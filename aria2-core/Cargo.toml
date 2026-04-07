@@ -32,3 +32,17 @@ digest = "0.10"
 [dev-dependencies]
 tempfile = "3.8"
 tokio-test = "0.4"
+criterion.workspace = true
+base64 = "0.21"
+
+[[bench]]
+name = "config_bench"
+harness = false
+
+[[bench]]
+name = "engine_bench"
+harness = false
+
+[[bench]]
+name = "filesystem_bench"
+harness = false
