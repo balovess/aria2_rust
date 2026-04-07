@@ -18,7 +18,7 @@ impl Default for AllocationStrategy {
 
 pub async fn allocate_file<D: DiskAdaptor>(
     adaptor: &mut D,
-    path: &Path,
+    _path: &Path,
     length: u64,
     strategy: AllocationStrategy,
 ) -> Result<()> {
@@ -93,9 +93,8 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
 
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let metadata = tokio::fs::metadata(parent).await
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+        let _ = tokio::fs::metadata(parent).await
+            .map_err(|e| Aria2Error::Io(e.to_string()));
         
         Ok(u64::MAX)
     }

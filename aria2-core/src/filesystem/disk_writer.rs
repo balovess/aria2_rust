@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::path::Path;
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 
 #[async_trait]
 pub trait DiskWriter: Send + Sync {

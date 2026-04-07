@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_parse_multi_file_torrent() {
-        let mut pieces_data = vec![0u8; 40];
+        let pieces_data = vec![0u8; 40];
         let mut info = BTreeMap::new();
         info.insert(b"name".to_vec(), BencodeValue::Bytes(b"multi_dir".to_vec()));
 
@@ -280,8 +280,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_optional_fields() {
-        let data = make_simple_torrent();
-        let data_str = String::from_utf8_lossy(&data);
+        let _data = make_simple_torrent();
 
         let mut root = BTreeMap::new();
         root.insert(b"announce".to_vec(), BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()));

@@ -10,6 +10,7 @@ pub struct CacheEntry {
     offset: u64,
     data: Vec<u8>,
     dirty: bool,
+    #[allow(dead_code)]
     last_access: Instant,
 }
 
@@ -87,7 +88,6 @@ impl WrDiskCache {
 
     pub async fn flush(&self) -> Result<Vec<CacheEntry>> {
         let mut entries = self.entries.lock().await;
-        let mut current_size = self.current_size.lock().await;
         
         let flushed: Vec<CacheEntry> = entries.iter()
             .filter(|e| e.dirty)
@@ -98,7 +98,7 @@ impl WrDiskCache {
             entry.dirty = false;
         }
         
-        debug!("刷新缓存, 刷新条目数: {}", flushed.len());
+        debug!("刷新缓存，刷新条目数：{}", flushed.len());
         
         Ok(flushed)
     }

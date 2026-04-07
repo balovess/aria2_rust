@@ -1,8 +1,10 @@
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::response::{TrackerResponse, TrackerEvent};
 
+#[allow(dead_code)]
 const DEFAULT_INTERVAL_SECS: u32 = 1800;
+#[allow(dead_code)]
 const TRACKER_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Clone)]

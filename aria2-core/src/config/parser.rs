@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use super::option::{OptionDef, OptionRegistry, OptionType, OptionValue};
+use super::option::{OptionRegistry, OptionType, OptionValue};
 
 #[derive(Debug, Clone)]
 pub enum ConfigSource {

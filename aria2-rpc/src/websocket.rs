@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use futures::FutureExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
@@ -94,7 +93,9 @@ impl DownloadEvent {
 
 #[derive(Clone)]
 struct Subscriber {
+    #[allow(dead_code)]
     id: String,
+    #[allow(dead_code)]
     filter: Option<Vec<EventType>>,
 }
 
@@ -249,6 +250,7 @@ mod tests {
 
     #[test]
     fn test_default_publisher() {
+        use futures::future::FutureExt;
         let p = EventPublisher::default();
         assert_eq!(p.subscriber_count().now_or_never().map(|c| c).unwrap(), 0);
     }

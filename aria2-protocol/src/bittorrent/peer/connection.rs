@@ -7,8 +7,6 @@ use crate::bittorrent::message::handshake::Handshake;
 use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 use super::state::PeerState;
 
-const READ_TIMEOUT_SECS: u64 = 120;
-
 #[derive(Debug, Clone)]
 pub struct PeerAddr {
     pub ip: String,

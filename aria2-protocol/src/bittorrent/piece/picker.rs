@@ -37,6 +37,7 @@ pub struct PiecePicker {
     pieces: Vec<PieceInfo>,
     strategy: PieceSelectionStrategy,
     peer_availability: HashMap<u32, HashSet<u32>>,
+    #[allow(dead_code)]
     rng_seed: u64,
 }
 

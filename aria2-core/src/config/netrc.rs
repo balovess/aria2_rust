@@ -82,7 +82,7 @@ impl NetRcFile {
             if in_macdef {
                 if line.is_empty() {
                     in_macdef = false;
-                    if let (Some(entry), Some(name)) = (&mut current_entry, macdef_name.take()) {
+                    if let (Some(entry), Some(_name)) = (&mut current_entry, macdef_name.take()) {
                         entry.macdef = Some(macdef_lines.join("\n"));
                         macdef_lines.clear();
                     }

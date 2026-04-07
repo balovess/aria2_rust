@@ -1,6 +1,5 @@
 use aria2_rpc::engine::RpcEngine;
-use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
-use aria2_rpc::server::{AuthConfig, ServerConfig};
+use aria2_rpc::json_rpc::JsonRpcRequest;
 use colored::Colorize;
 
 #[tokio::main]

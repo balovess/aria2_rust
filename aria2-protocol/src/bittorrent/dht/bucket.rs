@@ -1,4 +1,5 @@
 const K: usize = 8;
+#[allow(dead_code)]
 const BUCKET_COUNT: usize = 160;
 
 #[derive(Debug, Clone)]

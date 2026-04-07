@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, debug};
 
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 use super::request_group::{RequestGroup, GroupId, DownloadOptions, DownloadStatus};
 
 pub struct RequestGroupMan {

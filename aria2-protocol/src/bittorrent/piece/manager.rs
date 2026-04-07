@@ -1,6 +1,4 @@
-use sha1::{Sha1, Digest};
-
-use std::collections::HashMap;
+use sha1::Digest;
 
 pub struct PieceManager {
     num_pieces: u32,
@@ -94,7 +92,7 @@ mod tests {
     #[test]
     fn test_last_piece_size() {
         let hashes: Vec<[u8; 20]> = (0..3).map(|_| {
-            let mut h = [0u8; 20]; h
+            let h = [0u8; 20]; h
         }).collect();
         let mgr = PieceManager::new(3, 512, 1100, hashes);
         assert_eq!(mgr.piece_size(0), 512);
@@ -124,7 +122,7 @@ mod tests {
     #[test]
     fn test_total_progress() {
         let hashes: Vec<[u8; 20]> = (0..4).map(|_| {
-            let mut h = [0u8; 20]; h
+            let h = [0u8; 20]; h
         }).collect();
         let mut mgr = PieceManager::new(4, 256, 800, hashes);
         assert_eq!(mgr.total_progress(), 0.0);

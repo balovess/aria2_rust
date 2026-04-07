@@ -1,4 +1,4 @@
-use std::io::{self, Read, Cursor};
+use std::io::{Read, Cursor};
 use crate::error::{Aria2Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq)]

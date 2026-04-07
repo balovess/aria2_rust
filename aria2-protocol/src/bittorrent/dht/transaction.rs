@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const TRANSACTION_TIMEOUT_SECS: u64 = 30;
 

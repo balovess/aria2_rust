@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::bittorrent::bencode::codec::BencodeValue;
 
 #[derive(Debug, Clone)]

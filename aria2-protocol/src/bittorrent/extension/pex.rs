@@ -16,7 +16,7 @@ impl PexHandler {
         Err("PEX解析暂未实现".to_string())
     }
 
-    pub fn build_pex_message(added: Vec<PeerAddr>, removed: Vec<PeerAddr>) -> PexMessage {
+    pub fn build_pex_message(added: Vec<PeerAddr>, _removed: Vec<PeerAddr>) -> PexMessage {
         PexMessage::Added(added)
     }
 

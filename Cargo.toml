@@ -30,6 +30,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1.5"
 async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+aria2-protocol = { path = "aria2-protocol" }
+aria2-core = { path = "aria2-core" }
 
 [workspace.dev-dependencies]
 

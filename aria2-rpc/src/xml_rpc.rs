@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use base64::Engine;
 
@@ -60,7 +59,9 @@ enum XmlRpcValueInner {
     Boolean(bool),
     String_(String),
     Double(f64),
+    #[allow(dead_code)]
     DateTime(String),
+    #[allow(dead_code)]
     Base64(Vec<u8>),
     Array(Vec<XmlRpcValue>),
     Struct(Vec<XmlRpcMember>),

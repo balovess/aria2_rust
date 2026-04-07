@@ -15,6 +15,7 @@ pub enum TimerEvent {
 }
 
 pub struct Timer {
+    #[allow(dead_code)]
     id: TimerId,
     next_fire: TokioInstant,
     interval: Option<Duration>,

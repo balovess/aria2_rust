@@ -1,8 +1,7 @@
-use criterion::{criterion_group, Criterion, BenchmarkId, black_box};
+use criterion::{criterion_group, Criterion, black_box};
 use aria2_rpc::engine::RpcEngine;
-use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
-use aria2_rpc::server::AuthConfig;
-use aria2_rpc::xml_rpc::{XmlRpcRequest, XmlRpcResponse, XmlRpcValue};
+use aria2_rpc::json_rpc::JsonRpcRequest;
+use aria2_rpc::xml_rpc::XmlRpcRequest;
 use base64::Engine;
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {

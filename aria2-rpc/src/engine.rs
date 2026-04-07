@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
 use super::server::{
     AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalStat, GlobalOptions,
-    StatusInfo, TaskOptions, UriEntry, create_gid,
+    StatusInfo, TaskOptions, create_gid,
 };
 use super::websocket::{DownloadEvent, EventPublisher, EventType};
 
@@ -19,7 +19,9 @@ pub struct RpcEngine {
 
 struct TaskState {
     status: StatusInfo,
+    #[allow(dead_code)]
     options: HashMap<String, serde_json::Value>,
+    #[allow(dead_code)]
     uris: Vec<String>,
 }
 

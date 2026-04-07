@@ -4,7 +4,6 @@ use colored::Colorize;
 
 use aria2_core::config::{ConfigManager, OptionValue};
 use aria2_core::engine::download_engine::DownloadEngine;
-use aria2_core::engine::command::Command;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::init_logging;

@@ -66,6 +66,7 @@ impl HttpHeaderProcessor {
         String::from_utf8_lossy(&bytes).to_string()
     }
 
+    #[allow(dead_code)]
     fn decode_percent(input: &str) -> String {
         let mut result = String::with_capacity(input.len());
         let mut bytes = input.bytes().peekable();

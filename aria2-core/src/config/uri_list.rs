@@ -67,10 +67,8 @@ impl UriListFile {
     pub fn parse(&mut self, content: &str) -> Result<(), UriListError> {
         let mut current_uris: Vec<String> = Vec::new();
         let mut current_options: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut line_num = 0;
 
         for raw_line in content.lines() {
-            line_num += 1;
             let line = raw_line.trim();
 
             if line.is_empty() || line.starts_with('#') {

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::path::Path;
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 
 #[async_trait]
 pub trait DiskAdaptor: Send + Sync {
@@ -95,7 +95,6 @@ impl DiskAdaptor for DirectDiskAdaptor {
 
     async fn truncate(&mut self, length: u64) -> Result<()> {
         if let Some(ref mut file) = self.file {
-            use tokio::io::AsyncSeekExt;
             file.set_len(length).await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
         }

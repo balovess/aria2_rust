@@ -1,5 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
-use tracing::debug;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BencodeValue {

@@ -51,7 +51,9 @@ impl FtpResponse {
 pub struct FtpConnection {
     pub stream: BufReader<TcpStream>,
     pub options: FtpOptions,
+    #[allow(dead_code)]
     host: String,
+    #[allow(dead_code)]
     port: u16,
 }
 
