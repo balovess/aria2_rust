@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Protocol implementations for aria2-rust: HTTP/HTTPS, FTP/SFTP, BitTorrent (DHT/Tracker), Metalink"
 
 [dependencies]
 tokio.workspace = true

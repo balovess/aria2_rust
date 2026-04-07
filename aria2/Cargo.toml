@@ -17,8 +17,8 @@ aria2-rpc = { path = "../aria2-rpc" }
 
 tokio.workspace = true
 tracing.workspace = true
-clap = { version = "4.4", features = ["derive"] }
 colored = "2.0"
+serde_json.workspace = true
 
 [features]
 default = ["http", "bittorrent", "rpc"]

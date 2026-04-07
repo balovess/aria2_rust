@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "RPC library for aria2-rust: JSON-RPC 2.0, XML-RPC, WebSocket events, HTTP server framework, and RpcEngine bridge"
 
 [dependencies]
 tokio.workspace = true
