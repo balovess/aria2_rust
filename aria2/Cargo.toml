@@ -1,0 +1,29 @@
+[package]
+name = "aria2"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "aria2c"
+path = "src/main.rs"
+
+[dependencies]
+aria2-core = { path = "../aria2-core" }
+aria2-protocol = { path = "../aria2-protocol" }
+aria2-rpc = { path = "../aria2-rpc" }
+
+tokio.workspace = true
+tracing.workspace = true
+clap = { version = "4.4", features = ["derive"] }
+colored = "2.0"
+
+[features]
+default = ["http", "bittorrent", "rpc"]
+http = ["aria2-protocol/http"]
+bittorrent = ["aria2-protocol/bittorrent"]
+metalink = ["aria2-protocol/metalink"]
+rpc = []
+sftp = ["aria2-protocol/sftp"]

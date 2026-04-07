@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "aria2",
+    "aria2-core",
+    "aria2-protocol",
+    "aria2-rpc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["aria2-rust contributors"]
+license = "GPL-2.0-or-later"
+repository = "https://github.com/aria2/aria2-rust"
+
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1.5"
+async-trait = "0.1"
+
+[workspace.metadata.release]
+allow-branch = ["main"]

@@ -1,0 +1,31 @@
+[package]
+name = "aria2-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender = "0.2"
+bytes.workspace = true
+async-trait.workspace = true
+colored = "2.0"
+atty = "0.2"
+md5 = "0.7"
+sha1 = "0.10"
+sha2 = "0.10"
+adler32 = "1.2"
+digest = "0.10"
+
+[dev-dependencies]
+tempfile = "3.8"

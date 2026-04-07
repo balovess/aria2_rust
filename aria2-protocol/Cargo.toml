@@ -1,0 +1,44 @@
+[package]
+name = "aria2-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+
+reqwest = { version = "0.11", features = ["rustls-tls", "gzip", "brotli", "socks"] }
+hyper = { version = "0.14", features = ["full", "stream"] }
+rustls = "0.21"
+rustls-pemfile = "1.0"
+quick-xml = "0.31"
+
+flate2 = "1.0"
+base64 = "0.21"
+url = "2.5"
+md5 = "0.7"
+sha1 = "0.10"
+rand = "0.8"
+ssh2 = "0.9"
+bitflags = "2.4"
+
+[features]
+default = []
+http = []
+bittorrent = []
+metalink = []
+sftp = []
+
+[dev-dependencies]
+tempfile = "3.8"
+mockito = "1.4"
