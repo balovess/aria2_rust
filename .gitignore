@@ -3,3 +3,8 @@ aria2_original/
 .trae/
 bindings/nodejs/node_modules/
 bindings/python/aria2_rust_client/__pycache__/
+bindings/python/tests/e2e/__pycache__/
+bindings/python/tests/unit/__pycache__/
+
+bindings/python/tests/integration/__pycache__/
+bindings/python/tests/__pycache__/
