@@ -14,6 +14,12 @@ pub struct CacheEntry {
     last_access: Instant,
 }
 
+impl CacheEntry {
+    pub fn offset(&self) -> u64 { self.offset }
+    pub fn data(&self) -> &[u8] { &self.data }
+    pub fn is_dirty(&self) -> bool { self.dirty }
+}
+
 pub struct WrDiskCache {
     entries: Mutex<VecDeque<CacheEntry>>,
     max_size: usize,

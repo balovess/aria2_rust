@@ -1,7 +1,7 @@
 # aria2-rust
 
 <p align="center">
-  <strong>The ultra fast download utility — rewritten in Rust</strong>
+  <strong>The ultra-fast download utility — rewritten in Rust</strong>
 </p>
 
 <p align="center">
@@ -15,18 +15,18 @@
 
 ---
 
-aria2-rust 是知名下载工具 [aria2](https://aria2.github.io/) 的完整 Rust 重写版本。支持 HTTP/HTTPS、FTP/SFTP、BitTorrent、Metalink 协议，提供 JSON-RPC/XML-RPC/WebSocket 远程控制接口。
+**aria2-rust** is a complete rewrite of the renowned [aria2](https://aria2.github.io/) download utility in Rust. It supports HTTP/HTTPS, FTP/SFTP, BitTorrent, and Metalink protocols, with JSON-RPC/XML-RPC/WebSocket remote control capabilities.
 
 ## Features
 
-- **多协议下载**: HTTP/HTTPS、FTP/SFTP、BitTorrent (DHT/PEX/MSE)、Metalink V3/V4
-- **多源镜像**: 自动从多个 URI 分段并行下载，最大化带宽利用率
-- **断点续传**: 支持所有协议的断点续传，网络中断后无缝恢复
-- **BitTorrent 完整支持**: DHT 网络、Tracker 通信、Peer 交换(PEX)、MSE 加密、阻塞算法
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket 实时事件推送
-- **配置系统**: ~95 个核心选项，支持命令行 / 配置文件 / 环境变量四源合并
-- **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
-- **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
+- **Multi-Protocol Download**: HTTP/HTTPS, FTP/SFTP, BitTorrent (DHT/PEX/MSE), Metalink V3/V4
+- **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
+- **Resume Support**: Breakpoint resume on all protocols with seamless recovery after network interruptions
+- **Full BitTorrent Support**: DHT network, tracker communication, Peer Exchange (PEX), MSE encryption, choking algorithms
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket real-time event publishing
+- **Configuration System**: ~95 core options with four-source merging (CLI/file/environment/defaults)
+- **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
+- **URI List Files**: Batch import download tasks via `-i` parameter
 
 ## Quick Start
 
@@ -39,7 +39,7 @@ aria2-rust 是知名下载工具 [aria2](https://aria2.github.io/) 的完整 Rus
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourname/aria2-rust.git
+git clone https://github.com/aria2/aria2-rust.git
 cd aria2-rust
 
 # Build all crates
@@ -261,6 +261,6 @@ Copyright (C) 2024 aria2-rust contributors.
 ## Acknowledgments
 
 - [aria2](https://aria2.github.io/) — The original C++ download utility that inspired this project
-- [Tokuio](https://tokio.rs/) — Async runtime for Rust
+- [Tokio](https://tokio.rs/) — Async runtime for Rust
 - [Reqwest](https://docs.rs/reqwest/) — HTTP client foundation
 - [Axum](https://docs.rs/axum/) — Web framework for RPC server

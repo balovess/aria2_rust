@@ -6,4 +6,6 @@ pub mod sftp_download_command;
 pub mod bt_download_command;
 pub mod metalink_download_command;
 pub mod magnet_download_command;
+pub mod concurrent_segment_manager;
+pub mod concurrent_download_command;
 pub mod timer;

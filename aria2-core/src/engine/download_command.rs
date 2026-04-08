@@ -1,13 +1,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use async_trait::async_trait;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 use futures::StreamExt;
 
 use crate::error::{Aria2Error, Result, RecoverableError};
 use crate::engine::command::{Command, CommandStatus};
 use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
-use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter};
+use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter, CachedDiskWriter, SeekableDiskWriter};
+use crate::filesystem::file_allocation;
+use crate::filesystem::resume_helper::ResumeHelper;
 
 pub struct DownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -15,6 +17,8 @@ pub struct DownloadCommand {
     output_path: std::path::PathBuf,
     started: bool,
     completed_bytes: u64,
+    continue_enabled: bool,
+    file_allocation: String,
 }
 
 impl DownloadCommand {
@@ -54,16 +58,18 @@ impl DownloadCommand {
             output_path: path,
             started: false,
             completed_bytes: 0,
+            continue_enabled: true,
+            file_allocation: "prealloc".to_string(),
         })
     }
 
     fn extract_filename(uri: &str) -> Option<String> {
         uri.rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty() && *s != "/")
-        .map(|s| {
-            s.split('?').next().unwrap_or(s).to_string()
-        })
+            .next()
+            .filter(|s| !s.is_empty() && *s != "/")
+            .map(|s| {
+                s.split('?').next().unwrap_or(s).to_string()
+            })
     }
 
     pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
@@ -101,7 +107,34 @@ impl Command for DownloadCommand {
             }
         }
 
-        let response = self.client.get(&uri).send().await
+        let head_resp = self.client.head(&uri).send().await.ok();
+        let total_length = head_resp.and_then(|r| r.content_length()).unwrap_or(0);
+
+        let resume_helper = ResumeHelper::new(&self.output_path, self.continue_enabled);
+        let resume_state = resume_helper.detect(total_length).await?;
+
+        if resume_state.is_complete {
+            info!("文件已完整存在，跳过下载: {} ({} bytes)", self.output_path.display(), resume_state.existing_length);
+            self.completed_bytes = resume_state.existing_length;
+            let mut g = self.group.write().await;
+            g.set_total_length(self.completed_bytes).await;
+            g.update_progress(self.completed_bytes).await;
+            g.complete().await?;
+            return Ok(());
+        }
+
+        if total_length > 0 {
+            file_allocation::preallocate_file(&self.output_path, total_length, &self.file_allocation).await?;
+        }
+
+        let request = if let Some(range_header) = ResumeHelper::build_range_header(&resume_state) {
+            debug!("断点续传: {}", range_header);
+            self.client.get(&uri).header("Range", range_header)
+        } else {
+            self.client.get(&uri)
+        };
+
+        let response = request.send().await
             .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("HTTP请求失败: {}", e) }))?;
 
         let status = response.status();
@@ -112,13 +145,26 @@ impl Command for DownloadCommand {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(format!("HTTP错误: {}", status))));
         }
 
-        let total_length = response.content_length().unwrap_or(0) as u64;
+        let resp_length = response.content_length().unwrap_or(0) as u64;
+        let actual_total = if resume_state.should_resume {
+            resume_state.start_offset + resp_length
+        } else {
+            resp_length
+        };
         {
             let mut g = self.group.write().await;
-            g.set_total_length(total_length).await;
+            g.set_total_length(actual_total).await;
         }
 
-        let mut writer = DefaultDiskWriter::new(&self.output_path);
+        let start_offset = if resume_state.should_resume { resume_state.start_offset } else { 0 };
+        self.completed_bytes = start_offset;
+        let mut writer: Box<dyn DiskWriter> = if resume_state.should_resume {
+            info!("续传模式: 从偏移 {} 开始", start_offset);
+            Box::new(DefaultDiskWriter::new(&self.output_path))
+        } else {
+            Box::new(DefaultDiskWriter::new(&self.output_path))
+        };
+
         let mut stream = response.bytes_stream();
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();

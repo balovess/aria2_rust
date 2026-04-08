@@ -1,6 +1,6 @@
 use std::path::Path;
 use crate::error::{Aria2Error, Result};
-use super::disk_adaptor::DiskAdaptor;
+use super::disk_adaptor::{DiskAdaptor, DirectDiskAdaptor};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AllocationStrategy {
@@ -11,8 +11,17 @@ pub enum AllocationStrategy {
 }
 
 impl Default for AllocationStrategy {
-    fn default() -> Self {
-        AllocationStrategy::None
+    fn default() -> Self { AllocationStrategy::None }
+}
+
+impl AllocationStrategy {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "prealloc" => AllocationStrategy::Prealloc,
+            "falloc" => AllocationStrategy::Falloc,
+            "trunc" => AllocationStrategy::Trunc,
+            _ => AllocationStrategy::None,
+        }
     }
 }
 
@@ -30,6 +39,31 @@ pub async fn allocate_file<D: DiskAdaptor>(
     }
 }
 
+pub async fn preallocate_file(
+    path: &Path,
+    length: u64,
+    strategy: &str,
+) -> Result<()> {
+    let alloc_strategy = AllocationStrategy::from_str(strategy);
+
+    if length == 0 || alloc_strategy == AllocationStrategy::None {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        let parent: &Path = parent;
+        if !parent.exists() {
+            tokio::fs::create_dir_all(parent).await
+                .map_err(|e: std::io::Error| Aria2Error::Io(e.to_string()))?;
+        }
+    }
+
+    let mut adaptor = DirectDiskAdaptor::new();
+    adaptor.open(path).await?;
+    allocate_file(&mut adaptor, path, length, alloc_strategy).await?;
+    adaptor.close().await
+}
+
 async fn preallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
     adaptor.truncate(length).await
 }
@@ -39,7 +73,7 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
     {
         use std::os::unix::io::AsRawFd;
         if let Some(file) = adaptor.as_any().downcast_ref::<std::fs::File>() {
-            let fd = file.as_rawFd();
+            let fd = file.as_raw_fd();
             unsafe {
                 let ret = libc::posix_fallocate64(fd, 0, length as i64);
                 if ret != 0 {
@@ -93,14 +127,98 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
 
     #[cfg(windows)]
     {
-        let _ = tokio::fs::metadata(parent).await
-            .map_err(|e| Aria2Error::Io(e.to_string()));
-        
-        Ok(u64::MAX)
+        let metadata = tokio::fs::metadata(parent).await
+            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+
+        let free = metadata.len();
+        if free > 0 { Ok(free) } else { Ok(u64::MAX / 2) }
     }
 
     #[cfg(all(not(unix), not(windows)))]
     {
         Ok(u64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allocation_strategy_from_str() {
+        assert_eq!(AllocationStrategy::from_str("none"), AllocationStrategy::None);
+        assert_eq!(AllocationStrategy::from_str("prealloc"), AllocationStrategy::Prealloc);
+        assert_eq!(AllocationStrategy::from_str("falloc"), AllocationStrategy::Falloc);
+        assert_eq!(AllocationStrategy::from_str("trunc"), AllocationStrategy::Trunc);
+        assert_eq!(AllocationStrategy::from_str("invalid"), AllocationStrategy::None);
+        assert_eq!(AllocationStrategy::from_str(""), AllocationStrategy::None);
+    }
+
+    #[tokio::test]
+    async fn test_preallocate_file_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_none.bin");
+        preallocate_file(&path, 1024, "none").await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_preallocate_file_trunc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_trunc.bin");
+        preallocate_file(&path, 4096, "trunc").await.unwrap();
+
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn test_preallocate_file_prealloc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_prealloc.bin");
+        preallocate_file(&path, 1024 * 1024, "prealloc").await.unwrap();
+
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.len(), 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_preallocate_zero_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_zero.bin");
+        preallocate_file(&path, 0, "trunc").await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_preallocate_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub1").join("sub2").join("test_nested.bin");
+        preallocate_file(&path, 100, "trunc").await.unwrap();
+
+        assert!(path.exists());
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_get_available_space_returns_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let space = get_available_space(dir.path()).await;
+        assert!(space.is_ok());
+        let val = space.unwrap();
+        assert!(val > 0);
+    }
+
+    #[tokio::test]
+    async fn test_preallocate_overwrite_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_overwrite.bin");
+
+        tokio::fs::write(&path, b"original data").await.unwrap();
+        preallocate_file(&path, 2048, "trunc").await.unwrap();
+
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.len(), 2048);
     }
 }
