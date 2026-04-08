@@ -16,6 +16,8 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         checksum: None,
         cookie_file: None,
         cookies: None,
+        bt_force_encrypt: false,
+        bt_require_crypto: false,
     };
     DownloadCommand::new(GroupId::new(1), uri, &options, options.dir.as_deref(), options.out.as_deref()).unwrap()
 }
@@ -117,6 +119,8 @@ fn test_download_options_with_values() {
         checksum: None,
         cookie_file: None,
         cookies: None,
+        bt_force_encrypt: false,
+        bt_require_crypto: false,
     };
     assert_eq!(opts.split, Some(16));
     assert_eq!(opts.max_connection_per_server, Some(8));

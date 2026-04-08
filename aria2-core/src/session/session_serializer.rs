@@ -344,6 +344,8 @@ ftp://server/big.iso
             checksum: None,
             cookie_file: None,
             cookies: None,
+            bt_force_encrypt: false,
+            bt_require_crypto: false,
         };
         let map = download_options_to_map(&opts);
         assert_eq!(map.get("split").unwrap(), "8");

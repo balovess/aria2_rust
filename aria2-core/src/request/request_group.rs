@@ -55,6 +55,8 @@ pub struct DownloadOptions {
     pub checksum: Option<(String, String)>,
     pub cookie_file: Option<String>,
     pub cookies: Option<String>,
+    pub bt_force_encrypt: bool,
+    pub bt_require_crypto: bool,
 }
 
 pub struct RequestGroup {

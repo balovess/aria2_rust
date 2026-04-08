@@ -51,6 +51,8 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         checksum: None,
         cookie_file: None,
         cookies: None,
+        bt_force_encrypt: false,
+        bt_require_crypto: false,
     };
 
     match man.add_group(vec![uri.to_string()], download_opts).await {

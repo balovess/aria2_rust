@@ -49,14 +49,22 @@ pub struct PeerConnection {
 impl PeerConnection {
     pub async fn connect(addr: &PeerAddr, info_hash: &[u8; 20]) -> Result<Self, String> {
         let socket_addr = addr.to_socket_addr();
-        debug!("连接peer: {}", socket_addr);
+        debug!("Connecting to peer: {}", socket_addr);
 
-        let mut stream = tokio::time::timeout(
+        let stream = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            TcpStream::connect(socket_addr),
+            tokio::net::TcpStream::connect(&socket_addr),
         ).await
         .map_err(|_| format!("连接peer超时: {}", socket_addr))?
         .map_err(|e| format!("连接peer失败: {}", e))?;
+
+        Self::from_stream(stream, info_hash).await
+    }
+
+    pub async fn from_stream(
+        mut stream: tokio::net::TcpStream,
+        info_hash: &[u8; 20],
+    ) -> Result<Self, String> {
 
         let my_peer_id = id::generate_peer_id();
         let handshake = Handshake::new(info_hash, &my_peer_id);
@@ -81,8 +89,7 @@ impl PeerConnection {
             return Err("info_hash不匹配".to_string());
         }
 
-        info!("Peer握手成功: {} (peer_id={})",
-              socket_addr, remote_hs.peer_id_str());
+        info!("Peer握手成功: peer_id={}", remote_hs.peer_id_str());
 
         Ok(Self {
             stream,
@@ -90,6 +97,18 @@ impl PeerConnection {
             remote_peer_id: Some(remote_hs.peer_id),
             remote_bitfield: vec![],
         })
+    }
+
+    pub fn from_stream_with_peer(
+        stream: tokio::net::TcpStream,
+        peer_id: [u8; 20],
+    ) -> Self {
+        Self {
+            stream,
+            state: PeerState::new(),
+            remote_peer_id: Some(peer_id),
+            remote_bitfield: vec![],
+        }
     }
 
     pub async fn send_message(&mut self, message: &BtMessage) -> Result<(), String> {

@@ -247,6 +247,8 @@ impl App {
             checksum,
             cookie_file: self.get_opt_str("load-cookies").await,
             cookies: self.get_opt_str("cookie").await,
+            bt_force_encrypt: self.get_opt_bool("bt-force-encrypt").await.unwrap_or(false),
+            bt_require_crypto: self.get_opt_bool("bt-require-crypto").await.unwrap_or(false),
         };
 
         let mut engine_lock = self.engine.lock().await;
