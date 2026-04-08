@@ -1,0 +1,27 @@
+{
+  "name": "@aria2-rust/client",
+  "version": "0.1.0",
+  "description": "Production-grade Node.js client for aria2-rust JSON-RPC & WebSocket interface",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "vitest run tests/e2e",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "ws": "^8.16" },
+  "devDependencies": { "typescript": "^5.3", "tsup": "^8.0", "vitest": "^1.2", "@types/ws": "^8.5", "@types/node": "^20.11" },
+  "engines": { "node": ">=18.0" },
+  "license": "GPL-2.0-or-later"
+}

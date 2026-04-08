@@ -4,3 +4,4 @@ pub mod bucket;
 pub mod message;
 pub mod transaction;
 pub mod bootstrap;
+pub mod client;

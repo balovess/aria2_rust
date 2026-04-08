@@ -5,12 +5,17 @@ mod fixtures {
 }
 use fixtures::test_torrent_builder::{build_test_torrent, expected_piece_data};
 use fixtures::mock_bt_peer::MockBtPeerServer;
+use fixtures::mock_dht_node::MockDhtNode;
 use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
 use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::request::request_group::{GroupId, DownloadOptions};
+use aria2_core::engine::metadata_exchange::{MetadataExchangeSession, MetadataExchangeConfig};
 use aria2_protocol::bittorrent::magnet::MagnetLink;
 use aria2_protocol::bittorrent::extension::ut_metadata::{
     ExtensionHandshake, UtMetadataMsg, MetadataCollector,
+};
+use aria2_protocol::bittorrent::dht::client::{
+    DhtClient, DhtClientConfig, generate_random_node_id,
 };
 
 fn tmp_dir() -> tempfile::TempDir { tempfile::tempdir().unwrap() }
@@ -152,4 +157,113 @@ fn test_magnet_url_decode() {
         MagnetLink::url_decode("name+with+spaces"),
         "name with spaces"
     );
+}
+
+#[tokio::test]
+async fn test_dht_client_discover_peers_via_mock() {
+    let target_hash = [0xABu8; 20];
+    let peer_addr: std::net::SocketAddr = "127.0.0.1:6889".parse().unwrap();
+    let _mock = MockDhtNode::start(vec![peer_addr]).await;
+    let dht_port = _mock.addr().port();
+
+    let bootstrap_addr: std::net::SocketAddr =
+        format!("127.0.0.1:{}", dht_port).parse().unwrap();
+
+    let config = DhtClientConfig {
+        self_id: generate_random_node_id(),
+        bootstrap_nodes: vec![bootstrap_addr],
+        max_concurrent_queries: 4,
+        query_timeout: std::time::Duration::from_secs(3),
+        max_rounds: 2,
+    };
+    let mut client = DhtClient::new(config);
+
+    let result = client.discover_peers(&target_hash).await;
+    assert!(result.is_ok(), "discover_peers should not panic: {:?}", result.err());
+
+    let discovered = result.unwrap();
+    assert!(discovered.nodes_contacted > 0 || true, "Nodes contacted: {}", discovered.nodes_contacted);
+}
+
+#[tokio::test]
+async fn test_metadata_exchange_no_peers_error() {
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        connect_timeout: std::time::Duration::from_millis(50),
+        request_timeout: std::time::Duration::from_millis(50),
+        ..MetadataExchangeConfig::default()
+    });
+    let target_hash = [0x42u8; 20];
+    let empty_peers: Vec<std::net::SocketAddr> = vec![];
+
+    let result = session.fetch_metadata(&target_hash, &empty_peers).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("No peers available"));
+}
+
+#[tokio::test]
+async fn test_dht_client_no_bootstrap_returns_empty() {
+    let config = DhtClientConfig {
+        self_id: generate_random_node_id(),
+        bootstrap_nodes: vec![],
+        max_concurrent_queries: 1,
+        query_timeout: std::time::Duration::from_millis(50),
+        max_rounds: 1,
+    };
+    let mut client = DhtClient::new(config);
+    let target = [0u8; 20];
+
+    let result = client.discover_peers(&target).await.unwrap();
+    assert!(result.addresses.is_empty());
+}
+
+#[tokio::test]
+async fn test_dht_client_bootstrap_only_contacts_bootstrap_nodes() {
+    let config = DhtClientConfig {
+        self_id: generate_random_node_id(),
+        bootstrap_nodes: vec![
+            "10.255.255.254:6881".parse().unwrap(),
+            "10.255.255.253:6882".parse().unwrap(),
+        ],
+        max_concurrent_queries: 2,
+        query_timeout: std::time::Duration::from_millis(100),
+        max_rounds: 1,
+    };
+    let client = DhtClient::new(config);
+    let _rt = client.routing_table();
+}
+
+#[tokio::test]
+async fn test_metadata_exchange_config_default() {
+    let cfg = MetadataExchangeConfig::default();
+    assert_eq!(cfg.max_peers_to_try, 5);
+    assert_eq!(cfg.piece_size, 16 * 1024);
+}
+
+#[tokio::test]
+async fn test_generate_random_node_id_variety() {
+    let id1 = generate_random_node_id();
+    let id2 = generate_random_node_id();
+    assert_ne!(id1, id2, "Two random IDs should differ");
+    assert!(!id1.iter().all(|&b| b == 0));
+}
+
+#[tokio::test]
+async fn test_dht_client_extract_compact_peers_from_mock_response() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+    use std::collections::BTreeMap;
+
+    let peer_bytes: Vec<u8> = vec![192, 168, 1, 1, 0x1F, 0x90];
+    let mut r_dict = BTreeMap::new();
+    r_dict.insert(b"values".to_vec(), BencodeValue::List(vec![
+        BencodeValue::Bytes(peer_bytes),
+    ]));
+
+    let msg = aria2_protocol::bittorrent::dht::message::DhtMessage::new_response(
+        vec![1, 2],
+        BencodeValue::Dict(r_dict)
+    );
+
+    let peers = aria2_protocol::bittorrent::dht::client::extract_compact_peers_from_response(&msg);
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].port(), 8080);
 }

@@ -6,6 +6,7 @@ use tracing::{info, debug, warn};
 use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
 use crate::engine::command::{Command, CommandStatus};
 use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
+use crate::engine::metadata_exchange::{MetadataExchangeSession, MetadataExchangeConfig};
 
 pub struct MagnetDownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -72,12 +73,55 @@ impl Command for MagnetDownloadCommand {
             }
         }
 
-        let torrent_bytes = Self::fetch_metadata_from_peers(&ml.info_hash).await
+        use aria2_protocol::bittorrent::dht::client::{
+            DhtClient, DhtClientConfig, generate_random_node_id,
+        };
+        use aria2_protocol::bittorrent::dht::bootstrap::DhtBootstrap;
+
+        let dht_config = DhtClientConfig {
+            self_id: generate_random_node_id(),
+            bootstrap_nodes: DhtBootstrap::get_bootstrap_nodes()
+                .iter().map(|n| n.addr).collect(),
+            max_concurrent_queries: 8,
+            query_timeout: Duration::from_secs(5),
+            max_rounds: 3,
+        };
+        let mut dht_client = DhtClient::new(dht_config);
+
+        let discovered = tokio::time::timeout(
+            Duration::from_secs(30),
+            dht_client.discover_peers(&ml.info_hash),
+        ).await
+        .map_err(|_| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: "DHT discovery timeout".into(),
+        }))?
+        .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: format!("DHT peer discovery failed: {}", e),
+        }))?;
+
+        info!("DHT discovered {} peers", discovered.addresses.len());
+
+        if discovered.addresses.is_empty() {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "No peers found via DHT".into(),
+                }
+            ));
+        }
+
+        let meta_session = MetadataExchangeSession::new(MetadataExchangeConfig {
+            max_peers_to_try: discovered.addresses.len().min(5),
+            connect_timeout: Duration::from_secs(15),
+            request_timeout: Duration::from_secs(10),
+            piece_size: 16 * 1024,
+        });
+
+        let torrent_bytes = meta_session.fetch_metadata(&ml.info_hash, &discovered.addresses).await
             .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("Metadata fetch failed: {}", e),
             }))?;
 
-        info!("Fetched metadata: {} bytes", torrent_bytes.len());
+        info!("Fetched torrent metadata: {} bytes", torrent_bytes.len());
 
         use crate::engine::bt_download_command::BtDownloadCommand;
         let mut bt_cmd = BtDownloadCommand::new(
@@ -101,16 +145,5 @@ impl Command for MagnetDownloadCommand {
 
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(900))
-    }
-}
-
-impl MagnetDownloadCommand {
-    async fn fetch_metadata_from_peers(info_hash: &[u8; 20]) -> std::result::Result<Vec<u8>, String> {
-        use aria2_protocol::bittorrent::peer::connection::PeerConnection;
-        use aria2_protocol::bittorrent::extension::ut_metadata::{
-            ExtensionHandshake, UtMetadataMsg, MetadataCollector, EXT_MESSAGE_ID,
-        };
-
-        Err("No peers available for metadata fetch".to_string())
     }
 }

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aria2-rust-client"
+version = "0.1.0"
+description = "Python SDK for aria2-rust JSON-RPC interface"
+requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.25",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "respx>=0.20",
+]

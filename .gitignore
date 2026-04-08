@@ -1,3 +1,5 @@
 target/
 aria2_original/
 .trae/
+bindings/nodejs/node_modules/
+bindings/python/aria2_rust_client/__pycache__/

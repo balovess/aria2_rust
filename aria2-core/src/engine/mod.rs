@@ -8,4 +8,5 @@ pub mod metalink_download_command;
 pub mod magnet_download_command;
 pub mod concurrent_segment_manager;
 pub mod concurrent_download_command;
+pub mod metadata_exchange;
 pub mod timer;
