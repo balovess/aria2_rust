@@ -173,6 +173,22 @@ impl PeerConnection {
     pub fn is_connected(&self) -> bool {
         self.remote_peer_id.is_some()
     }
+
+    pub async fn stream_write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.stream.write_all(data).await
+            .map_err(|e| format!("Stream write failed: {}", e))
+    }
+
+    pub async fn stream_flush(&mut self) -> Result<(), String> {
+        self.stream.flush().await
+            .map_err(|e| format!("Stream flush failed: {}", e))
+    }
+
+    pub async fn stream_read_exact(&mut self, buf: &mut [u8]) -> Result<(), String> {
+        self.stream.read_exact(buf).await
+            .map(|_| ())
+            .map_err(|e| format!("Stream read failed: {}", e))
+    }
 }
 
 #[cfg(test)]

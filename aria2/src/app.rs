@@ -4,8 +4,16 @@ use colored::Colorize;
 
 use aria2_core::config::{ConfigManager, OptionValue};
 use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::command::Command;
+use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
+use aria2_core::engine::bt_download_command::BtDownloadCommand;
+use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
 use aria2_core::request::request_group_man::RequestGroupMan;
-use aria2_core::request::request_group::DownloadOptions;
+use aria2_core::request::request_group::{GroupId, DownloadOptions};
+use aria2_core::validation::protocol_detector::{detect, InputType, DetectedInput};
 use aria2_core::init_logging;
 use tracing::{info, error, warn, Level};
 
@@ -35,7 +43,7 @@ pub struct App {
     pub config: Arc<RwLock<ConfigManager>>,
     engine: Arc<Mutex<Option<DownloadEngine>>>,
     request_man: Arc<RwLock<RequestGroupMan>>,
-    uris: Vec<String>,
+    detected_inputs: Vec<DetectedInput>,
 }
 
 impl App {
@@ -48,7 +56,7 @@ impl App {
             config,
             engine: Arc::new(Mutex::new(None)),
             request_man,
-            uris: Vec::new(),
+            detected_inputs: Vec::new(),
         }
     }
 
@@ -156,7 +164,10 @@ impl App {
             }
         }
 
-        self.uris = positional_uris;
+        self.detected_inputs = positional_uris.into_iter().filter_map(|uri| match detect(&uri) {
+            Ok(d) => Some(d),
+            Err(e) => { warn!("无法检测输入类型 '{}': {}", uri, e); None }
+        }).collect();
         Ok(())
     }
 
@@ -195,33 +206,63 @@ impl App {
     }
 
     pub async fn add_downloads(&self) -> std::result::Result<Vec<u64>, String> {
-        if self.uris.is_empty() {
-            return Err("没有提供下载URI".to_string());
+        if self.detected_inputs.is_empty() {
+            return Err("No download inputs provided".to_string());
         }
 
         let dir = self.get_opt_str("dir").await;
         let out = self.get_opt_str("out").await;
-        let split = self.get_opt_i64("split").await.map(|v| v as u16);
-        let max_conn = self.get_opt_i64("max-connection-per-server").await.map(|v| v as u16);
-        let max_dl = self.get_opt_i64("max-download-limit").await.map(|v| v as u64);
 
         let options = DownloadOptions {
-            split,
-            max_connection_per_server: max_conn,
-            max_download_limit: max_dl,
+            split: None,
+            max_connection_per_server: None,
+            max_download_limit: None,
             max_upload_limit: None,
-            dir,
-            out,
+            dir: dir.clone(),
+            out: out.clone(),
         };
 
-        let man: tokio::sync::RwLockReadGuard<'_, RequestGroupMan> = self.request_man.read().await;
+        let mut engine_lock = self.engine.lock().await;
+        let engine = engine_lock.as_mut().ok_or_else(|| "Engine not initialized".to_string())?;
+
         let mut gids = Vec::new();
 
-        for uri in &self.uris {
-            let gid: u64 = man.add_group(vec![uri.clone()], options.clone()).await
-                .map_err(|e| format!("添加下载任务失败: {}", e))?
-                .value();
-            gids.push(gid);
+        for (i, input) in self.detected_inputs.iter().enumerate() {
+            let gid = GroupId::new(i as u64 + 1);
+
+            let cmd: Box<dyn Command> = match &input.input_type {
+                InputType::HttpUrl => {
+                    Box::new(DownloadCommand::new(gid, &input.raw, &options, dir.as_deref(), out.as_deref())
+                        .map_err(|e| format!("HTTP download command failed: {}", e))?)
+                }
+                InputType::FtpUrl => {
+                    Box::new(FtpDownloadCommand::new(gid, &input.raw, &options, dir.as_deref(), out.as_deref())
+                        .map_err(|e| format!("FTP download command failed: {}", e))?)
+                }
+                InputType::SftpUrl => {
+                    Box::new(SftpDownloadCommand::new(gid, &input.raw, &options, dir.as_deref(), out.as_deref())
+                        .map_err(|e| format!("SFTP download command failed: {}", e))?)
+                }
+                InputType::TorrentFile => {
+                    let data = input.file_data.as_ref()
+                        .ok_or_else(|| "Torrent file data not available".to_string())?;
+                    Box::new(BtDownloadCommand::new(gid, data, &options, dir.as_deref())
+                        .map_err(|e| format!("BT download command failed: {}", e))?)
+                }
+                InputType::MetalinkFile => {
+                    let data = input.file_data.as_ref()
+                        .ok_or_else(|| "Metalink file data not available".to_string())?;
+                    Box::new(MetalinkDownloadCommand::new(gid, data, &options, dir.as_deref())
+                        .map_err(|e| format!("Metalink download command failed: {}", e))?)
+                }
+                InputType::MagnetLink => {
+                    Box::new(MagnetDownloadCommand::new(gid, &input.raw, &options, dir.as_deref())
+                        .map_err(|e| format!("Magnet download command failed: {}", e))?)
+                }
+            };
+
+            engine.add_command(cmd).map_err(|e| format!("Failed to add command to engine: {}", e))?;
+            gids.push(gid.value());
         }
 
         Ok(gids)
@@ -231,7 +272,7 @@ impl App {
         let mut engine_lock: tokio::sync::MutexGuard<'_, Option<DownloadEngine>> = self.engine.lock().await;
         if let Some(engine) = engine_lock.take() {
             drop(engine_lock);
-            info!("启动下载引擎, 共 {} 个任务", self.uris.len());
+            info!("启动下载引擎, 共 {} 个任务", self.detected_inputs.len());
             let result: Result<(), _> = engine.run().await;
             result.map_err(|e| format!("引擎运行错误: {}", e))
         } else {
@@ -273,7 +314,7 @@ impl App {
 
         self.print_banner();
 
-        if self.uris.is_empty() {
+        if self.detected_inputs.is_empty() {
             eprintln!("{}", "错误: 请提供下载URI或torrent文件路径".red());
             return 1;
         }

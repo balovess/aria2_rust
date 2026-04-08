@@ -4,4 +4,6 @@ pub mod download_command;
 pub mod ftp_download_command;
 pub mod sftp_download_command;
 pub mod bt_download_command;
+pub mod metalink_download_command;
+pub mod magnet_download_command;
 pub mod timer;

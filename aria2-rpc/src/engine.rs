@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use base64::Engine;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
 use super::server::{
@@ -47,6 +48,7 @@ impl RpcEngine {
         match req.method.as_str() {
             "aria2.addUri" => self.handle_add_uri(req).await.unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.addTorrent" => self.handle_add_torrent(req).await.unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.addMetalink" => self.handle_add_metalink(req).await.unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.remove" => self.handle_remove(req).await.unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.pause" | "aria2.forcePause" => self.handle_pause(req).await.unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.unpause" | "aria2.forceUnpause" => self.handle_unpause(req).await.unwrap_or_else(|e| e.into_response(req.id.clone())),
@@ -95,7 +97,42 @@ impl RpcEngine {
     async fn handle_add_torrent(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
         let torrent_data: String = req.get_param(0)?;
         let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-        let gid = self.add_task(vec![format!("torrent://{}", torrent_data)], opts).await?;
+        let _dir = opts.get("dir").and_then(|v| v.as_str()).unwrap_or(".").to_string();
+
+        let decoded_bytes = if torrent_data.starts_with("data:") {
+            base64::engine::general_purpose::STANDARD.decode(torrent_data.split(',').nth(1).unwrap_or(""))
+                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
+        } else {
+            base64::engine::general_purpose::STANDARD.decode(&torrent_data)
+                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
+        };
+
+        if decoded_bytes.len() < 3 || decoded_bytes[0] != b'd' || decoded_bytes[1] != b'8' || decoded_bytes[2] != b':' {
+            return Err(JsonRpcError::InvalidParams("Invalid BEncode data (not a .torrent file)".into()));
+        }
+
+        let gid = self.add_task(vec![format!("torrent://{}", &decoded_bytes[..std::cmp::min(32, decoded_bytes.len())].iter().map(|b| format!("{:02x}", b)).collect::<String>())], opts).await?;
+        Ok(JsonRpcResponse::success(req.id.clone().unwrap_or_default(), gid))
+    }
+
+    async fn handle_add_metalink(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
+        let metalink_data: String = req.get_param(0)?;
+        let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
+
+        let decoded_bytes = if metalink_data.starts_with("data:") {
+            base64::engine::general_purpose::STANDARD.decode(metalink_data.split(',').nth(1).unwrap_or(""))
+                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
+        } else {
+            base64::engine::general_purpose::STANDARD.decode(&metalink_data)
+                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
+        };
+
+        let preview = String::from_utf8_lossy(&decoded_bytes[..decoded_bytes.len().min(200)]);
+        if !preview.to_lowercase().contains("<metalink") && !preview.contains("urn:ietf:params:xml:ns:metalink") {
+            return Err(JsonRpcError::InvalidParams("Invalid Metalink XML data".into()));
+        }
+
+        let gid = self.add_task(vec!["metalink://download".to_string()], opts).await?;
         Ok(JsonRpcResponse::success(req.id.clone().unwrap_or_default(), gid))
     }
 
@@ -403,5 +440,49 @@ mod tests {
     async fn test_engine_default() {
         let engine = RpcEngine::default();
         assert_eq!(engine.task_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_add_torrent() {
+        let engine = RpcEngine::new();
+        let fake_torrent_bencode = "d8:announce40:http://tracker.example.com/announce4:info6:lengthi1000e12:piece lengthi32768e6:pieces20:00000000000000000000000ee";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(fake_torrent_bencode.as_bytes());
+        let req = JsonRpcRequest::new("aria2.addTorrent", serde_json::json!([encoded])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "addTorrent should succeed for valid BEncode data");
+        let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert!(!gid.is_empty());
+        assert_eq!(engine.task_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_add_torrent_invalid_data() {
+        let engine = RpcEngine::new();
+        let not_torrent = base64::engine::general_purpose::STANDARD.encode("this is not a torrent file");
+        let req = JsonRpcRequest::new("aria2.addTorrent", serde_json::json!([not_torrent])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_error(), "addTorrent should fail for non-BEncode data");
+    }
+
+    #[tokio::test]
+    async fn test_handle_add_metalink() {
+        let engine = RpcEngine::new();
+        let metalink_xml = r#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><files><file name="test.bin"><size>1024</size><url priority="1">http://example.com/test.bin</url></file></files></metalink>"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(metalink_xml.as_bytes());
+        let req = JsonRpcRequest::new("aria2.addMetalink", serde_json::json!([encoded])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "addMetalink should succeed for valid Metalink XML");
+        let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert!(!gid.is_empty());
+        assert_eq!(engine.task_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_add_metalink_invalid_data() {
+        let engine = RpcEngine::new();
+        let not_metalink = base64::engine::general_purpose::STANDARD.encode("this is not metalink xml");
+        let req = JsonRpcRequest::new("aria2.addMetalink", serde_json::json!([not_metalink])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_error(), "addMetalink should fail for non-XML data");
     }
 }

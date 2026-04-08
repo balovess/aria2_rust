@@ -28,7 +28,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 adler32 = "1.2"
 digest = "0.10"
-aria2-protocol = { workspace = true, features = ["bittorrent"] }
+aria2-protocol = { workspace = true, features = ["bittorrent", "metalink"] }
 reqwest = { version = "0.11", features = ["stream", "rustls-tls"], default-features = false }
 ssh2 = "0.9"
 rand = "0.8"

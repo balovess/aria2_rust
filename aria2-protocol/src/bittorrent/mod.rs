@@ -6,3 +6,4 @@ pub mod tracker;
 pub mod piece;
 pub mod dht;
 pub mod extension;
+pub mod magnet;
