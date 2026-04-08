@@ -57,6 +57,8 @@ pub struct DownloadOptions {
     pub cookies: Option<String>,
     pub bt_force_encrypt: bool,
     pub bt_require_crypto: bool,
+    pub enable_dht: bool,
+    pub dht_listen_port: Option<u16>,
 }
 
 pub struct RequestGroup {

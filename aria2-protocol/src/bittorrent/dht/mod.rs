@@ -5,3 +5,5 @@ pub mod message;
 pub mod transaction;
 pub mod bootstrap;
 pub mod client;
+pub mod socket;
+pub mod engine;

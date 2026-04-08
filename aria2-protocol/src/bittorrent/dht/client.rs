@@ -1,13 +1,13 @@
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{debug, warn};
-use tokio::time::timeout;
+use tracing::debug;
 
 use crate::bittorrent::bencode::codec::BencodeValue;
-use super::message::{DhtMessage, DhtMessageBuilder, DhtQueryMethod};
+use super::message::{DhtMessage, DhtMessageBuilder};
 use super::transaction::TransactionManager;
 use super::routing_table::RoutingTable;
 use super::node::DhtNode;
+use super::socket::DhtSocket;
 
 pub struct DhtClientConfig {
     pub self_id: [u8; 20],
@@ -58,6 +58,7 @@ impl DhtClient {
     pub async fn discover_peers(&mut self, target_info_hash: &[u8; 20])
         -> Result<DiscoveredPeers, String> {
 
+        let socket = DhtSocket::bind(0).await?;
         let mut all_peers: Vec<SocketAddr> = Vec::new();
         let mut nodes_contacted = 0usize;
 
@@ -97,9 +98,10 @@ impl DhtClient {
                 );
                 let addr = *node_addr;
                 let query_timeout = self.config.query_timeout;
+                let sock = socket.clone();
 
                 handles.push(tokio::spawn(async move {
-                    Self::query_node_udp(addr, &query_msg, query_timeout).await
+                    Self::query_node_with_socket(&sock, addr, &query_msg, query_timeout).await
                 }));
             }
 
@@ -137,30 +139,24 @@ impl DhtClient {
         })
     }
 
-    async fn query_node_udp(
+    async fn query_node_with_socket(
+        socket: &DhtSocket,
         node_addr: SocketAddr,
         message: &DhtMessage,
         query_timeout: Duration,
     ) -> Result<DhtMessage, String> {
-        use tokio::net::UdpSocket;
-
-        let socket = UdpSocket::bind("0.0.0.0:0").await
-            .map_err(|e| format!("UDP bind failed: {}", e))?;
-
         let encoded = message.encode()?;
-        socket.send_to(&encoded, node_addr).await
-            .map_err(|e| format!("UDP send to {} failed: {}", node_addr, e))?;
+        socket.send_to(node_addr, &encoded).await?;
 
         let mut buf = [0u8; 4096];
-        match timeout(query_timeout, socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, from))) => {
-                if from != node_addr {
-                    return Err(format!("Response from unexpected address: {} (expected {})", from, node_addr));
+        match socket.recv_with_timeout(&mut buf, query_timeout).await {
+            Ok((len, _from)) => {
+                if len == 0 {
+                    return Err("Empty response".to_string());
                 }
                 DhtMessage::decode(&buf[..len])
             }
-            Ok(Err(e)) => Err(format!("UDP recv error: {}", e)),
-            Err(_) => Err(format!("Query to {} timed out after {:?}", node_addr, query_timeout)),
+            Err(e) => Err(e),
         }
     }
 
@@ -191,7 +187,7 @@ pub fn extract_compact_peers_from_response(response: &DhtMessage) -> Vec<SocketA
     peers
 }
 
-fn extract_compact_nodes_from_response(response: &DhtMessage) -> Vec<(SocketAddr, [u8; 20])> {
+pub fn extract_compact_nodes_from_response(response: &DhtMessage) -> Vec<(SocketAddr, [u8; 20])> {
     let r = match &response.r {
         Some(r) => r,
         None => return vec![],

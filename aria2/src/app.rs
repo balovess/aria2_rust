@@ -249,6 +249,8 @@ impl App {
             cookies: self.get_opt_str("cookie").await,
             bt_force_encrypt: self.get_opt_bool("bt-force-encrypt").await.unwrap_or(false),
             bt_require_crypto: self.get_opt_bool("bt-require-crypto").await.unwrap_or(false),
+            enable_dht: self.get_opt_bool("enable-dht").await.unwrap_or(true),
+            dht_listen_port: self.get_opt_i64("dht-listen-port").await.and_then(|v| if v > 0 { Some(v as u16) } else { None }),
         };
 
         let mut engine_lock = self.engine.lock().await;

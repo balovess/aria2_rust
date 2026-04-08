@@ -21,6 +21,8 @@ fn create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
         cookies: None,
         bt_force_encrypt: false,
         bt_require_crypto: false,
+        enable_dht: false,
+        dht_listen_port: None,
     };
     let group = RequestGroup::new(GroupId::new(1), vec![uri.to_string()], options);
     Arc::new(RwLock::new(group))

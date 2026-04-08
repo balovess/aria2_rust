@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use async_trait::async_trait;
-use tracing::{info, debug, warn};
+use tracing::{info, warn};
 
 use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
 use crate::engine::command::{Command, CommandStatus};
@@ -14,6 +14,7 @@ pub struct MagnetDownloadCommand {
     output_path: std::path::PathBuf,
     started: bool,
     completed_bytes: u64,
+    dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
 }
 
 impl MagnetDownloadCommand {
@@ -45,6 +46,7 @@ impl MagnetDownloadCommand {
             output_path: path,
             started: false,
             completed_bytes: 0,
+            dht_engine: None,
         })
     }
 
@@ -73,35 +75,35 @@ impl Command for MagnetDownloadCommand {
             }
         }
 
-        use aria2_protocol::bittorrent::dht::client::{
-            DhtClient, DhtClientConfig, generate_random_node_id,
+        let enable_dht = { self.group.read().await.options().enable_dht };
+        let dht_port = { self.group.read().await.options().dht_listen_port };
+
+        if enable_dht && self.dht_engine.is_none() {
+            let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+                port: dht_port.unwrap_or(0),
+                ..Default::default()
+            };
+            match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
+                Ok(engine) => {
+                    self.dht_engine = Some(engine);
+                    self.dht_engine.as_ref().unwrap().start_maintenance_loop();
+                    info!("Magnet: DHT engine started for peer discovery");
+                }
+                Err(e) => { warn!("Magnet: DHT engine start failed: {}", e); }
+            }
+        }
+
+        let discovered_peers = if let Some(ref engine) = self.dht_engine {
+            let result = engine.find_peers(&ml.info_hash).await;
+            info!("Magnet: DHT discovered {} peers (contacted {} nodes)",
+                  result.peers.len(), result.nodes_contacted);
+            result.peers
+        } else {
+            warn!("Magnet: DHT disabled, no peers available");
+            vec![]
         };
-        use aria2_protocol::bittorrent::dht::bootstrap::DhtBootstrap;
 
-        let dht_config = DhtClientConfig {
-            self_id: generate_random_node_id(),
-            bootstrap_nodes: DhtBootstrap::get_bootstrap_nodes()
-                .iter().map(|n| n.addr).collect(),
-            max_concurrent_queries: 8,
-            query_timeout: Duration::from_secs(5),
-            max_rounds: 3,
-        };
-        let mut dht_client = DhtClient::new(dht_config);
-
-        let discovered = tokio::time::timeout(
-            Duration::from_secs(30),
-            dht_client.discover_peers(&ml.info_hash),
-        ).await
-        .map_err(|_| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-            message: "DHT discovery timeout".into(),
-        }))?
-        .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-            message: format!("DHT peer discovery failed: {}", e),
-        }))?;
-
-        info!("DHT discovered {} peers", discovered.addresses.len());
-
-        if discovered.addresses.is_empty() {
+        if discovered_peers.is_empty() {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {
                     message: "No peers found via DHT".into(),
@@ -110,13 +112,13 @@ impl Command for MagnetDownloadCommand {
         }
 
         let meta_session = MetadataExchangeSession::new(MetadataExchangeConfig {
-            max_peers_to_try: discovered.addresses.len().min(5),
+            max_peers_to_try: discovered_peers.len().min(5),
             connect_timeout: Duration::from_secs(15),
             request_timeout: Duration::from_secs(10),
             piece_size: 16 * 1024,
         });
 
-        let torrent_bytes = meta_session.fetch_metadata(&ml.info_hash, &discovered.addresses).await
+        let torrent_bytes = meta_session.fetch_metadata(&ml.info_hash, &discovered_peers).await
             .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("Metadata fetch failed: {}", e),
             }))?;
@@ -132,6 +134,10 @@ impl Command for MagnetDownloadCommand {
         )?;
 
         bt_cmd.execute().await?;
+
+        if let Some(ref engine) = self.dht_engine {
+            engine.shutdown();
+        }
 
         self.completed_bytes = self.group.read().await.total_length();
 

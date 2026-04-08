@@ -126,6 +126,7 @@ pub struct BtDownloadCommand {
     seed_ratio: Option<f64>,
     total_uploaded: u64,
     udp_client: Option<SharedUdpClient>,
+    dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
 }
 
 impl BtDownloadCommand {
@@ -166,6 +167,7 @@ impl BtDownloadCommand {
             seed_ratio,
             total_uploaded: 0,
             udp_client: None,
+            dht_engine: None,
         })
     }
 
@@ -359,7 +361,45 @@ impl Command for BtDownloadCommand {
 
         if peer_addrs.is_empty() {
             eprintln!("[BT] ERROR: No peers from tracker");
-            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "No peers from tracker".into() }));
+        }
+
+        let enable_dht = { self.group.read().await.options().enable_dht };
+        if enable_dht && self.dht_engine.is_none() {
+            let dht_port = { self.group.read().await.options().dht_listen_port };
+            let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+                port: dht_port.unwrap_or(0),
+                ..Default::default()
+            };
+            match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
+                Ok(engine) => {
+                    self.dht_engine = Some(engine);
+                    eprintln!("[BT] DHT engine started");
+                    self.dht_engine.as_ref().unwrap().start_maintenance_loop();
+                }
+                Err(e) => { warn!("[BT] DHT engine start failed: {}", e); }
+            }
+        }
+
+        if let Some(ref engine) = self.dht_engine {
+            let result = engine.find_peers(&info_hash_raw).await;
+            if !result.peers.is_empty() {
+                let before = peer_addrs.len();
+                for addr in &result.peers {
+                    let ip_str = addr.ip().to_string();
+                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip_str, addr.port());
+                    if !peer_addrs.iter().any(|p| p.ip == paddr.ip && p.port == paddr.port) {
+                        peer_addrs.push(paddr);
+                    }
+                }
+                eprintln!("[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
+                         peer_addrs.len() - before, peer_addrs.len(), result.nodes_contacted);
+            } else {
+                debug!("[BT] DHT find_peers returned no peers");
+            }
+        }
+
+        if peer_addrs.is_empty() {
+            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "No peers from tracker or DHT".into() }));
         }
 
         eprintln!("[BT] Connecting to {} peers...", peer_addrs.len());
@@ -580,6 +620,16 @@ impl Command for BtDownloadCommand {
         }
 
         info!("BT command done: downloaded={} uploaded={}", self.completed_bytes, self.total_uploaded);
+
+        if let Some(ref engine) = self.dht_engine {
+            if let Err(e) = engine.announce_peer(&info_hash_raw, 0).await {
+                warn!("[BT] DHT announce failed: {}", e);
+            } else {
+                info!("[BT] DHT announce_peer sent for {}", meta.info_hash.as_hex());
+            }
+            engine.shutdown();
+        }
+
         Ok(())
     }
 
