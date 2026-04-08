@@ -7,6 +7,7 @@ use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
 use crate::engine::command::{Command, CommandStatus};
 use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
 use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 
 pub struct SftpDownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -221,7 +222,14 @@ impl Command for SftpDownloadCommand {
             g.set_total_length(total_length).await;
         }
 
-        let mut writer = DefaultDiskWriter::new(&self.output_path);
+        let raw_writer = DefaultDiskWriter::new(&self.output_path);
+        let rate_limit = { let g = self.group.read().await; g.options().max_download_limit };
+        let mut writer: Box<dyn DiskWriter> = match rate_limit {
+            Some(rate) if rate > 0 => {
+                Box::new(ThrottledWriter::new(raw_writer, RateLimiter::new(&RateLimiterConfig::new(Some(rate), None))))
+            }
+            _ => Box::new(raw_writer),
+        };
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;

@@ -8,6 +8,7 @@ use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
 use crate::engine::command::{Command, CommandStatus};
 use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
 use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 
 pub struct FtpDownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -273,7 +274,13 @@ impl Command for FtpDownloadCommand {
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "data conn timeout".into() }))?
             .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("data conn failed: {}", e) }))?;
 
-        let mut writer = DefaultDiskWriter::new(&self.output_path);
+        let raw_writer = DefaultDiskWriter::new(&self.output_path);
+        let rate_limit = { let g = self.group.read().await; g.options().max_download_limit };
+        let mut writer: Box<dyn DiskWriter> = if let Some(rate) = rate_limit.filter(|&r| r > 0) {
+            Box::new(ThrottledWriter::new(raw_writer, RateLimiter::new(&RateLimiterConfig::new(Some(rate), None))))
+        } else {
+            Box::new(raw_writer)
+        };
         let mut buffer = vec![0u8; 65536];
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();

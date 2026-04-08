@@ -50,6 +50,8 @@ pub struct DownloadOptions {
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,
     pub out: Option<String>,
+    pub seed_time: Option<u64>,
+    pub seed_ratio: Option<f64>,
 }
 
 pub struct RequestGroup {

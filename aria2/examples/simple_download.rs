@@ -46,6 +46,8 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         max_upload_limit: None,
         dir,
         out: None,
+        seed_time: None,
+        seed_ratio: None,
     };
 
     match man.add_group(vec![uri.to_string()], download_opts).await {

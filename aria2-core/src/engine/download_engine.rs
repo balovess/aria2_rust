@@ -6,6 +6,7 @@ use tracing::{info, error, debug, warn};
 
 use crate::error::{Aria2Error, Result, RecoverableError};
 use crate::retry::{RetryPolicy, RetryStats};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use super::command::{Command, CommandStatus};
 
 pub struct DownloadEngine {
@@ -15,6 +16,7 @@ pub struct DownloadEngine {
     tick_interval: Duration,
     retry_policy: Arc<RetryPolicy>,
     retry_stats: Arc<RetryStats>,
+    global_limiter: Option<RateLimiter>,
 }
 
 impl DownloadEngine {
@@ -35,11 +37,26 @@ impl DownloadEngine {
             tick_interval: Duration::from_millis(tick_interval_ms),
             retry_policy: Arc::new(policy),
             retry_stats: Arc::new(RetryStats::default()),
+            global_limiter: None,
         };
 
         info!("下载引擎初始化完成, tick间隔: {}ms, 最大重试次数: {}", tick_interval_ms, max_tries);
 
         engine
+    }
+
+    pub fn set_global_rate_limiter(&mut self, config: RateLimiterConfig) {
+        self.global_limiter = Some(RateLimiter::new(&config));
+        info!("全局限速已设置: download={:?}, upload={:?}",
+            config.download_rate(), config.upload_rate());
+    }
+
+    pub fn global_rate_limiter(&self) -> Option<&RateLimiter> {
+        self.global_limiter.as_ref()
+    }
+
+    pub fn take_global_rate_limiter(&mut self) -> Option<RateLimiter> {
+        self.global_limiter.take()
     }
 
     pub fn add_command(&self, command: Box<dyn Command>) -> Result<()> {

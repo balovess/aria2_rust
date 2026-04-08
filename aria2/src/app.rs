@@ -212,18 +212,34 @@ impl App {
 
         let dir = self.get_opt_str("dir").await;
         let out = self.get_opt_str("out").await;
+        let dl_limit = self.get_opt_i64("max-download-limit").await.and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let ul_limit = self.get_opt_i64("max-upload-limit").await.and_then(|v| if v > 0 { Some(v as u64) } else { None });
+
+        let split = self.get_opt_i64("split").await.and_then(|v| if v > 0 { Some(v as u16) } else { None });
+        let max_conn = self.get_opt_i64("max-connection-per-server").await.and_then(|v| if v > 0 { Some(v as u16) } else { None });
+        let seed_time = self.get_opt_i64("seed-time").await.and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let seed_ratio = self.get_opt_str("seed-ratio").await.and_then(|v| v.parse::<f64>().ok()).filter(|&r| r > 0.0);
 
         let options = DownloadOptions {
-            split: None,
-            max_connection_per_server: None,
-            max_download_limit: None,
-            max_upload_limit: None,
+            split,
+            max_connection_per_server: max_conn,
+            max_download_limit: dl_limit,
+            max_upload_limit: ul_limit,
             dir: dir.clone(),
             out: out.clone(),
+            seed_time,
+            seed_ratio,
         };
 
         let mut engine_lock = self.engine.lock().await;
         let engine = engine_lock.as_mut().ok_or_else(|| "Engine not initialized".to_string())?;
+
+        let global_dl = self.get_opt_i64("max-overall-download-limit").await.and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let global_ul = self.get_opt_i64("max-overall-upload-limit").await.and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        if global_dl.is_some() || global_ul.is_some() {
+            use aria2_core::rate_limiter::RateLimiterConfig;
+            engine.set_global_rate_limiter(RateLimiterConfig::new(global_dl, global_ul));
+        }
 
         let mut gids = Vec::new();
 

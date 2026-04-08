@@ -5,8 +5,11 @@ use tracing::{info, debug, warn};
 
 use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
 use crate::engine::command::{Command, CommandStatus};
+use crate::engine::bt_upload_session::{BtUploadSession, BtSeedingConfig, PieceDataProvider, InMemoryPieceProvider};
+use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
 use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 
 pub struct BtDownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -14,6 +17,10 @@ pub struct BtDownloadCommand {
     started: bool,
     completed_bytes: u64,
     torrent_data: Vec<u8>,
+    seed_enabled: bool,
+    seed_time: Option<Duration>,
+    seed_ratio: Option<f64>,
+    total_uploaded: u64,
 }
 
 impl BtDownloadCommand {
@@ -35,7 +42,13 @@ impl BtDownloadCommand {
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
         let group = RequestGroup::new(gid, vec![format!("bt://{}", meta.info_hash.as_hex())], options.clone());
-        info!("BtDownloadCommand created: {} -> {} ({} bytes, {} pieces)", meta.info.name, path.display(), meta.total_size(), meta.num_pieces());
+
+        let seed_time = options.seed_time.map(|t| if t == 0 { None } else { Some(Duration::from_secs(t)) }).flatten();
+        let seed_ratio = options.seed_ratio.filter(|&r| r > 0.0);
+
+        info!("BtDownloadCommand created: {} -> {} ({} bytes, {} pieces) seed={:?} ratio={:?}",
+            meta.info.name, path.display(), meta.total_size(), meta.num_pieces(),
+            seed_time, seed_ratio);
 
         Ok(Self {
             group: Arc::new(tokio::sync::RwLock::new(group)),
@@ -43,11 +56,93 @@ impl BtDownloadCommand {
             started: false,
             completed_bytes: 0,
             torrent_data: torrent_bytes.to_vec(),
+            seed_enabled: true,
+            seed_time,
+            seed_ratio,
+            total_uploaded: 0,
         })
     }
 
     pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
         self.group.read().await
+    }
+
+    async fn run_seeding_phase(
+        &mut self,
+        connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
+        piece_length: u32,
+        num_pieces: u32,
+    ) -> Result<()> {
+        if connections.is_empty() {
+            info!("No active peers for seeding");
+            return Ok(());
+        }
+
+        let file_provider = Arc::new(FileBackedPieceProvider::new(
+            self.output_path.clone(),
+            piece_length,
+            num_pieces,
+        ));
+
+        let upload_limit = { self.group.read().await.options().max_upload_limit };
+        let config = BtSeedingConfig {
+            max_upload_bytes_per_sec: upload_limit,
+            max_peers_to_unchoke: 4,
+            optimistic_unchoke_interval_secs: 30,
+        };
+
+        let exit_cond = match (self.seed_time, self.seed_ratio) {
+            (Some(t), Some(r)) => SeedExitCondition { seed_time: Some(t), seed_ratio: Some(r) },
+            (Some(t), None) => SeedExitCondition { seed_time: Some(t), seed_ratio: None },
+            (None, Some(r)) => SeedExitCondition { seed_time: None, seed_ratio: Some(r) },
+            (None, None) => SeedExitCondition::infinite(),
+        };
+
+        let mut manager = BtSeedManager::new(connections, file_provider, config, exit_cond, self.completed_bytes);
+        manager.run_seeding_loop().await?;
+
+        self.total_uploaded = manager.total_uploaded();
+        info!("Seeding complete: uploaded {} bytes in {:?}", self.total_uploaded, manager.seeding_duration());
+        Ok(())
+    }
+}
+
+struct FileBackedPieceProvider {
+    file_path: std::path::PathBuf,
+    piece_length: u32,
+    num_pieces: u32,
+}
+
+impl FileBackedPieceProvider {
+    pub fn new(file_path: std::path::PathBuf, piece_length: u32, num_pieces: u32) -> Self {
+        Self { file_path, piece_length, num_pieces }
+    }
+}
+
+impl PieceDataProvider for FileBackedPieceProvider {
+    fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>> {
+        use tokio::fs::File;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        use std::io::SeekFrom;
+
+        let file_pos = piece_index as u64 * self.piece_length as u64 + offset as u64;
+
+        let rt = tokio::runtime::Handle::try_current().ok()?;
+        rt.block_on(async {
+            let mut f = File::open(&self.file_path).await.ok()?;
+            f.seek(SeekFrom::Start(file_pos)).await.ok()?;
+            let mut buf = vec![0u8; length as usize];
+            f.read_exact(&mut buf).await.ok()?;
+            Some(buf)
+        })
+    }
+
+    fn has_piece(&self, _piece_index: u32) -> bool {
+        true
+    }
+
+    fn num_pieces(&self) -> u32 {
+        self.num_pieces
     }
 }
 
@@ -151,7 +246,14 @@ impl Command for BtDownloadCommand {
             return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "All peer connections failed".into() }));
         }
 
-        let mut writer = DefaultDiskWriter::new(&self.output_path);
+        let raw_writer = DefaultDiskWriter::new(&self.output_path);
+        let rate_limit = { let g = self.group.read().await; g.options().max_download_limit };
+        let mut writer: Box<dyn DiskWriter> = match rate_limit {
+            Some(rate) if rate > 0 => {
+                Box::new(ThrottledWriter::new(raw_writer, RateLimiter::new(&RateLimiterConfig::new(Some(rate), None))))
+            }
+            _ => Box::new(raw_writer),
+        };
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
@@ -262,6 +364,16 @@ impl Command for BtDownloadCommand {
         }
 
         writer.finalize().await.ok();
+        info!("BT download done: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+
+        if self.seed_enabled && !active_connections.is_empty() {
+            info!("Starting seeding phase with {} peers...", active_connections.len());
+            self.run_seeding_phase(active_connections, piece_length, num_pieces as u32).await?;
+        } else {
+            for conn in &mut active_connections {
+                drop(conn);
+            }
+        }
 
         let final_speed = {
             let elapsed = start_time.elapsed().as_secs_f64();
@@ -270,11 +382,11 @@ impl Command for BtDownloadCommand {
         {
             let mut g = self.group.write().await;
             g.update_progress(self.completed_bytes).await;
-            g.update_speed(final_speed, 0).await;
+            g.update_speed(final_speed, self.total_uploaded).await;
             g.complete().await?;
         }
 
-        info!("BT download done: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+        info!("BT command done: downloaded={} uploaded={}", self.completed_bytes, self.total_uploaded);
         Ok(())
     }
 

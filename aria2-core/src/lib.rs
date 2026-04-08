@@ -61,6 +61,7 @@ pub mod util;
 pub mod ui;
 pub mod retry;
 pub mod validation;
+pub mod rate_limiter;
 
 use tracing::Level;
 

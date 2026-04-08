@@ -10,6 +10,7 @@ use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::file_allocation;
+use crate::rate_limiter::RateLimiter;
 use crate::filesystem::control_file;
 
 pub struct ConcurrentDownloadCommand {
@@ -137,7 +138,14 @@ impl Command for ConcurrentDownloadCommand {
         ctrl_file.save().await.ok();
 
         let mut writer = CachedDiskWriter::new(&self.output_path, expected_size, self.disk_cache_size_mb);
-        Self::download_concurrent_to_disk(&self.client, &mut manager, &mut writer, &mut ctrl_file).await
+
+        let rate_limit = { let g = self.group.read().await; g.options().max_download_limit };
+        let limiter = rate_limit.filter(|&r| r > 0).map(|r| {
+            use crate::rate_limiter::RateLimiterConfig;
+            RateLimiter::new(&RateLimiterConfig::new(Some(r), None))
+        });
+
+        Self::download_concurrent_to_disk(&self.client, &mut manager, &mut writer, &mut ctrl_file, limiter.as_ref()).await
             .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("Concurrent download failed: {}", e) }))?;
 
         writer.flush().await.map_err(|e| Aria2Error::Io(e.to_string()))?;
@@ -179,11 +187,12 @@ impl ConcurrentDownloadCommand {
         manager: &mut ConcurrentSegmentManager,
         writer: &mut CachedDiskWriter,
         ctrl_file: &mut control_file::ControlFile,
+        limiter: Option<&RateLimiter>,
     ) -> std::result::Result<(), String> {
         manager.allocate_segments();
 
         if manager.num_segments() <= 1 {
-            return Self::download_single_mirror_fallback_to_disk(client, manager, writer).await;
+            return Self::download_single_mirror_fallback_to_disk(client, manager, writer, limiter).await;
         }
 
         let mut iteration = 0u32;
@@ -317,6 +326,7 @@ impl ConcurrentDownloadCommand {
         client: &reqwest::Client,
         manager: &mut ConcurrentSegmentManager,
         writer: &mut CachedDiskWriter,
+        limiter: Option<&RateLimiter>,
     ) -> std::result::Result<(), String> {
         for mi in 0..manager.num_mirrors() {
             let url = match manager.mirror_url(mi) {
@@ -333,6 +343,9 @@ impl ConcurrentDownloadCommand {
                         while let Some(chunk_result) = stream.next().await {
                             match chunk_result {
                                 Ok(bytes) => {
+                                    if let Some(lim) = limiter {
+                                        lim.acquire_download(bytes.len() as u64).await;
+                                    }
                                     writer.write_at(offset, &bytes).await
                                         .map_err(|e| format!("Write error: {}", e))?;
                                     offset += bytes.len() as u64;
