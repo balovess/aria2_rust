@@ -13,6 +13,8 @@ use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter, CachedDiskWr
 use crate::filesystem::file_allocation;
 use crate::filesystem::resume_helper::ResumeHelper;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::http::cookie::Cookie;
+use crate::http::cookie_storage::CookieStorage;
 
 const CONCURRENT_MIN_FILE_SIZE: u64 = 1024 * 1024;
 
@@ -24,6 +26,8 @@ pub struct DownloadCommand {
     completed_bytes: u64,
     continue_enabled: bool,
     file_allocation: String,
+    cookie_storage: Arc<CookieStorage>,
+    cookie_file: Option<String>,
 }
 
 impl DownloadCommand {
@@ -57,6 +61,37 @@ impl DownloadCommand {
         let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
         info!("DownloadCommand 创建: {} -> {}", uri, path.display());
 
+        let cookie_file = options.cookie_file.clone();
+        let cookie_storage = Arc::new(CookieStorage::new());
+
+        if let Some(ref cf) = cookie_file {
+            let p = std::path::Path::new(cf);
+            if p.exists() {
+                match cookie_storage.load_file(p) {
+                    Ok(n) => info!("从文件加载了 {} 个 Cookie: {}", n, cf),
+                    Err(e) => warn!("加载 Cookie 文件失败 {}: {}", cf, e),
+                }
+            }
+        }
+
+        if let Some(ref cookies_str) = options.cookies {
+            let domain = Self::extract_host(uri);
+            for pair in cookies_str.split(';') {
+                let pair = pair.trim();
+                if pair.is_empty() { continue; }
+                if let Some((name, value)) = pair.split_once('=') {
+                    let name = name.trim();
+                    let value = value.trim();
+                    if !name.is_empty() {
+                        cookie_storage.add(Cookie::new(name, value, &domain));
+                    }
+                }
+            }
+            if !cookie_storage.is_empty() {
+                info!("手动设置了 {} 个 Cookie", cookie_storage.count());
+            }
+        }
+
         Ok(Self {
             group: Arc::new(tokio::sync::RwLock::new(group)),
             client,
@@ -65,6 +100,8 @@ impl DownloadCommand {
             completed_bytes: 0,
             continue_enabled: true,
             file_allocation: "prealloc".to_string(),
+            cookie_storage,
+            cookie_file,
         })
     }
 
@@ -75,6 +112,23 @@ impl DownloadCommand {
             .map(|s| {
                 s.split('?').next().unwrap_or(s).to_string()
             })
+    }
+
+    fn extract_host(uri: &str) -> String {
+        reqwest::Url::parse(uri)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_else(|| "localhost".to_string())
+    }
+
+    fn save_cookies_if_configured(&self) {
+        if let Some(ref cf) = self.cookie_file {
+            if let Err(e) = self.cookie_storage.save_file(std::path::Path::new(cf)) {
+                warn!("保存 Cookie 文件失败 {}: {}", cf, e);
+            } else {
+                info!("Cookie 已保存到 {}", cf);
+            }
+        }
     }
 
     pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
@@ -99,15 +153,39 @@ impl DownloadCommand {
         resume_state: &crate::filesystem::resume_helper::ResumeState,
         total_length: u64,
     ) -> Result<()> {
-        let request = if let Some(range_header) = ResumeHelper::build_range_header(resume_state) {
+        let url_parsed = reqwest::Url::parse(uri).ok();
+        let mut request = if let Some(range_header) = ResumeHelper::build_range_header(resume_state) {
             debug!("断点续传: {}", range_header);
             self.client.get(uri).header("Range", range_header)
         } else {
             self.client.get(uri)
         };
 
+        if let Some(ref url) = url_parsed {
+            let host = url.host_str().unwrap_or("");
+            let path = url.path();
+            let secure = url.scheme() == "https";
+            let cookie_hdr = self.cookie_storage.to_header_string(host, path, secure);
+            if !cookie_hdr.is_empty() {
+                request = request.header("Cookie", &cookie_hdr);
+            }
+        }
+
         let response = request.send().await
             .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("HTTP请求失败: {}", e) }))?;
+
+        if let Some(ref url) = url_parsed {
+            let domain = url.host_str().unwrap_or("");
+            let path = url.path();
+            for sc_val in response.headers().get_all("set-cookie").iter() {
+                if let Ok(sc_str) = sc_val.to_str() {
+                    if let Some(c) = Cookie::from_set_cookie_header(sc_str, domain, path) {
+                        self.cookie_storage.add(c);
+                        debug!("收到 Set-Cookie: {}", sc_str);
+                    }
+                }
+            }
+        }
 
         let status = response.status();
         if !status.is_success() && status.as_u16() != 206 {
@@ -182,6 +260,7 @@ impl DownloadCommand {
         }
 
         info!("顺序下载完成: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+        self.save_cookies_if_configured();
         Ok(())
     }
 
@@ -201,6 +280,14 @@ impl DownloadCommand {
         manager.set_max_connections_per_mirror(max_conn.min(split));
         manager.allocate_segments();
 
+        let url_parsed = reqwest::Url::parse(uri).ok();
+        let cookie_hdr = if let Some(ref url) = url_parsed {
+            self.cookie_storage.to_header_string(
+                url.host_str().unwrap_or(""), url.path(), url.scheme() == "https"
+            )
+        } else { String::new() };
+        let cookie_hdr_for_spawn: Option<String> = if cookie_hdr.is_empty() { None } else { Some(cookie_hdr) };
+
         let mut writer = CachedDiskWriter::new(&self.output_path, Some(total_length), None);
 
         let limiter = options.max_download_limit.filter(|&r| r > 0).map(|r| {
@@ -216,8 +303,9 @@ impl DownloadCommand {
                     Some((seg_idx, offset, length)) => {
                         let url = uri.to_string();
                         let dl = HttpSegmentDownloader::new(&self.client);
+                        let ch = cookie_hdr_for_spawn.clone();
                         let handle = tokio::spawn(async move {
-                            dl.download_range(&url, offset, length).await
+                            dl.download_range(&url, offset, length, ch.as_deref()).await
                                 .map_err(|e| e.to_string())
                         });
                         active_handles.insert(seg_idx, handle);
@@ -294,6 +382,7 @@ impl DownloadCommand {
         }
 
         info!("并发下载完成: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+        self.save_cookies_if_configured();
         Ok(())
     }
 }
@@ -324,7 +413,17 @@ impl Command for DownloadCommand {
             }
         }
 
-        let head_resp = self.client.head(&uri).send().await.ok();
+        let url_for_head = reqwest::Url::parse(&uri).ok();
+        let cookie_hdr_head = if let Some(ref url) = url_for_head {
+            self.cookie_storage.to_header_string(
+                url.host_str().unwrap_or(""), url.path(), url.scheme() == "https"
+            )
+        } else { String::new() };
+        let mut head_req = self.client.head(&uri);
+        if !cookie_hdr_head.is_empty() {
+            head_req = head_req.header("Cookie", &cookie_hdr_head);
+        }
+        let head_resp = head_req.send().await.ok();
         let (total_length, supports_range) = if let Some(ref resp) = head_resp {
             let tl = resp.content_length().unwrap_or(0);
             let sr = resp.headers().get("Accept-Ranges").and_then(|v| v.to_str().ok()).map_or(false, |v| v.to_lowercase().contains("bytes"));

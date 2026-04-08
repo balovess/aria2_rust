@@ -8,6 +8,7 @@ import tempfile
 from typing import Optional
 
 import pytest
+import pytest_asyncio
 
 
 def find_aria2_rust_binary() -> Optional[str]:
@@ -120,7 +121,7 @@ class Aria2Server:
         return f"http://127.0.0.1:{self.port}/jsonrpc"
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_file_server():
     tmpdir = tempfile.mkdtemp(prefix="aria2_test_files_")
     small_file = os.path.join(tmpdir, "small.txt")
@@ -136,7 +137,7 @@ async def test_file_server():
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def aria2_server():
     binary = find_aria2_rust_binary()
     if binary is None:

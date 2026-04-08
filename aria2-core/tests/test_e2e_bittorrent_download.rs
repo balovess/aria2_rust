@@ -112,9 +112,12 @@ async fn test_e2e_bt_small_torrent_download() {
     let mut cmd = BtDownloadCommand::new(
         GroupId::new(100),
         &torrent_for_cmd,
-        &DownloadOptions::default(),
+        &DownloadOptions {
+            seed_time: Some(0), // 禁用 seeding
+            ..DownloadOptions::default()
+        },
         Some(dir.path().to_str().unwrap()),
-    ).expect("BtDownloadCommand创建失败");
+    ).expect("BtDownloadCommand 创建失败");
 
     match tokio::time::timeout(std::time::Duration::from_secs(15), cmd.execute()).await {
         Ok(Ok(())) => eprintln!("[DL] Download OK!"),
@@ -159,7 +162,10 @@ async fn test_e2e_bt_medium_torrent_download() {
     let mut cmd = BtDownloadCommand::new(
         GroupId::new(101),
         &torrent_for_cmd,
-        &DownloadOptions::default(),
+        &DownloadOptions {
+            seed_time: Some(0),
+            ..DownloadOptions::default()
+        },
         Some(dir.path().to_str().unwrap()),
     ).unwrap();
 
@@ -204,7 +210,10 @@ async fn test_e2e_bt_progress_tracking() {
     let torrent_for_cmd = build_test_torrent("progress.bin", 1024, 512, &final_tracker_url);
 
     let mut cmd = BtDownloadCommand::new(
-        GroupId::new(300), &torrent_for_cmd, &DownloadOptions::default(),
+        GroupId::new(300), &torrent_for_cmd, &DownloadOptions {
+            seed_time: Some(0),
+            ..DownloadOptions::default()
+        },
         Some(dir.path().to_str().unwrap()),
     ).unwrap();
 

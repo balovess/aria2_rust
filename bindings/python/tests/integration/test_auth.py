@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 
 from aria2_rust_client.client import Aria2Client
 from aria2_rust_client.errors import AuthError
 
 
-@pytest.mark.asyncio
 class TestAuth:
     async def test_token_auth_success(self, rpc_url_with_token, rpc_server_with_token):
         async with Aria2Client(url=rpc_url_with_token, token="test-token") as client:

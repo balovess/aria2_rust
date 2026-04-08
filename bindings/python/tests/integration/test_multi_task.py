@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 
 from aria2_rust_client.client import Aria2Client
 from aria2_rust_client.types import StatusInfo
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(rpc_url):
     c = Aria2Client(url=rpc_url)
     yield c
     await c.close()
 
 
-@pytest.mark.asyncio
 class TestMultiTask:
     async def test_add_multiple_tasks(self, client):
         gids = []

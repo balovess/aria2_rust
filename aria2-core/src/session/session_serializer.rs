@@ -342,6 +342,8 @@ ftp://server/big.iso
             seed_time: Some(300),
             seed_ratio: Some(2.0),
             checksum: None,
+            cookie_file: None,
+            cookies: None,
         };
         let map = download_options_to_map(&opts);
         assert_eq!(map.get("split").unwrap(), "8");

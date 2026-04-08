@@ -13,3 +13,5 @@ pub mod bt_upload_session;
 pub mod bt_seed_manager;
 pub mod metadata_exchange;
 pub mod timer;
+pub mod udp_tracker_client;
+pub mod udp_tracker_manager;

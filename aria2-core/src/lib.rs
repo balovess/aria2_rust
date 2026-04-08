@@ -64,6 +64,8 @@ pub mod validation;
 pub mod rate_limiter;
 pub mod session;
 pub mod checksum;
+pub mod selector;
+pub mod http;
 
 use tracing::Level;
 

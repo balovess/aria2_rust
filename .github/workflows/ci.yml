@@ -49,3 +49,146 @@ jobs:
 
       - name: Format check
         run: cargo fmt --all -- --check
+
+  python-test:
+    name: Python SDK Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          cd bindings/python
+          pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: |
+          cd bindings/python
+          pytest tests/unit/ -v --cov=aria2_rust_client
+
+      - name: Run integration tests
+        run: |
+          cd bindings/python
+          pytest tests/integration/ -v
+
+      - name: Run E2E tests (optional)
+        run: |
+          cd bindings/python
+          pytest tests/e2e/ -v || true  # Allow failure if aria2-rust not available
+
+      - name: Type checking (optional)
+        run: |
+          cd bindings/python
+          pip install mypy
+          mypy aria2_rust_client || true  # Optional
+
+  nodejs-test:
+    name: Node.js SDK Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          cd bindings/nodejs
+          npm install
+
+      - name: Run unit tests
+        run: |
+          cd bindings/nodejs
+          npm run test:unit
+
+      - name: Run integration tests
+        run: |
+          cd bindings/nodejs
+          npm run test:integration
+
+      - name: Run E2E tests (optional)
+        run: |
+          cd bindings/nodejs
+          npm run test:e2e || true  # Allow failure if aria2-rust not available
+
+      - name: Type checking
+        run: |
+          cd bindings/nodejs
+          npm run typecheck
+
+      - name: Build
+        run: |
+          cd bindings/nodejs
+          npm run build
+
+  # Publish jobs (only triggered on tags)
+  publish-python:
+    name: Publish Python SDK to PyPI
+    needs: [test, python-test]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      
+      - name: Install build tools
+        run: |
+          cd bindings/python
+          pip install build twine
+      
+      - name: Build package
+        run: |
+          cd bindings/python
+          python -m build
+      
+      - name: Publish to PyPI
+        run: |
+          cd bindings/python
+          twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+  publish-nodejs:
+    name: Publish Node.js SDK to NPM
+    needs: [test, nodejs-test]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+      
+      - name: Install dependencies
+        run: |
+          cd bindings/nodejs
+          npm install
+      
+      - name: Build package
+        run: |
+          cd bindings/nodejs
+          npm run build
+      
+      - name: Publish to NPM
+        run: |
+          cd bindings/nodejs
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
