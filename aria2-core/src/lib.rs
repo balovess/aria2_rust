@@ -63,6 +63,7 @@ pub mod retry;
 pub mod validation;
 pub mod rate_limiter;
 pub mod session;
+pub mod checksum;
 
 use tracing::Level;
 

@@ -13,6 +13,7 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         out: Some(format!("test_concurrent_{}.bin", std::process::id())),
         seed_time: None,
         seed_ratio: None,
+        checksum: None,
     };
     DownloadCommand::new(GroupId::new(1), uri, &options, options.dir.as_deref(), options.out.as_deref()).unwrap()
 }
@@ -111,6 +112,7 @@ fn test_download_options_with_values() {
         out: Some("file.bin".to_string()),
         seed_time: None,
         seed_ratio: None,
+        checksum: None,
     };
     assert_eq!(opts.split, Some(16));
     assert_eq!(opts.max_connection_per_server, Some(8));

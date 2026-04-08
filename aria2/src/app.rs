@@ -229,6 +229,11 @@ impl App {
         let max_conn = self.get_opt_i64("max-connection-per-server").await.and_then(|v| if v > 0 { Some(v as u16) } else { None });
         let seed_time = self.get_opt_i64("seed-time").await.and_then(|v| if v > 0 { Some(v as u64) } else { None });
         let seed_ratio = self.get_opt_str("seed-ratio").await.and_then(|v| v.parse::<f64>().ok()).filter(|&r| r > 0.0);
+        let checksum = self.get_opt_str("checksum").and_then(|v| {
+            if let Some((algo, val)) = v.split_once('=') {
+                Some((algo.trim().to_string(), val.trim().to_string()))
+            } else { None }
+        });
 
         let options = DownloadOptions {
             split,
@@ -239,6 +244,7 @@ impl App {
             out: out.clone(),
             seed_time,
             seed_ratio,
+            checksum,
         };
 
         let mut engine_lock = self.engine.lock().await;

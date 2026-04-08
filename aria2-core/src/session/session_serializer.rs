@@ -341,6 +341,7 @@ ftp://server/big.iso
             out: Some("output.bin".to_string()),
             seed_time: Some(300),
             seed_ratio: Some(2.0),
+            checksum: None,
         };
         let map = download_options_to_map(&opts);
         assert_eq!(map.get("split").unwrap(), "8");

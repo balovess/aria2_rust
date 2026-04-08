@@ -52,6 +52,7 @@ pub struct DownloadOptions {
     pub out: Option<String>,
     pub seed_time: Option<u64>,
     pub seed_ratio: Option<f64>,
+    pub checksum: Option<(String, String)>,
 }
 
 pub struct RequestGroup {
