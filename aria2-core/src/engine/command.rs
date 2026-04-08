@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use crate::error::{Aria2Error, Result};
 use std::time::Duration;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CommandStatus {
     Pending,
     Running,

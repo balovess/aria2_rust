@@ -1,5 +1,6 @@
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::time::{interval, timeout as tokio_timeout};
 use std::time::Duration;
 use tracing::{info, error, debug, warn};
@@ -8,6 +9,9 @@ use crate::error::{Aria2Error, Result, RecoverableError};
 use crate::retry::{RetryPolicy, RetryStats};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use super::command::{Command, CommandStatus};
+use crate::session::auto_save_session::AutoSaveSession;
+use crate::session::save_session_command::SaveSessionCommand;
+use crate::request::request_group_man::RequestGroupMan;
 
 pub struct DownloadEngine {
     command_tx: mpsc::UnboundedSender<Box<dyn Command>>,
@@ -17,6 +21,10 @@ pub struct DownloadEngine {
     retry_policy: Arc<RetryPolicy>,
     retry_stats: Arc<RetryStats>,
     global_limiter: Option<RateLimiter>,
+    save_session_path: Option<PathBuf>,
+    save_session_interval: Option<Duration>,
+    request_group_man: Option<Arc<RwLock<RequestGroupMan>>>,
+    auto_save: Option<Arc<Mutex<AutoSaveSession>>>,
 }
 
 impl DownloadEngine {
@@ -38,6 +46,10 @@ impl DownloadEngine {
             retry_policy: Arc::new(policy),
             retry_stats: Arc::new(RetryStats::default()),
             global_limiter: None,
+            save_session_path: None,
+            save_session_interval: None,
+            request_group_man: None,
+            auto_save: None,
         };
 
         info!("下载引擎初始化完成, tick间隔: {}ms, 最大重试次数: {}", tick_interval_ms, max_tries);
@@ -57,6 +69,42 @@ impl DownloadEngine {
 
     pub fn take_global_rate_limiter(&mut self) -> Option<RateLimiter> {
         self.global_limiter.take()
+    }
+
+    pub fn set_save_session(
+        &mut self,
+        path: PathBuf,
+        interval: Option<Duration>,
+        man: Arc<RwLock<RequestGroupMan>>,
+    ) {
+        self.save_session_path = Some(path.clone());
+        self.save_session_interval = interval;
+        self.request_group_man = Some(man);
+
+        if let (Some(interval), Some(man_ref)) = (interval, &self.request_group_man) {
+            let path_clone = path.clone();
+            let auto_save = AutoSaveSession::new(path, interval, man_ref.clone());
+            self.auto_save = Some(Arc::new(Mutex::new(auto_save)));
+            info!(
+                "自动保存 session 已启用: 路径={}, 间隔={:.1}s",
+                path_clone.display(),
+                interval.as_secs_f64()
+            );
+        } else {
+            info!("手动保存 session 已启用: 路径={}", path.display());
+        }
+    }
+
+    pub fn mark_session_dirty(&self) {
+        if let Some(ref auto_save) = self.auto_save {
+            if let Ok(auto) = auto_save.try_lock() {
+                auto.mark_dirty();
+            }
+        }
+    }
+
+    pub fn save_session_path(&self) -> Option<&PathBuf> {
+        self.save_session_path.as_ref()
     }
 
     pub fn add_command(&self, command: Box<dyn Command>) -> Result<()> {
@@ -175,6 +223,13 @@ impl DownloadEngine {
 
     async fn shutdown(&self, running: &mut Vec<Box<dyn Command>>) {
         info!("正在关闭运行中的命令...");
+        if let (Some(ref path), Some(ref man)) = (&self.save_session_path, &self.request_group_man) {
+            let mut cmd = SaveSessionCommand::new(path.clone(), man.clone());
+            match cmd.execute().await {
+                Ok(_) => info!("关闭时已保存 session 到 {}", path.display()),
+                Err(e) => warn!("关闭时保存 session 失败: {}", e),
+            }
+        }
         running.clear();
     }
 

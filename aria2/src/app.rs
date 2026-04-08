@@ -200,7 +200,17 @@ impl App {
 
     pub async fn initialize_engine(&self) {
         let tick_ms = self.get_opt_i64("bt-request-peer-timeout").await.unwrap_or(100) as u64;
-        let engine = DownloadEngine::new(tick_ms);
+        let mut engine = DownloadEngine::new(tick_ms);
+
+        let save_session_path = self.get_opt_str("save-session").await
+            .map(|s| std::path::PathBuf::from(s));
+        let save_session_interval = self.get_opt_i64("save-session-interval").await
+            .and_then(|v| if v > 0 { Some(std::time::Duration::from_secs(v as u64)) } else { None });
+
+        if let Some(path) = save_session_path {
+            engine.set_save_session(path, save_session_interval, self.request_man.clone());
+        }
+
         *self.engine.lock().await = Some(engine);
         info!("引擎初始化完成");
     }
