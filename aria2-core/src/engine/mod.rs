@@ -1,5 +1,10 @@
+pub mod bt_choke_manager;
+pub mod bt_connection_pool;
 pub mod bt_download_command;
+pub mod bt_peer_connection;
+pub mod bt_piece_downloader;
 pub mod bt_seed_manager;
+pub mod bt_tracker_comm;
 pub mod bt_upload_session;
 pub mod choking_algorithm;
 pub mod command;
@@ -20,4 +25,3 @@ pub mod timer;
 pub mod udp_tracker_client;
 pub mod udp_tracker_manager;
 pub mod batched_disk_writer;
-pub mod bt_connection_pool;

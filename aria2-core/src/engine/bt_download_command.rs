@@ -3,7 +3,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+// Import extracted modules
+use crate::engine::bt_choke_manager::{
+    add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
+    on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
+};
+use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_piece_downloader::{write_piece_to_multi_files, FileBackedPieceProvider};
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
+use crate::engine::bt_tracker_comm::{
+    announce_to_public_tracker, perform_http_tracker_announce,
+};
 use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::command::{Command, CommandStatus};
@@ -16,154 +26,19 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::engine::multi_file_layout::MultiFileLayout;
 use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
 
-enum BtPeerConn {
-    Plain(aria2_protocol::bittorrent::peer::connection::PeerConnection),
-    Encrypted(aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection),
-}
-
-impl BtPeerConn {
-    async fn connect_mse(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        require_encryption: bool,
-    ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(addr, info_hash, require_encryption).await {
-            Ok(conn) => Ok(BtPeerConn::Encrypted(conn)),
-            Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
-        }
-    }
-
-    async fn connect_plain(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-    ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect(addr, info_hash)
-            .await
-        {
-            Ok(conn) => Ok(BtPeerConn::Plain(conn)),
-            Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
-        }
-    }
-
-    async fn send_unchoke(&mut self) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_unchoke().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_unchoke().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn send_choke(&mut self) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_choke().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_choke().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn send_interested(&mut self) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_interested().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_interested().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn send_not_interested(&mut self) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_not_interested().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_not_interested().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn send_have(&mut self, piece_index: u32) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_have(piece_index).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_have(piece_index).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn send_request(
-        &mut self,
-        req: aria2_protocol::bittorrent::message::types::PieceBlockRequest,
-    ) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_request(req).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_request(req).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn send_cancel(
-        &mut self,
-        req: &aria2_protocol::bittorrent::message::types::PieceBlockRequest,
-    ) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_cancel(req).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_cancel(req).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn send_bitfield(&mut self, bitfield: Vec<u8>) -> Result<()> {
-        match self {
-            BtPeerConn::Plain(c) => c.send_bitfield(bitfield).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.send_bitfield(bitfield).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    async fn read_message(
-        &mut self,
-    ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
-        match self {
-            BtPeerConn::Plain(c) => c.read_message().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            BtPeerConn::Encrypted(c) => c.read_message().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-        }
-    }
-
-    fn is_connected(&self) -> bool {
-        match self {
-            BtPeerConn::Plain(c) => c.is_connected(),
-            BtPeerConn::Encrypted(c) => c.is_connected(),
-        }
-    }
-
-    fn is_encrypted(&self) -> bool {
-        matches!(self, BtPeerConn::Encrypted(_))
-    }
-}
-
+/// BitTorrent download command implementation.
+///
+/// This is the main orchestrator for BitTorrent downloads, coordinating:
+/// - Tracker communication and peer discovery
+/// - Peer connection management
+/// - Piece/block download scheduling
+/// - Seeding phase after download completion
+///
+/// The heavy logic has been extracted into focused modules:
+/// - `bt_peer_connection.rs` - Connection management (plain + encrypted)
+/// - `bt_piece_downloader.rs` - Piece download and disk I/O
+/// - `bt_tracker_comm.rs` - Tracker communication
+/// - `bt_choke_manager.rs` - Choking algorithm integration
 pub struct BtDownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
     output_path: std::path::PathBuf,
@@ -374,139 +249,41 @@ impl BtDownloadCommand {
     }
 
     // ------------------------------------------------------------------
-    // Download-side choke tracking helpers
+    // Download-side choke tracking helpers (delegated to bt_choke_manager)
     // ------------------------------------------------------------------
 
     /// Record that a peer at the given index has sent us a Choke message.
     ///
     /// This updates the internal `choking_algo` state so that
-    /// [`Self::select_best_peer_for_request`] can deprioritize choked peers.
+    /// [`select_best_peer_for_request`] can deprioritize choked peers.
     pub fn on_peer_choke(&mut self, peer_idx: usize) {
-        if let Some(ref mut algo) = self.choking_algo {
-            if let Some(peer) = algo.get_peer_mut(peer_idx) {
-                peer.peer_choking = true;
-                debug!("Peer #{} is now choking us", peer_idx);
-            }
-        }
+        on_peer_choke(&mut self.choking_algo, peer_idx);
     }
 
     /// Record that a peer at the given index has sent us an Unchoke message.
     pub fn on_peer_unchoke(&mut self, peer_idx: usize) {
-        if let Some(ref mut algo) = self.choking_algo {
-            if let Some(peer) = algo.get_peer_mut(peer_idx) {
-                peer.peer_choking = false;
-                debug!("Peer #{} has unchoked us", peer_idx);
-            }
-        }
+        on_peer_unchoke(&mut self.choking_algo, peer_idx);
     }
 
     /// Record data received from a peer (updates speed + resets snubbed).
     pub fn on_data_received_from_peer(&mut self, peer_idx: usize, bytes: u64) {
-        if let Some(ref mut algo) = self.choking_algo {
-            algo.on_data_received(peer_idx, bytes);
-        }
+        on_data_received_from_peer(&mut self.choking_algo, peer_idx, bytes);
     }
 
-    /// Check if any tracked peer is snubbed and should be handled (e.g., disconnected or deprioritized).
+    /// Check if any tracked peer is snubbed and should be handled.
     ///
     /// Returns indices of newly snubbed peers.
     pub fn check_snubbed_peers(&mut self) -> Vec<usize> {
-        if let Some(ref mut algo) = self.choking_algo {
-            algo.check_snubbed_peers()
-        } else {
-            vec![]
-        }
+        check_snubbed_peers(&mut self.choking_algo)
     }
 
     /// Add a connected peer to the choking algorithm tracking.
-    ///
-    /// Call this when a new peer connection is established during download phase.
     pub fn add_peer_to_tracking(
         &mut self,
         peer_id: [u8; 8],
         addr: std::net::SocketAddr,
     ) -> usize {
-        if let Some(ref mut algo) = self.choking_algo {
-            use super::peer_stats::PeerStats;
-            let full_peer_id = {
-                let mut id = [0u8; 20];
-                id[..8].copy_from_slice(&peer_id);
-                id
-            };
-            let stats = PeerStats::new(full_peer_id, addr);
-            algo.add_peer(stats);
-            algo.len() - 1 // Return the index of the added peer
-        } else {
-            0 // No algorithm, return dummy index
-        }
-    }
-}
-
-struct FileBackedPieceProvider {
-    file_path: std::path::PathBuf,
-    piece_length: u32,
-    num_pieces: u32,
-    multi_file_layout: Option<MultiFileLayout>,
-}
-
-impl FileBackedPieceProvider {
-    pub fn new(file_path: std::path::PathBuf, piece_length: u32, num_pieces: u32, multi_file_layout: Option<MultiFileLayout>) -> Self {
-        Self {
-            file_path,
-            piece_length,
-            num_pieces,
-            multi_file_layout,
-        }
-    }
-}
-
-impl PieceDataProvider for FileBackedPieceProvider {
-    fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>> {
-        use std::io::SeekFrom;
-        use tokio::fs::File;
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-        let read_op = move |file_path: std::path::PathBuf, seek_pos: u64, len: u32| -> Option<Vec<u8>> {
-            let rt = match tokio::runtime::Handle::try_current() {
-                Ok(handle) => handle,
-                Err(_) => {
-                    let rt = tokio::runtime::Runtime::new().ok()?;
-                    return rt.block_on(async {
-                        let mut f = File::open(&file_path).await.ok()?;
-                        f.seek(SeekFrom::Start(seek_pos)).await.ok()?;
-                        let mut buf = vec![0u8; len as usize];
-                        f.read_exact(&mut buf).await.ok()?;
-                        Some(buf)
-                    });
-                }
-            };
-            tokio::task::block_in_place(|| {
-                rt.block_on(async {
-                    let mut f = File::open(&file_path).await.ok()?;
-                    f.seek(SeekFrom::Start(seek_pos)).await.ok()?;
-                    let mut buf = vec![0u8; len as usize];
-                    f.read_exact(&mut buf).await.ok()?;
-                    Some(buf)
-                })
-            })
-        };
-
-        if let Some(ref layout) = self.multi_file_layout {
-            let (file_idx, file_offset) = layout.resolve_file_offset(piece_index, offset)?;
-            let file_path = layout.file_absolute_path(file_idx)?.to_path_buf();
-            read_op(file_path, file_offset, length)
-        } else {
-            let file_pos = piece_index as u64 * self.piece_length as u64 + offset as u64;
-            read_op(self.file_path.clone(), file_pos, length)
-        }
-    }
-
-    fn has_piece(&self, _piece_index: u32) -> bool {
-        true
-    }
-
-    fn num_pieces(&self) -> u32 {
-        self.num_pieces
+        add_peer_to_tracking(&mut self.choking_algo, peer_id, addr)
     }
 }
 
@@ -566,56 +343,16 @@ impl Command for BtDownloadCommand {
         let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
         let info_hash_raw = meta.info_hash.bytes;
 
-        let announce_url = format!("{}?info_hash={}&peer_id={}&port=6881&uploaded=0&downloaded=0&left={}&event=started&compact=1",
-            meta.announce,
-            urlencode_infohash(&info_hash_raw),
-            urlencode_infohash(&my_peer_id),
-            total_size,
-        );
+        // ==================================================================
+        // Phase 1: Tracker Communication & Peer Discovery
+        // ==================================================================
 
-        eprintln!("[BT] Announcing to tracker: {}", announce_url);
-        let resp = reqwest::get(&announce_url).await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Tracker HTTP failed: {}", e),
-            })
-        })?;
-        eprintln!("[BT] Tracker response status: {}", resp.status());
-        let body = resp.bytes().await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Tracker body read failed: {}", e),
-            })
-        })?;
-        eprintln!("[BT] Tracker body: {:?}", String::from_utf8_lossy(&body));
+        // HTTP tracker announce
+        let mut peer_addrs =
+            perform_http_tracker_announce(&meta.announce, &info_hash_raw, &my_peer_id, total_size)
+                .await?;
 
-        let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(
-            &body,
-        )
-        .map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Tracker parse failed: {}", e),
-            })
-        })?;
-
-        eprintln!("[BT] Tracker response: {} peers", tracker_resp.peer_count());
-        for peer in &tracker_resp.peers {
-            eprintln!("[BT]   Peer: {}:{}", peer.ip, peer.port);
-        }
-
-        if tracker_resp.is_failure() {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: tracker_resp.failure_reason.unwrap_or_default(),
-                },
-            ));
-        }
-
-        let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
-            tracker_resp
-                .peers
-                .iter()
-                .map(|p| aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&p.ip, p.port))
-                .collect();
-
+        // UDP tracker announce
         if let Ok(udp) = UdpTrackerClient::new(0).await {
             self.udp_client = Some(Arc::new(tokio::sync::Mutex::new(udp)));
             if let Some(ref shared_client) = self.udp_client {
@@ -649,6 +386,7 @@ impl Command for BtDownloadCommand {
             eprintln!("[BT] ERROR: No peers from tracker");
         }
 
+        // DHT peer discovery
         let enable_dht = { self.group.read().await.options().enable_dht };
         if enable_dht && self.dht_engine.is_none() {
             let dht_port = { self.group.read().await.options().dht_listen_port };
@@ -697,6 +435,7 @@ impl Command for BtDownloadCommand {
             }
         }
 
+        // Public tracker fallback
         let enable_public_trackers = { self.group.read().await.options().enable_public_trackers };
         if enable_public_trackers && self.public_trackers.is_none() && peer_addrs.len() < 15 {
             let ptl = std::sync::Arc::new(
@@ -715,7 +454,7 @@ impl Command for BtDownloadCommand {
             let mut announced = 0usize;
 
             for url in http_urls.iter().take(10) {
-                match Self::announce_to_public_tracker(url, &info_hash_raw, &my_peer_id, total_size)
+                match announce_to_public_tracker(url, &info_hash_raw, &my_peer_id, total_size)
                     .await
                 {
                     Ok(peers) => {
@@ -758,6 +497,10 @@ impl Command for BtDownloadCommand {
                 },
             ));
         }
+
+        // ==================================================================
+        // Phase 2: Connect to Peers
+        // ==================================================================
 
         eprintln!("[BT] Connecting to {} peers...", peer_addrs.len());
         let mut active_connections: Vec<BtPeerConn> = Vec::new();
@@ -869,6 +612,10 @@ impl Command for BtDownloadCommand {
                 self.choking_algo.as_ref().unwrap().len()
             );
         }
+
+        // ==================================================================
+        // Phase 3: Download Pieces
+        // ==================================================================
 
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
         let rate_limit = {
@@ -1000,7 +747,7 @@ impl Command for BtDownloadCommand {
                                 self.completed_bytes += data.len() as u64;
 
                                 // Update peer statistics with received data
-                                self.on_piece_received(conn_idx, data.len() as u64);
+                                on_piece_received(&mut self.choking_algo, conn_idx, data.len() as u64);
                                 got_block = true;
                                 break;
                             }
@@ -1025,8 +772,9 @@ impl Command for BtDownloadCommand {
                         piece_manager.mark_piece_complete(next_piece_idx as u32);
                         piece_picker.mark_completed(next_piece_idx as u32);
 
+                        // Write piece to disk (single-file or multi-file mode)
                         if let Some(ref layout) = self.multi_file_layout {
-                            Self::write_piece_to_multi_files(
+                            write_piece_to_multi_files(
                                 layout,
                                 next_piece_idx as u32,
                                 &piece_data,
@@ -1113,6 +861,10 @@ impl Command for BtDownloadCommand {
             self.completed_bytes
         );
 
+        // ==================================================================
+        // Phase 4: Seeding
+        // ==================================================================
+
         if self.seed_enabled && !active_connections.is_empty() {
             eprintln!(
                 "[BT] Starting seeding phase with {} peers...",
@@ -1134,6 +886,10 @@ impl Command for BtDownloadCommand {
                 drop(conn);
             }
         }
+
+        // ==================================================================
+        // Finalization
+        // ==================================================================
 
         let final_speed = {
             let elapsed = start_time.elapsed().as_secs_f64();
@@ -1190,203 +946,47 @@ impl Command for BtDownloadCommand {
 impl BtDownloadCommand {
     /// Select the best peer for requesting pieces, preferring unchoked peers.
     ///
-    /// Uses the choking algorithm's peer stats to score and rank peers:
-    /// - Unchoked peers are strongly preferred
-    /// - Higher download speed is better
-    /// - Snubbed peers are penalized
-    ///
-    /// Returns the index of the best peer, or None if no suitable peer found.
-    fn select_best_peer_for_request(&self) -> Option<usize> {
-        if let Some(ref algo) = self.choking_algo {
-            // Find best peer: unchoked + high download speed + not snubbed
-            let best_idx = algo
-                .peers()
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| !p.am_choking && p.peer_interested && !p.is_snubbed)
-                .max_by_key(|(_, p)| {
-                    let mut score = 0i64;
-                    // Download speed is primary factor (scaled down to avoid overflow)
-                    score += (p.download_speed * 0.5) as i64;
-                    // Upload speed contribution (reciprocity)
-                    score += (p.upload_speed * 0.3) as i64;
-                    // Bonus for being interested in our data
-                    if p.peer_interested {
-                        score += 50;
-                    }
-                    score
-                })
-                .map(|(i, _)| i);
-
-            if best_idx.is_some() {
-                debug!(
-                    "[BT] Selected peer {} for request (using choking algorithm)",
-                    best_idx.unwrap()
-                );
-                return best_idx;
-            }
-
-            // Fallback: if no unchoked+interested peer, just pick first non-snubbed peer
-            algo.peers()
-                .iter()
-                .position(|p| !p.is_snubbed)
-        } else {
-            // No choking algorithm configured: cannot select a peer
-            None
-        }
+    /// Delegates to [`crate::engine::bt_choke_manager::select_best_peer_for_request`].
+    pub fn select_best_peer_for_request(&self) -> Option<usize> {
+        select_best_peer_for_request(&self.choking_algo)
     }
 
     /// Handle a peer that has been marked as snubbed.
     ///
-    /// Reduces the request frequency for this peer by increasing its
-    /// request interval multiplier. This avoids wasting time waiting for
-    /// data from unresponsive peers while keeping the connection alive
-    /// in case they recover.
-    async fn handle_snubbed_peer(&mut self, peer_idx: usize) -> Result<()> {
-        if let Some(ref mut algo) = self.choking_algo {
-            if let Some(peer) = algo.get_peer_mut(peer_idx) {
-                // Reduce request frequency (don't ask them for pieces as often)
-                // This is a soft penalty - we don't disconnect, just reduce priority
-                warn!(
-                    "[BT] Peer {} at {} marked as snubbed, reducing request priority",
-                    peer_idx, peer.addr
-                );
-
-                // The choking algorithm will automatically lower this peer's score
-                // on next rotation due to is_snubbed flag, which will cause it to be choked
-
-                // Additional action: we could optionally force a choke message
-                // For now, just log and let the algorithm handle it naturally
-            }
-        }
-
-        Ok(())
+    /// Delegates to [`crate::engine::bt_choke_manager::handle_snubbed_peer`].
+    pub async fn handle_snubbed_peer(&mut self, peer_idx: usize) -> Result<()> {
+        handle_snubbed_peer(&mut self.choking_algo, peer_idx)
+            .await
+            .map_err(|_| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Failed to handle snubbed peer {}", peer_idx),
+            }))
     }
 
     /// Update peer statistics when piece data is received.
     ///
-    /// Should be called whenever we successfully receive a block from a peer.
-    /// Updates the download speed estimate via EMA and resets the snubbed timer.
-    fn on_piece_received(&mut self, peer_idx: usize, bytes: u64) {
-        if let Some(ref mut algo) = self.choking_algo {
-            algo.on_data_received(peer_idx, bytes);
-            debug!(
-                "[BT] Updated peer {} stats: received {} bytes",
-                peer_idx, bytes
-            );
-        }
+    /// Delegates to [`crate::engine::bt_choke_manager::on_piece_received`].
+    pub fn on_piece_received(&mut self, peer_idx: usize, bytes: u64) {
+        on_piece_received(&mut self.choking_algo, peer_idx, bytes);
     }
 
-    async fn announce_to_public_tracker(
+    /// Announce to a public tracker (delegated to bt_tracker_comm module).
+    pub async fn announce_to_public_tracker(
         tracker_url: &str,
         info_hash: &[u8; 20],
         peer_id: &[u8; 20],
         total_size: u64,
     ) -> std::result::Result<Vec<(String, u16)>, String> {
-        let url = format!("{}?info_hash={}&peer_id={}&port=6881&uploaded=0&downloaded=0&left={}&event=started&compact=1",
-            tracker_url,
-            urlencode_infohash(info_hash),
-            urlencode_infohash(peer_id),
-            total_size,
-        );
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| format!("build client: {}", e))?;
-
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
-        }
-
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("read body: {}", e))?;
-
-        let tracker_resp =
-            aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
-                .map_err(|e| format!("parse response: {}", e))?;
-
-        if tracker_resp.is_failure() {
-            return Err(tracker_resp
-                .failure_reason
-                .unwrap_or_else(|| "tracker failure".to_string()));
-        }
-
-        Ok(tracker_resp
-            .peers
-            .into_iter()
-            .map(|p| (p.ip, p.port))
-            .collect())
+        announce_to_public_tracker(tracker_url, info_hash, peer_id, total_size).await
     }
 
-    async fn write_piece_to_multi_files(
+    /// Write piece data to multi-file layout (delegated to bt_piece_downloader module).
+    pub async fn write_piece_to_multi_files(
         layout: &MultiFileLayout,
         piece_idx: u32,
         piece_data: &[u8],
-        _piece_length: u32,
+        piece_length: u32,
     ) -> Result<()> {
-        use tokio::io::{AsyncWriteExt, AsyncSeekExt};
-        use std::collections::HashMap;
-
-        let mut file_writers: HashMap<usize, tokio::fs::File> = HashMap::new();
-
-        let mut data_offset = 0usize;
-        while data_offset < piece_data.len() {
-            let piece_offset = data_offset as u32;
-
-            if let Some((file_idx, file_offset)) = layout.resolve_file_offset(piece_idx, piece_offset) {
-                let file_path = layout.file_absolute_path(file_idx)
-                    .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("invalid file index".to_string())))?
-                    .to_path_buf();
-
-                if !file_writers.contains_key(&file_idx) {
-                    let f = tokio::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .open(&file_path)
-                        .await
-                        .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("open failed: {}", e))))?;
-                    file_writers.insert(file_idx, f);
-                }
-
-                let file_info = layout.get_file_info(file_idx)
-                    .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("invalid file index".to_string())))?;
-
-                let bytes_available_in_file = file_info.length.saturating_sub(file_offset);
-                let bytes_remaining_in_piece = (piece_data.len() - data_offset) as u64;
-                let write_len = bytes_available_in_file.min(bytes_remaining_in_piece) as usize;
-
-                if write_len == 0 {
-                    break;
-                }
-
-                let chunk = &piece_data[data_offset..data_offset + write_len];
-
-                let writer = file_writers.get_mut(&file_idx).unwrap();
-                writer.seek(std::io::SeekFrom::Start(file_offset)).await
-                    .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("seek failed: {}", e))))?;
-                writer.write_all(chunk).await
-                    .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("write failed: {}", e))))?;
-
-                data_offset += write_len;
-            } else {
-                break;
-            }
-        }
-
-        for (_, mut f) in file_writers {
-            f.flush().await.map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("flush failed: {}", e))))?;
-        }
-
-        Ok(())
+        write_piece_to_multi_files(layout, piece_idx, piece_data, piece_length).await
     }
 
     pub fn is_multi_file(&self) -> bool {
@@ -1398,10 +998,6 @@ impl BtDownloadCommand {
     }
 }
 
-fn urlencode_infohash(hash: &[u8; 20]) -> String {
-    hash.iter().map(|b| format!("%{:02X}", b)).collect()
-}
-
 // ======================================================================
 // Tests
 // ======================================================================
@@ -1409,6 +1005,7 @@ fn urlencode_infohash(hash: &[u8; 20]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
     use crate::engine::peer_stats::PeerStats;
     use crate::request::request_group::{DownloadOptions, GroupId};
     use std::net::SocketAddr;

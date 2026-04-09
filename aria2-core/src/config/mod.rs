@@ -1,5 +1,7 @@
 pub mod netrc;
 pub mod option;
+pub mod option_definitions;
+pub mod option_types;
 pub mod parser;
 pub mod uri_list;
 
