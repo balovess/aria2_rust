@@ -348,6 +348,7 @@ ftp://server/big.iso
             bt_require_crypto: false,
             enable_dht: true,
             dht_listen_port: Some(6881),
+            enable_public_trackers: true,
         };
         let map = download_options_to_map(&opts);
         assert_eq!(map.get("split").unwrap(), "8");

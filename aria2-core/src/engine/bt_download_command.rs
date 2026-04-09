@@ -127,6 +127,7 @@ pub struct BtDownloadCommand {
     total_uploaded: u64,
     udp_client: Option<SharedUdpClient>,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    public_trackers: Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
 }
 
 impl BtDownloadCommand {
@@ -168,6 +169,7 @@ impl BtDownloadCommand {
             total_uploaded: 0,
             udp_client: None,
             dht_engine: None,
+            public_trackers: None,
         })
     }
 
@@ -395,6 +397,46 @@ impl Command for BtDownloadCommand {
                          peer_addrs.len() - before, peer_addrs.len(), result.nodes_contacted);
             } else {
                 debug!("[BT] DHT find_peers returned no peers");
+            }
+        }
+
+        let enable_public_trackers = { self.group.read().await.options().enable_public_trackers };
+        if enable_public_trackers && self.public_trackers.is_none() && peer_addrs.len() < 15 {
+            let ptl = std::sync::Arc::new(aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new());
+            ptl.start_auto_update(
+                "https://cf.trackerslist.com/best.txt".to_string(),
+                std::time::Duration::from_secs(86400),
+            );
+            self.public_trackers = Some(ptl);
+        }
+
+        if let Some(ref pt) = self.public_trackers {
+            let http_urls = pt.get_http_trackers().await;
+            let mut extra_peers: Vec<(String, u16)> = Vec::new();
+            let mut announced = 0usize;
+
+            for url in http_urls.iter().take(10) {
+                match Self::announce_to_public_tracker(url, &info_hash_raw, &my_peer_id, total_size).await {
+                    Ok(peers) => {
+                        announced += 1;
+                        extra_peers.extend(peers);
+                    }
+                    Err(e) => { debug!("[BT] Public tracker {} failed: {}", url, e); }
+                }
+            }
+
+            if !extra_peers.is_empty() {
+                let before = peer_addrs.len();
+                for (ip, port) in extra_peers {
+                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port);
+                    if !peer_addrs.iter().any(|p| p.ip == paddr.ip && p.port == paddr.port) {
+                        peer_addrs.push(paddr);
+                    }
+                }
+                eprintln!("[BT] Public trackers discovered {} extra peers (announced to {} of {})",
+                         peer_addrs.len() - before, announced, http_urls.len());
+            } else if announced > 0 {
+                debug!("[BT] Public trackers responded but no peers found");
             }
         }
 
@@ -639,6 +681,47 @@ impl Command for BtDownloadCommand {
 
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(600))
+    }
+}
+
+impl BtDownloadCommand {
+    async fn announce_to_public_tracker(
+        tracker_url: &str,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        total_size: u64,
+    ) -> std::result::Result<Vec<(String, u16)>, String> {
+        let url = format!("{}?info_hash={}&peer_id={}&port=6881&uploaded=0&downloaded=0&left={}&event=started&compact=1",
+            tracker_url,
+            urlencode_infohash(info_hash),
+            urlencode_infohash(peer_id),
+            total_size,
+        );
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| format!("build client: {}", e))?;
+
+        let resp = client.get(&url)
+            .send().await
+            .map_err(|e| format!("request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+
+        let body = resp.bytes().await
+            .map_err(|e| format!("read body: {}", e))?;
+
+        let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
+            .map_err(|e| format!("parse response: {}", e))?;
+
+        if tracker_resp.is_failure() {
+            return Err(tracker_resp.failure_reason.unwrap_or_else(|| "tracker failure".to_string()));
+        }
+
+        Ok(tracker_resp.peers.into_iter().map(|p| (p.ip, p.port)).collect())
     }
 }
 

@@ -59,6 +59,7 @@ pub struct DownloadOptions {
     pub bt_require_crypto: bool,
     pub enable_dht: bool,
     pub dht_listen_port: Option<u16>,
+    pub enable_public_trackers: bool,
 }
 
 pub struct RequestGroup {

@@ -20,6 +20,7 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         bt_require_crypto: false,
         enable_dht: false,
         dht_listen_port: None,
+        enable_public_trackers: false,
     };
     DownloadCommand::new(GroupId::new(1), uri, &options, options.dir.as_deref(), options.out.as_deref()).unwrap()
 }
@@ -125,6 +126,7 @@ fn test_download_options_with_values() {
         bt_require_crypto: false,
         enable_dht: false,
         dht_listen_port: None,
+        enable_public_trackers: false,
     };
     assert_eq!(opts.split, Some(16));
     assert_eq!(opts.max_connection_per_server, Some(8));

@@ -251,6 +251,7 @@ impl App {
             bt_require_crypto: self.get_opt_bool("bt-require-crypto").await.unwrap_or(false),
             enable_dht: self.get_opt_bool("enable-dht").await.unwrap_or(true),
             dht_listen_port: self.get_opt_i64("dht-listen-port").await.and_then(|v| if v > 0 { Some(v as u16) } else { None }),
+            enable_public_trackers: self.get_opt_bool("enable-public-trackers").await.unwrap_or(true),
         };
 
         let mut engine_lock = self.engine.lock().await;
