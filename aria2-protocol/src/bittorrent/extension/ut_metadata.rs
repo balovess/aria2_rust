@@ -4,8 +4,13 @@ pub const EXT_MESSAGE_ID: u8 = 20;
 pub const UT_METADATA_ID: &str = "ut_metadata";
 pub const METADATA_ID: &str = "metadata_size";
 
-fn find_dict_entry<'a>(dict: &'a std::collections::BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Option<&'a BencodeValue> {
-    dict.iter().find(|(k, _)| k.as_slice() == key).map(|(_, v)| v)
+fn find_dict_entry<'a>(
+    dict: &'a std::collections::BTreeMap<Vec<u8>, BencodeValue>,
+    key: &[u8],
+) -> Option<&'a BencodeValue> {
+    dict.iter()
+        .find(|(k, _)| k.as_slice() == key)
+        .map(|(_, v)| v)
 }
 
 #[derive(Debug, Clone)]
@@ -36,17 +41,24 @@ impl ExtensionHandshake {
         let mut dict = std::collections::BTreeMap::new();
 
         let m_dict: BencodeValue = BencodeValue::Dict(
-            self.m.iter()
+            self.m
+                .iter()
                 .map(|(k, v)| (k.as_bytes().to_vec(), BencodeValue::Int(*v)))
-                .collect()
+                .collect(),
         );
         dict.insert(b"m".to_vec(), m_dict);
 
         if let Some(size) = self.metadata_size {
-            dict.insert(METADATA_ID.as_bytes().to_vec(), BencodeValue::Int(size as i64));
+            dict.insert(
+                METADATA_ID.as_bytes().to_vec(),
+                BencodeValue::Int(size as i64),
+            );
         }
         if let Some(ref version) = self.v {
-            dict.insert(b"v".to_vec(), BencodeValue::Bytes(version.as_bytes().to_vec()));
+            dict.insert(
+                b"v".to_vec(),
+                BencodeValue::Bytes(version.as_bytes().to_vec()),
+            );
         }
 
         BencodeValue::Dict(dict)
@@ -74,7 +86,11 @@ impl ExtensionHandshake {
             .and_then(|b| std::str::from_utf8(b).ok())
             .map(|s| s.to_string());
 
-        Some(Self { m, metadata_size, v })
+        Some(Self {
+            m,
+            metadata_size,
+            v,
+        })
     }
 
     pub fn get_ut_metadata_id(&self) -> Option<i64> {
@@ -115,8 +131,7 @@ impl UtMetadataMsg {
         let (val, _) = BencodeValue::decode(payload)
             .map_err(|e| format!("Failed to decode ut_metadata: {}", e))?;
 
-        let dict = val.as_dict()
-            .ok_or("ut_metadata payload is not a dict")?;
+        let dict = val.as_dict().ok_or("ut_metadata payload is not a dict")?;
 
         let msg_type = find_dict_entry(dict, b"msg_type")
             .and_then(|v| v.as_int())
@@ -144,6 +159,7 @@ impl UtMetadataMsg {
 pub struct MetadataCollector {
     total_size: u64,
     collected: Vec<Option<Vec<u8>>>,
+    #[allow(dead_code)]
     piece_size: u32,
 }
 
@@ -159,8 +175,12 @@ impl MetadataCollector {
 
     pub fn add_piece(&mut self, piece_idx: u32, data: &[u8]) -> bool {
         let idx = piece_idx as usize;
-        if idx >= self.collected.len() { return false; }
-        if self.collected[idx].is_some() { return false; }
+        if idx >= self.collected.len() {
+            return false;
+        }
+        if self.collected[idx].is_some() {
+            return false;
+        }
         self.collected[idx] = Some(data.to_vec());
         true
     }
@@ -170,7 +190,9 @@ impl MetadataCollector {
     }
 
     pub fn assemble(&self) -> Option<Vec<u8>> {
-        if !self.is_complete() { return None; }
+        if !self.is_complete() {
+            return None;
+        }
         let mut result = Vec::with_capacity(self.total_size as usize);
         for piece in &self.collected {
             result.extend(piece.as_ref().unwrap());

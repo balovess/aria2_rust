@@ -5,9 +5,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
-    AnnounceResponse, UdpEvent,
-};
+use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{AnnounceResponse, UdpEvent};
 
 use crate::engine::udp_tracker_client::SharedUdpClient;
 
@@ -47,7 +45,10 @@ impl UdpTrackerManager {
             for url in urls_tier.split(',') {
                 let trimmed = url.trim();
                 if let Some(endpoint) = Self::parse_udp_url(trimmed, tier) {
-                    debug!("Adding UDP tracker endpoint: {} -> {}", trimmed, endpoint.addr);
+                    debug!(
+                        "Adding UDP tracker endpoint: {} -> {}",
+                        trimmed, endpoint.addr
+                    );
                     self.endpoints.push(endpoint);
                     added += 1;
                 }
@@ -55,7 +56,11 @@ impl UdpTrackerManager {
             tier += 1;
         }
         if !self.endpoints.is_empty() {
-            info!("Parsed {} UDP tracker endpoints from {} URL groups", added, urls.len());
+            info!(
+                "Parsed {} UDP tracker endpoints from {} URL groups",
+                added,
+                urls.len()
+            );
         }
         added
     }
@@ -128,7 +133,9 @@ impl UdpTrackerManager {
         }
 
         let port = self.get_bind_port().await;
-        let start_tier = self.current_tier.min(self.endpoints.len().saturating_sub(1));
+        let start_tier = self
+            .current_tier
+            .min(self.endpoints.len().saturating_sub(1));
 
         for tier_offset in 0..MAX_TRACKER_ANNOUNCE_TIER {
             let tier_idx = (start_tier + tier_offset) % self.endpoints.len();
@@ -137,10 +144,9 @@ impl UdpTrackerManager {
             {
                 let mut c = self.client.lock().await;
                 c.add_announce(
-                    &ep.addr, info_hash, peer_id,
-                    downloaded, left, uploaded,
-                    event, num_want, port,
-                ).await;
+                    &ep.addr, info_hash, peer_id, downloaded, left, uploaded, event, num_want, port,
+                )
+                .await;
             }
 
             let mut c = self.client.lock().await;
@@ -165,7 +171,10 @@ impl UdpTrackerManager {
         if !results.is_empty() {
             self.last_announce_interval = results.first().map(|r| r.interval).unwrap_or(300);
             self.last_announce_time = Some(tokio::time::Instant::now());
-            info!("UDP tracker announce completed: {} responses", results.len());
+            info!(
+                "UDP tracker announce completed: {} responses",
+                results.len()
+            );
         }
 
         c.handle_timeouts().await;
@@ -197,7 +206,8 @@ impl UdpTrackerManager {
 
     async fn get_bind_port(&self) -> u16 {
         let c = self.client.lock().await;
-        c.socket().local_addr()
+        c.socket()
+            .local_addr()
             .map(|a| a.port())
             .unwrap_or(DEFAULT_UDP_PORT)
     }
@@ -219,7 +229,10 @@ impl UdpTrackerManager {
 }
 
 impl UdpTrackerManager {
-    pub async fn from_torrent_meta(meta: &Arc<RwLock<TorrentMeta>>, client: SharedUdpClient) -> Option<Self> {
+    pub async fn from_torrent_meta(
+        meta: &Arc<RwLock<TorrentMeta>>,
+        client: SharedUdpClient,
+    ) -> Option<Self> {
         let mut mgr = Self::new(client).await;
         let m = meta.read().await;
         let urls: Vec<String> = m.announce_list.iter().flatten().cloned().collect();
@@ -326,7 +339,10 @@ mod tests {
 
         assert!(mgr.should_reannounce(), "Should reannounce initially");
         mgr.last_announce_time = Some(tokio::time::Instant::now());
-        assert!(!mgr.should_reannounce(), "Should not reannounce immediately after");
+        assert!(
+            !mgr.should_reannounce(),
+            "Should not reannounce immediately after"
+        );
 
         mgr.last_announce_interval = 0;
         assert!(mgr.should_reannounce(), "Should reannounce with interval=0");

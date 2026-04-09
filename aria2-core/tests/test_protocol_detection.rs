@@ -1,4 +1,4 @@
-use aria2_core::validation::protocol_detector::{detect, InputType, DetectedInput};
+use aria2_core::validation::protocol_detector::{detect, DetectedInput, InputType};
 
 #[test]
 fn test_detect_http_url() {
@@ -28,7 +28,10 @@ fn test_detect_sftp_url() {
 
 #[test]
 fn test_detect_magnet_link() {
-    let d = detect("magnet:?xt=urn:btih:abc123def456&dn=Ubuntu&tr=udp://tracker.example.com:1337/announce").unwrap();
+    let d = detect(
+        "magnet:?xt=urn:btih:abc123def456&dn=Ubuntu&tr=udp://tracker.example.com:1337/announce",
+    )
+    .unwrap();
     assert_eq!(d.input_type, InputType::MagnetLink);
     assert!(d.file_data.is_none());
 }
@@ -79,7 +82,10 @@ fn test_detect_torrent_file_invalid_content() {
     std::fs::write(&bad_path, "this is not a valid torrent file content").unwrap();
 
     let result = detect(bad_path.to_str().unwrap());
-    assert!(result.is_err(), "Invalid BEncode content should be rejected");
+    assert!(
+        result.is_err(),
+        "Invalid BEncode content should be rejected"
+    );
 }
 
 #[test]
@@ -123,9 +129,24 @@ fn test_detect_unknown_scheme_returns_http_fallback() {
 
 #[test]
 fn test_detect_all_schemes_case_insensitive() {
-    assert_eq!(detect("HTTP://X.COM/F").unwrap().input_type, InputType::HttpUrl);
-    assert_eq!(detect("HTTPS://X.COM/F").unwrap().input_type, InputType::HttpUrl);
-    assert_eq!(detect("FTP://X.COM/F").unwrap().input_type, InputType::FtpUrl);
-    assert_eq!(detect("SFTP://X.COM/F").unwrap().input_type, InputType::SftpUrl);
-    assert_eq!(detect("MAGNET:?XT=URN:BTHI:ABC").unwrap().input_type, InputType::MagnetLink);
+    assert_eq!(
+        detect("HTTP://X.COM/F").unwrap().input_type,
+        InputType::HttpUrl
+    );
+    assert_eq!(
+        detect("HTTPS://X.COM/F").unwrap().input_type,
+        InputType::HttpUrl
+    );
+    assert_eq!(
+        detect("FTP://X.COM/F").unwrap().input_type,
+        InputType::FtpUrl
+    );
+    assert_eq!(
+        detect("SFTP://X.COM/F").unwrap().input_type,
+        InputType::SftpUrl
+    );
+    assert_eq!(
+        detect("MAGNET:?XT=URN:BTHI:ABC").unwrap().input_type,
+        InputType::MagnetLink
+    );
 }

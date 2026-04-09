@@ -42,7 +42,13 @@ impl HashType {
     }
 
     pub fn all_supported() -> Vec<HashType> {
-        vec![HashType::Md5, HashType::Sha1, HashType::Sha256, HashType::Sha512, HashType::Adler32]
+        vec![
+            HashType::Md5,
+            HashType::Sha1,
+            HashType::Sha256,
+            HashType::Sha512,
+            HashType::Adler32,
+        ]
     }
 }
 
@@ -162,17 +168,26 @@ mod tests {
         let hex = MessageDigest::hash_hex(HashType::Sha1, b"");
         assert_eq!(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
 
-        let hex = MessageDigest::hash_hex(HashType::Sha1, b"The quick brown fox jumps over the lazy dog");
+        let hex = MessageDigest::hash_hex(
+            HashType::Sha1,
+            b"The quick brown fox jumps over the lazy dog",
+        );
         assert_eq!(hex, "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12");
     }
 
     #[test]
     fn test_sha256_known_vector() {
         let hex = MessageDigest::hash_hex(HashType::Sha256, b"");
-        assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
 
         let hex = MessageDigest::hash_hex(HashType::Sha256, b"abc");
-        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
@@ -188,7 +203,11 @@ mod tests {
     fn test_finalize_hex_format_lowercase() {
         let hex = MessageDigest::hash_hex(HashType::Md5, b"test");
         for ch in hex.chars() {
-            assert!(ch.is_ascii_digit() || ('a'..='f').contains(&ch), "hex 应为小写: {}", hex);
+            assert!(
+                ch.is_ascii_digit() || ('a'..='f').contains(&ch),
+                "hex 应为小写: {}",
+                hex
+            );
         }
     }
 

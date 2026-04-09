@@ -3,12 +3,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use async_trait::async_trait;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
-use crate::error::Result;
-use crate::engine::command::{Command, CommandStatus};
-use crate::request::request_group_man::RequestGroupMan;
 use super::session_serializer;
+use crate::engine::command::{Command, CommandStatus};
+use crate::error::Result;
+use crate::request::request_group_man::RequestGroupMan;
 
 pub struct SaveSessionCommand {
     path: PathBuf,
@@ -61,10 +61,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_session_command_creation() {
         let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-        let cmd = SaveSessionCommand::new(
-            PathBuf::from("/tmp/test.sess"),
-            man,
-        );
+        let cmd = SaveSessionCommand::new(PathBuf::from("/tmp/test.sess"), man);
         assert_eq!(cmd.status(), CommandStatus::Pending);
         assert!(cmd.path().to_str().unwrap().contains("test.sess"));
     }
@@ -72,10 +69,17 @@ mod tests {
     #[tokio::test]
     async fn test_save_session_command_execute() {
         let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-        man.write().await.add_group(
-            vec!["http://example.com/file.zip".into()],
-            DownloadOptions { split: Some(4), ..Default::default() },
-        ).await.unwrap();
+        man.write()
+            .await
+            .add_group(
+                vec!["http://example.com/file.zip".into()],
+                DownloadOptions {
+                    split: Some(4),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
 
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_save_session_{}.sess", std::process::id()));
@@ -111,10 +115,14 @@ mod tests {
     #[tokio::test]
     async fn test_save_session_atomic_write() {
         let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-        man.write().await.add_group(
-            vec!["http://example.com/atomic.bin".into()],
-            DownloadOptions::default(),
-        ).await.unwrap();
+        man.write()
+            .await
+            .add_group(
+                vec!["http://example.com/atomic.bin".into()],
+                DownloadOptions::default(),
+            )
+            .await
+            .unwrap();
 
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_atomic_{}.sess", std::process::id()));

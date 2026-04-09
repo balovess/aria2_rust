@@ -1,4 +1,4 @@
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 
 use crate::bittorrent::bencode::codec::BencodeValue;
 
@@ -30,13 +30,17 @@ impl InfoHash {
 }
 
 impl PartialEq for InfoHash {
-    fn eq(&self, other: &Self) -> bool { self.bytes == other.bytes }
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
 }
 
 impl Eq for InfoHash {}
 
 impl std::hash::Hash for InfoHash {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.bytes.hash(state) }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state)
+    }
 }
 
 #[cfg(test)]

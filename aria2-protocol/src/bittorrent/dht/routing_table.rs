@@ -18,7 +18,9 @@ impl RoutingTable {
 
     pub fn insert(&mut self, node: DhtNode) {
         let bucket_idx = self.bucket_index_for(&node.id);
-        if bucket_idx >= BUCKET_COUNT { return; }
+        if bucket_idx >= BUCKET_COUNT {
+            return;
+        }
 
         match self.buckets[bucket_idx].insert(node) {
             Some(evicted) => {
@@ -30,22 +32,23 @@ impl RoutingTable {
 
     pub fn remove(&mut self, node_id: &[u8; 20]) -> bool {
         let idx = self.bucket_index_for(node_id);
-        if idx >= BUCKET_COUNT { return false; }
+        if idx >= BUCKET_COUNT {
+            return false;
+        }
         self.buckets[idx].remove(node_id)
     }
 
     pub fn find_closest(&self, target: &[u8; 20], count: usize) -> Vec<&DhtNode> {
-        let mut all_nodes: Vec<(usize, &DhtNode)> = self.buckets.iter()
+        let mut all_nodes: Vec<(usize, &DhtNode)> = self
+            .buckets
+            .iter()
             .enumerate()
             .flat_map(|(i, b)| b.get_nodes().iter().map(move |n| (i, n)))
             .collect();
 
         all_nodes.sort_by_key(|(_, n)| n.distance_to(target));
 
-        all_nodes.into_iter()
-            .take(count)
-            .map(|(_, n)| n)
-            .collect()
+        all_nodes.into_iter().take(count).map(|(_, n)| n).collect()
     }
 
     pub fn get_bucket(&self, index: usize) -> Option<&Bucket> {
@@ -114,7 +117,9 @@ mod tests {
         let mut table = RoutingTable::new([0u8; 20]);
         for i in 0..10u8 {
             let mut node = DhtNode::new([i; 20], "127.0.0.1:6881".parse().unwrap());
-            for _ in 0..3 { node.record_failure(); }
+            for _ in 0..3 {
+                node.record_failure();
+            }
             table.insert(node);
         }
         assert!(table.evict_bad_nodes() > 0);

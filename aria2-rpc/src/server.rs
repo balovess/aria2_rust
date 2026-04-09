@@ -1,32 +1,33 @@
+use base64::Engine;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Serialize, Deserialize};
-use base64::Engine;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     pub token: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self { token: None, username: None, password: None }
-    }
-}
-
 impl AuthConfig {
-    pub fn with_token(mut self, token: impl Into<String>) -> Self { self.token = Some(token.into()); self }
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
     pub fn with_basic_auth(mut self, user: impl Into<String>, pass: impl Into<String>) -> Self {
         self.username = Some(user.into());
         self.password = Some(pass.into());
         self
     }
 
-    pub fn has_token(&self) -> bool { self.token.is_some() }
-    pub fn has_basic(&self) -> bool { self.username.is_some() && self.password.is_some() }
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
+    }
+    pub fn has_basic(&self) -> bool {
+        self.username.is_some() && self.password.is_some()
+    }
 
     pub fn verify_token(&self, provided: &str) -> bool {
         match &self.token {
@@ -51,7 +52,9 @@ impl AuthConfig {
 }
 
 fn base64_decode(s: &str) -> Result<String, String> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(s).map_err(|e| e.to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|e| e.to_string())?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
@@ -75,8 +78,14 @@ impl Default for CorsConfig {
 }
 
 impl CorsConfig {
-    pub fn with_origin(mut self, origin: impl Into<String>) -> Self { self.allow_origin = origin.into(); self }
-    pub fn with_credentials(mut self) -> Self { self.allow_credentials = true; self }
+    pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
+        self.allow_origin = origin.into();
+        self
+    }
+    pub fn with_credentials(mut self) -> Self {
+        self.allow_credentials = true;
+        self
+    }
 
     pub fn to_headers(&self) -> Vec<(&str, &str)> {
         vec![
@@ -108,12 +117,26 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn with_port(mut self, port: u16) -> Self { self.port = port; self }
-    pub fn with_host(mut self, host: impl Into<String>) -> Self { self.host = host.into(); self }
-    pub fn with_auth(mut self, auth: AuthConfig) -> Self { self.auth = auth; self }
-    pub fn with_cors(mut self, cors: CorsConfig) -> Self { self.cors = cors; self }
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.host = host.into();
+        self
+    }
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
+        self
+    }
+    pub fn with_cors(mut self, cors: CorsConfig) -> Self {
+        self.cors = cors;
+        self
+    }
 
-    pub fn addr(&self) -> String { format!("{}:{}", self.host, self.port) }
+    pub fn addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
 }
 
 pub type GlobalOptions = Arc<RwLock<HashMap<String, serde_json::Value>>>;
@@ -160,16 +183,40 @@ impl Default for StatusInfo {
 
 impl StatusInfo {
     pub fn new(gid: impl Into<String>) -> Self {
-        Self { gid: gid.into(), ..Default::default() }
+        Self {
+            gid: gid.into(),
+            ..Default::default()
+        }
     }
 
-    pub fn with_total_length(mut self, v: u64) -> Self { self.total_length = Some(v); self }
-    pub fn with_completed_length(mut self, v: u64) -> Self { self.completed_length = Some(v); self }
-    pub fn with_download_speed(mut self, v: u64) -> Self { self.download_speed = Some(v); self }
-    pub fn with_status(mut self, s: DownloadStatus) -> Self { self.status = s; self }
-    pub fn with_dir(mut self, d: impl Into<String>) -> Self { self.dir = Some(d.into()); self }
-    pub fn with_files(mut self, f: Vec<FileInfo>) -> Self { self.files = Some(f); self }
-    pub fn with_error_code(mut self, c: i32) -> Self { self.error_code = Some(c); self }
+    pub fn with_total_length(mut self, v: u64) -> Self {
+        self.total_length = Some(v);
+        self
+    }
+    pub fn with_completed_length(mut self, v: u64) -> Self {
+        self.completed_length = Some(v);
+        self
+    }
+    pub fn with_download_speed(mut self, v: u64) -> Self {
+        self.download_speed = Some(v);
+        self
+    }
+    pub fn with_status(mut self, s: DownloadStatus) -> Self {
+        self.status = s;
+        self
+    }
+    pub fn with_dir(mut self, d: impl Into<String>) -> Self {
+        self.dir = Some(d.into());
+        self
+    }
+    pub fn with_files(mut self, f: Vec<FileInfo>) -> Self {
+        self.files = Some(f);
+        self
+    }
+    pub fn with_error_code(mut self, c: i32) -> Self {
+        self.error_code = Some(c);
+        self
+    }
 
     pub fn progress_percent(&self) -> f64 {
         match (self.total_length, self.completed_length) {
@@ -179,8 +226,9 @@ impl StatusInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum DownloadStatus {
+    #[default]
     Active,
     Waiting,
     Paused,
@@ -189,13 +237,13 @@ pub enum DownloadStatus {
     Removed,
 }
 
-impl Default for DownloadStatus {
-    fn default() -> Self { Self::Active }
-}
-
 impl DownloadStatus {
-    pub fn is_active(&self) -> bool { matches!(self, Self::Active | Self::Waiting) }
-    pub fn is_stopped(&self) -> bool { !self.is_active() && !matches!(self, Self::Removed) }
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active | Self::Waiting)
+    }
+    pub fn is_stopped(&self) -> bool {
+        !self.is_active() && !matches!(self, Self::Removed)
+    }
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -220,17 +268,34 @@ pub struct FileInfo {
 
 impl Default for FileInfo {
     fn default() -> Self {
-        Self { index: 0, path: String::new(), length: 0, completed_length: 0, selected: true, uris: vec![] }
+        Self {
+            index: 0,
+            path: String::new(),
+            length: 0,
+            completed_length: 0,
+            selected: true,
+            uris: vec![],
+        }
     }
 }
 
 impl FileInfo {
     pub fn new(path: impl Into<String>, length: u64) -> Self {
-        Self { path: path.into(), length, ..Default::default() }
+        Self {
+            path: path.into(),
+            length,
+            ..Default::default()
+        }
     }
 
-    pub fn with_uris(mut self, uris: Vec<UriEntry>) -> Self { self.uris = uris; self }
-    pub fn with_completed(mut self, v: u64) -> Self { self.completed_length = v; self }
+    pub fn with_uris(mut self, uris: Vec<UriEntry>) -> Self {
+        self.uris = uris;
+        self
+    }
+    pub fn with_completed(mut self, v: u64) -> Self {
+        self.completed_length = v;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -240,17 +305,30 @@ pub struct UriEntry {
 }
 
 impl UriEntry {
-    pub fn new(uri: impl Into<String>) -> Self { Self { uri: uri.into(), status: UriStatus::Waiting } }
-    pub fn used(mut self) -> Self { self.status = UriStatus::Used; self }
-    pub fn waiting(mut self) -> Self { self.status = UriStatus::Waiting; self }
+    pub fn new(uri: impl Into<String>) -> Self {
+        Self {
+            uri: uri.into(),
+            status: UriStatus::Waiting,
+        }
+    }
+    pub fn used(mut self) -> Self {
+        self.status = UriStatus::Used;
+        self
+    }
+    pub fn waiting(mut self) -> Self {
+        self.status = UriStatus::Waiting;
+        self
+    }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
-pub enum UriStatus { Used, Waiting }
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Default)]
+pub enum UriStatus {
+    Used,
+    #[default]
+    Waiting,
+}
 
-impl Default for UriStatus { fn default() -> Self { Self::Waiting } }
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct GlobalStat {
     pub download_speed: u64,
     pub upload_speed: u64,
@@ -258,12 +336,6 @@ pub struct GlobalStat {
     pub num_waiting: usize,
     pub num_stopped: usize,
     pub num_stopped_total: usize,
-}
-
-impl Default for GlobalStat {
-    fn default() -> Self {
-        Self { download_speed: 0, upload_speed: 0, num_active: 0, num_waiting: 0, num_stopped: 0, num_stopped_total: 0 }
-    }
 }
 
 impl GlobalStat {
@@ -281,8 +353,10 @@ impl GlobalStat {
 
 fn generate_gid() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
-        .unwrap_or_default().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     use std::hash::{Hash, Hasher};
     nanos.hash(&mut hasher);
@@ -290,7 +364,9 @@ fn generate_gid() -> String {
     format!("{:016x}", hasher.finish())
 }
 
-pub fn create_gid() -> String { generate_gid() }
+pub fn create_gid() -> String {
+    generate_gid()
+}
 
 #[cfg(test)]
 mod tests {
@@ -318,14 +394,20 @@ mod tests {
         assert!(auth.has_basic());
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"admin:pass123");
         assert!(auth.verify_basic(&encoded));
-        assert!(!auth.verify_basic(base64::engine::general_purpose::STANDARD.encode(b"admin:wrong").as_str()));
+        assert!(!auth.verify_basic(
+            base64::engine::general_purpose::STANDARD
+                .encode(b"admin:wrong")
+                .as_str()
+        ));
     }
 
     #[test]
     fn test_cors_config_default() {
         let cors = CorsConfig::default();
         let headers = cors.to_headers();
-        assert!(headers.iter().any(|(k, _)| k == &"Access-Control-Allow-Origin"));
+        assert!(headers
+            .iter()
+            .any(|(k, _)| k == &"Access-Control-Allow-Origin"));
     }
 
     #[test]

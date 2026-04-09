@@ -9,12 +9,20 @@ pub struct Bucket {
 
 impl Bucket {
     pub fn new() -> Self {
-        Self { nodes: Vec::with_capacity(K) }
+        Self {
+            nodes: Vec::with_capacity(K),
+        }
     }
 
-    pub fn len(&self) -> usize { self.nodes.len() }
-    pub fn is_full(&self) -> bool { self.nodes.len() >= K }
-    pub fn is_empty(&self) -> bool { self.nodes.is_empty() }
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+    pub fn is_full(&self) -> bool {
+        self.nodes.len() >= K
+    }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
 
     pub fn insert(&mut self, node: DhtNode) -> Option<DhtNode> {
         if let Some(pos) = self.nodes.iter().position(|n| n.id == node.id) {
@@ -42,7 +50,9 @@ impl Bucket {
         }
     }
 
-    pub fn get_nodes(&self) -> &[DhtNode] { &self.nodes }
+    pub fn get_nodes(&self) -> &[DhtNode] {
+        &self.nodes
+    }
 
     pub fn get_good_count(&self) -> usize {
         self.nodes.iter().filter(|n| n.is_good()).count()
@@ -56,7 +66,9 @@ impl Bucket {
 }
 
 impl Default for Bucket {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub use super::node::DhtNode;
@@ -95,7 +107,9 @@ mod tests {
         for i in 0..K as u8 {
             let mut node = DhtNode::new([i; 20], "127.0.0.1:6881".parse().unwrap());
             if i < K as u8 - 1 {
-                for _ in 0..3 { node.record_failure(); }
+                for _ in 0..3 {
+                    node.record_failure();
+                }
             }
             bucket.insert(node);
         }

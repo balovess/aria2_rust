@@ -1,6 +1,6 @@
-use aria2_core::checksum::message_digest::{HashType, MessageDigest};
 use aria2_core::checksum::checksum::{Checksum, ChecksumValidator};
 use aria2_core::checksum::chunk_checksum::ChunkChecksum;
+use aria2_core::checksum::message_digest::{HashType, MessageDigest};
 
 #[test]
 fn test_e2e_md5_known_vector_rfc1321() {
@@ -22,15 +22,20 @@ fn test_e2e_sha1_fips180_4() {
     let hex = MessageDigest::hash_hex(HashType::Sha1, b"abc");
     assert_eq!(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
 
-    let hex = MessageDigest::hash_hex(HashType::Sha1,
-        b"abcdbcdecdefdefgefghfghijkijklmnopqrstuvwxxyz");
+    let hex = MessageDigest::hash_hex(
+        HashType::Sha1,
+        b"abcdbcdecdefdefgefghfghijkijklmnopqrstuvwxxyz",
+    );
     assert_eq!(hex, "b5ffe488358705f24ebaf43727d8f4d413480d60");
 }
 
 #[test]
 fn test_e2e_sha256_nist_vector() {
     let hex = MessageDigest::hash_hex(HashType::Sha256, b"");
-    assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert_eq!(
+        hex,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
 
     let hex = MessageDigest::hash_hex(HashType::Sha256, b"hello world");
     let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
@@ -51,7 +56,11 @@ fn test_e2e_checksum_verify_correct_data() {
     let cs = Checksum::new(HashType::Md5, "d41d8cd98f00b204e9800998ecf8427e").unwrap();
     assert!(cs.verify(b""), "空字符串 MD5 应匹配");
 
-    let cs = Checksum::new(HashType::Sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").unwrap();
+    let cs = Checksum::new(
+        HashType::Sha256,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    )
+    .unwrap();
     assert!(cs.verify(b"abc"), "'abc' SHA-256 应匹配");
 }
 
@@ -85,9 +94,18 @@ fn test_e2e_checksum_from_type_string_parsing() {
 #[test]
 fn test_e2e_checksum_invalid_inputs_rejected() {
     assert!(Checksum::new(HashType::Md5, "").is_err(), "空值应失败");
-    assert!(Checksum::new(HashType::Md5, "zzz").is_err(), "非法 hex 应失败");
-    assert!(Checksum::new(HashType::Md5, "abcd").is_err(), "长度不足应失败 (MD5=32 hex)");
-    assert!(Checksum::from_type_and_value("blake3", "abc").is_err(), "未知算法应失败");
+    assert!(
+        Checksum::new(HashType::Md5, "zzz").is_err(),
+        "非法 hex 应失败"
+    );
+    assert!(
+        Checksum::new(HashType::Md5, "abcd").is_err(),
+        "长度不足应失败 (MD5=32 hex)"
+    );
+    assert!(
+        Checksum::from_type_and_value("blake3", "abc").is_err(),
+        "未知算法应失败"
+    );
 }
 
 #[test]
@@ -130,9 +148,11 @@ fn test_e2e_chunk_checksum_partial_verify() {
 
 #[test]
 fn test_e2e_streaming_validator_consistency() {
-    let cs = Checksum::new(HashType::Sha256,
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    ).unwrap();
+    let cs = Checksum::new(
+        HashType::Sha256,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    )
+    .unwrap();
 
     let mut validator = cs.create_validator();
     validator.update(b"ab");

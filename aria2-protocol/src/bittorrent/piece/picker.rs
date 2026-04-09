@@ -8,7 +8,9 @@ pub enum PieceSelectionStrategy {
 }
 
 impl Default for PieceSelectionStrategy {
-    fn default() -> Self { PieceSelectionStrategy::RarestFirst }
+    fn default() -> Self {
+        PieceSelectionStrategy::RarestFirst
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +79,8 @@ impl PiecePicker {
     }
 
     pub fn add_peer_piece(&mut self, peer_id: u32, piece_index: u32) {
-        self.peer_availability.entry(peer_id)
+        self.peer_availability
+            .entry(peer_id)
             .or_insert_with(HashSet::new)
             .insert(piece_index);
         self.update_frequencies();
@@ -110,23 +113,37 @@ impl PiecePicker {
     }
 
     pub fn select(&self, peer_bitfield: &[u8], nbits: usize) -> Option<u32> {
-        if nbits == 0 || peer_bitfield.is_empty() { return None; }
+        if nbits == 0 || peer_bitfield.is_empty() {
+            return None;
+        }
         let max_pieces = std::cmp::min(nbits, self.pieces.len());
         match self.strategy {
-            PieceSelectionStrategy::RarestFirst => self.select_rarest_with_bitfield(peer_bitfield, max_pieces),
-            PieceSelectionStrategy::Sequential => self.select_sequential_with_bitfield(peer_bitfield, max_pieces),
-            PieceSelectionStrategy::Random => self.select_random_with_bitfield(peer_bitfield, max_pieces),
+            PieceSelectionStrategy::RarestFirst => {
+                self.select_rarest_with_bitfield(peer_bitfield, max_pieces)
+            }
+            PieceSelectionStrategy::Sequential => {
+                self.select_sequential_with_bitfield(peer_bitfield, max_pieces)
+            }
+            PieceSelectionStrategy::Random => {
+                self.select_random_with_bitfield(peer_bitfield, max_pieces)
+            }
         }
     }
 
     fn select_rarest_with_bitfield(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
         let mut best: Option<(usize, &PieceInfo)> = None;
         for (i, piece) in self.pieces.iter().enumerate().take(max_pieces) {
-            if piece.completed || piece.in_progress { continue; }
+            if piece.completed || piece.in_progress {
+                continue;
+            }
             let byte_idx = i / 8;
             let bit_idx = 7 - (i % 8);
-            if byte_idx >= bitfield.len() { continue; }
-            if (bitfield[byte_idx] & (1 << bit_idx)) == 0 { continue; }
+            if byte_idx >= bitfield.len() {
+                continue;
+            }
+            if (bitfield[byte_idx] & (1 << bit_idx)) == 0 {
+                continue;
+            }
             match &best {
                 None => best = Some((i, piece)),
                 Some((_, prev)) => {
@@ -143,7 +160,9 @@ impl PiecePicker {
 
     fn select_sequential_with_bitfield(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
         for (i, piece) in self.pieces.iter().enumerate().take(max_pieces) {
-            if piece.completed || piece.in_progress { continue; }
+            if piece.completed || piece.in_progress {
+                continue;
+            }
             let byte_idx = i / 8;
             let bit_idx = 7 - (i % 8);
             if byte_idx < bitfield.len() && (bitfield[byte_idx] & (1 << bit_idx)) != 0 {
@@ -155,28 +174,43 @@ impl PiecePicker {
 
     fn select_random_with_bitfield(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
         use rand::Rng;
-        let available: Vec<u32> = self.pieces.iter().enumerate().take(max_pieces)
+        let available: Vec<u32> = self
+            .pieces
+            .iter()
+            .enumerate()
+            .take(max_pieces)
             .filter_map(|(i, piece)| {
-                if piece.completed || piece.in_progress { return None; }
+                if piece.completed || piece.in_progress {
+                    return None;
+                }
                 let byte_idx = i / 8;
                 let bit_idx = 7 - (i % 8);
-                if byte_idx >= bitfield.len() { return None; }
-                if (bitfield[byte_idx] & (1 << bit_idx)) == 0 { return None; }
+                if byte_idx >= bitfield.len() {
+                    return None;
+                }
+                if (bitfield[byte_idx] & (1 << bit_idx)) == 0 {
+                    return None;
+                }
                 Some(piece.index)
             })
             .collect();
-        if available.is_empty() { return None; }
+        if available.is_empty() {
+            return None;
+        }
         let mut rng = rand::thread_rng();
         Some(available[rng.gen_range(0..available.len())])
     }
 
     fn pick_rarest_first(&mut self) -> Option<u32> {
-        let mut candidates: Vec<&PieceInfo> = self.pieces.iter()
+        let mut candidates: Vec<&PieceInfo> = self
+            .pieces
+            .iter()
             .filter(|p| !p.completed && !p.in_progress && p.frequency > 0)
             .collect();
 
         candidates.sort_by(|a, b| {
-            a.frequency.cmp(&b.frequency)
+            a.frequency
+                .cmp(&b.frequency)
                 .then(b.priority.cmp(&a.priority))
         });
 
@@ -184,28 +218,36 @@ impl PiecePicker {
     }
 
     fn pick_sequential(&self) -> Option<u32> {
-        self.pieces.iter()
+        self.pieces
+            .iter()
             .find(|p| !p.completed && !p.in_progress)
             .map(|p| p.index)
     }
 
     fn pick_random(&self) -> Option<u32> {
         use rand::Rng;
-        let available: Vec<u32> = self.pieces.iter()
+        let available: Vec<u32> = self
+            .pieces
+            .iter()
             .filter(|p| !p.completed && !p.in_progress && p.frequency > 0)
             .map(|p| p.index)
             .collect();
 
-        if available.is_empty() { return None; }
+        if available.is_empty() {
+            return None;
+        }
         let mut rng = rand::thread_rng();
         Some(available[rng.gen_range(0..available.len())])
     }
 
     pub fn endgame_candidates(&self) -> Vec<u32> {
         let incomplete_count = self.pieces.iter().filter(|p| !p.completed).count();
-        if incomplete_count > 5 { return vec![]; }
+        if incomplete_count > 5 {
+            return vec![];
+        }
 
-        self.pieces.iter()
+        self.pieces
+            .iter()
             .filter(|p| !p.completed)
             .map(|p| p.index)
             .collect()
@@ -224,7 +266,9 @@ impl PiecePicker {
     }
 
     pub fn progress_percent(&self) -> f64 {
-        if self.total_pieces == 0 { return 100.0; }
+        if self.total_pieces == 0 {
+            return 100.0;
+        }
         self.completed_count() as f64 / self.total_pieces as f64 * 100.0
     }
 
@@ -325,7 +369,11 @@ mod tests {
 
         let bf = make_bitfield(8, &[0, 1, 2, 3, 4, 5, 6]);
         let selected = picker.select(&bf, 8);
-        assert_eq!(selected, Some(1), "should pick piece with frequency=1 in bitfield");
+        assert_eq!(
+            selected,
+            Some(1),
+            "should pick piece with frequency=1 in bitfield"
+        );
     }
 
     #[test]
@@ -335,7 +383,11 @@ mod tests {
 
         let bf = make_bitfield(8, &[0, 1, 2, 3, 4, 5, 6, 7]);
         let selected = picker.select(&bf, 8);
-        assert_eq!(selected, Some(1), "piece 1 has lowest freq=1 and lower index than piece 3");
+        assert_eq!(
+            selected,
+            Some(1),
+            "piece 1 has lowest freq=1 and lower index than piece 3"
+        );
     }
 
     #[test]
@@ -348,7 +400,9 @@ mod tests {
     #[test]
     fn test_select_all_completed_returns_none() {
         let mut picker = PiecePicker::new(4);
-        for i in 0..4 { picker.mark_completed(i); }
+        for i in 0..4 {
+            picker.mark_completed(i);
+        }
         let bf = make_bitfield(4, &[0, 1, 2, 3]);
         assert_eq!(picker.select(&bf, 4), None);
     }
@@ -383,7 +437,11 @@ mod tests {
 
         let bf = make_bitfield(4, &[0, 1, 2, 3]);
         let selected = picker.select(&bf, 4);
-        assert_eq!(selected, Some(2), "highest priority piece should win when freq tied");
+        assert_eq!(
+            selected,
+            Some(2),
+            "highest priority piece should win when freq tied"
+        );
     }
 
     #[test]
@@ -394,7 +452,11 @@ mod tests {
         picker.mark_completed(1);
 
         let bf = make_bitfield(8, &[2, 3, 4, 5, 6, 7]);
-        assert_eq!(picker.select(&bf, 8), Some(2), "sequential picks lowest available in bitfield");
+        assert_eq!(
+            picker.select(&bf, 8),
+            Some(2),
+            "sequential picks lowest available in bitfield"
+        );
     }
 
     #[test]
@@ -408,8 +470,11 @@ mod tests {
             let sel = picker.select(&bf, 8);
             assert!(sel.is_some());
             let idx = sel.unwrap();
-            assert!(idx == 3 || idx == 5 || idx == 7,
-                    "random should only pick from bitfield-available pieces, got {}", idx);
+            assert!(
+                idx == 3 || idx == 5 || idx == 7,
+                "random should only pick from bitfield-available pieces, got {}",
+                idx
+            );
         }
     }
 
@@ -417,11 +482,18 @@ mod tests {
     fn test_endgame_candidates_threshold() {
         let mut picker = PiecePicker::new(3);
         picker.mark_completed(0);
-        assert_eq!(picker.endgame_candidates().len(), 2, "≤5 incomplete → all returned");
+        assert_eq!(
+            picker.endgame_candidates().len(),
+            2,
+            "≤5 incomplete → all returned"
+        );
 
         let mut picker2 = PiecePicker::new(10);
         picker2.mark_completed(0);
-        assert!(picker2.endgame_candidates().is_empty(), ">5 incomplete → empty");
+        assert!(
+            picker2.endgame_candidates().is_empty(),
+            ">5 incomplete → empty"
+        );
     }
 
     #[test]

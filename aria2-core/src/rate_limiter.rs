@@ -1,7 +1,7 @@
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use async_trait::async_trait;
 
 use crate::error::Result;
 
@@ -211,8 +211,16 @@ impl RateLimiter {
     pub async fn config(&self) -> RateLimiterConfig {
         let inner = self.inner.lock().await;
         RateLimiterConfig::new(
-            if inner.download.is_unlimited() { None } else { Some(inner.download.rate() as u64) },
-            if inner.upload.is_unlimited() { None } else { Some(inner.upload.rate() as u64) },
+            if inner.download.is_unlimited() {
+                None
+            } else {
+                Some(inner.download.rate() as u64)
+            },
+            if inner.upload.is_unlimited() {
+                None
+            } else {
+                Some(inner.upload.rate() as u64)
+            },
         )
     }
 }
@@ -301,7 +309,11 @@ mod tests {
         let start = Instant::now();
         tb.acquire(5000).await;
         let elapsed = start.elapsed();
-        assert!(elapsed < Duration::from_millis(100), "burst should be instant: {:?}", elapsed);
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "burst should be instant: {:?}",
+            elapsed
+        );
 
         tb.acquire(6000).await;
         let total_elapsed = start.elapsed();
@@ -369,8 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter_with_limits() {
-        let cfg = RateLimiterConfig::new(Some(5000), Some(1000))
-            .with_burst(Some(1000), Some(500));
+        let cfg = RateLimiterConfig::new(Some(5000), Some(1000)).with_burst(Some(1000), Some(500));
         let rl = RateLimiter::new(&cfg);
         assert!(rl.is_download_limited());
         assert!(rl.is_upload_limited());
@@ -405,8 +416,7 @@ mod tests {
         use crate::filesystem::disk_writer::ByteArrayDiskWriter;
 
         let raw = ByteArrayDiskWriter::new();
-        let cfg = RateLimiterConfig::new(Some(100_000), None)
-            .with_burst(Some(1000), None);
+        let cfg = RateLimiterConfig::new(Some(100_000), None).with_burst(Some(1000), None);
         let rl = RateLimiter::new(&cfg);
         let mut tw = ThrottledWriter::new(raw, rl);
 

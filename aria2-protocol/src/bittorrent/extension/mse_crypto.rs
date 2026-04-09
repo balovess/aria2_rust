@@ -1,5 +1,4 @@
 use sha1::{Digest, Sha1};
-use super::mse_dh::DhKeyPair;
 
 const KEYSTREAM_DISCARD: usize = 1024;
 
@@ -124,7 +123,8 @@ impl Rc4State {
             self.i = self.i.wrapping_add(1);
             self.j = self.j.wrapping_add(self.s[self.i as usize]);
             self.s.swap(self.i as usize, self.j as usize);
-            let k = self.s[(self.s[self.i as usize] as usize + self.s[self.j as usize] as usize) % 256];
+            let k =
+                self.s[(self.s[self.i as usize] as usize + self.s[self.j as usize] as usize) % 256];
             *byte ^= k;
         }
     }
@@ -232,10 +232,18 @@ mod tests {
         let mut encrypted = original.to_vec();
 
         crypto_initiator.encrypt(&mut encrypted);
-        assert_ne!(encrypted, original.to_vec(), "encrypted should differ from plaintext");
+        assert_ne!(
+            encrypted,
+            original.to_vec(),
+            "encrypted should differ from plaintext"
+        );
 
         crypto_responder.decrypt(&mut encrypted);
-        assert_eq!(encrypted, original.to_vec(), "decrypted should match original");
+        assert_eq!(
+            encrypted,
+            original.to_vec(),
+            "decrypted should match original"
+        );
     }
 
     #[test]

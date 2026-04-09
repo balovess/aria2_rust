@@ -1,10 +1,14 @@
+use crate::error::{Aria2Error, FatalError, Result};
 use std::path::Path;
-use crate::error::{Aria2Error, Result, FatalError};
 
 const DEFAULT_MARGIN_MB: u64 = 100;
 
 pub fn available_space(path: &Path) -> Result<u64> {
-    let path = if path.as_os_str().is_empty() { Path::new(".") } else { path };
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
 
     #[cfg(target_family = "unix")]
     {
@@ -41,7 +45,11 @@ pub fn check_with_margin(path: &Path, required: u64, margin_mb: Option<u64>) -> 
 }
 
 pub fn total_space(path: &Path) -> Result<u64> {
-    let path = if path.as_os_str().is_empty() { Path::new(".") } else { path };
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
 
     #[cfg(target_family = "unix")]
     {

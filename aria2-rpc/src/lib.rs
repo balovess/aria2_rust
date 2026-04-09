@@ -53,17 +53,17 @@
 //! All 25 implemented methods follow the original aria2 RPC specification at
 //! <https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface>.
 
-pub mod json_rpc;
-pub mod xml_rpc;
-pub mod websocket;
-pub mod server;
 pub mod engine;
+pub mod json_rpc;
+pub mod server;
+pub mod websocket;
+pub mod xml_rpc;
 
-pub use json_rpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcError, parse_request, JSONRPC_VERSION};
-pub use xml_rpc::{XmlRpcRequest, XmlRpcResponse, XmlRpcValue, XmlRpcMember};
-pub use websocket::{DownloadEvent, EventPublisher, EventType, WsSession};
-pub use server::{
-    AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalStat,
-    ServerConfig, StatusInfo, UriEntry, create_gid,
-};
 pub use engine::RpcEngine;
+pub use json_rpc::{parse_request, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION};
+pub use server::{
+    create_gid, AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalStat, ServerConfig,
+    StatusInfo, UriEntry,
+};
+pub use websocket::{DownloadEvent, EventPublisher, EventType, WsSession};
+pub use xml_rpc::{XmlRpcMember, XmlRpcRequest, XmlRpcResponse, XmlRpcValue};

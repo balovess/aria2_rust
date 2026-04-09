@@ -66,18 +66,22 @@ impl DhtMessage {
         let mut dict = BTreeMap::new();
 
         dict.insert(b"t".to_vec(), BencodeValue::Bytes(self.t.clone()));
-        dict.insert(b"y".to_vec(), BencodeValue::Bytes(
-            match self.y {
+        dict.insert(
+            b"y".to_vec(),
+            BencodeValue::Bytes(match self.y {
                 DhtMessageType::Query => b"q".to_vec(),
                 DhtMessageType::Response => b"r".to_vec(),
                 DhtMessageType::Error => b"e".to_vec(),
-            }
-        ));
+            }),
+        );
 
         match &self.y {
             DhtMessageType::Query => {
                 if let Some(ref method) = self.q {
-                    dict.insert(b"q".to_vec(), BencodeValue::Bytes(method.0.clone().into_bytes()));
+                    dict.insert(
+                        b"q".to_vec(),
+                        BencodeValue::Bytes(method.0.clone().into_bytes()),
+                    );
                 }
                 if let Some(ref args) = self.a {
                     dict.insert(b"a".to_vec(), args.clone());
@@ -90,10 +94,13 @@ impl DhtMessage {
             }
             DhtMessageType::Error => {
                 if let Some((code, msg)) = &self.e {
-                    dict.insert(b"e".to_vec(), BencodeValue::List(vec![
-                        BencodeValue::Int(*code),
-                        BencodeValue::Bytes(msg.clone().into_bytes()),
-                    ]));
+                    dict.insert(
+                        b"e".to_vec(),
+                        BencodeValue::List(vec![
+                            BencodeValue::Int(*code),
+                            BencodeValue::Bytes(msg.clone().into_bytes()),
+                        ]),
+                    );
                 }
             }
         }
@@ -104,12 +111,14 @@ impl DhtMessage {
     pub fn decode(data: &[u8]) -> Result<Self, String> {
         let (root, _) = BencodeValue::decode(data)?;
 
-        let t = root.dict_get(b"t")
+        let t = root
+            .dict_get(b"t")
             .and_then(|v| v.as_bytes())
             .map(|b| b.to_vec())
             .ok_or("缺少t字段")?;
 
-        let y_bytes = root.dict_get(b"y")
+        let y_bytes = root
+            .dict_get(b"y")
             .and_then(|v| v.as_bytes())
             .ok_or("缺少y字段")?;
 
@@ -124,27 +133,57 @@ impl DhtMessage {
             DhtMessageType::Query => {
                 let q_str = root.dict_get_str("q").ok_or("缺少q字段")?;
                 let args = root.dict_get(b"a").cloned();
-                Ok(Self { t, y, q: Some(DhtQueryMethod(q_str.to_string())), a: args, r: None, e: None })
+                Ok(Self {
+                    t,
+                    y,
+                    q: Some(DhtQueryMethod(q_str.to_string())),
+                    a: args,
+                    r: None,
+                    e: None,
+                })
             }
             DhtMessageType::Response => {
                 let r = root.dict_get(b"r").cloned();
-                Ok(Self { t, y, q: None, a: None, r, e: None })
+                Ok(Self {
+                    t,
+                    y,
+                    q: None,
+                    a: None,
+                    r,
+                    e: None,
+                })
             }
             DhtMessageType::Error => {
-                let err_val = root.dict_get(b"e")
+                let err_val = root
+                    .dict_get(b"e")
                     .and_then(|v| v.as_list())
                     .ok_or("缺少e字段")?;
-                if err_val.len() < 2 { return Err("error格式错误".to_string()); }
+                if err_val.len() < 2 {
+                    return Err("error格式错误".to_string());
+                }
                 let code = err_val[0].as_int().unwrap_or(201);
                 let msg = err_val[1].as_str().unwrap_or("unknown error");
-                Ok(Self { t, y, q: None, a: None, r: None, e: Some((code, msg.to_string())) })
+                Ok(Self {
+                    t,
+                    y,
+                    q: None,
+                    a: None,
+                    r: None,
+                    e: Some((code, msg.to_string())),
+                })
             }
         }
     }
 
-    pub fn is_query(&self) -> bool { matches!(self.y, DhtMessageType::Query) }
-    pub fn is_response(&self) -> bool { matches!(self.y, DhtMessageType::Response) }
-    pub fn is_error(&self) -> bool { matches!(self.y, DhtMessageType::Error) }
+    pub fn is_query(&self) -> bool {
+        matches!(self.y, DhtMessageType::Query)
+    }
+    pub fn is_response(&self) -> bool {
+        matches!(self.y, DhtMessageType::Response)
+    }
+    pub fn is_error(&self) -> bool {
+        matches!(self.y, DhtMessageType::Error)
+    }
 }
 
 pub struct DhtMessageBuilder;
@@ -153,33 +192,65 @@ impl DhtMessageBuilder {
     pub fn ping(transaction_id: u32, sender_id: &[u8; 20]) -> DhtMessage {
         let mut args_dict = std::collections::BTreeMap::new();
         args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(sender_id.to_vec()));
-        DhtMessage::new_query(transaction_id, DhtQueryMethod::PING, BencodeValue::Dict(args_dict))
+        DhtMessage::new_query(
+            transaction_id,
+            DhtQueryMethod::PING,
+            BencodeValue::Dict(args_dict),
+        )
     }
 
     pub fn find_node(transaction_id: u32, sender_id: &[u8; 20], target: &[u8; 20]) -> DhtMessage {
         let mut args_dict = std::collections::BTreeMap::new();
         args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(sender_id.to_vec()));
         args_dict.insert(b"target".to_vec(), BencodeValue::Bytes(target.to_vec()));
-        DhtMessage::new_query(transaction_id, DhtQueryMethod::FIND_NODE, BencodeValue::Dict(args_dict))
+        DhtMessage::new_query(
+            transaction_id,
+            DhtQueryMethod::FIND_NODE,
+            BencodeValue::Dict(args_dict),
+        )
     }
 
-    pub fn get_peers(transaction_id: u32, sender_id: &[u8; 20], info_hash: &[u8; 20]) -> DhtMessage {
-        let mut args_dict = std::collections::BTreeMap::new();
-        args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(sender_id.to_vec()));
-        args_dict.insert(b"info_hash".to_vec(), BencodeValue::Bytes(info_hash.to_vec()));
-        DhtMessage::new_query(transaction_id, DhtQueryMethod::GET_PEERS, BencodeValue::Dict(args_dict))
-    }
-
-    pub fn announce_peer(
-        transaction_id: u32, sender_id: &[u8; 20],
-        info_hash: &[u8; 20], port: u16, token: &str,
+    pub fn get_peers(
+        transaction_id: u32,
+        sender_id: &[u8; 20],
+        info_hash: &[u8; 20],
     ) -> DhtMessage {
         let mut args_dict = std::collections::BTreeMap::new();
         args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(sender_id.to_vec()));
-        args_dict.insert(b"info_hash".to_vec(), BencodeValue::Bytes(info_hash.to_vec()));
+        args_dict.insert(
+            b"info_hash".to_vec(),
+            BencodeValue::Bytes(info_hash.to_vec()),
+        );
+        DhtMessage::new_query(
+            transaction_id,
+            DhtQueryMethod::GET_PEERS,
+            BencodeValue::Dict(args_dict),
+        )
+    }
+
+    pub fn announce_peer(
+        transaction_id: u32,
+        sender_id: &[u8; 20],
+        info_hash: &[u8; 20],
+        port: u16,
+        token: &str,
+    ) -> DhtMessage {
+        let mut args_dict = std::collections::BTreeMap::new();
+        args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(sender_id.to_vec()));
+        args_dict.insert(
+            b"info_hash".to_vec(),
+            BencodeValue::Bytes(info_hash.to_vec()),
+        );
         args_dict.insert(b"port".to_vec(), BencodeValue::Int(port as i64));
-        args_dict.insert(b"token".to_vec(), BencodeValue::Bytes(token.as_bytes().to_vec()));
-        DhtMessage::new_query(transaction_id, DhtQueryMethod::ANNOUNCE_PEER, BencodeValue::Dict(args_dict))
+        args_dict.insert(
+            b"token".to_vec(),
+            BencodeValue::Bytes(token.as_bytes().to_vec()),
+        );
+        DhtMessage::new_query(
+            transaction_id,
+            DhtQueryMethod::ANNOUNCE_PEER,
+            BencodeValue::Dict(args_dict),
+        )
     }
 }
 

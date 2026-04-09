@@ -19,8 +19,12 @@ impl Clone for ServerStat {
         Self {
             host: self.host.clone(),
             download_speed: AtomicU64::new(self.download_speed.load(Ordering::Relaxed)),
-            single_connection_avg_speed: AtomicU64::new(self.single_connection_avg_speed.load(Ordering::Relaxed)),
-            multi_connection_avg_speed: AtomicU64::new(self.multi_connection_avg_speed.load(Ordering::Relaxed)),
+            single_connection_avg_speed: AtomicU64::new(
+                self.single_connection_avg_speed.load(Ordering::Relaxed),
+            ),
+            multi_connection_avg_speed: AtomicU64::new(
+                self.multi_connection_avg_speed.load(Ordering::Relaxed),
+            ),
             last_updated: AtomicU64::new(self.last_updated.load(Ordering::Relaxed)),
             status: AtomicU8::new(self.status.load(Ordering::Relaxed)),
             counter: AtomicU32::new(self.counter.load(Ordering::Relaxed)),
@@ -46,11 +50,13 @@ impl ServerStat {
         if is_multi {
             let old = self.multi_connection_avg_speed.load(Ordering::Relaxed);
             let new = ema(old, speed);
-            self.multi_connection_avg_speed.store(new, Ordering::Relaxed);
+            self.multi_connection_avg_speed
+                .store(new, Ordering::Relaxed);
         } else {
             let old = self.single_connection_avg_speed.load(Ordering::Relaxed);
             let new = ema(old, speed);
-            self.single_connection_avg_speed.store(new, Ordering::Relaxed);
+            self.single_connection_avg_speed
+                .store(new, Ordering::Relaxed);
         }
         self.touch();
     }
@@ -70,7 +76,11 @@ impl ServerStat {
     pub fn get_avg_speed(&self) -> u64 {
         let s = self.single_connection_avg_speed.load(Ordering::Relaxed);
         let m = self.multi_connection_avg_speed.load(Ordering::Relaxed);
-        if s > 0 && m > 0 { (s + m) / 2 } else { s.max(m) }
+        if s > 0 && m > 0 {
+            (s + m) / 2
+        } else {
+            s.max(m)
+        }
     }
 
     pub fn is_ok(&self) -> bool {
@@ -99,13 +109,21 @@ impl ServerStat {
 
     pub fn is_fresh(&self, duration_secs: u64) -> bool {
         let last = self.last_updated.load(Ordering::Relaxed);
-        if last == 0 { return false; }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        if last == 0 {
+            return false;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         now.saturating_sub(last) < duration_secs
     }
 
     fn touch(&self) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         self.last_updated.store(now, Ordering::Relaxed);
     }
 }
@@ -214,7 +232,9 @@ mod tests {
             }));
         }
 
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
 
         assert!(stat.get_download_speed() > 0);
         assert!(stat.is_fresh(60));

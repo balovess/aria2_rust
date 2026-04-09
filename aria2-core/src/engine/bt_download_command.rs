@@ -1,17 +1,19 @@
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use async_trait::async_trait;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
-use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
-use crate::engine::command::{Command, CommandStatus};
-use crate::engine::bt_upload_session::{BtUploadSession, BtSeedingConfig, PieceDataProvider, InMemoryPieceProvider};
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
-use crate::engine::udp_tracker_client::{UdpTrackerClient, SharedUdpClient};
+use crate::engine::bt_upload_session::{
+    BtSeedingConfig, BtUploadSession, InMemoryPieceProvider, PieceDataProvider,
+};
+use crate::engine::command::{Command, CommandStatus};
+use crate::engine::udp_tracker_client::{SharedUdpClient, UdpTrackerClient};
 use crate::engine::udp_tracker_manager::UdpTrackerManager;
-use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
-use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter};
+use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
 
 enum BtPeerConn {
@@ -35,7 +37,9 @@ impl BtPeerConn {
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash: &[u8; 20],
     ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect(addr, info_hash).await {
+        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect(addr, info_hash)
+            .await
+        {
             Ok(conn) => Ok(BtPeerConn::Plain(conn)),
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
         }
@@ -43,64 +47,108 @@ impl BtPeerConn {
 
     async fn send_unchoke(&mut self) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_unchoke().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_unchoke().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_unchoke().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_unchoke().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
     async fn send_choke(&mut self) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_choke().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_choke().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_choke().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_choke().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
     async fn send_interested(&mut self) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_interested().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_interested().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_interested().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_interested().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
     async fn send_not_interested(&mut self) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_not_interested().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_not_interested().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_not_interested().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_not_interested().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
     async fn send_have(&mut self, piece_index: u32) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_have(piece_index).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_have(piece_index).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_have(piece_index).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_have(piece_index).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
-    async fn send_request(&mut self, req: aria2_protocol::bittorrent::message::types::PieceBlockRequest) -> Result<()> {
+    async fn send_request(
+        &mut self,
+        req: aria2_protocol::bittorrent::message::types::PieceBlockRequest,
+    ) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_request(req).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_request(req).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_request(req).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_request(req).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
-    async fn send_cancel(&mut self, req: &aria2_protocol::bittorrent::message::types::PieceBlockRequest) -> Result<()> {
+    async fn send_cancel(
+        &mut self,
+        req: &aria2_protocol::bittorrent::message::types::PieceBlockRequest,
+    ) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_cancel(req).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_cancel(req).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_cancel(req).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_cancel(req).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
     async fn send_bitfield(&mut self, bitfield: Vec<u8>) -> Result<()> {
         match self {
-            BtPeerConn::Plain(c) => c.send_bitfield(bitfield).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.send_bitfield(bitfield).await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.send_bitfield(bitfield).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.send_bitfield(bitfield).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
-    async fn read_message(&mut self) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
+    async fn read_message(
+        &mut self,
+    ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
         match self {
-            BtPeerConn::Plain(c) => c.read_message().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
-            BtPeerConn::Encrypted(c) => c.read_message().await.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })),
+            BtPeerConn::Plain(c) => c.read_message().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            BtPeerConn::Encrypted(c) => c.read_message().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
         }
     }
 
@@ -128,7 +176,8 @@ pub struct BtDownloadCommand {
     total_uploaded: u64,
     udp_client: Option<SharedUdpClient>,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-    public_trackers: Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
+    public_trackers:
+        Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
     peer_tracker: Option<PeerBitfieldTracker>,
 }
 
@@ -140,7 +189,9 @@ impl BtDownloadCommand {
         output_dir: Option<&str>,
     ) -> Result<Self> {
         let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {}", e))))?;
+            .map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {}", e)))
+        })?;
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -150,14 +201,33 @@ impl BtDownloadCommand {
         let filename = meta.info.name.clone();
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        let group = RequestGroup::new(gid, vec![format!("bt://{}", meta.info_hash.as_hex())], options.clone());
+        let group = RequestGroup::new(
+            gid,
+            vec![format!("bt://{}", meta.info_hash.as_hex())],
+            options.clone(),
+        );
 
-        let seed_time = options.seed_time.map(|t| if t == 0 { None } else { Some(Duration::from_secs(t)) }).flatten();
+        let seed_time = options
+            .seed_time
+            .map(|t| {
+                if t == 0 {
+                    None
+                } else {
+                    Some(Duration::from_secs(t))
+                }
+            })
+            .flatten();
         let seed_ratio = options.seed_ratio.filter(|&r| r > 0.0);
 
-        info!("BtDownloadCommand created: {} -> {} ({} bytes, {} pieces) seed={:?} ratio={:?}",
-            meta.info.name, path.display(), meta.total_size(), meta.num_pieces(),
-            seed_time, seed_ratio);
+        info!(
+            "BtDownloadCommand created: {} -> {} ({} bytes, {} pieces) seed={:?} ratio={:?}",
+            meta.info.name,
+            path.display(),
+            meta.total_size(),
+            meta.num_pieces(),
+            seed_time,
+            seed_ratio
+        );
 
         Ok(Self {
             group: Arc::new(tokio::sync::RwLock::new(group)),
@@ -165,7 +235,8 @@ impl BtDownloadCommand {
             started: false,
             completed_bytes: 0,
             torrent_data: torrent_bytes.to_vec(),
-            seed_enabled: options.seed_time.unwrap_or(0) > 0 || options.seed_ratio.unwrap_or(0.0) > 0.0,
+            seed_enabled: options.seed_time.unwrap_or(0) > 0
+                || options.seed_ratio.unwrap_or(0.0) > 0.0,
             seed_time,
             seed_ratio,
             total_uploaded: 0,
@@ -205,25 +276,45 @@ impl BtDownloadCommand {
         };
 
         let exit_cond = match (self.seed_time, self.seed_ratio) {
-            (Some(t), Some(r)) => SeedExitCondition { seed_time: Some(t), seed_ratio: Some(r) },
-            (Some(t), None) => SeedExitCondition { seed_time: Some(t), seed_ratio: None },
-            (None, Some(r)) => SeedExitCondition { seed_time: None, seed_ratio: Some(r) },
+            (Some(t), Some(r)) => SeedExitCondition {
+                seed_time: Some(t),
+                seed_ratio: Some(r),
+            },
+            (Some(t), None) => SeedExitCondition {
+                seed_time: Some(t),
+                seed_ratio: None,
+            },
+            (None, Some(r)) => SeedExitCondition {
+                seed_time: None,
+                seed_ratio: Some(r),
+            },
             (None, None) => SeedExitCondition::infinite(),
         };
 
-        let plain_connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = connections
-            .into_iter()
-            .filter_map(|c| match c {
-                BtPeerConn::Plain(p) => Some(p),
-                _ => None,
-            })
-            .collect();
+        let plain_connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> =
+            connections
+                .into_iter()
+                .filter_map(|c| match c {
+                    BtPeerConn::Plain(p) => Some(p),
+                    _ => None,
+                })
+                .collect();
 
-        let mut manager = BtSeedManager::new(plain_connections, file_provider, config, exit_cond, self.completed_bytes);
+        let mut manager = BtSeedManager::new(
+            plain_connections,
+            file_provider,
+            config,
+            exit_cond,
+            self.completed_bytes,
+        );
         manager.run_seeding_loop().await?;
 
         self.total_uploaded = manager.total_uploaded();
-        info!("Seeding complete: uploaded {} bytes in {:?}", self.total_uploaded, manager.seeding_duration());
+        info!(
+            "Seeding complete: uploaded {} bytes in {:?}",
+            self.total_uploaded,
+            manager.seeding_duration()
+        );
         Ok(())
     }
 }
@@ -236,15 +327,19 @@ struct FileBackedPieceProvider {
 
 impl FileBackedPieceProvider {
     pub fn new(file_path: std::path::PathBuf, piece_length: u32, num_pieces: u32) -> Self {
-        Self { file_path, piece_length, num_pieces }
+        Self {
+            file_path,
+            piece_length,
+            num_pieces,
+        }
     }
 }
 
 impl PieceDataProvider for FileBackedPieceProvider {
     fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>> {
+        use std::io::SeekFrom;
         use tokio::fs::File;
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        use std::io::SeekFrom;
 
         let file_pos = piece_index as u64 * self.piece_length as u64 + offset as u64;
 
@@ -277,13 +372,17 @@ impl Command for BtDownloadCommand {
 
         if let Some(parent) = self.output_path.parent() {
             if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e))))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
+                })?;
             }
         }
 
-        let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Torrent parse error: {}", e))))?;
+        let meta =
+            aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("Torrent parse error: {}", e)))
+                })?;
 
         {
             let mut g = self.group.write().await;
@@ -295,11 +394,17 @@ impl Command for BtDownloadCommand {
         let num_pieces = meta.num_pieces();
 
         let mut piece_manager = aria2_protocol::bittorrent::piece::manager::PieceManager::new(
-            num_pieces as u32, piece_length, total_size, meta.info.pieces.clone(),
+            num_pieces as u32,
+            piece_length,
+            total_size,
+            meta.info.pieces.clone(),
         );
 
-        let mut piece_picker = aria2_protocol::bittorrent::piece::picker::PiecePicker::new(num_pieces as u32);
-        piece_picker.set_strategy(aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::Sequential);
+        let mut piece_picker =
+            aria2_protocol::bittorrent::piece::picker::PiecePicker::new(num_pieces as u32);
+        piece_picker.set_strategy(
+            aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::Sequential,
+        );
 
         let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
         let info_hash_raw = meta.info_hash.bytes;
@@ -312,15 +417,27 @@ impl Command for BtDownloadCommand {
         );
 
         eprintln!("[BT] Announcing to tracker: {}", announce_url);
-        let resp = reqwest::get(&announce_url).await
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("Tracker HTTP failed: {}", e) }))?;
+        let resp = reqwest::get(&announce_url).await.map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Tracker HTTP failed: {}", e),
+            })
+        })?;
         eprintln!("[BT] Tracker response status: {}", resp.status());
-        let body = resp.bytes().await
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("Tracker body read failed: {}", e) }))?;
+        let body = resp.bytes().await.map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Tracker body read failed: {}", e),
+            })
+        })?;
         eprintln!("[BT] Tracker body: {:?}", String::from_utf8_lossy(&body));
 
-        let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("Tracker parse failed: {}", e) }))?;
+        let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(
+            &body,
+        )
+        .map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Tracker parse failed: {}", e),
+            })
+        })?;
 
         eprintln!("[BT] Tracker response: {} peers", tracker_resp.peer_count());
         for peer in &tracker_resp.peers {
@@ -328,12 +445,19 @@ impl Command for BtDownloadCommand {
         }
 
         if tracker_resp.is_failure() {
-            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: tracker_resp.failure_reason.unwrap_or_default() }));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: tracker_resp.failure_reason.unwrap_or_default(),
+                },
+            ));
         }
 
-        let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = tracker_resp.peers.iter()
-            .map(|p| aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&p.ip, p.port))
-            .collect();
+        let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
+            tracker_resp
+                .peers
+                .iter()
+                .map(|p| aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&p.ip, p.port))
+                .collect();
 
         if let Ok(udp) = UdpTrackerClient::new(0).await {
             self.udp_client = Some(Arc::new(tokio::sync::Mutex::new(udp)));
@@ -382,7 +506,9 @@ impl Command for BtDownloadCommand {
                     eprintln!("[BT] DHT engine started");
                     self.dht_engine.as_ref().unwrap().start_maintenance_loop();
                 }
-                Err(e) => { warn!("[BT] DHT engine start failed: {}", e); }
+                Err(e) => {
+                    warn!("[BT] DHT engine start failed: {}", e);
+                }
             }
         }
 
@@ -392,13 +518,23 @@ impl Command for BtDownloadCommand {
                 let before = peer_addrs.len();
                 for addr in &result.peers {
                     let ip_str = addr.ip().to_string();
-                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip_str, addr.port());
-                    if !peer_addrs.iter().any(|p| p.ip == paddr.ip && p.port == paddr.port) {
+                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                        &ip_str,
+                        addr.port(),
+                    );
+                    if !peer_addrs
+                        .iter()
+                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                    {
                         peer_addrs.push(paddr);
                     }
                 }
-                eprintln!("[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
-                         peer_addrs.len() - before, peer_addrs.len(), result.nodes_contacted);
+                eprintln!(
+                    "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
+                    peer_addrs.len() - before,
+                    peer_addrs.len(),
+                    result.nodes_contacted
+                );
             } else {
                 debug!("[BT] DHT find_peers returned no peers");
             }
@@ -406,7 +542,9 @@ impl Command for BtDownloadCommand {
 
         let enable_public_trackers = { self.group.read().await.options().enable_public_trackers };
         if enable_public_trackers && self.public_trackers.is_none() && peer_addrs.len() < 15 {
-            let ptl = std::sync::Arc::new(aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new());
+            let ptl = std::sync::Arc::new(
+                aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
+            );
             ptl.start_auto_update(
                 "https://cf.trackerslist.com/best.txt".to_string(),
                 std::time::Duration::from_secs(86400),
@@ -420,32 +558,48 @@ impl Command for BtDownloadCommand {
             let mut announced = 0usize;
 
             for url in http_urls.iter().take(10) {
-                match Self::announce_to_public_tracker(url, &info_hash_raw, &my_peer_id, total_size).await {
+                match Self::announce_to_public_tracker(url, &info_hash_raw, &my_peer_id, total_size)
+                    .await
+                {
                     Ok(peers) => {
                         announced += 1;
                         extra_peers.extend(peers);
                     }
-                    Err(e) => { debug!("[BT] Public tracker {} failed: {}", url, e); }
+                    Err(e) => {
+                        debug!("[BT] Public tracker {} failed: {}", url, e);
+                    }
                 }
             }
 
             if !extra_peers.is_empty() {
                 let before = peer_addrs.len();
                 for (ip, port) in extra_peers {
-                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port);
-                    if !peer_addrs.iter().any(|p| p.ip == paddr.ip && p.port == paddr.port) {
+                    let paddr =
+                        aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port);
+                    if !peer_addrs
+                        .iter()
+                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                    {
                         peer_addrs.push(paddr);
                     }
                 }
-                eprintln!("[BT] Public trackers discovered {} extra peers (announced to {} of {})",
-                         peer_addrs.len() - before, announced, http_urls.len());
+                eprintln!(
+                    "[BT] Public trackers discovered {} extra peers (announced to {} of {})",
+                    peer_addrs.len() - before,
+                    announced,
+                    http_urls.len()
+                );
             } else if announced > 0 {
                 debug!("[BT] Public trackers responded but no peers found");
             }
         }
 
         if peer_addrs.is_empty() {
-            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "No peers from tracker or DHT".into() }));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "No peers from tracker or DHT".into(),
+                },
+            ));
         }
 
         eprintln!("[BT] Connecting to {} peers...", peer_addrs.len());
@@ -467,7 +621,12 @@ impl Command for BtDownloadCommand {
 
             match conn_result {
                 Ok(mut conn) => {
-                    eprintln!("[BT] Connected to peer {}:{} (encrypted={})", addr.ip, addr.port, conn.is_encrypted());
+                    eprintln!(
+                        "[BT] Connected to peer {}:{} (encrypted={})",
+                        addr.ip,
+                        addr.port,
+                        conn.is_encrypted()
+                    );
                     conn.send_unchoke().await.ok();
                     conn.send_interested().await.ok();
 
@@ -479,38 +638,60 @@ impl Command for BtDownloadCommand {
 
                     eprintln!("[BT] Waiting for unchoke from {}:{}", addr.ip, addr.port);
                     for _ in 0..50 {
-                        match tokio::time::timeout(Duration::from_secs(5), conn.read_message()).await {
+                        match tokio::time::timeout(Duration::from_secs(5), conn.read_message())
+                            .await
+                        {
                             Ok(Ok(Some(msg))) => {
                                 use aria2_protocol::bittorrent::message::types::BtMessage;
-                                if matches!(msg, BtMessage::Unchoke) { 
+                                if matches!(msg, BtMessage::Unchoke) {
                                     eprintln!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
-                                    break; 
+                                    break;
                                 }
                                 eprintln!("[BT] Got message: {:?}", msg);
                             }
-                            Ok(Ok(None)) => { eprintln!("[BT] EOF from peer"); break; }
-                            Ok(Err(e)) => { eprintln!("[BT] Error reading from peer: {}", e); break; }
-                            Err(_) => { eprintln!("[BT] Timeout reading from peer"); break; }
+                            Ok(Ok(None)) => {
+                                eprintln!("[BT] EOF from peer");
+                                break;
+                            }
+                            Ok(Err(e)) => {
+                                eprintln!("[BT] Error reading from peer: {}", e);
+                                break;
+                            }
+                            Err(_) => {
+                                eprintln!("[BT] Timeout reading from peer");
+                                break;
+                            }
                         }
                     }
 
                     active_connections.push(conn);
                 }
-                Err(e) => { eprintln!("[BT] Failed to connect peer {}: {}", addr.ip, e); continue; }
+                Err(e) => {
+                    eprintln!("[BT] Failed to connect peer {}: {}", addr.ip, e);
+                    continue;
+                }
             }
         }
 
         eprintln!("[BT] Active connections: {}", active_connections.len());
         if active_connections.is_empty() {
-            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "All peer connections failed".into() }));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "All peer connections failed".into(),
+                },
+            ));
         }
 
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
-        let rate_limit = { let g = self.group.read().await; g.options().max_download_limit };
+        let rate_limit = {
+            let g = self.group.read().await;
+            g.options().max_download_limit
+        };
         let mut writer: Box<dyn DiskWriter> = match rate_limit {
-            Some(rate) if rate > 0 => {
-                Box::new(ThrottledWriter::new(raw_writer, RateLimiter::new(&RateLimiterConfig::new(Some(rate), None))))
-            }
+            Some(rate) if rate > 0 => Box::new(ThrottledWriter::new(
+                raw_writer,
+                RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)),
+            )),
             _ => Box::new(raw_writer),
         };
         let start_time = Instant::now();
@@ -530,11 +711,16 @@ impl Command for BtDownloadCommand {
         }
         piece_picker.set_frequencies_from_peers(&peer_tracker.piece_frequencies());
 
-        eprintln!("[BT] Piece selection strategy: RarestFirst, {} pieces total, {} peers tracked",
-                 num_pieces, peer_tracker.peer_count());
+        eprintln!(
+            "[BT] Piece selection strategy: RarestFirst, {} pieces total, {} peers tracked",
+            num_pieces,
+            peer_tracker.peer_count()
+        );
 
         loop {
-            if piece_picker.is_complete() { break; }
+            if piece_picker.is_complete() {
+                break;
+            }
 
             let remaining = piece_picker.remaining_count();
             let is_endgame = remaining > 0 && remaining <= ENDGAME_THRESHOLD;
@@ -548,7 +734,8 @@ impl Command for BtDownloadCommand {
             } else {
                 let all_ones_bf = vec![0xFFu8; ((num_pieces as usize) + 7) / 8];
                 piece_picker.select(&all_ones_bf, num_pieces as usize)
-            }.map(|v| v as usize);
+            }
+            .map(|v| v as usize);
 
             let next_piece_idx = match next_piece_idx {
                 Some(idx) => idx,
@@ -560,14 +747,18 @@ impl Command for BtDownloadCommand {
             };
 
             eprintln!("[BT] Downloading piece {}...", next_piece_idx);
-            let actual_piece_len = if next_piece_idx == num_pieces - 1 && total_size % piece_length as u64 != 0 {
-                (total_size % piece_length as u64) as u32
-            } else {
-                piece_length
-            };
+            let actual_piece_len =
+                if next_piece_idx == num_pieces - 1 && total_size % piece_length as u64 != 0 {
+                    (total_size % piece_length as u64) as u32
+                } else {
+                    piece_length
+                };
 
             let num_blocks = (actual_piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            eprintln!("[BT] Piece {} has {} blocks (size: {} bytes)", next_piece_idx, num_blocks, actual_piece_len);
+            eprintln!(
+                "[BT] Piece {} has {} blocks (size: {} bytes)",
+                next_piece_idx, num_blocks, actual_piece_len
+            );
             let mut piece_ok = false;
 
             for _retry in 0..MAX_RETRIES {
@@ -577,7 +768,11 @@ impl Command for BtDownloadCommand {
 
                 for block_idx in 0..num_blocks {
                     let offset = block_idx * BLOCK_SIZE;
-                    let len = if offset + BLOCK_SIZE > actual_piece_len { actual_piece_len - offset } else { BLOCK_SIZE };
+                    let len = if offset + BLOCK_SIZE > actual_piece_len {
+                        actual_piece_len - offset
+                    } else {
+                        BLOCK_SIZE
+                    };
 
                     let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
                         index: next_piece_idx as u32,
@@ -585,10 +780,15 @@ impl Command for BtDownloadCommand {
                         length: len,
                     };
 
-                    eprintln!("[BT] Requesting block {} offset={} len={}", block_idx, offset, len);
+                    eprintln!(
+                        "[BT] Requesting block {} offset={} len={}",
+                        block_idx, offset, len
+                    );
                     let mut got_block = false;
                     for conn in &mut active_connections {
-                        if conn.send_request(req.clone()).await.is_err() { continue; }
+                        if conn.send_request(req.clone()).await.is_err() {
+                            continue;
+                        }
 
                         match tokio::time::timeout(Duration::from_secs(3), async {
                             for _ in 0..10000 {
@@ -618,14 +818,17 @@ impl Command for BtDownloadCommand {
                         }
                     }
 
-                    if !got_block { 
+                    if !got_block {
                         eprintln!("[BT] Failed to get block {}", block_idx);
-                        break; 
+                        break;
                     }
                 }
 
                 if blocks_received == num_blocks {
-                    eprintln!("[BT] All blocks received for piece {}, verifying...", next_piece_idx);
+                    eprintln!(
+                        "[BT] All blocks received for piece {}, verifying...",
+                        next_piece_idx
+                    );
                     if piece_manager.verify_piece_hash(next_piece_idx as u32, &piece_data) {
                         eprintln!("[BT] Piece {} verified OK", next_piece_idx);
                         piece_manager.mark_piece_complete(next_piece_idx as u32);
@@ -638,16 +841,28 @@ impl Command for BtDownloadCommand {
                         piece_ok = true;
                         break;
                     } else {
-                        eprintln!("[BT] SHA1 mismatch on piece {}, retrying...", next_piece_idx);
+                        eprintln!(
+                            "[BT] SHA1 mismatch on piece {}, retrying...",
+                            next_piece_idx
+                        );
                     }
                 } else {
-                    eprintln!("[BT] Incomplete piece {}, received {}/{}", next_piece_idx, blocks_received, num_blocks);
+                    eprintln!(
+                        "[BT] Incomplete piece {}, received {}/{}",
+                        next_piece_idx, blocks_received, num_blocks
+                    );
                 }
             }
 
             if !piece_ok {
-                eprintln!("[BT] Piece {} failed after {} retries", next_piece_idx, MAX_RETRIES);
-                return Err(Aria2Error::Fatal(FatalError::Config(format!("Piece {} download failed after {} retries", next_piece_idx, MAX_RETRIES))));
+                eprintln!(
+                    "[BT] Piece {} failed after {} retries",
+                    next_piece_idx, MAX_RETRIES
+                );
+                return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                    "Piece {} download failed after {} retries",
+                    next_piece_idx, MAX_RETRIES
+                ))));
             }
 
             {
@@ -668,14 +883,29 @@ impl Command for BtDownloadCommand {
         eprintln!("[BT] Finalizing writer...");
         writer.finalize().await.ok();
         eprintln!("[BT] Writer finalized OK");
-        info!("BT download done: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+        info!(
+            "BT download done: {} ({} bytes)",
+            self.output_path.display(),
+            self.completed_bytes
+        );
 
         if self.seed_enabled && !active_connections.is_empty() {
-            eprintln!("[BT] Starting seeding phase with {} peers...", active_connections.len());
-            info!("Starting seeding phase with {} peers...", active_connections.len());
-            self.run_seeding_phase(active_connections, piece_length, num_pieces as u32).await?;
+            eprintln!(
+                "[BT] Starting seeding phase with {} peers...",
+                active_connections.len()
+            );
+            info!(
+                "Starting seeding phase with {} peers...",
+                active_connections.len()
+            );
+            self.run_seeding_phase(active_connections, piece_length, num_pieces as u32)
+                .await?;
         } else {
-            eprintln!("[BT] Skipping seeding (enabled={}, connections={})", self.seed_enabled, active_connections.len());
+            eprintln!(
+                "[BT] Skipping seeding (enabled={}, connections={})",
+                self.seed_enabled,
+                active_connections.len()
+            );
             for conn in &mut active_connections {
                 drop(conn);
             }
@@ -683,7 +913,11 @@ impl Command for BtDownloadCommand {
 
         let final_speed = {
             let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 { (self.completed_bytes as f64 / elapsed) as u64 } else { 0 }
+            if elapsed > 0.0 {
+                (self.completed_bytes as f64 / elapsed) as u64
+            } else {
+                0
+            }
         };
         {
             let mut g = self.group.write().await;
@@ -692,13 +926,19 @@ impl Command for BtDownloadCommand {
             g.complete().await?;
         }
 
-        info!("BT command done: downloaded={} uploaded={}", self.completed_bytes, self.total_uploaded);
+        info!(
+            "BT command done: downloaded={} uploaded={}",
+            self.completed_bytes, self.total_uploaded
+        );
 
         if let Some(ref engine) = self.dht_engine {
             if let Err(e) = engine.announce_peer(&info_hash_raw, 0).await {
                 warn!("[BT] DHT announce failed: {}", e);
             } else {
-                info!("[BT] DHT announce_peer sent for {}", meta.info_hash.as_hex());
+                info!(
+                    "[BT] DHT announce_peer sent for {}",
+                    meta.info_hash.as_hex()
+                );
             }
             engine.shutdown();
         }
@@ -707,7 +947,11 @@ impl Command for BtDownloadCommand {
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 { CommandStatus::Running } else { CommandStatus::Pending }
+        if self.completed_bytes > 0 {
+            CommandStatus::Running
+        } else {
+            CommandStatus::Pending
+        }
     }
 
     fn timeout(&self) -> Option<Duration> {
@@ -734,25 +978,36 @@ impl BtDownloadCommand {
             .build()
             .map_err(|e| format!("build client: {}", e))?;
 
-        let resp = client.get(&url)
-            .send().await
+        let resp = client
+            .get(&url)
+            .send()
+            .await
             .map_err(|e| format!("request failed: {}", e))?;
 
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
 
-        let body = resp.bytes().await
+        let body = resp
+            .bytes()
+            .await
             .map_err(|e| format!("read body: {}", e))?;
 
-        let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
-            .map_err(|e| format!("parse response: {}", e))?;
+        let tracker_resp =
+            aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
+                .map_err(|e| format!("parse response: {}", e))?;
 
         if tracker_resp.is_failure() {
-            return Err(tracker_resp.failure_reason.unwrap_or_else(|| "tracker failure".to_string()));
+            return Err(tracker_resp
+                .failure_reason
+                .unwrap_or_else(|| "tracker failure".to_string()));
         }
 
-        Ok(tracker_resp.peers.into_iter().map(|p| (p.ip, p.port)).collect())
+        Ok(tracker_resp
+            .peers
+            .into_iter()
+            .map(|p| (p.ip, p.port))
+            .collect())
     }
 }
 

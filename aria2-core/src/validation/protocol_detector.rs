@@ -1,4 +1,4 @@
-use crate::error::{Aria2Error, Result, FatalError};
+use crate::error::{Aria2Error, FatalError, Result};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputType {
@@ -43,7 +43,9 @@ fn looks_like_metalink(data: &[u8]) -> bool {
 pub fn detect(input: &str) -> Result<DetectedInput> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(Aria2Error::Fatal(FatalError::Config("Input is empty".into())));
+        return Err(Aria2Error::Fatal(FatalError::Config(
+            "Input is empty".into(),
+        )));
     }
 
     let lower = trimmed.to_lowercase();
@@ -85,15 +87,23 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
     }
 
     let path = std::path::Path::new(trimmed);
-    let filename = path.file_name()
+    let filename = path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(trimmed)
         .to_lowercase();
 
     if filename.ends_with(".torrent") {
-        let data = std::fs::read(path).map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Cannot read torrent file: {}", e))))?;
+        let data = std::fs::read(path).map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "Cannot read torrent file: {}",
+                e
+            )))
+        })?;
         if !looks_like_torrent(&data) {
-            return Err(Aria2Error::Fatal(FatalError::Config("File does not look like a valid .torrent (missing BEncode header)".into())));
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "File does not look like a valid .torrent (missing BEncode header)".into(),
+            )));
         }
         return Ok(DetectedInput {
             input_type: InputType::TorrentFile,
@@ -102,10 +112,20 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
         });
     }
 
-    if filename.ends_with(".metalink") || filename.ends_with(".meta4") || filename.ends_with(".meta4") {
-        let data = std::fs::read(path).map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Cannot read metalink file: {}", e))))?;
+    if filename.ends_with(".metalink")
+        || filename.ends_with(".meta4")
+        || filename.ends_with(".meta4")
+    {
+        let data = std::fs::read(path).map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "Cannot read metalink file: {}",
+                e
+            )))
+        })?;
         if !looks_like_metalink(&data) {
-            return Err(Aria2Error::Fatal(FatalError::Config("File does not look like a valid metalink XML".into())));
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "File does not look like a valid metalink XML".into(),
+            )));
         }
         return Ok(DetectedInput {
             input_type: InputType::MetalinkFile,
@@ -115,7 +135,9 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
     }
 
     if path.exists() {
-        let data = std::fs::read(path).map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Cannot read file: {}", e))))?;
+        let data = std::fs::read(path).map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!("Cannot read file: {}", e)))
+        })?;
         if looks_like_torrent(&data) {
             return Ok(DetectedInput {
                 input_type: InputType::TorrentFile,
@@ -140,7 +162,9 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
         });
     }
 
-    Err(Aria2Error::Fatal(FatalError::Config(format!("Cannot detect input type for: {}", trimmed).into())))
+    Err(Aria2Error::Fatal(FatalError::Config(
+        format!("Cannot detect input type for: {}", trimmed).into(),
+    )))
 }
 
 #[cfg(test)]

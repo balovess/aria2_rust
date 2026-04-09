@@ -1,21 +1,23 @@
+use async_trait::async_trait;
+use futures::StreamExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use async_trait::async_trait;
-use tracing::{info, debug, warn, error};
-use futures::StreamExt;
+use tracing::{debug, error, info, warn};
 
-use crate::error::{Aria2Error, Result, RecoverableError};
 use crate::engine::command::{Command, CommandStatus};
-use crate::engine::http_segment_downloader::HttpSegmentDownloader;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
+use crate::engine::http_segment_downloader::HttpSegmentDownloader;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
-use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter, CachedDiskWriter, SeekableDiskWriter};
+use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::disk_writer::{
+    CachedDiskWriter, DefaultDiskWriter, DiskWriter, SeekableDiskWriter,
+};
 use crate::filesystem::file_allocation;
 use crate::filesystem::resume_helper::{ResumeHelper, ResumeState};
-use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::http::cookie::Cookie;
 use crate::http::cookie_storage::CookieStorage;
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 const CONCURRENT_MIN_FILE_SIZE: u64 = 1024 * 1024;
 
@@ -68,8 +70,12 @@ impl DownloadCommand {
             }
         }
 
-        let client = builder.build()
-            .map_err(|e| Aria2Error::Fatal(crate::error::FatalError::Config(format!("创建HTTP客户端失败: {}", e))))?;
+        let client = builder.build().map_err(|e| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "创建HTTP客户端失败: {}",
+                e
+            )))
+        })?;
 
         let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
         info!("DownloadCommand 创建: {} -> {}", uri, path.display());
@@ -91,7 +97,9 @@ impl DownloadCommand {
             let domain = Self::extract_host(uri);
             for pair in cookies_str.split(';') {
                 let pair = pair.trim();
-                if pair.is_empty() { continue; }
+                if pair.is_empty() {
+                    continue;
+                }
                 if let Some((name, value)) = pair.split_once('=') {
                     let name = name.trim();
                     let value = value.trim();
@@ -122,9 +130,7 @@ impl DownloadCommand {
         uri.rsplit('/')
             .next()
             .filter(|s| !s.is_empty() && *s != "/")
-            .map(|s| {
-                s.split('?').next().unwrap_or(s).to_string()
-            })
+            .map(|s| s.split('?').next().unwrap_or(s).to_string())
     }
 
     fn extract_host(uri: &str) -> String {
@@ -153,8 +159,12 @@ impl DownloadCommand {
     }
 
     fn should_use_concurrent(&self, total_length: u64, supports_range: bool) -> bool {
-        if !supports_range { return false; }
-        if total_length < CONCURRENT_MIN_FILE_SIZE { return false; }
+        if !supports_range {
+            return false;
+        }
+        if total_length < CONCURRENT_MIN_FILE_SIZE {
+            return false;
+        }
 
         let split = { self.group.blocking_read().options().split.unwrap_or(1) };
         split > 1
@@ -167,7 +177,8 @@ impl DownloadCommand {
         total_length: u64,
     ) -> Result<()> {
         let url_parsed = reqwest::Url::parse(uri).ok();
-        let mut request = if let Some(range_header) = ResumeHelper::build_range_header(resume_state) {
+        let mut request = if let Some(range_header) = ResumeHelper::build_range_header(resume_state)
+        {
             debug!("断点续传: {}", range_header);
             self.client.get(uri).header("Range", range_header)
         } else {
@@ -184,8 +195,11 @@ impl DownloadCommand {
             }
         }
 
-        let response = request.send().await
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("HTTP请求失败: {}", e) }))?;
+        let response = request.send().await.map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("HTTP请求失败: {}", e),
+            })
+        })?;
 
         if let Some(ref url) = url_parsed {
             let domain = url.host_str().unwrap_or("");
@@ -203,9 +217,13 @@ impl DownloadCommand {
         let status = response.status();
         if !status.is_success() && status.as_u16() != 206 {
             if status.as_u16() >= 500 {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError { code: status.as_u16() }));
+                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
+                    code: status.as_u16(),
+                }));
             }
-            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(format!("HTTP错误: {}", status))));
+            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                format!("HTTP错误: {}", status),
+            )));
         }
 
         let resp_length = response.content_length().unwrap_or(0) as u64;
@@ -219,7 +237,11 @@ impl DownloadCommand {
             g.set_total_length(actual_total).await;
         }
 
-        let start_offset = if resume_state.should_resume { resume_state.start_offset } else { 0 };
+        let start_offset = if resume_state.should_resume {
+            resume_state.start_offset
+        } else {
+            0
+        };
         self.completed_bytes = start_offset;
         let rate_limit = { self.group.read().await.options().max_download_limit };
 
@@ -240,7 +262,11 @@ impl DownloadCommand {
         let mut last_completed = 0u64;
 
         while let Some(chunk) = stream.next().await {
-            let data: bytes::Bytes = chunk.map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?;
+            let data: bytes::Bytes = chunk.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: e.to_string(),
+                })
+            })?;
             writer.write(&data).await?;
             self.completed_bytes += data.len() as u64;
 
@@ -263,7 +289,11 @@ impl DownloadCommand {
 
         let final_speed = {
             let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 { (self.completed_bytes as f64 / elapsed) as u64 } else { 0 }
+            if elapsed > 0.0 {
+                (self.completed_bytes as f64 / elapsed) as u64
+            } else {
+                0
+            }
         };
         {
             let mut g = self.group.write().await;
@@ -272,43 +302,59 @@ impl DownloadCommand {
             g.complete().await?;
         }
 
-        info!("顺序下载完成: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+        info!(
+            "顺序下载完成: {} ({} bytes)",
+            self.output_path.display(),
+            self.completed_bytes
+        );
         self.save_cookies_if_configured();
         Ok(())
     }
 
-    async fn execute_concurrent_download(
-        &mut self,
-        uri: &str,
-        total_length: u64,
-    ) -> Result<()> {
+    async fn execute_concurrent_download(&mut self, uri: &str, total_length: u64) -> Result<()> {
         let options = self.group.read().await.options().clone();
         let split = options.split.unwrap_or(1) as usize;
         let max_conn = options.max_connection_per_server.unwrap_or(4) as usize;
         let seg_size = total_length / split as u64;
 
-        info!("并发下载启动: split={}, max_conn={}, segment_size={} bytes, total={}", split, max_conn, seg_size, total_length);
+        info!(
+            "并发下载启动: split={}, max_conn={}, segment_size={} bytes, total={}",
+            split, max_conn, seg_size, total_length
+        );
 
-        let mut manager = ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(seg_size));
+        let mut manager =
+            ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(seg_size));
         manager.set_max_connections_per_mirror(max_conn.min(split));
         manager.allocate_segments();
 
         let url_parsed = reqwest::Url::parse(uri).ok();
         let cookie_hdr = if let Some(ref url) = url_parsed {
             self.cookie_storage.to_header_string(
-                url.host_str().unwrap_or(""), url.path(), url.scheme() == "https"
+                url.host_str().unwrap_or(""),
+                url.path(),
+                url.scheme() == "https",
             )
-        } else { String::new() };
-        let cookie_hdr_for_spawn: Option<String> = if cookie_hdr.is_empty() { None } else { Some(cookie_hdr) };
+        } else {
+            String::new()
+        };
+        let cookie_hdr_for_spawn: Option<String> = if cookie_hdr.is_empty() {
+            None
+        } else {
+            Some(cookie_hdr)
+        };
 
         let mut writer = CachedDiskWriter::new(&self.output_path, Some(total_length), None);
 
-        let limiter = options.max_download_limit.filter(|&r| r > 0).map(|r| {
-            RateLimiter::new(&RateLimiterConfig::new(Some(r), None))
-        });
+        let limiter = options
+            .max_download_limit
+            .filter(|&r| r > 0)
+            .map(|r| RateLimiter::new(&RateLimiterConfig::new(Some(r), None)));
 
         let start_time = Instant::now();
-        let mut active_handles: std::collections::HashMap<u32, tokio::task::JoinHandle<std::result::Result<Vec<u8>, String>>> = std::collections::HashMap::new();
+        let mut active_handles: std::collections::HashMap<
+            u32,
+            tokio::task::JoinHandle<std::result::Result<Vec<u8>, String>>,
+        > = std::collections::HashMap::new();
 
         loop {
             while active_handles.len() < max_conn {
@@ -318,7 +364,8 @@ impl DownloadCommand {
                         let dl = HttpSegmentDownloader::new(&self.client);
                         let ch = cookie_hdr_for_spawn.clone();
                         let handle = tokio::spawn(async move {
-                            dl.download_range(&url, offset, length, ch.as_deref()).await
+                            dl.download_range(&url, offset, length, ch.as_deref())
+                                .await
                                 .map_err(|e| e.to_string())
                         });
                         active_handles.insert(seg_idx, handle);
@@ -342,9 +389,13 @@ impl DownloadCommand {
                                 if let Some(ref lim) = limiter {
                                     lim.acquire_download(data.len() as u64).await;
                                 }
-                                if let Some((offset, _, _)) = manager.segment_info(seg_idx as usize) {
-                                    writer.write_at(offset, &data).await
-                                        .map_err(|e| Aria2Error::Fatal(crate::error::FatalError::Config(format!("写入失败: {}", e))))?;
+                                if let Some((offset, _, _)) = manager.segment_info(seg_idx as usize)
+                                {
+                                    writer.write_at(offset, &data).await.map_err(|e| {
+                                        Aria2Error::Fatal(crate::error::FatalError::Config(
+                                            format!("写入失败: {}", e),
+                                        ))
+                                    })?;
                                 } else {
                                     writer.write_at(0, &data).await.ok();
                                 }
@@ -372,20 +423,34 @@ impl DownloadCommand {
                 break;
             }
 
-            if manager.has_failed_segments() && !manager.has_pending_segments() && active_handles.is_empty() {
+            if manager.has_failed_segments()
+                && !manager.has_pending_segments()
+                && active_handles.is_empty()
+            {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure { message: "并发下载所有段均失败".into() }
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: "并发下载所有段均失败".into(),
+                    },
                 ));
             }
 
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        writer.flush().await.map_err(|e| Aria2Error::Fatal(crate::error::FatalError::Config(format!("flush 失败: {}", e))))?;
+        writer.flush().await.map_err(|e| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "flush 失败: {}",
+                e
+            )))
+        })?;
 
         let final_speed = {
             let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 { (self.completed_bytes as f64 / elapsed) as u64 } else { 0 }
+            if elapsed > 0.0 {
+                (self.completed_bytes as f64 / elapsed) as u64
+            } else {
+                0
+            }
         };
         {
             let mut g = self.group.write().await;
@@ -394,7 +459,11 @@ impl DownloadCommand {
             g.complete().await?;
         }
 
-        info!("并发下载完成: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+        info!(
+            "并发下载完成: {} ({} bytes)",
+            self.output_path.display(),
+            self.completed_bytes
+        );
         self.save_cookies_if_configured();
         Ok(())
     }
@@ -416,21 +485,29 @@ impl DownloadCommand {
                 }
             }
 
-            match self.execute_sequential_download(uri, resume_state, _total_length).await {
+            match self
+                .execute_sequential_download(uri, resume_state, _total_length)
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     warn!("顺序下载尝试 #{} 失败: {}", attempt + 1, e);
                     last_err = Some(e);
-                    if retry_policy.is_exhausted(attempt) || !retry_policy.should_retry_error(&format!("{:?}", last_err.as_ref().unwrap())) {
+                    if retry_policy.is_exhausted(attempt)
+                        || !retry_policy
+                            .should_retry_error(&format!("{:?}", last_err.as_ref().unwrap()))
+                    {
                         break;
                     }
                 }
             }
         }
 
-        Err(last_err.unwrap_or_else(|| Aria2Error::Recoverable(
-            RecoverableError::TemporaryNetworkFailure { message: "所有重试均失败".into() }
-        )))
+        Err(last_err.unwrap_or_else(|| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: "所有重试均失败".into(),
+            })
+        }))
     }
 
     async fn execute_concurrent_download_with_retry(
@@ -440,12 +517,16 @@ impl DownloadCommand {
         resume_state: &ResumeState,
         max_retries_per_segment: u32,
     ) -> Result<()> {
-        info!("使用并发模式下载 (split={}, max_retries/segment={})",
-             self.group.read().await.options().split.unwrap_or(1), max_retries_per_segment);
+        info!(
+            "使用并发模式下载 (split={}, max_retries/segment={})",
+            self.group.read().await.options().split.unwrap_or(1),
+            max_retries_per_segment
+        );
 
         let split = self.group.read().await.options().split.unwrap_or(1) as u64;
         let segment_size = (total_length + split - 1) / split;
-        let mut manager = ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(segment_size));
+        let mut manager =
+            ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(segment_size));
         manager.set_max_retries(max_retries_per_segment);
 
         if resume_state.should_resume {
@@ -457,15 +538,22 @@ impl DownloadCommand {
         while manager.has_pending_segments() || !manager.is_complete() {
             while let Some((seg_idx, offset, length)) = manager.next_pending_segment() {
                 let seg_idx_u32 = seg_idx as u32;
-                info!("启动段 {} 下载: offset={}, size={}", seg_idx, offset, length);
+                info!(
+                    "启动段 {} 下载: offset={}, size={}",
+                    seg_idx, offset, length
+                );
                 let downloader = HttpSegmentDownloader::new(&self.client);
                 let result = downloader.download_range(uri, offset, length, None).await;
 
                 match result {
                     Ok(data) => {
                         debug!("段 {} 完成: {} bytes", seg_idx, data.len());
-                        writer.write_at(offset, &data).await
-                            .map_err(|e| Aria2Error::Fatal(crate::error::FatalError::Config(format!("写入失败: {}", e))))?;
+                        writer.write_at(offset, &data).await.map_err(|e| {
+                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                                "写入失败: {}",
+                                e
+                            )))
+                        })?;
                         manager.complete_segment(seg_idx_u32, data);
                     }
                     Err(e) => {
@@ -479,19 +567,28 @@ impl DownloadCommand {
                 g.update_progress(self.completed_bytes).await;
             }
 
-            if manager.is_complete() { break; }
+            if manager.is_complete() {
+                break;
+            }
 
             if manager.has_permanently_failed_segments() {
                 error!("存在永久失败的下载段");
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure { message: "部分下载段永久失败".into() }
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: "部分下载段永久失败".into(),
+                    },
                 ));
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        writer.flush().await.map_err(|e| Aria2Error::Fatal(crate::error::FatalError::Config(format!("flush 失败: {}", e))))?;
+        writer.flush().await.map_err(|e| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "flush 失败: {}",
+                e
+            )))
+        })?;
         self.completed_bytes = manager.completed_bytes();
         let mut g = self.group.write().await;
         g.set_total_length(self.completed_bytes).await;
@@ -514,24 +611,34 @@ impl Command for DownloadCommand {
         };
 
         if uri.is_empty() {
-            return Err(Aria2Error::Fatal(crate::error::FatalError::Config("下载URI为空".into())));
+            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                "下载URI为空".into(),
+            )));
         }
 
         debug!("开始下载: {} -> {}", uri, self.output_path.display());
 
         if let Some(parent) = self.output_path.parent() {
             if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| Aria2Error::Fatal(crate::error::FatalError::Config(format!("创建目录失败: {}", e))))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "创建目录失败: {}",
+                        e
+                    )))
+                })?;
             }
         }
 
         let url_for_head = reqwest::Url::parse(&uri).ok();
         let cookie_hdr_head = if let Some(ref url) = url_for_head {
             self.cookie_storage.to_header_string(
-                url.host_str().unwrap_or(""), url.path(), url.scheme() == "https"
+                url.host_str().unwrap_or(""),
+                url.path(),
+                url.scheme() == "https",
             )
-        } else { String::new() };
+        } else {
+            String::new()
+        };
         let mut head_req = self.client.head(&uri);
         if !cookie_hdr_head.is_empty() {
             head_req = head_req.header("Cookie", &cookie_hdr_head);
@@ -539,7 +646,11 @@ impl Command for DownloadCommand {
         let head_resp = head_req.send().await.ok();
         let (total_length, supports_range) = if let Some(ref resp) = head_resp {
             let tl = resp.content_length().unwrap_or(0);
-            let sr = resp.headers().get("Accept-Ranges").and_then(|v| v.to_str().ok()).map_or(false, |v| v.to_lowercase().contains("bytes"));
+            let sr = resp
+                .headers()
+                .get("Accept-Ranges")
+                .and_then(|v| v.to_str().ok())
+                .map_or(false, |v| v.to_lowercase().contains("bytes"));
             (tl, sr)
         } else {
             (0, false)
@@ -549,7 +660,11 @@ impl Command for DownloadCommand {
         let resume_state = resume_helper.detect(total_length).await?;
 
         if resume_state.is_complete {
-            info!("文件已完整存在，跳过下载: {} ({} bytes)", self.output_path.display(), resume_state.existing_length);
+            info!(
+                "文件已完整存在，跳过下载: {} ({} bytes)",
+                self.output_path.display(),
+                resume_state.existing_length
+            );
             self.completed_bytes = resume_state.existing_length;
             let mut g = self.group.write().await;
             g.set_total_length(self.completed_bytes).await;
@@ -559,26 +674,50 @@ impl Command for DownloadCommand {
         }
 
         if total_length > 0 {
-            file_allocation::preallocate_file(&self.output_path, total_length, &self.file_allocation).await?;
+            file_allocation::preallocate_file(
+                &self.output_path,
+                total_length,
+                &self.file_allocation,
+            )
+            .await?;
         }
 
         let options = self.group.read().await.options().clone();
 
         if self.should_use_concurrent(total_length, supports_range) {
             if resume_state.should_resume {
-                info!("并发模式 + 断点续传: 已有 {} bytes, 从偏移 {} 继续",
-                     resume_state.existing_length, resume_state.start_offset);
+                info!(
+                    "并发模式 + 断点续传: 已有 {} bytes, 从偏移 {} 继续",
+                    resume_state.existing_length, resume_state.start_offset
+                );
             }
             let max_retries = options.max_retries;
-            return self.execute_concurrent_download_with_retry(&uri, total_length, &resume_state, max_retries).await;
+            return self
+                .execute_concurrent_download_with_retry(
+                    &uri,
+                    total_length,
+                    &resume_state,
+                    max_retries,
+                )
+                .await;
         }
 
         let retry_policy = RetryPolicy::new(options.max_retries, options.retry_wait * 1000);
-        self.execute_sequential_download_with_retry(&uri, &resume_state, total_length, &retry_policy).await
+        self.execute_sequential_download_with_retry(
+            &uri,
+            &resume_state,
+            total_length,
+            &retry_policy,
+        )
+        .await
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 { CommandStatus::Running } else { CommandStatus::Pending }
+        if self.completed_bytes > 0 {
+            CommandStatus::Running
+        } else {
+            CommandStatus::Pending
+        }
     }
 
     fn timeout(&self) -> Option<Duration> {

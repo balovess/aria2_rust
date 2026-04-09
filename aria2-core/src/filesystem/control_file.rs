@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use crate::error::{Aria2Error, Result};
+use std::path::{Path, PathBuf};
 
 const CONTROL_MAGIC: &[u8; 4] = b"A2CF";
 const CONTROL_VERSION: u16 = 1;
@@ -19,15 +19,25 @@ pub struct ControlFile {
 }
 
 impl ControlFile {
-    pub fn path(&self) -> &Path { &self.path }
-    pub fn total_length(&self) -> u64 { self.total_length }
-    pub fn completed_length(&self) -> u64 { self.completed_length }
-    pub fn bitfield(&self) -> &[u8] { &self.bitfield }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn total_length(&self) -> u64 {
+        self.total_length
+    }
+    pub fn completed_length(&self) -> u64 {
+        self.completed_length
+    }
+    pub fn bitfield(&self) -> &[u8] {
+        &self.bitfield
+    }
     pub fn set_checksum(&mut self, algo: u8, value: Vec<u8>) {
         self.checksum_algo = algo;
         self.checksum_value = value;
     }
-    pub fn checksum_algo(&self) -> u8 { self.checksum_algo }
+    pub fn checksum_algo(&self) -> u8 {
+        self.checksum_algo
+    }
 
     pub async fn open_or_create(
         ctrl_path: &Path,
@@ -35,9 +45,9 @@ impl ControlFile {
         num_pieces: usize,
     ) -> Result<Self> {
         if ctrl_path.exists() {
-            Self::load(ctrl_path).await?.ok_or_else(|| {
-                Aria2Error::Io(format!("无法加载控制文件: {}", ctrl_path.display()))
-            })
+            Self::load(ctrl_path)
+                .await?
+                .ok_or_else(|| Aria2Error::Io(format!("无法加载控制文件: {}", ctrl_path.display())))
         } else {
             let bitfield_len = (num_pieces + 7) / 8;
             Ok(Self {
@@ -58,7 +68,8 @@ impl ControlFile {
             return Ok(None);
         }
 
-        let data = tokio::fs::read(path).await
+        let data = tokio::fs::read(path)
+            .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
         if data.len() < 8 {
@@ -147,13 +158,15 @@ impl ControlFile {
 
         let tmp_path = self.path.with_extension("aria2.tmp");
         {
-            tokio::fs::write(&tmp_path, &buf).await
+            tokio::fs::write(&tmp_path, &buf)
+                .await
                 .map_err(|e| Aria2Error::Io(e.to_string()))?;
             if let Ok(f) = tokio::fs::File::open(&tmp_path).await {
                 let _ = f.sync_all().await;
             }
         }
-        tokio::fs::rename(&tmp_path, &self.path).await
+        tokio::fs::rename(&tmp_path, &self.path)
+            .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
         Ok(())
     }
@@ -178,9 +191,7 @@ impl ControlFile {
     }
 
     pub fn completed_pieces(&self) -> usize {
-        self.bitfield.iter()
-            .map(|b| b.count_ones() as usize)
-            .sum()
+        self.bitfield.iter().map(|b| b.count_ones() as usize).sum()
     }
 
     fn calculate_completed(&self) -> u64 {

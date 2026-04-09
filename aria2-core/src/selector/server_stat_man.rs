@@ -57,7 +57,9 @@ impl ServerStatMan {
 }
 
 impl Default for ServerStatMan {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

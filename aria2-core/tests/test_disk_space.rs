@@ -1,4 +1,6 @@
-use aria2_core::filesystem::disk_space::{available_space, has_enough_space, check_with_margin, total_space};
+use aria2_core::filesystem::disk_space::{
+    available_space, check_with_margin, has_enough_space, total_space,
+};
 use tempfile::TempDir;
 
 #[test]

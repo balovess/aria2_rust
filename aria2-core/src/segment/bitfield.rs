@@ -37,11 +37,12 @@ impl Bitfield {
 
     pub fn set(&mut self, index: usize) -> Result<()> {
         if index >= self.num_bits {
-            return Err(Aria2Error::DownloadFailed(
-                format!("Bitfield索引超出范围: {} >= {}", index, self.num_bits)
-            ));
+            return Err(Aria2Error::DownloadFailed(format!(
+                "Bitfield索引超出范围: {} >= {}",
+                index, self.num_bits
+            )));
         }
-        
+
         let byte_index = index / 8;
         let bit_offset = index % 8;
         self.bits[byte_index] |= 1 << (7 - bit_offset);
@@ -50,11 +51,12 @@ impl Bitfield {
 
     pub fn unset(&mut self, index: usize) -> Result<()> {
         if index >= self.num_bits {
-            return Err(Aria2Error::DownloadFailed(
-                format!("Bitfield索引超出范围: {} >= {}", index, self.num_bits)
-            ));
+            return Err(Aria2Error::DownloadFailed(format!(
+                "Bitfield索引超出范围: {} >= {}",
+                index, self.num_bits
+            )));
         }
-        
+
         let byte_index = index / 8;
         let bit_offset = index % 8;
         self.bits[byte_index] &= !(1 << (7 - bit_offset));
@@ -65,7 +67,7 @@ impl Bitfield {
         if index >= self.num_bits {
             return false;
         }
-        
+
         let byte_index = index / 8;
         let bit_offset = index % 8;
         (self.bits[byte_index] & (1 << (7 - bit_offset))) != 0
@@ -74,13 +76,13 @@ impl Bitfield {
     pub fn is_all_set(&self) -> bool {
         let full_bytes = self.num_bits / 8;
         let remaining_bits = self.num_bits % 8;
-        
+
         for i in 0..full_bytes {
             if self.bits[i] != 0xFF {
                 return false;
             }
         }
-        
+
         if remaining_bits > 0 {
             let mask = ((1u8 << remaining_bits) - 1) << (8 - remaining_bits);
             self.bits[full_bytes] == mask

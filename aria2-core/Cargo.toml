@@ -5,7 +5,13 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core library for aria2-rust: download engine, config system, request management, filesystem I/O, and console UI"
+description = "High-performance download engine core library with multi-protocol support (HTTP/HTTPS, FTP/SFTP, BitTorrent, Metalink)"
+documentation = "https://docs.rs/aria2-core"
+homepage = "https://github.com/balovess/aria2_rust"
+readme = "../README.md"
+keywords = ["download", "http", "ftp", "bittorrent", "aria2"]
+categories = ["network-programming", "web-programming"]
+include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [dependencies]
 tokio.workspace = true

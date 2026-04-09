@@ -42,9 +42,11 @@ impl JsonRpcError {
 
     pub fn message(&self) -> String {
         match self {
-            Self::ParseError(s) | Self::InvalidRequest(s) |
-            Self::MethodNotFound(s) | Self::InvalidParams(s) |
-            Self::InternalError(s) => s.clone(),
+            Self::ParseError(s)
+            | Self::InvalidRequest(s)
+            | Self::MethodNotFound(s)
+            | Self::InvalidParams(s)
+            | Self::InternalError(s) => s.clone(),
             Self::ServerError(_, s) => s.clone(),
         }
     }
@@ -55,7 +57,12 @@ impl JsonRpcError {
             message: self.message(),
             data: None,
         };
-        JsonRpcResponse { version: JSONRPC_VERSION.to_string(), id: id.unwrap_or(serde_json::Value::Null), result: None, error: Some(error) }
+        JsonRpcResponse {
+            version: JSONRPC_VERSION.to_string(),
+            id: id.unwrap_or(serde_json::Value::Null),
+            result: None,
+            error: Some(error),
+        }
     }
 }
 
@@ -71,7 +78,12 @@ pub struct JsonRpcRequest {
 
 impl JsonRpcRequest {
     pub fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
-        Self { version: Some(JSONRPC_VERSION.to_string()), method: method.into(), params, id: None }
+        Self {
+            version: Some(JSONRPC_VERSION.to_string()),
+            method: method.into(),
+            params,
+            id: None,
+        }
     }
 
     pub fn with_id(mut self, id: impl Into<serde_json::Value>) -> Self {
@@ -85,44 +97,74 @@ impl JsonRpcRequest {
 
     pub fn validate(&self) -> Result<(), JsonRpcError> {
         if self.method.is_empty() {
-            return Err(JsonRpcError::InvalidRequest("method is required".to_string()));
+            return Err(JsonRpcError::InvalidRequest(
+                "method is required".to_string(),
+            ));
         }
         if let Some(ref v) = self.version {
             if v != "2.0" {
-                return Err(JsonRpcError::InvalidRequest(format!("unsupported jsonrpc version: {}", v)));
+                return Err(JsonRpcError::InvalidRequest(format!(
+                    "unsupported jsonrpc version: {}",
+                    v
+                )));
             }
         }
         Ok(())
     }
 
-    pub fn get_param<T: serde::de::DeserializeOwned>(&self, index: usize) -> Result<T, JsonRpcError> {
+    pub fn get_param<T: serde::de::DeserializeOwned>(
+        &self,
+        index: usize,
+    ) -> Result<T, JsonRpcError> {
         match &self.params {
             serde_json::Value::Array(arr) if index < arr.len() => {
-                serde_json::from_value(arr[index].clone())
-                    .map_err(|e| JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, e)))
+                serde_json::from_value(arr[index].clone()).map_err(|e| {
+                    JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, e))
+                })
             }
             serde_json::Value::Object(map) => {
                 let key = format!("p{}", index);
                 map.get(&key)
                     .ok_or_else(|| JsonRpcError::InvalidParams(format!("param[{}] missing", index)))
-                    .and_then(|v| serde_json::from_value(v.clone()).map_err(|e| JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, e))))
+                    .and_then(|v| {
+                        serde_json::from_value(v.clone()).map_err(|e| {
+                            JsonRpcError::InvalidParams(format!(
+                                "param[{}] type error: {}",
+                                index, e
+                            ))
+                        })
+                    })
             }
-            _ => Err(JsonRpcError::InvalidParams(format!("param[{}] not found", index))),
+            _ => Err(JsonRpcError::InvalidParams(format!(
+                "param[{}] not found",
+                index
+            ))),
         }
     }
 
-    pub fn get_param_or_default<T: serde::de::DeserializeOwned + Default>(&self, index: usize) -> T {
+    pub fn get_param_or_default<T: serde::de::DeserializeOwned + Default>(
+        &self,
+        index: usize,
+    ) -> T {
         self.get_param::<T>(index).unwrap_or_default()
     }
 
-    pub fn get_param_by_name<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<T, JsonRpcError> {
+    pub fn get_param_by_name<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+    ) -> Result<T, JsonRpcError> {
         match &self.params {
-            serde_json::Value::Object(map) => {
-                map.get(name)
-                    .ok_or_else(|| JsonRpcError::InvalidParams(format!("param '{}' missing", name)))
-                    .and_then(|v| serde_json::from_value(v.clone()).map_err(|e| JsonRpcError::InvalidParams(format!("param '{}' type error: {}", name, e))))
-            }
-            _ => Err(JsonRpcError::InvalidParams("params must be an object for named parameters".to_string())),
+            serde_json::Value::Object(map) => map
+                .get(name)
+                .ok_or_else(|| JsonRpcError::InvalidParams(format!("param '{}' missing", name)))
+                .and_then(|v| {
+                    serde_json::from_value(v.clone()).map_err(|e| {
+                        JsonRpcError::InvalidParams(format!("param '{}' type error: {}", name, e))
+                    })
+                }),
+            _ => Err(JsonRpcError::InvalidParams(
+                "params must be an object for named parameters".to_string(),
+            )),
         }
     }
 }
@@ -148,7 +190,12 @@ pub struct JsonRpcResponse {
 
 impl JsonRpcResponse {
     pub fn success(id: impl Into<serde_json::Value>, result: impl Into<serde_json::Value>) -> Self {
-        Self { version: JSONRPC_VERSION.to_string(), id: id.into(), result: Some(result.into()), error: None }
+        Self {
+            version: JSONRPC_VERSION.to_string(),
+            id: id.into(),
+            result: Some(result.into()),
+            error: None,
+        }
     }
 
     pub fn error(id: impl Into<serde_json::Value>, code: i32, message: impl Into<String>) -> Self {
@@ -156,12 +203,20 @@ impl JsonRpcResponse {
             version: JSONRPC_VERSION.to_string(),
             id: id.into(),
             result: None,
-            error: Some(RpcErrorResponse { code, message: message.into(), data: None }),
+            error: Some(RpcErrorResponse {
+                code,
+                message: message.into(),
+                data: None,
+            }),
         }
     }
 
-    pub fn is_error(&self) -> bool { self.error.is_some() }
-    pub fn is_success(&self) -> bool { !self.is_error() }
+    pub fn is_error(&self) -> bool {
+        self.error.is_some()
+    }
+    pub fn is_success(&self) -> bool {
+        !self.is_error()
+    }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
@@ -185,8 +240,8 @@ impl JsonRpcBatchResponse {
 }
 
 pub fn parse_request(data: &[u8]) -> Result<Vec<JsonRpcRequest>, JsonRpcError> {
-    let parsed: serde_json::Value = serde_json::from_slice(data)
-        .map_err(|e| JsonRpcError::ParseError(e.to_string()))?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(data).map_err(|e| JsonRpcError::ParseError(e.to_string()))?;
 
     if let Ok(req) = serde_json::from_value::<JsonRpcRequest>(parsed.clone()) {
         req.validate()?;
@@ -195,7 +250,9 @@ pub fn parse_request(data: &[u8]) -> Result<Vec<JsonRpcRequest>, JsonRpcError> {
 
     if let Ok(batch) = serde_json::from_value::<Vec<JsonRpcRequest>>(parsed) {
         if batch.is_empty() {
-            return Err(JsonRpcError::InvalidRequest("batch request cannot be empty".to_string()));
+            return Err(JsonRpcError::InvalidRequest(
+                "batch request cannot be empty".to_string(),
+            ));
         }
         for req in &batch {
             req.validate()?;
@@ -203,13 +260,17 @@ pub fn parse_request(data: &[u8]) -> Result<Vec<JsonRpcRequest>, JsonRpcError> {
         return Ok(batch);
     }
 
-    Err(JsonRpcError::ParseError("invalid request format".to_string()))
+    Err(JsonRpcError::ParseError(
+        "invalid request format".to_string(),
+    ))
 }
 
 pub fn parse_single_request(data: &[u8]) -> Result<JsonRpcRequest, JsonRpcError> {
     let requests = parse_request(data)?;
     if requests.len() != 1 {
-        return Err(JsonRpcError::InvalidRequest("expected single request".to_string()));
+        return Err(JsonRpcError::InvalidRequest(
+            "expected single request".to_string(),
+        ));
     }
     Ok(requests.into_iter().next().unwrap())
 }
@@ -229,7 +290,8 @@ mod tests {
 
     #[test]
     fn test_notification_no_id() {
-        let raw = r#"{"jsonrpc":"2.0","method":"aria2.onDownloadStart","params":[{"gid":"abc123"}]}"#;
+        let raw =
+            r#"{"jsonrpc":"2.0","method":"aria2.onDownloadStart","params":[{"gid":"abc123"}]}"#;
         let requests = parse_request(raw.as_bytes()).unwrap();
         assert!(requests[0].is_notification());
     }
@@ -272,7 +334,10 @@ mod tests {
 
     #[test]
     fn test_get_param_named() {
-        let req = JsonRpcRequest::new("test", serde_json::json!({"uri": "http://example.com", "dir": "/tmp"}));
+        let req = JsonRpcRequest::new(
+            "test",
+            serde_json::json!({"uri": "http://example.com", "dir": "/tmp"}),
+        );
         let uri: String = req.get_param_by_name("uri").unwrap();
         let dir: String = req.get_param_by_name("dir").unwrap();
         assert_eq!(uri, "http://example.com");
@@ -328,8 +393,7 @@ mod tests {
 
     #[test]
     fn test_builder_pattern() {
-        let req = JsonRpcRequest::new("aria2.tellStatus", serde_json::json!(["abc"]))
-            .with_id(5);
+        let req = JsonRpcRequest::new("aria2.tellStatus", serde_json::json!(["abc"])).with_id(5);
         assert_eq!(req.method, "aria2.tellStatus");
         assert_eq!(req.id, Some(serde_json::json!(5)));
     }

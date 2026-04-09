@@ -51,43 +51,82 @@ pub struct DownloadEvent {
 
 impl DownloadEvent {
     pub fn new(event_type: EventType, params: Vec<serde_json::Value>) -> Self {
-        Self { version: "2.0".to_string(), method: event_type.method_name().to_string(), params }
+        Self {
+            version: "2.0".to_string(),
+            method: event_type.method_name().to_string(),
+            params,
+        }
     }
 
-    pub fn event_type(&self) -> Option<EventType> { EventType::from_method(&self.method) }
-    pub fn method(&self) -> &str { &self.method }
-    pub fn params(&self) -> &[serde_json::Value] { &self.params }
+    pub fn event_type(&self) -> Option<EventType> {
+        EventType::from_method(&self.method)
+    }
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+    pub fn params(&self) -> &[serde_json::Value] {
+        &self.params
+    }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
     pub fn download_start(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(EventType::DownloadStart, vec![serde_json::json!({"gid": gid.into(), "files": files})])
+        Self::new(
+            EventType::DownloadStart,
+            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+        )
     }
 
     pub fn download_complete(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(EventType::DownloadComplete, vec![serde_json::json!({"gid": gid.into(), "files": files})])
+        Self::new(
+            EventType::DownloadComplete,
+            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+        )
     }
 
-    pub fn download_error(gid: impl Into<String>, error_code: i32, files: Vec<serde_json::Value>) -> Self {
-        Self::new(EventType::DownloadError, vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})])
+    pub fn download_error(
+        gid: impl Into<String>,
+        error_code: i32,
+        files: Vec<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            EventType::DownloadError,
+            vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})],
+        )
     }
 
     pub fn download_pause(gid: impl Into<String>) -> Self {
-        Self::new(EventType::DownloadPause, vec![serde_json::json!({"gid": gid.into()})])
+        Self::new(
+            EventType::DownloadPause,
+            vec![serde_json::json!({"gid": gid.into()})],
+        )
     }
 
     pub fn download_stop(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(EventType::DownloadStop, vec![serde_json::json!({"gid": gid.into(), "files": files})])
+        Self::new(
+            EventType::DownloadStop,
+            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+        )
     }
 
     pub fn bt_download_complete(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(EventType::BtDownloadComplete, vec![serde_json::json!({"gid": gid.into(), "files": files})])
+        Self::new(
+            EventType::BtDownloadComplete,
+            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+        )
     }
 
-    pub fn bt_download_error(gid: impl Into<String>, error_code: i32, files: Vec<serde_json::Value>) -> Self {
-        Self::new(EventType::BtDownloadError, vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})])
+    pub fn bt_download_error(
+        gid: impl Into<String>,
+        error_code: i32,
+        files: Vec<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            EventType::BtDownloadError,
+            vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})],
+        )
     }
 }
 
@@ -107,13 +146,26 @@ pub struct EventPublisher {
 impl EventPublisher {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
-        Self { tx, subscribers: Arc::new(RwLock::new(HashMap::new())) }
+        Self {
+            tx,
+            subscribers: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
-    pub async fn subscribe(&self, sub_id: impl Into<String>, filter: Option<Vec<EventType>>) -> broadcast::Receiver<(EventType, DownloadEvent)> {
+    pub async fn subscribe(
+        &self,
+        sub_id: impl Into<String>,
+        filter: Option<Vec<EventType>>,
+    ) -> broadcast::Receiver<(EventType, DownloadEvent)> {
         let mut subs = self.subscribers.write().await;
         let id = sub_id.into();
-        subs.insert(id.clone(), Subscriber { id: id.clone(), filter });
+        subs.insert(
+            id.clone(),
+            Subscriber {
+                id: id.clone(),
+                filter,
+            },
+        );
         self.tx.subscribe()
     }
 
@@ -143,7 +195,9 @@ impl EventPublisher {
 }
 
 impl Default for EventPublisher {
-    fn default() -> Self { Self::new(256) }
+    fn default() -> Self {
+        Self::new(256)
+    }
 }
 
 pub struct WsSession {
@@ -156,7 +210,9 @@ impl WsSession {
         Self { id: id.into(), rx }
     }
 
-    pub fn id(&self) -> &str { &self.id }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 
     pub async fn recv(&mut self) -> Option<(EventType, DownloadEvent)> {
         self.rx.recv().await.ok()
@@ -169,9 +225,18 @@ mod tests {
 
     #[test]
     fn test_event_type_method_names() {
-        assert_eq!(EventType::DownloadStart.method_name(), "aria2.onDownloadStart");
-        assert_eq!(EventType::DownloadComplete.method_name(), "aria2.onDownloadComplete");
-        assert_eq!(EventType::DownloadError.method_name(), "aria2.onDownloadError");
+        assert_eq!(
+            EventType::DownloadStart.method_name(),
+            "aria2.onDownloadStart"
+        );
+        assert_eq!(
+            EventType::DownloadComplete.method_name(),
+            "aria2.onDownloadComplete"
+        );
+        assert_eq!(
+            EventType::DownloadError.method_name(),
+            "aria2.onDownloadError"
+        );
     }
 
     #[test]
@@ -182,7 +247,8 @@ mod tests {
 
     #[test]
     fn test_download_event_creation() {
-        let event = DownloadEvent::download_start("abc123", vec![serde_json::json!({"path": "/file.iso"})]);
+        let event =
+            DownloadEvent::download_start("abc123", vec![serde_json::json!({"path": "/file.iso"})]);
         assert_eq!(event.event_type().unwrap(), EventType::DownloadStart);
         assert_eq!(event.method(), "aria2.onDownloadStart");
         assert_eq!(event.params().len(), 1);
@@ -252,6 +318,6 @@ mod tests {
     fn test_default_publisher() {
         use futures::future::FutureExt;
         let p = EventPublisher::default();
-        assert_eq!(p.subscriber_count().now_or_never().map(|c| c).unwrap(), 0);
+        assert_eq!(p.subscriber_count().now_or_never().unwrap(), 0);
     }
 }

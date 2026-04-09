@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::node::DhtNode;
@@ -51,12 +51,16 @@ fn compact_to_socket_addr(data: &[u8]) -> Option<std::net::SocketAddr> {
     if data.len() == 6 {
         let ip = std::net::Ipv4Addr::new(data[0], data[1], data[2], data[3]);
         let port = u16::from_be_bytes([data[4], data[5]]);
-        Some(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip, port)))
+        Some(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+            ip, port,
+        )))
     } else if data.len() == 18 {
         let octets: [u8; 16] = data[..16].try_into().ok()?;
         let ip = std::net::Ipv6Addr::from(octets);
         let port = u16::from_be_bytes([data[16], data[17]]);
-        Some(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(ip, port, 0, 0)))
+        Some(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+            ip, port, 0, 0,
+        )))
     } else {
         None
     }
@@ -115,10 +119,24 @@ impl DhtPersistence {
         }
 
         let header_v3: [u8; 8] = [
-            DHT_MAGIC[0], DHT_MAGIC[1], DHT_FORMAT_ID, 0, 0, 0, 0, DHT_VERSION_3,
+            DHT_MAGIC[0],
+            DHT_MAGIC[1],
+            DHT_FORMAT_ID,
+            0,
+            0,
+            0,
+            0,
+            DHT_VERSION_3,
         ];
         let header_v2: [u8; 8] = [
-            DHT_MAGIC[0], DHT_MAGIC[1], DHT_FORMAT_ID, 0, 0, 0, 0, DHT_VERSION_2,
+            DHT_MAGIC[0],
+            DHT_MAGIC[1],
+            DHT_FORMAT_ID,
+            0,
+            0,
+            0,
+            0,
+            DHT_VERSION_2,
         ];
 
         let version = if &data[..8] == &header_v3[..] {
@@ -132,32 +150,63 @@ impl DhtPersistence {
         let mut offset = 8;
 
         let saved_at_secs = if version >= 3 {
-            if offset + 8 > data.len() { return Err("dht.dat 时间戳截断".into()); }
-            let ts = u64::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3],
-                data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
+            if offset + 8 > data.len() {
+                return Err("dht.dat 时间戳截断".into());
+            }
+            let ts = u64::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
+            ]);
             offset += 8;
             ts
         } else {
-            if offset + 8 > data.len() { return Err("dht.dat 时间戳截断 (v2)".into()); }
-            let ts32 = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as u64;
+            if offset + 8 > data.len() {
+                return Err("dht.dat 时间戳截断 (v2)".into());
+            }
+            let ts32 = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as u64;
             offset += 8;
             ts32
         };
 
-        if offset + 32 > data.len() { return Err("dht.dat localnode 截断".into()); }
+        if offset + 32 > data.len() {
+            return Err("dht.dat localnode 截断".into());
+        }
         offset += 8;
-        let self_id: [u8; 20] = data[offset..offset+20].try_into()
+        let self_id: [u8; 20] = data[offset..offset + 20]
+            .try_into()
             .map_err(|_| "dht.dat self_id 长度错误")?;
         offset += 20;
         offset += 4;
 
-        if offset + 8 > data.len() { return Err("dht.dat 节点计数截断".into()); }
-        let num_nodes = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+        if offset + 8 > data.len() {
+            return Err("dht.dat 节点计数截断".into());
+        }
+        let num_nodes = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
         offset += 8;
 
         let expected_end = offset + num_nodes * NODE_ENTRY_SIZE;
         if expected_end > data.len() {
-            return Err(format!("dht.dat 节点数据截断: 需要 {} 字节，实际 {}", expected_end, data.len()));
+            return Err(format!(
+                "dht.dat 节点数据截断: 需要 {} 字节，实际 {}",
+                expected_end,
+                data.len()
+            ));
         }
 
         let mut nodes = Vec::with_capacity(num_nodes);
@@ -171,7 +220,9 @@ impl DhtPersistence {
                 continue;
             }
 
-            if offset + clen > data.len() { break; }
+            if offset + clen > data.len() {
+                break;
+            }
             let compact = &data[offset..offset + clen];
 
             if compact.iter().all(|&b| b == 0) {
@@ -191,8 +242,11 @@ impl DhtPersistence {
             let pad_remaining = 24 - clen;
             offset += pad_remaining;
 
-            if offset + 20 > data.len() { break; }
-            let id: [u8; 20] = data[offset..offset+20].try_into()
+            if offset + 20 > data.len() {
+                break;
+            }
+            let id: [u8; 20] = data[offset..offset + 20]
+                .try_into()
                 .map_err(|_| "dht.dat 节点 ID 长度错误")?;
             offset += 20;
             offset += 4;
@@ -200,7 +254,11 @@ impl DhtPersistence {
             nodes.push(PersistedNode { id, addr });
         }
 
-        Ok(DhtPersistedData { self_id, saved_at_secs, nodes })
+        Ok(DhtPersistedData {
+            self_id,
+            saved_at_secs,
+            nodes,
+        })
     }
 
     pub fn collect_good_nodes(rt: &RoutingTable) -> Vec<DhtNode> {
@@ -217,34 +275,56 @@ impl DhtPersistence {
         result
     }
 
-    pub async fn save_to_file(path: &Path, self_id: &[u8; 20], nodes: &[DhtNode]) -> Result<usize, String> {
+    pub async fn save_to_file(
+        path: &Path,
+        self_id: &[u8; 20],
+        nodes: &[DhtNode],
+    ) -> Result<usize, String> {
         let data = Self::serialize(self_id, nodes)?;
 
         let tmp_path = path.with_extension("dat.tmp");
-        tokio::fs::write(&tmp_path, &data).await
+        tokio::fs::write(&tmp_path, &data)
+            .await
             .map_err(|e| format!("写入临时文件失败 {}: {}", tmp_path.display(), e))?;
 
-        tokio::fs::rename(&tmp_path, path).await
-            .map_err(|e| format!("重命名失败 {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+        tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
+            format!(
+                "重命名失败 {} -> {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            )
+        })?;
 
         Ok(nodes.len())
     }
 
-    pub fn save_to_file_sync(path: &Path, self_id: &[u8; 20], nodes: &[DhtNode]) -> Result<usize, String> {
+    pub fn save_to_file_sync(
+        path: &Path,
+        self_id: &[u8; 20],
+        nodes: &[DhtNode],
+    ) -> Result<usize, String> {
         let data = Self::serialize(self_id, nodes)?;
 
         let tmp_path = path.with_extension("dat.tmp");
         std::fs::write(&tmp_path, &data)
             .map_err(|e| format!("写入临时文件失败 {}: {}", tmp_path.display(), e))?;
 
-        std::fs::rename(&tmp_path, path)
-            .map_err(|e| format!("重命名失败 {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            format!(
+                "重命名失败 {} -> {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            )
+        })?;
 
         Ok(nodes.len())
     }
 
     pub async fn load_from_file(path: &Path) -> Result<DhtPersistedData, String> {
-        let data = tokio::fs::read(path).await
+        let data = tokio::fs::read(path)
+            .await
             .map_err(|e| format!("读取 dht.dat 失败 {}: {}", path.display(), e))?;
         Self::deserialize(&data)
     }
@@ -259,6 +339,7 @@ impl DhtPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_serialize_header_magic_and_version() {
@@ -312,7 +393,11 @@ mod tests {
 
         let num_nodes = u32::from_be_bytes([data[44], data[45], data[46], data[47]]);
         assert_eq!(num_nodes, 0);
-        assert_eq!(data.len(), 56, "empty table should be exactly 56 bytes (header+ts+localnode+count)");
+        assert_eq!(
+            data.len(),
+            56,
+            "empty table should be exactly 56 bytes (header+ts+localnode+count)"
+        );
     }
 
     #[test]
@@ -332,7 +417,9 @@ mod tests {
     #[test]
     fn test_deserialize_v2_compat() {
         let mut data = vec![0u8; 56];
-        data[0] = 0xA1; data[1] = 0xA2; data[2] = 0x02;
+        data[0] = 0xA1;
+        data[1] = 0xA2;
+        data[2] = 0x02;
         data[7] = 0x02;
         data[8..12].copy_from_slice(&(1000u32).to_be_bytes());
 
@@ -353,7 +440,9 @@ mod tests {
             "[2001:db8::1]:6882".parse().unwrap(),
             "10.0.0.1:6883".parse().unwrap(),
         ];
-        let nodes: Vec<DhtNode> = addrs.iter().enumerate()
+        let nodes: Vec<DhtNode> = addrs
+            .iter()
+            .enumerate()
             .map(|(i, a)| DhtNode::new([i as u8; 20], *a))
             .collect();
 
@@ -383,7 +472,9 @@ mod tests {
 
         let bad_addr = "127.0.0.1:6882".parse().unwrap();
         let mut bad_node = DhtNode::new([2u8; 20], bad_addr);
-        for _ in 0..3 { bad_node.record_failure(); }
+        for _ in 0..3 {
+            bad_node.record_failure();
+        }
 
         rt.insert(good_node);
         rt.insert(bad_node);
@@ -404,7 +495,9 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            DhtPersistence::save_to_file(&path, &self_id, &[node]).await.unwrap();
+            DhtPersistence::save_to_file(&path, &self_id, &[node])
+                .await
+                .unwrap();
 
             let loaded = DhtPersistence::load_from_file(&path).await.unwrap();
             assert_eq!(loaded.self_id, self_id);
@@ -420,9 +513,10 @@ mod tests {
         let mut nodes = Vec::new();
         for i in 0u8..20 {
             let octets = [192, 0, 1, i + 1];
-            let addr = std::net::SocketAddr::V4(
-                std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]), 6881 + i as u16)
-            );
+            let addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]),
+                6881 + i as u16,
+            ));
             nodes.push(DhtNode::new([i; 20], addr));
         }
 
@@ -455,7 +549,10 @@ mod tests {
     fn test_compact_to_socket_addr_ipv4() {
         let compact: Vec<u8> = vec![127, 0, 0, 1, 0x1A, 0x0B];
         let addr = compact_to_socket_addr(&compact).unwrap();
-        assert_eq!(addr, "127.0.0.1:6667".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(
+            addr,
+            "127.0.0.1:6667".parse::<std::net::SocketAddr>().unwrap()
+        );
     }
 
     #[test]

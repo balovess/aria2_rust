@@ -20,8 +20,11 @@ pub struct SftpSession {
 impl SftpSession {
     pub async fn open(conn: &SshConnection) -> Result<Self, String> {
         debug!("initializing SFTP session...");
-        let sftp_box = Box::new(conn.session().sftp()
-            .map_err(|e| format!("SFTP subsystem init failed: {}", e))?);
+        let sftp_box = Box::new(
+            conn.session()
+                .sftp()
+                .map_err(|e| format!("SFTP subsystem init failed: {}", e))?,
+        );
 
         // ssh2 0.9 Sftp does not expose server_version(); assume v3-v6 support
         let version = 3u32;

@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::error::{Aria2Error, Result};
+use async_trait::async_trait;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,13 +14,13 @@ pub enum CommandStatus {
 #[async_trait]
 pub trait Command: Send + Sync {
     async fn execute(&mut self) -> Result<()>;
-    
+
     fn status(&self) -> CommandStatus;
-    
+
     fn priority(&self) -> u32 {
         0
     }
-    
+
     fn timeout(&self) -> Option<Duration> {
         None
     }

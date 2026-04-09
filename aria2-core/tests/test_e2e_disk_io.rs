@@ -1,9 +1,9 @@
 mod fixtures {
     pub mod test_server;
 }
+use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use aria2_core::filesystem::file_allocation::{self, preallocate_file};
-use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::filesystem::resume_helper::ResumeHelper;
 
 #[tokio::test]
@@ -68,7 +68,9 @@ async fn test_preallocation_prealloc() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_prealloc.bin");
 
-    preallocate_file(&path, 1024 * 1024, "prealloc").await.unwrap();
+    preallocate_file(&path, 1024 * 1024, "prealloc")
+        .await
+        .unwrap();
 
     let metadata = tokio::fs::metadata(&path).await.unwrap();
     assert_eq!(metadata.len(), 1024 * 1024);

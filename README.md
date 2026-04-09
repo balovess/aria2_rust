@@ -49,7 +49,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/aria2/aria2-rust.git
+git clone https://github.com/balovess/aria2_rust.git
 cd aria2-rust
 
 # Build all crates

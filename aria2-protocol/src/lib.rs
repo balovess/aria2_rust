@@ -29,8 +29,8 @@
 //! - **[`sftp`]` *(feature: `sftp`)* — SFTP over SSH2 client: key/password auth,
 //!   file operations (stat/read/write/mkdir/rmdir/readdir/symlink), streaming transfer.
 
-pub mod http;
 pub mod ftp;
+pub mod http;
 
 #[cfg(feature = "bittorrent")]
 pub mod bittorrent;

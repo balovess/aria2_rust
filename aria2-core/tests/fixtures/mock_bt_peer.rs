@@ -17,7 +17,9 @@ impl MockBtPeerServer {
         torrent_metadata: Option<Vec<u8>>,
     ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = tokio::net::TcpListener::bind(addr).await.expect("绑定Mock Peer端口失败");
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("绑定Mock Peer端口失败");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -40,10 +42,15 @@ impl MockBtPeerServer {
             }
         });
 
-        MockBtPeerServer { addr: actual_addr, shutdown: Some(shutdown_tx) }
+        MockBtPeerServer {
+            addr: actual_addr,
+            shutdown: Some(shutdown_tx),
+        }
     }
 
-    pub fn addr(&self) -> SocketAddr { self.addr }
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
 
     async fn handle_peer(
         stream: &mut tokio::net::TcpStream,
@@ -54,12 +61,20 @@ impl MockBtPeerServer {
         const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
 
         let mut handshake_buf = [0u8; 68];
-        if stream.read_exact(&mut handshake_buf).await.is_err() { return; }
+        if stream.read_exact(&mut handshake_buf).await.is_err() {
+            return;
+        }
 
         let pstrlen = handshake_buf[0] as usize;
-        if pstrlen != 19 { return; }
-        if &handshake_buf[1..=19] != PROTOCOL_STR { return; }
-        if &handshake_buf[28..48] != expected_info_hash.as_slice() { return; }
+        if pstrlen != 19 {
+            return;
+        }
+        if &handshake_buf[1..=19] != PROTOCOL_STR {
+            return;
+        }
+        if &handshake_buf[28..48] != expected_info_hash.as_slice() {
+            return;
+        }
 
         let peer_id: [u8; 20] = rand::random();
         let mut response_hs = [0u8; 68];
@@ -87,14 +102,22 @@ impl MockBtPeerServer {
 
         loop {
             let mut len_buf = [0u8; 4];
-            if stream.read_exact(&mut len_buf).await.is_err() { break; }
+            if stream.read_exact(&mut len_buf).await.is_err() {
+                break;
+            }
             let msg_len = u32::from_be_bytes(len_buf);
 
-            if msg_len == 0 { continue; }
-            if msg_len > 131072 { break; }
+            if msg_len == 0 {
+                continue;
+            }
+            if msg_len > 131072 {
+                break;
+            }
 
             let mut payload = vec![0u8; msg_len as usize];
-            if stream.read_exact(&mut payload).await.is_err() { break; }
+            if stream.read_exact(&mut payload).await.is_err() {
+                break;
+            }
 
             match payload.first().copied() {
                 Some(2) => {
@@ -105,9 +128,12 @@ impl MockBtPeerServer {
                 Some(3) => {}
                 Some(6) => {
                     if payload.len() >= 13 {
-                        let index = u32::from_be_bytes(payload[1..5].try_into().unwrap_or([0u8; 4]));
-                        let begin = u32::from_be_bytes(payload[5..9].try_into().unwrap_or([0u8; 4]));
-                        let length = u32::from_be_bytes(payload[9..13].try_into().unwrap_or([0u8; 4]));
+                        let index =
+                            u32::from_be_bytes(payload[1..5].try_into().unwrap_or([0u8; 4]));
+                        let begin =
+                            u32::from_be_bytes(payload[5..9].try_into().unwrap_or([0u8; 4]));
+                        let length =
+                            u32::from_be_bytes(payload[9..13].try_into().unwrap_or([0u8; 4]));
 
                         let data = if (index as usize) < piece_data.len() {
                             let piece = &piece_data[index as usize];
@@ -171,27 +197,41 @@ fn build_extended_message(payload: &[u8]) -> Vec<u8> {
     buf
 }
 
-fn parse_bencode_from_slice(data: &[u8]) -> Option<std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>> {
+fn parse_bencode_from_slice(
+    data: &[u8],
+) -> Option<std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>> {
     use std::collections::BTreeMap;
 
     fn decode_value(data: &[u8], pos: usize) -> Option<(BencodeValueForMock, usize)> {
-        if pos >= data.len() { return None; }
+        if pos >= data.len() {
+            return None;
+        }
         match data[pos] {
             b'i' => {
-                let end = data[pos+1..].iter().position(|&c| c == b'e')? + pos + 1;
-                let num_str = std::str::from_utf8(&data[pos+1..end]).ok()?;
+                let end = data[pos + 1..].iter().position(|&c| c == b'e')? + pos + 1;
+                let num_str = std::str::from_utf8(&data[pos + 1..end]).ok()?;
                 let val: i64 = num_str.parse().ok()?;
                 Some((BencodeValueForMock::Int(val), end + 1))
             }
             b'0'..=b'9' => {
                 let colon_pos = data[pos..].iter().position(|&c| c == b':')? + pos;
-                let len: usize = std::str::from_utf8(&data[pos..colon_pos]).ok()?.parse().ok()?;
+                let len: usize = std::str::from_utf8(&data[pos..colon_pos])
+                    .ok()?
+                    .parse()
+                    .ok()?;
                 let end = colon_pos + 1 + len;
-                if end > data.len() { return None; }
-                Some((BencodeValueForMock::Bytes(data[colon_pos+1..end].to_vec()), end))
+                if end > data.len() {
+                    return None;
+                }
+                Some((
+                    BencodeValueForMock::Bytes(data[colon_pos + 1..end].to_vec()),
+                    end,
+                ))
             }
             b'l' => {
-                if data[pos+1] == b'e' { return Some((BencodeValueForMock::List(vec![]), pos + 2)); }
+                if data[pos + 1] == b'e' {
+                    return Some((BencodeValueForMock::List(vec![]), pos + 2));
+                }
                 let mut list = Vec::new();
                 let mut p = pos + 1;
                 while p < data.len() && data[p] != b'e' {
@@ -202,7 +242,9 @@ fn parse_bencode_from_slice(data: &[u8]) -> Option<std::collections::BTreeMap<Ve
                 Some((BencodeValueForMock::List(list), p + 1))
             }
             b'd' => {
-                if data[pos+1] == b'e' { return Some((BencodeValueForMock::Dict(BTreeMap::new()), pos + 2)); }
+                if data[pos + 1] == b'e' {
+                    return Some((BencodeValueForMock::Dict(BTreeMap::new()), pos + 2));
+                }
                 let mut dict = BTreeMap::new();
                 let mut p = pos + 1;
                 while p < data.len() && data[p] != b'e' {
@@ -214,7 +256,7 @@ fn parse_bencode_from_slice(data: &[u8]) -> Option<std::collections::BTreeMap<Ve
                 }
                 Some((BencodeValueForMock::Dict(dict), p + 1))
             }
-            _ => None
+            _ => None,
         }
     }
 
@@ -229,10 +271,16 @@ enum BencodeValueForMock {
 }
 impl BencodeValueForMock {
     fn into_bytes(self) -> Option<Vec<u8>> {
-        match self { Self::Bytes(b) => Some(b), _ => None }
+        match self {
+            Self::Bytes(b) => Some(b),
+            _ => None,
+        }
     }
     fn into_dict(self) -> Option<std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>> {
-        match self { Self::Dict(d) => Some(d), _ => None }
+        match self {
+            Self::Dict(d) => Some(d),
+            _ => None,
+        }
     }
 }
 
@@ -240,12 +288,24 @@ fn has_key(dict: &std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>, key:
     dict.iter().any(|(k, _)| k.as_slice() == key)
 }
 
-fn find_entry<'a>(dict: &'a std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>, key: &[u8]) -> Option<&'a BencodeValueForMock> {
-    dict.iter().find(|(k, _)| k.as_slice() == key).map(|(_, v)| v)
+fn find_entry<'a>(
+    dict: &'a std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>,
+    key: &[u8],
+) -> Option<&'a BencodeValueForMock> {
+    dict.iter()
+        .find(|(k, _)| k.as_slice() == key)
+        .map(|(_, v)| v)
 }
 
-fn handle_extension_message(dict: &std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>, metadata: &[u8]) -> Option<Vec<u8>> {
-    if find_entry(dict, b"msg_type").and_then(|v| match v { BencodeValueForMock::Int(i) => Some(*i), _ => None }) == Some(0) {
+fn handle_extension_message(
+    dict: &std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>,
+    metadata: &[u8],
+) -> Option<Vec<u8>> {
+    if find_entry(dict, b"msg_type").and_then(|v| match v {
+        BencodeValueForMock::Int(i) => Some(*i),
+        _ => None,
+    }) == Some(0)
+    {
         let piece_size = 16 * 1024;
         let total_size = metadata.len() as u64;
         let num_pieces = ((total_size + piece_size as u64 - 1) / piece_size as u64) as u32;
@@ -269,7 +329,9 @@ fn handle_extension_message(dict: &std::collections::BTreeMap<Vec<u8>, BencodeVa
         }
 
         let mut all = Vec::new();
-        for r in responses { all.extend(r); }
+        for r in responses {
+            all.extend(r);
+        }
         return Some(all);
     }
 
@@ -277,14 +339,20 @@ fn handle_extension_message(dict: &std::collections::BTreeMap<Vec<u8>, BencodeVa
     let mut m_dict = std::collections::BTreeMap::new();
     m_dict.insert(b"ut_metadata".to_vec(), BencodeValueForMock::Int(1));
     hs_dict.insert(b"m".to_vec(), BencodeValueForMock::Dict(m_dict));
-    hs_dict.insert(b"metadata_size".to_vec(), BencodeValueForMock::Int(metadata.len() as i64));
+    hs_dict.insert(
+        b"metadata_size".to_vec(),
+        BencodeValueForMock::Int(metadata.len() as i64),
+    );
 
     let mut encoded = Vec::new();
     encode_bencode_dict_for_mock(&hs_dict, &mut encoded);
     Some(build_extended_message(&encoded))
 }
 
-fn encode_bencode_dict_for_mock(dict: &std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>, out: &mut Vec<u8>) {
+fn encode_bencode_dict_for_mock(
+    dict: &std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>,
+    out: &mut Vec<u8>,
+) {
     out.push(b'd');
     for (k, v) in dict {
         let len_str = k.len().to_string();
@@ -299,15 +367,22 @@ fn encode_bencode_dict_for_mock(dict: &std::collections::BTreeMap<Vec<u8>, Benco
 fn encode_value_for_mock(val: &BencodeValueForMock, out: &mut Vec<u8>) {
     match val {
         BencodeValueForMock::Int(i) => {
-            out.push(b'i'); out.extend_from_slice(i.to_string().as_bytes()); out.push(b'e');
+            out.push(b'i');
+            out.extend_from_slice(i.to_string().as_bytes());
+            out.push(b'e');
         }
         BencodeValueForMock::Bytes(b) => {
             let len_str = b.len().to_string();
-            out.extend_from_slice(len_str.as_bytes()); out.push(b':');
+            out.extend_from_slice(len_str.as_bytes());
+            out.push(b':');
             out.extend_from_slice(b);
         }
         BencodeValueForMock::List(items) => {
-            out.push(b'l'); for item in items { encode_value_for_mock(item, out); } out.push(b'e');
+            out.push(b'l');
+            for item in items {
+                encode_value_for_mock(item, out);
+            }
+            out.push(b'e');
         }
         BencodeValueForMock::Dict(d) => {
             encode_bencode_dict_for_mock(d, out);
@@ -317,6 +392,8 @@ fn encode_value_for_mock(val: &BencodeValueForMock, out: &mut Vec<u8>) {
 
 impl Drop for MockBtPeerServer {
     fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() { let _ = tx.send(()); }
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
     }
 }

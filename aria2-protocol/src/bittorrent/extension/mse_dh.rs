@@ -1,6 +1,5 @@
 use num_bigint_dig::{BigUint, RandBigInt};
-use num_traits::{One, Zero, Num};
-use rand::Rng;
+use num_traits::{Num, Zero};
 
 pub const DH_P_1024_HEX: &str = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1\
 29024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374\
@@ -61,6 +60,7 @@ impl Default for DhKeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_traits::One;
 
     #[test]
     fn test_generate_keypair() {
@@ -102,8 +102,10 @@ mod tests {
             let pub_val = BigUint::from_bytes_be(&pair.public);
             let one: BigUint = One::one();
             let p = DhKeyPair::get_prime();
-            assert!(pub_val > one && pub_val < p,
-                "public key must be in range (1, p)");
+            assert!(
+                pub_val > one && pub_val < p,
+                "public key must be in range (1, p)"
+            );
         }
     }
 
@@ -111,6 +113,10 @@ mod tests {
     fn test_prime_constant_bit_length() {
         let p = DhKeyPair::get_prime();
         let bits = p.bits();
-        assert!(bits >= 1024, "DH prime must be at least 1024 bits, got {}", bits);
+        assert!(
+            bits >= 1024,
+            "DH prime must be at least 1024 bits, got {}",
+            bits
+        );
     }
 }

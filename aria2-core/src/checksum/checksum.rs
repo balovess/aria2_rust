@@ -1,5 +1,5 @@
-use crate::error::{Aria2Error, Result};
 use super::message_digest::{HashType, MessageDigest};
+use crate::error::{Aria2Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct Checksum {
@@ -112,7 +112,11 @@ mod tests {
         let cs = Checksum::from_type_and_value("md5", "d41d8cd98f00b204e9800998ecf8427e").unwrap();
         assert_eq!(cs.hash_type(), HashType::Md5);
 
-        let cs = Checksum::from_type_and_value("SHA-256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").unwrap();
+        let cs = Checksum::from_type_and_value(
+            "SHA-256",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .unwrap();
         assert_eq!(cs.hash_type(), HashType::Sha256);
     }
 
@@ -130,7 +134,11 @@ mod tests {
 
     #[test]
     fn test_validator_streaming_matches_one_shot() {
-        let cs = Checksum::new(HashType::Sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").unwrap();
+        let cs = Checksum::new(
+            HashType::Sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .unwrap();
 
         let mut validator = cs.create_validator();
         validator.update(b"a");

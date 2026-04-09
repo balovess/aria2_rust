@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 pub fn build_metalink_v3(
     filename: &str,
@@ -13,10 +13,16 @@ pub fn build_metalink_v3(
     xml.push_str(&format!("    <file name=\"{}\">\n", filename));
     xml.push_str(&format!("      <size>{}</size>\n", file_size));
     if !sha256_hash.is_empty() {
-        xml.push_str(&format!("      <hash type=\"sha-256\">{}</hash>\n", sha256_hash));
+        xml.push_str(&format!(
+            "      <hash type=\"sha-256\">{}</hash>\n",
+            sha256_hash
+        ));
     }
     for (url, priority) in urls {
-        xml.push_str(&format!("      <url priority=\"{}\">{}</url>\n", priority, url));
+        xml.push_str(&format!(
+            "      <url priority=\"{}\">{}</url>\n",
+            priority, url
+        ));
     }
     xml.push_str("    </file>\n");
     xml.push_str("  </files>\n");
@@ -37,10 +43,16 @@ pub fn build_metalink_v4(
     xml.push_str(&format!("  <file name=\"{}\">\n", filename));
     xml.push_str(&format!("    <size>{}</size>\n", file_size));
     if !sha256_hash.is_empty() {
-        xml.push_str(&format!("    <hash type=\"sha-256\">{}</hash>\n", sha256_hash));
+        xml.push_str(&format!(
+            "    <hash type=\"sha-256\">{}</hash>\n",
+            sha256_hash
+        ));
     }
     for (url, priority) in urls {
-        xml.push_str(&format!("    <url priority=\"{}\">{}</url>\n", priority, url));
+        xml.push_str(&format!(
+            "    <url priority=\"{}\">{}</url>\n",
+            priority, url
+        ));
     }
     xml.push_str("  </file>\n");
     xml.push_str("</metalink>\n");

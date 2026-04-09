@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 use aria2_core::config::ConfigManager;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::segment::bitfield::Bitfield;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_100_request_groups_concurrent_create() {
@@ -17,7 +17,9 @@ async fn test_100_request_groups_concurrent_create() {
             );
         }));
     }
-    for h in handles { let _ = h.await; }
+    for h in handles {
+        let _ = h.await;
+    }
 }
 
 #[tokio::test]
@@ -31,14 +33,17 @@ async fn test_config_manager_concurrent_read_write() {
         handles.push(tokio::spawn(async move {
             if i % 2 == 0 {
                 let mut m = mgr_clone.write().await;
-                let _ = m.set_global_option("split", aria2_core::config::OptionValue::Int(i as i64));
+                let _ =
+                    m.set_global_option("split", aria2_core::config::OptionValue::Int(i as i64));
             } else {
                 let m = mgr_clone.read().await;
                 let _ = m.get_global_i64("split").await;
             }
         }));
     }
-    for h in handles { let _ = h.await; }
+    for h in handles {
+        let _ = h.await;
+    }
 }
 
 #[test]
@@ -80,10 +85,7 @@ fn test_bitfield_concurrent_set_unset() {
 fn test_lifecycle_create_complete_remove() {
     for _ in 0..200 {
         let man = RequestGroupMan::new();
-        let gid = man.add_group(
-            vec!["http://example.com/f.zip".into()],
-            Default::default(),
-        );
+        let gid = man.add_group(vec!["http://example.com/f.zip".into()], Default::default());
         drop(gid);
         drop(man);
     }
@@ -97,7 +99,9 @@ fn test_hashmap_high_frequency_insert_lookup() {
     }
     let mut hits = 0u64;
     for i in 0..5000 {
-        if map.contains_key(&format!("key-{}", i)) { hits += 1; }
+        if map.contains_key(&format!("key-{}", i)) {
+            hits += 1;
+        }
     }
     assert_eq!(hits, 5000);
 }

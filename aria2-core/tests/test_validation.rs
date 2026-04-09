@@ -1,6 +1,8 @@
-use aria2_core::validation::uri::{validate, is_magnet_link, is_torrent_file, sanitize_filename_from_uri};
+use aria2_core::validation::filename::{make_unique, sanitize};
 use aria2_core::validation::option::*;
-use aria2_core::validation::filename::{sanitize, make_unique};
+use aria2_core::validation::uri::{
+    is_magnet_link, is_torrent_file, sanitize_filename_from_uri, validate,
+};
 
 #[test]
 fn test_validate_http_uri() {

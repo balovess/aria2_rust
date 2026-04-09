@@ -53,10 +53,16 @@ impl Hash for PieceBlockRequest {
 
 impl PieceBlockRequest {
     pub fn new(index: u32, begin: u32, length: u32) -> Self {
-        Self { index, begin, length }
+        Self {
+            index,
+            begin,
+            length,
+        }
     }
 
-    pub fn serialized_size() -> usize { 12 }
+    pub fn serialized_size() -> usize {
+        12
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,12 +72,26 @@ pub enum BtMessage {
     Unchoke,
     Interested,
     NotInterested,
-    Have { piece_index: u32 },
-    Bitfield { data: Vec<u8> },
-    Request { request: PieceBlockRequest },
-    Piece { index: u32, begin: u32, data: Vec<u8> },
-    Cancel { request: PieceBlockRequest },
-    Port { port: u16 },
+    Have {
+        piece_index: u32,
+    },
+    Bitfield {
+        data: Vec<u8>,
+    },
+    Request {
+        request: PieceBlockRequest,
+    },
+    Piece {
+        index: u32,
+        begin: u32,
+        data: Vec<u8>,
+    },
+    Cancel {
+        request: PieceBlockRequest,
+    },
+    Port {
+        port: u16,
+    },
 }
 
 impl BtMessage {
@@ -94,7 +114,10 @@ impl BtMessage {
     pub fn payload_size(&self) -> Option<usize> {
         match self {
             BtMessage::KeepAlive => None,
-            BtMessage::Choke | BtMessage::Unchoke | BtMessage::Interested | BtMessage::NotInterested => Some(1),
+            BtMessage::Choke
+            | BtMessage::Unchoke
+            | BtMessage::Interested
+            | BtMessage::NotInterested => Some(1),
             BtMessage::Have { .. } => Some(5),
             BtMessage::Bitfield { data } => Some(1 + data.len()),
             BtMessage::Request { .. } | BtMessage::Cancel { .. } => Some(13),

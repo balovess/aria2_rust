@@ -1,10 +1,10 @@
 mod fixtures {
     pub mod mock_ftp_server;
 }
-use fixtures::mock_ftp_server::{MockFtpServer, small_content, medium_pattern};
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 use aria2_core::engine::command::Command;
-use aria2_core::request::request_group::{GroupId, DownloadOptions};
+use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use fixtures::mock_ftp_server::{medium_pattern, small_content, MockFtpServer};
 use std::path::Path;
 
 async fn start_server() -> MockFtpServer {
@@ -28,13 +28,18 @@ async fn test_e2e_ftp_download_small_file() {
         &DownloadOptions::default(),
         dir.path().to_str(),
         None,
-    ).expect("创建FtpDownloadCommand失败");
+    )
+    .expect("创建FtpDownloadCommand失败");
 
     let result = cmd.execute().await;
     assert!(result.is_ok(), "FTP下载失败: {:?}", result.err());
 
     let output_path = Path::new(dir.path()).join("small.bin");
-    assert!(output_path.exists(), "输出文件不存在: {}", output_path.display());
+    assert!(
+        output_path.exists(),
+        "输出文件不存在: {}",
+        output_path.display()
+    );
 
     let data = std::fs::read(&output_path).expect("读取下载文件失败");
     assert_eq!(data, small_content(), "内容不匹配");
@@ -48,9 +53,13 @@ async fn test_e2e_ftp_download_medium_file() {
     let url = format!("ftp://127.0.0.1:{}/files/medium.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(2), &url, &DownloadOptions::default(),
-        dir.path().to_str(), None,
-    ).expect("创建FtpDownloadCommand失败");
+        GroupId::new(2),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("创建FtpDownloadCommand失败");
 
     cmd.execute().await.expect("FTP medium文件下载失败");
 
@@ -69,9 +78,13 @@ async fn test_e2e_ftp_download_large_file() {
     let url = format!("ftp://127.0.0.1:{}/files/large.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(3), &url, &DownloadOptions::default(),
-        dir.path().to_str(), None,
-    ).expect("创建FtpDownloadCommand失败");
+        GroupId::new(3),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("创建FtpDownloadCommand失败");
 
     cmd.execute().await.expect("FTP large文件下载失败");
 
@@ -89,14 +102,22 @@ async fn test_e2e_ftp_binary_mode_correctness() {
     let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(4), &url, &DownloadOptions::default(),
-        dir.path().to_str(), None,
-    ).unwrap();
+        GroupId::new(4),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .unwrap();
 
     cmd.execute().await.unwrap();
 
     let data = std::fs::read(dir.path().join("small.bin")).unwrap();
-    assert_eq!(data, &[0xDE, 0xAD, 0xBE, 0xEF], "二进制模式应保持原始字节不变");
+    assert_eq!(
+        data,
+        &[0xDE, 0xAD, 0xBE, 0xEF],
+        "二进制模式应保持原始字节不变"
+    );
 }
 
 #[tokio::test]
@@ -107,14 +128,22 @@ async fn test_e2e_ftp_550_not_found() {
     let url = format!("ftp://127.0.0.1:{}/files/notfound", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(5), &url, &DownloadOptions::default(),
-        dir.path().to_str(), None,
-    ).expect("创建FtpDownloadCommand失败");
+        GroupId::new(5),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("创建FtpDownloadCommand失败");
 
     let result = cmd.execute().await;
     assert!(result.is_err(), "550应返回错误");
     let err_msg = format!("{:?}", result.err());
-    assert!(err_msg.contains("FileNotFound") || err_msg.contains("not found"), "应为FileNotFound错误: {}", err_msg);
+    assert!(
+        err_msg.contains("FileNotFound") || err_msg.contains("not found"),
+        "应为FileNotFound错误: {}",
+        err_msg
+    );
 }
 
 #[tokio::test]
@@ -125,17 +154,28 @@ async fn test_e2e_ftp_request_group_progress_tracking() {
     let url = format!("ftp://127.0.0.1:{}/files/medium.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(6), &url, &DownloadOptions::default(),
-        dir.path().to_str(), None,
-    ).expect("创建FtpDownloadCommand失败");
+        GroupId::new(6),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("创建FtpDownloadCommand失败");
 
     let progress_before = cmd.group().await.progress().await;
-    assert!((progress_before - 0.0).abs() < f64::EPSILON, "下载前进度应为0");
+    assert!(
+        (progress_before - 0.0).abs() < f64::EPSILON,
+        "下载前进度应为0"
+    );
 
     cmd.execute().await.expect("FTP下载失败");
 
     let progress_after = cmd.group().await.progress().await;
-    assert!((progress_after - 100.0).abs() < 1.0, "下载后进度应接近100%, got: {}", progress_after);
+    assert!(
+        (progress_after - 100.0).abs() < 1.0,
+        "下载后进度应接近100%, got: {}",
+        progress_after
+    );
 
     let status = cmd.group().await.status().await;
     assert!(status.is_completed());
@@ -150,14 +190,22 @@ async fn test_e2e_ftp_custom_output_dir() {
     let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(7), &url, &DownloadOptions::default(),
-        subdir.to_str(), None,
-    ).expect("创建FtpDownloadCommand失败");
+        GroupId::new(7),
+        &url,
+        &DownloadOptions::default(),
+        subdir.to_str(),
+        None,
+    )
+    .expect("创建FtpDownloadCommand失败");
 
     cmd.execute().await.expect("FTP自定义目录下载失败");
 
     let output_path = subdir.join("small.bin");
-    assert!(output_path.exists(), "文件应在FTP子目录中: {}", output_path.display());
+    assert!(
+        output_path.exists(),
+        "文件应在FTP子目录中: {}",
+        output_path.display()
+    );
 }
 
 #[tokio::test]
@@ -168,15 +216,22 @@ async fn test_e2e_ftp_custom_output_filename() {
     let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(8), &url, &DownloadOptions::default(),
+        GroupId::new(8),
+        &url,
+        &DownloadOptions::default(),
         dir.path().to_str(),
         Some("ftp_download.dat".into()),
-    ).expect("创建FtpDownloadCommand失败");
+    )
+    .expect("创建FtpDownloadCommand失败");
 
     cmd.execute().await.expect("FTP自定义文件名下载失败");
 
     let output_path = Path::new(dir.path()).join("ftp_download.dat");
-    assert!(output_path.exists(), "自定义FTP名称文件不存在: {}", output_path.display());
+    assert!(
+        output_path.exists(),
+        "自定义FTP名称文件不存在: {}",
+        output_path.display()
+    );
 }
 
 #[tokio::test]
@@ -192,8 +247,11 @@ async fn test_e2e_ftp_concurrent_downloads() -> Result<(), Box<dyn std::error::E
             let addr = server.addr();
             let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
             let mut cmd = FtpDownloadCommand::new(
-                GroupId::new(20 + i), &url, &DownloadOptions::default(),
-                Some(&dp), None,
+                GroupId::new(20 + i),
+                &url,
+                &DownloadOptions::default(),
+                Some(&dp),
+                None,
             )?;
             cmd.execute().await
         }));
@@ -224,7 +282,8 @@ async fn test_raw_tcp_connectivity() {
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         reader.read_line(&mut line),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(Ok(n)) => println!("[DIAG] 读取到 {} bytes: {:?}", n, line.trim()),

@@ -29,10 +29,13 @@ impl TransactionManager {
         self.next_tx_id = self.next_tx_id.wrapping_add(1);
         let key = tx_id.to_be_bytes().to_vec();
 
-        self.transactions.insert(key.clone(), PendingTransaction {
-            created_at: Instant::now(),
-            callback: Box::new(callback),
-        });
+        self.transactions.insert(
+            key.clone(),
+            PendingTransaction {
+                created_at: Instant::now(),
+                callback: Box::new(callback),
+            },
+        );
 
         key
     }
@@ -49,9 +52,8 @@ impl TransactionManager {
 
     pub fn cleanup_expired(&mut self) -> usize {
         let before = self.transactions.len();
-        self.transactions.retain(|_, pending| {
-            pending.created_at.elapsed().as_secs() < TRANSACTION_TIMEOUT_SECS
-        });
+        self.transactions
+            .retain(|_, pending| pending.created_at.elapsed().as_secs() < TRANSACTION_TIMEOUT_SECS);
         before - self.transactions.len()
     }
 
@@ -61,7 +63,9 @@ impl TransactionManager {
 }
 
 impl Default for TransactionManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

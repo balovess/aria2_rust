@@ -1,8 +1,8 @@
-pub mod client;
-pub mod request;
-pub mod response;
-pub mod header;
 pub mod auth;
-pub mod proxy;
+pub mod client;
 pub mod cookie;
 pub mod encoding;
+pub mod header;
+pub mod proxy;
+pub mod request;
+pub mod response;

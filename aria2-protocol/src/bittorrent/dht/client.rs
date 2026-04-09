@@ -2,12 +2,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::debug;
 
-use crate::bittorrent::bencode::codec::BencodeValue;
 use super::message::{DhtMessage, DhtMessageBuilder};
-use super::transaction::TransactionManager;
-use super::routing_table::RoutingTable;
 use super::node::DhtNode;
+use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
+use super::transaction::TransactionManager;
+use crate::bittorrent::bencode::codec::BencodeValue;
 
 pub struct DhtClientConfig {
     pub self_id: [u8; 20],
@@ -37,6 +37,7 @@ pub struct DiscoveredPeers {
 pub struct DhtClient {
     config: DhtClientConfig,
     routing_table: RoutingTable,
+    #[allow(dead_code)]
     tx_manager: TransactionManager,
 }
 
@@ -55,15 +56,20 @@ impl DhtClient {
         }
     }
 
-    pub async fn discover_peers(&mut self, target_info_hash: &[u8; 20])
-        -> Result<DiscoveredPeers, String> {
-
+    pub async fn discover_peers(
+        &mut self,
+        target_info_hash: &[u8; 20],
+    ) -> Result<DiscoveredPeers, String> {
         let socket = DhtSocket::bind(0).await?;
         let mut all_peers: Vec<SocketAddr> = Vec::new();
         let mut nodes_contacted = 0usize;
 
         for round in 0..self.config.max_rounds {
-            debug!("DHT discovery round {}/{}", round + 1, self.config.max_rounds);
+            debug!(
+                "DHT discovery round {}/{}",
+                round + 1,
+                self.config.max_rounds
+            );
 
             if !all_peers.is_empty() {
                 return Ok(DiscoveredPeers {
@@ -72,7 +78,9 @@ impl DhtClient {
                 });
             }
 
-            let closest_nodes = self.routing_table.find_closest(target_info_hash, self.config.max_concurrent_queries);
+            let closest_nodes = self
+                .routing_table
+                .find_closest(target_info_hash, self.config.max_concurrent_queries);
             let nodes_to_query: Vec<SocketAddr> = if !closest_nodes.is_empty() {
                 closest_nodes.iter().map(|n| n.addr).collect()
             } else if round == 0 {
@@ -86,16 +94,17 @@ impl DhtClient {
 
             let mut handles = Vec::new();
             for (i, node_addr) in nodes_to_query.iter().enumerate() {
-                if i >= self.config.max_concurrent_queries { break; }
-                if *node_addr == SocketAddr::from(([0, 0, 0, 0], 0)) { continue; }
+                if i >= self.config.max_concurrent_queries {
+                    break;
+                }
+                if *node_addr == SocketAddr::from(([0, 0, 0, 0], 0)) {
+                    continue;
+                }
 
                 let tx_id = (round * 1000 + i as usize) as u32;
 
-                let query_msg = DhtMessageBuilder::get_peers(
-                    tx_id,
-                    &self.config.self_id,
-                    target_info_hash,
-                );
+                let query_msg =
+                    DhtMessageBuilder::get_peers(tx_id, &self.config.self_id, target_info_hash);
                 let addr = *node_addr;
                 let query_timeout = self.config.query_timeout;
                 let sock = socket.clone();
@@ -160,7 +169,9 @@ impl DhtClient {
         }
     }
 
-    pub fn routing_table(&self) -> &RoutingTable { &self.routing_table }
+    pub fn routing_table(&self) -> &RoutingTable {
+        &self.routing_table
+    }
 }
 
 pub fn extract_compact_peers_from_response(response: &DhtMessage) -> Vec<SocketAddr> {
@@ -201,7 +212,9 @@ pub fn extract_compact_nodes_from_response(response: &DhtMessage) -> Vec<(Socket
     let mut nodes = Vec::new();
     let chunk_size = 26;
     for chunk in nodes_data.chunks(chunk_size) {
-        if chunk.len() < chunk_size { continue; }
+        if chunk.len() < chunk_size {
+            continue;
+        }
 
         let mut node_id = [0u8; 20];
         node_id.copy_from_slice(&chunk[0..20]);
@@ -230,13 +243,19 @@ mod tests {
 
     #[test]
     fn test_extract_compact_peers_empty() {
-        let msg = DhtMessage::new_response(vec![1, 2],
+        let msg = DhtMessage::new_response(
+            vec![1, 2],
             crate::bittorrent::bencode::codec::BencodeValue::Dict(
                 std::collections::BTreeMap::new()
                     .into_iter()
-                    .map(|(k, v): (&Vec<u8>, &Vec<u8>)| (k.to_vec(), crate::bittorrent::bencode::codec::BencodeValue::Bytes(v.clone())))
-                    .collect::<std::collections::BTreeMap<Vec<u8>, _>>()
-            )
+                    .map(|(k, v): (&Vec<u8>, &Vec<u8>)| {
+                        (
+                            k.to_vec(),
+                            crate::bittorrent::bencode::codec::BencodeValue::Bytes(v.clone()),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<Vec<u8>, _>>(),
+            ),
         );
 
         let result = extract_compact_peers_from_response(&msg);
@@ -249,19 +268,23 @@ mod tests {
         use std::collections::BTreeMap;
 
         let peer_bytes: Vec<u8> = vec![
-            192, 168, 1, 1,  // IP: 192.168.1.1
-            0x1F, 0x90,       // Port: 8080
+            192, 168, 1, 1, // IP: 192.168.1.1
+            0x1F, 0x90, // Port: 8080
         ];
 
         let mut r_dict = BTreeMap::new();
-        r_dict.insert(b"values".to_vec(), BencodeValue::List(vec![
-            BencodeValue::Bytes(peer_bytes),
-        ]));
+        r_dict.insert(
+            b"values".to_vec(),
+            BencodeValue::List(vec![BencodeValue::Bytes(peer_bytes)]),
+        );
 
         let msg = DhtMessage::new_response(vec![1, 2], BencodeValue::Dict(r_dict));
         let peers = extract_compact_peers_from_response(&msg);
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(
+            peers[0].ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1))
+        );
         assert_eq!(peers[0].port(), 8080);
     }
 
@@ -274,10 +297,10 @@ mod tests {
         let peer2: Vec<u8> = vec![172, 16, 5, 1, 0x17, 0x70];
 
         let mut r_dict = BTreeMap::new();
-        r_dict.insert(b"values".to_vec(), BencodeValue::List(vec![
-            BencodeValue::Bytes(peer1),
-            BencodeValue::Bytes(peer2),
-        ]));
+        r_dict.insert(
+            b"values".to_vec(),
+            BencodeValue::List(vec![BencodeValue::Bytes(peer1), BencodeValue::Bytes(peer2)]),
+        );
 
         let msg = DhtMessage::new_response(vec![1, 2], BencodeValue::Dict(r_dict));
         let peers = extract_compact_peers_from_response(&msg);
@@ -306,7 +329,10 @@ mod tests {
         let nodes = extract_compact_nodes_from_response(&msg);
         assert_eq!(nodes.len(), 1);
         let (addr, nid) = &nodes[0];
-        assert_eq!(addr.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            addr.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))
+        );
         assert_eq!(addr.port(), 5000);
         assert_eq!(nid[0], 0xAB);
     }
@@ -337,7 +363,10 @@ mod tests {
     #[test]
     fn test_generate_random_node_id_nonzero() {
         let id = generate_random_node_id();
-        assert!(!id.iter().all(|&b| b == 0), "Random ID should not be all zeros");
+        assert!(
+            !id.iter().all(|&b| b == 0),
+            "Random ID should not be all zeros"
+        );
     }
 
     #[test]
@@ -352,7 +381,10 @@ mod tests {
         };
         let client = DhtClient::new(config);
         let rt = client.routing_table();
-        assert!(rt.total_node_count() >= 1, "bootstrap nodes share zero ID so only one is stored");
+        assert!(
+            rt.total_node_count() >= 1,
+            "bootstrap nodes share zero ID so only one is stored"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 use crate::error::{Aria2Error, Result};
 use crate::segment::Segment;
@@ -85,7 +85,7 @@ pub struct RequestGroup {
 impl RequestGroup {
     pub fn new(gid: GroupId, uris: Vec<String>, options: DownloadOptions) -> Self {
         info!("创建请求组 #{}", gid.value());
-        
+
         RequestGroup {
             gid,
             uris,
@@ -104,32 +104,32 @@ impl RequestGroup {
     pub async fn start(&mut self) -> Result<()> {
         let mut status = self.status.write().await;
         let mut start_time = self.start_time.write().await;
-        
+
         *status = DownloadStatus::Active;
         *start_time = Some(std::time::Instant::now());
-        
+
         info!("启动下载任务 #{}", self.gid.value());
         Ok(())
     }
 
     pub async fn pause(&mut self) -> Result<()> {
         let mut status = self.status.write().await;
-        
+
         if matches!(*status, DownloadStatus::Active) {
             *status = DownloadStatus::Paused;
             info!("暂停下载任务 #{}", self.gid.value());
         }
-        
+
         Ok(())
     }
 
     pub async fn remove(&mut self) -> Result<()> {
         let mut status = self.status.write().await;
         let mut end_time = self.end_time.write().await;
-        
+
         *status = DownloadStatus::Removed;
         *end_time = Some(std::time::Instant::now());
-        
+
         info!("移除下载任务 #{}", self.gid.value());
         Ok(())
     }
@@ -138,11 +138,11 @@ impl RequestGroup {
         let mut status = self.status.write().await;
         let mut end_time = self.end_time.write().await;
         let mut completed_length = self.completed_length.write().await;
-        
+
         *status = DownloadStatus::Complete;
         *end_time = Some(std::time::Instant::now());
         *completed_length = self.total_length;
-        
+
         info!("完成下载任务 #{}", self.gid.value());
         Ok(())
     }
@@ -150,10 +150,10 @@ impl RequestGroup {
     pub async fn error(&mut self, err: Aria2Error) -> Result<()> {
         let mut status = self.status.write().await;
         let mut end_time = self.end_time.write().await;
-        
+
         *status = DownloadStatus::Error(err);
         *end_time = Some(std::time::Instant::now());
-        
+
         debug!("下载任务 #{} 发生错误", self.gid.value());
         Ok(())
     }
@@ -200,7 +200,7 @@ impl RequestGroup {
     pub async fn progress(&self) -> f64 {
         let total = self.total_length;
         let completed = *self.completed_length.read().await;
-        
+
         if total == 0 {
             0.0
         } else {
@@ -240,8 +240,10 @@ impl RequestGroup {
 
     pub async fn eta(&self) -> Option<std::time::Duration> {
         let speed = *self.download_speed.read().await;
-        let remaining = self.total_length.saturating_sub(*self.completed_length.read().await);
-        
+        let remaining = self
+            .total_length
+            .saturating_sub(*self.completed_length.read().await);
+
         if speed == 0 || remaining == 0 {
             None
         } else {

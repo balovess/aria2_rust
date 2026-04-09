@@ -51,10 +51,14 @@ impl ProgressBar {
     }
 
     pub fn render(&self, force: bool) {
-        if !force && !is_tty() { return; }
+        if !force && !is_tty() {
+            return;
+        }
         let percent = if self.total > 0 {
             (self.current as f64 / self.total as f64 * 100.0).min(100.0)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let filled = (percent / 100.0 * self.width as f64) as usize;
         let empty = self.width.saturating_sub(filled);
@@ -66,17 +70,25 @@ impl ProgressBar {
         let total_str = format_size(self.total);
         let eta = self.eta();
 
-        print!("\r[{}] {:.0}% ({}/{}) {} ETA: {}",
-            bar, percent, downloaded, total_str, speed_str, eta);
+        print!(
+            "\r[{}] {:.0}% ({}/{}) {} ETA: {}",
+            bar, percent, downloaded, total_str, speed_str, eta
+        );
         let _ = io::stdout().flush();
     }
 
     pub fn render_summary(&self) -> String {
-        format!("{}% ({}/{}) {}", 
-            if self.total > 0 { (self.current as f64 / self.total as f64 * 100.0) as i32 } else { 0 },
+        format!(
+            "{}% ({}/{}) {}",
+            if self.total > 0 {
+                (self.current as f64 / self.total as f64 * 100.0) as i32
+            } else {
+                0
+            },
             format_size(self.current),
             format_size(self.total),
-            format_speed(self.speed))
+            format_speed(self.speed)
+        )
     }
 
     fn eta(&self) -> String {
@@ -88,10 +100,18 @@ impl ProgressBar {
         format_duration(secs)
     }
 
-    pub fn set_total(&mut self, total: u64) { self.total = total; }
-    pub fn current(&self) -> u64 { self.current }
-    pub fn total(&self) -> u64 { self.total }
-    pub fn is_complete(&self) -> bool { self.current >= self.total }
+    pub fn set_total(&mut self, total: u64) {
+        self.total = total;
+    }
+    pub fn current(&self) -> u64 {
+        self.current
+    }
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+    pub fn is_complete(&self) -> bool {
+        self.current >= self.total
+    }
 }
 
 /// Multi-task progress display showing all active downloads at once.
@@ -107,7 +127,11 @@ pub struct MultiProgress {
 
 impl MultiProgress {
     pub fn new() -> Self {
-        Self { bars: Vec::new(), labels: Vec::new(), total_speed: 0 }
+        Self {
+            bars: Vec::new(),
+            labels: Vec::new(),
+            total_speed: 0,
+        }
     }
 
     pub fn add(&mut self, label: impl Into<String>, total: u64) -> usize {
@@ -125,7 +149,9 @@ impl MultiProgress {
     }
 
     pub fn render(&self, force: bool) {
-        if !force && !is_tty() { return; }
+        if !force && !is_tty() {
+            return;
+        }
         for (i, (bar, label)) in self.bars.iter().zip(self.labels.iter()).enumerate() {
             print!("[#{} ", i + 1);
             print!("{}", label);
@@ -137,15 +163,23 @@ impl MultiProgress {
     }
 
     pub fn finish_all(&mut self) {
-        for bar in &mut self.bars { bar.finish(); }
+        for bar in &mut self.bars {
+            bar.finish();
+        }
     }
 
-    pub fn len(&self) -> usize { self.bars.len() }
-    pub fn is_empty(&self) -> bool { self.bars.is_empty() }
+    pub fn len(&self) -> usize {
+        self.bars.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bars.is_empty()
+    }
 }
 
 impl Default for MultiProgress {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Status panel for download output with quiet mode support.
@@ -164,28 +198,44 @@ pub struct StatusPanel {
 
 impl StatusPanel {
     pub fn new(quiet: bool) -> Self {
-        Self { quiet, last_update: std::time::Instant::now(), update_interval_ms: 500 }
+        Self {
+            quiet,
+            last_update: std::time::Instant::now(),
+            update_interval_ms: 500,
+        }
     }
 
     pub fn should_update(&self) -> bool {
-        if self.quiet { return false; }
+        if self.quiet {
+            return false;
+        }
         self.last_update.elapsed().as_millis() as u64 >= self.update_interval_ms
     }
 
-    pub fn touch(&mut self) { self.last_update = std::time::Instant::now(); }
+    pub fn touch(&mut self) {
+        self.last_update = std::time::Instant::now();
+    }
 
     pub fn print_download_status(&self, gid: u64, status: &str, progress: &str) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("[#{} {}] {}", gid, status, progress);
     }
 
     pub fn print_complete(&self, gid: u64, filename: &str, size: &str) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         use colored::Colorize;
-        println!("[#{} {}] {} - {} ({})", 
-            gid, "DONE".green().bold(),
-            filename.green(), size.white(),
-            format_size_str(size));
+        println!(
+            "[#{} {}] {} - {} ({})",
+            gid,
+            "DONE".green().bold(),
+            filename.green(),
+            size.white(),
+            format_size_str(size)
+        );
     }
 
     pub fn print_error(&self, gid: u64, error: &str) {
@@ -195,13 +245,18 @@ impl StatusPanel {
 
     pub fn print_summary(&self, total_files: u64, total_size: u64, elapsed_secs: f64) {
         use colored::Colorize;
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!();
         println!("{}", "下载摘要:".yellow());
         println!("  总文件数:   {}", total_files.to_string().white());
         println!("  总大小:     {}", format_size(total_size).white());
         println!("  总耗时:     {}", format_duration(elapsed_secs).white());
-        println!("  平均速度:   {}/s", format_size((total_size as f64 / elapsed_secs.max(1.0)) as u64).white());
+        println!(
+            "  平均速度:   {}/s",
+            format_size((total_size as f64 / elapsed_secs.max(1.0)) as u64).white()
+        );
     }
 }
 
@@ -232,16 +287,24 @@ fn format_size(bytes: u64) -> String {
 }
 
 pub fn format_size_str(s: &str) -> String {
-    if let Ok(bytes) = s.parse::<u64>() { format_size(bytes) } else { s.to_string() }
+    if let Ok(bytes) = s.parse::<u64>() {
+        format_size(bytes)
+    } else {
+        s.to_string()
+    }
 }
 
 fn format_speed(bytes_per_sec: u64) -> String {
-    if bytes_per_sec == 0 { return "0 B/s".to_string(); }
+    if bytes_per_sec == 0 {
+        return "0 B/s".to_string();
+    }
     format!("{}/s", format_size(bytes_per_sec))
 }
 
 pub fn format_duration(secs: f64) -> String {
-    if secs.is_nan() || secs < 0.0 { return "--:--".to_string(); }
+    if secs.is_nan() || secs < 0.0 {
+        return "--:--".to_string();
+    }
     let total_secs = secs as u64;
     let hours = total_secs / 3600;
     let mins = (total_secs % 3600) / 60;

@@ -5,7 +5,13 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Protocol implementations for aria2-rust: HTTP/HTTPS, FTP/SFTP, BitTorrent (DHT/Tracker), Metalink"
+description = "Protocol implementations for aria2-rust (HTTP/HTTPS, FTP/SFTP, BitTorrent, Metalink)"
+documentation = "https://docs.rs/aria2-protocol"
+homepage = "https://github.com/balovess/aria2_rust"
+readme = "../README.md"
+keywords = ["http", "ftp", "bittorrent", "metalink", "protocol"]
+categories = ["network-programming", "web-programming"]
+include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [dependencies]
 tokio.workspace = true

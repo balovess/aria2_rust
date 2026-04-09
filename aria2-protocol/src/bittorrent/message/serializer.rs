@@ -48,23 +48,43 @@ fn serialize_block_request(req: &PieceBlockRequest) -> Vec<u8> {
     buf
 }
 
-pub fn serialize_choke() -> Vec<u8> { serialize(&BtMessage::Choke) }
-pub fn serialize_unchoke() -> Vec<u8> { serialize(&BtMessage::Unchoke) }
-pub fn serialize_interested() -> Vec<u8> { serialize(&BtMessage::Interested) }
-pub fn serialize_not_interested() -> Vec<u8> { serialize(&BtMessage::NotInterested) }
-pub fn serialize_have(piece_index: u32) -> Vec<u8> { serialize(&BtMessage::Have { piece_index }) }
-pub fn serialize_bitfield(data: Vec<u8>) -> Vec<u8> { serialize(&BtMessage::Bitfield { data }) }
+pub fn serialize_choke() -> Vec<u8> {
+    serialize(&BtMessage::Choke)
+}
+pub fn serialize_unchoke() -> Vec<u8> {
+    serialize(&BtMessage::Unchoke)
+}
+pub fn serialize_interested() -> Vec<u8> {
+    serialize(&BtMessage::Interested)
+}
+pub fn serialize_not_interested() -> Vec<u8> {
+    serialize(&BtMessage::NotInterested)
+}
+pub fn serialize_have(piece_index: u32) -> Vec<u8> {
+    serialize(&BtMessage::Have { piece_index })
+}
+pub fn serialize_bitfield(data: Vec<u8>) -> Vec<u8> {
+    serialize(&BtMessage::Bitfield { data })
+}
 pub fn serialize_request(index: u32, begin: u32, length: u32) -> Vec<u8> {
-    serialize(&BtMessage::Request { request: PieceBlockRequest::new(index, begin, length) })
+    serialize(&BtMessage::Request {
+        request: PieceBlockRequest::new(index, begin, length),
+    })
 }
 pub fn serialize_cancel(index: u32, begin: u32, length: u32) -> Vec<u8> {
-    serialize(&BtMessage::Cancel { request: PieceBlockRequest::new(index, begin, length) })
+    serialize(&BtMessage::Cancel {
+        request: PieceBlockRequest::new(index, begin, length),
+    })
 }
 pub fn serialize_piece(index: u32, begin: u32, data: Vec<u8>) -> Vec<u8> {
     serialize(&BtMessage::Piece { index, begin, data })
 }
-pub fn serialize_port(port: u16) -> Vec<u8> { serialize(&BtMessage::Port { port }) }
-pub fn serialize_keepalive() -> Vec<u8> { serialize(&BtMessage::KeepAlive) }
+pub fn serialize_port(port: u16) -> Vec<u8> {
+    serialize(&BtMessage::Port { port })
+}
+pub fn serialize_keepalive() -> Vec<u8> {
+    serialize(&BtMessage::KeepAlive)
+}
 
 pub fn create_standard_requests(piece_index: u32, piece_size: u32, offset: u32) -> Vec<BtMessage> {
     let remaining = piece_size - offset;
@@ -148,9 +168,16 @@ mod tests {
         let last_req = reqs.last().unwrap();
         if let BtMessage::Request { ref request } = last_req {
             assert_eq!(request.index, 0);
-            let total_requested: u32 = reqs.iter().map(|r| {
-                if let BtMessage::Request { ref request } = r { request.length } else { 0 }
-            }).sum();
+            let total_requested: u32 = reqs
+                .iter()
+                .map(|r| {
+                    if let BtMessage::Request { ref request } = r {
+                        request.length
+                    } else {
+                        0
+                    }
+                })
+                .sum();
             assert_eq!(total_requested, 50000);
         }
     }

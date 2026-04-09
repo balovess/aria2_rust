@@ -19,7 +19,10 @@ impl BencodeValue {
             b'l' => Self::decode_list(bytes),
             b'd' => Self::decode_dict(bytes),
             b'0'..=b'9' => Self::decode_bytes(bytes),
-            c => Err(format!("无效的bencode起始字符: '{}' (0x{:02x})", c as char, c)),
+            c => Err(format!(
+                "无效的bencode起始字符: '{}' (0x{:02x})",
+                c as char, c
+            )),
         }
     }
 
@@ -27,25 +30,31 @@ impl BencodeValue {
         if !bytes.starts_with(b"i") {
             return Err("整数不以'i'开头".to_string());
         }
-        let end = bytes.iter().position(|&b| b == b'e')
+        let end = bytes
+            .iter()
+            .position(|&b| b == b'e')
             .ok_or("整数缺少结束标记'e'")?;
         if end <= 1 {
             return Err("整数为空".to_string());
         }
         let num_str = unsafe { std::str::from_utf8_unchecked(&bytes[1..end]) };
-        let value: i64 = num_str.parse()
+        let value: i64 = num_str
+            .parse()
             .map_err(|e| format!("解析整数失败: {} (内容: '{}')", e, num_str))?;
         Ok((BencodeValue::Int(value), end + 1))
     }
 
     fn decode_bytes(bytes: &[u8]) -> Result<(Self, usize), String> {
-        let colon_pos = bytes.iter().position(|&b| b == b':')
+        let colon_pos = bytes
+            .iter()
+            .position(|&b| b == b':')
             .ok_or("字节串缺少长度分隔符':'")?;
         if colon_pos == 0 {
             return Err("字节串长度为空".to_string());
         }
         let len_str = unsafe { std::str::from_utf8_unchecked(&bytes[..colon_pos]) };
-        let length: usize = len_str.parse()
+        let length: usize = len_str
+            .parse()
             .map_err(|e| format!("解析字节串长度失败: {}", e))?;
         let data_start = colon_pos + 1;
         let data_end = data_start + length;
@@ -56,7 +65,10 @@ impl BencodeValue {
                 bytes.len() - data_start
             ));
         }
-        Ok((BencodeValue::Bytes(bytes[data_start..data_end].to_vec()), data_end))
+        Ok((
+            BencodeValue::Bytes(bytes[data_start..data_end].to_vec()),
+            data_end,
+        ))
     }
 
     fn decode_list(bytes: &[u8]) -> Result<(Self, usize), String> {
@@ -133,11 +145,17 @@ impl BencodeValue {
     }
 
     pub fn as_int(&self) -> Option<i64> {
-        match self { BencodeValue::Int(n) => Some(*n), _ => None }
+        match self {
+            BencodeValue::Int(n) => Some(*n),
+            _ => None,
+        }
     }
 
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self { BencodeValue::Bytes(b) => Some(b), _ => None }
+        match self {
+            BencodeValue::Bytes(b) => Some(b),
+            _ => None,
+        }
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -145,11 +163,17 @@ impl BencodeValue {
     }
 
     pub fn as_list(&self) -> Option<&Vec<BencodeValue>> {
-        match self { BencodeValue::List(l) => Some(l), _ => None }
+        match self {
+            BencodeValue::List(l) => Some(l),
+            _ => None,
+        }
     }
 
     pub fn as_dict(&self) -> Option<&BTreeMap<Vec<u8>, BencodeValue>> {
-        match self { BencodeValue::Dict(d) => Some(d), _ => None }
+        match self {
+            BencodeValue::Dict(d) => Some(d),
+            _ => None,
+        }
     }
 
     pub fn dict_get<K: AsRef<[u8]>>(&self, key: K) -> Option<&BencodeValue> {
@@ -164,26 +188,42 @@ impl BencodeValue {
         self.dict_get(key.as_bytes()).and_then(|v| v.as_int())
     }
 
-    pub fn is_int(&self) -> bool { matches!(self, BencodeValue::Int(_)) }
-    pub fn is_bytes(&self) -> bool { matches!(self, BencodeValue::Bytes(_)) }
-    pub fn is_list(&self) -> bool { matches!(self, BencodeValue::List(_)) }
-    pub fn is_dict(&self) -> bool { matches!(self, BencodeValue::Dict(_)) }
+    pub fn is_int(&self) -> bool {
+        matches!(self, BencodeValue::Int(_))
+    }
+    pub fn is_bytes(&self) -> bool {
+        matches!(self, BencodeValue::Bytes(_))
+    }
+    pub fn is_list(&self) -> bool {
+        matches!(self, BencodeValue::List(_))
+    }
+    pub fn is_dict(&self) -> bool {
+        matches!(self, BencodeValue::Dict(_))
+    }
 }
 
 impl From<i64> for BencodeValue {
-    fn from(n: i64) -> Self { BencodeValue::Int(n) }
+    fn from(n: i64) -> Self {
+        BencodeValue::Int(n)
+    }
 }
 
 impl From<Vec<u8>> for BencodeValue {
-    fn from(b: Vec<u8>) -> Self { BencodeValue::Bytes(b) }
+    fn from(b: Vec<u8>) -> Self {
+        BencodeValue::Bytes(b)
+    }
 }
 
 impl From<String> for BencodeValue {
-    fn from(s: String) -> Self { BencodeValue::Bytes(s.into_bytes()) }
+    fn from(s: String) -> Self {
+        BencodeValue::Bytes(s.into_bytes())
+    }
 }
 
 impl From<Vec<BencodeValue>> for BencodeValue {
-    fn from(l: Vec<BencodeValue>) -> Self { BencodeValue::List(l) }
+    fn from(l: Vec<BencodeValue>) -> Self {
+        BencodeValue::List(l)
+    }
 }
 
 #[cfg(test)]
@@ -198,8 +238,14 @@ mod tests {
         assert_eq!(original, decoded);
 
         assert_eq!(BencodeValue::decode(b"i0e"), Ok((BencodeValue::Int(0), 3)));
-        assert_eq!(BencodeValue::decode(b"i-42e"), Ok((BencodeValue::Int(-42), 5)));
-        assert_eq!(BencodeValue::decode(b"i123456789e"), Ok((BencodeValue::Int(123456789), 11)));
+        assert_eq!(
+            BencodeValue::decode(b"i-42e"),
+            Ok((BencodeValue::Int(-42), 5))
+        );
+        assert_eq!(
+            BencodeValue::decode(b"i123456789e"),
+            Ok((BencodeValue::Int(123456789), 11))
+        );
     }
 
     #[test]
@@ -209,11 +255,20 @@ mod tests {
         let (decoded, _) = BencodeValue::decode(&encoded).unwrap();
         assert_eq!(original, decoded);
 
-        assert_eq!(BencodeValue::decode(b"4:spam"), Ok((BencodeValue::Bytes(b"spam".to_vec()), 6)));
-        assert_eq!(BencodeValue::decode(b"0:"), Ok((BencodeValue::Bytes(vec![]), 2)));
+        assert_eq!(
+            BencodeValue::decode(b"4:spam"),
+            Ok((BencodeValue::Bytes(b"spam".to_vec()), 6))
+        );
+        assert_eq!(
+            BencodeValue::decode(b"0:"),
+            Ok((BencodeValue::Bytes(vec![]), 2))
+        );
         let binary_data: Vec<u8> = vec![0, 1, 2, 255];
         let enc = BencodeValue::Bytes(binary_data.clone()).encode();
-        assert_eq!(BencodeValue::decode(&enc), Ok((BencodeValue::Bytes(binary_data), 6)));
+        assert_eq!(
+            BencodeValue::decode(&enc),
+            Ok((BencodeValue::Bytes(binary_data), 6))
+        );
     }
 
     #[test]
@@ -227,7 +282,10 @@ mod tests {
         let (decoded, _) = BencodeValue::decode(&encoded).unwrap();
         assert_eq!(list, decoded);
 
-        assert_eq!(BencodeValue::decode(b"le"), Ok((BencodeValue::List(vec![]), 2)));
+        assert_eq!(
+            BencodeValue::decode(b"le"),
+            Ok((BencodeValue::List(vec![]), 2))
+        );
     }
 
     #[test]
@@ -240,20 +298,24 @@ mod tests {
         let (decoded, _) = BencodeValue::decode(&encoded).unwrap();
         assert_eq!(dict, decoded);
 
-        assert_eq!(BencodeValue::decode(b"de"), Ok((BencodeValue::Dict(BTreeMap::new()), 2)));
+        assert_eq!(
+            BencodeValue::decode(b"de"),
+            Ok((BencodeValue::Dict(BTreeMap::new()), 2))
+        );
     }
 
     #[test]
     fn test_nested_structures() {
         let nested = BencodeValue::Dict({
             let mut m = BTreeMap::new();
-            m.insert(b"a".to_vec(), BencodeValue::List(vec![
-                BencodeValue::Dict({
+            m.insert(
+                b"a".to_vec(),
+                BencodeValue::List(vec![BencodeValue::Dict({
                     let mut inner = BTreeMap::new();
                     inner.insert(b"x".to_vec(), BencodeValue::Int(99));
                     inner
-                }),
-            ]));
+                })]),
+            );
             m
         });
         let encoded = nested.encode();

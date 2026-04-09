@@ -1,6 +1,6 @@
 use tracing::{debug, warn};
 
-use super::response::{TrackerResponse, TrackerEvent};
+use super::response::{TrackerEvent, TrackerResponse};
 
 #[allow(dead_code)]
 const DEFAULT_INTERVAL_SECS: u32 = 1800;
@@ -40,7 +40,10 @@ impl TrackerAnnounceParams {
     pub fn to_query_string(&self) -> String {
         let mut params = Vec::new();
 
-        params.push(format!("info_hash={}", Self::url_encode_infohash(&self.info_hash)));
+        params.push(format!(
+            "info_hash={}",
+            Self::url_encode_infohash(&self.info_hash)
+        ));
         params.push(format!("peer_id={}", hex_encode(&self.peer_id)));
         params.push(format!("port={}", self.port));
         params.push(format!("uploaded={}", self.uploaded));
@@ -80,12 +83,16 @@ pub struct TrackerClient {
 
 impl TrackerClient {
     pub fn new(announce_url: &str) -> Self {
-        Self { announce_urls: vec![announce_url.to_string()] }
+        Self {
+            announce_urls: vec![announce_url.to_string()],
+        }
     }
 
     pub fn with_announce_list(urls: Vec<Vec<String>>) -> Self {
         let flat: Vec<String> = urls.into_iter().flatten().collect();
-        Self { announce_urls: flat }
+        Self {
+            announce_urls: flat,
+        }
     }
 
     pub async fn announce(
@@ -118,8 +125,7 @@ impl TrackerClient {
         };
 
         let client = HttpClient::default_client()?;
-        let request = HttpRequest::get(&full_url)
-            .with_header("User-Agent", "aria2/1.37.0-Rust");
+        let request = HttpRequest::get(&full_url).with_header("User-Agent", "aria2/1.37.0-Rust");
 
         let response = client.execute(request).await?;
 
@@ -138,7 +144,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn url_encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => String::from(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                String::from(b as char)
+            }
             _ => format!("%{:02X}", b),
         })
         .collect()

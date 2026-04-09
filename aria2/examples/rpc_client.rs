@@ -19,8 +19,11 @@ async fn main() {
 
     let resp = engine.handle_request(&req).await;
     let gid = if resp.is_success() {
-        resp.result.clone().unwrap_or(serde_json::Value::Null)
-            .as_str().unwrap_or("")
+        resp.result
+            .clone()
+            .unwrap_or(serde_json::Value::Null)
+            .as_str()
+            .unwrap_or("")
             .to_string()
     } else {
         eprintln!("   错误: 无法添加任务");

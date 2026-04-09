@@ -29,7 +29,9 @@ impl HttpRequest {
     }
 
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.headers.get_or_insert_with(Vec::new).push((name.to_string(), value.to_string()));
+        self.headers
+            .get_or_insert_with(Vec::new)
+            .push((name.to_string(), value.to_string()));
         self
     }
 
@@ -69,7 +71,9 @@ impl HttpRequest {
     }
 
     pub fn get_header(&self, name: &str) -> Option<&String> {
-        self.headers.as_ref()?.iter()
+        self.headers
+            .as_ref()?
+            .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v)
     }

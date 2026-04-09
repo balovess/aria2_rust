@@ -1,13 +1,13 @@
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use async_trait::async_trait;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
-use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
 use crate::engine::command::{Command, CommandStatus};
-use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
-use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter};
+use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 pub struct SftpDownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -44,7 +44,15 @@ impl SftpDownloadCommand {
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
         let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
-        info!("SftpDownloadCommand 创建: {} -> {} ({}@{}:{}/{})", uri, path.display(), username, host, port, remote_path);
+        info!(
+            "SftpDownloadCommand 创建: {} -> {} ({}@{}:{}/{})",
+            uri,
+            path.display(),
+            username,
+            host,
+            port,
+            remote_path
+        );
 
         Ok(Self {
             group: Arc::new(tokio::sync::RwLock::new(group)),
@@ -61,7 +69,9 @@ impl SftpDownloadCommand {
 
     fn parse_uri(uri: &str) -> Result<(String, u16, String, Option<String>, String)> {
         if !uri.starts_with("sftp://") {
-            return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol { protocol: "sftp".into() }));
+            return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {
+                protocol: "sftp".into(),
+            }));
         }
 
         let without_scheme = uri.trim_start_matches("sftp://");
@@ -133,12 +143,19 @@ impl Command for SftpDownloadCommand {
             self.started = true;
         }
 
-        debug!("SFTP下载开始: {}@{}:{} -> {}", self.username, self.host, self.port, self.output_path.display());
+        debug!(
+            "SFTP下载开始: {}@{}:{} -> {}",
+            self.username,
+            self.host,
+            self.port,
+            self.output_path.display()
+        );
 
         if let Some(parent) = self.output_path.parent() {
             if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("创建目录失败: {}", e))))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("创建目录失败: {}", e)))
+                })?;
             }
         }
 
@@ -151,23 +168,22 @@ impl Command for SftpDownloadCommand {
         let remote_path_err = remote_path.clone();
 
         let download_result: Vec<u8> = tokio::task::spawn_blocking(move || {
-            use std::net::TcpStream;
             use std::io::Read;
+            use std::net::TcpStream;
 
             let addr_str = format!("{}:{}", host, port);
-            let addr: std::net::SocketAddr = addr_str.parse()
+            let addr: std::net::SocketAddr = addr_str
+                .parse()
                 .map_err(|_| format!("无法解析地址: {}", addr_str))?;
 
-            let tcp = TcpStream::connect_timeout(
-                &addr,
-                std::time::Duration::from_secs(15),
-            ).map_err(|e| format!("TCP连接失败: {}", e))?;
+            let tcp = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(15))
+                .map_err(|e| format!("TCP连接失败: {}", e))?;
 
             tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))
                 .map_err(|e| format!("设置读取超时失败: {}", e))?;
 
-            let mut sess = ssh2::Session::new()
-                .map_err(|e| format!("SSH Session创建失败: {}", e))?;
+            let mut sess =
+                ssh2::Session::new().map_err(|e| format!("SSH Session创建失败: {}", e))?;
             sess.set_tcp_stream(tcp);
 
             if let Some(ref pwd) = password {
@@ -177,15 +193,18 @@ impl Command for SftpDownloadCommand {
                 return Err("未提供认证信息(需要password)".to_string());
             }
 
-            let sftp = sess.sftp()
+            let sftp = sess
+                .sftp()
                 .map_err(|e| format!("SFTP子系统初始化失败: {}", e))?;
 
-            let file_size = sftp.stat(std::path::Path::new(&remote_path))
+            let file_size = sftp
+                .stat(std::path::Path::new(&remote_path))
                 .ok()
                 .and_then(|s| s.size)
                 .unwrap_or(0);
 
-            let mut remote_file = sftp.open(std::path::Path::new(&remote_path))
+            let mut remote_file = sftp
+                .open(std::path::Path::new(&remote_path))
                 .map_err(|e| format!("打开远程文件失败 [{}]: {}", remote_path, e))?;
 
             let mut data = Vec::with_capacity(file_size.max(1024) as usize);
@@ -202,17 +221,29 @@ impl Command for SftpDownloadCommand {
 
             drop(remote_file);
             Ok(data)
-        }).await
-        .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("SFTP任务执行失败: {}", e) }))?
+        })
+        .await
+        .map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("SFTP任务执行失败: {}", e),
+            })
+        })?
         .map_err(|e| {
             if e.contains("No such file") || e.contains("not found") {
-                Aria2Error::Fatal(FatalError::FileNotFound { path: remote_path_err.clone() })
+                Aria2Error::Fatal(FatalError::FileNotFound {
+                    path: remote_path_err.clone(),
+                })
             } else if e.contains("auth") || e.contains("permission") || e.contains("denied") {
-                Aria2Error::Fatal(FatalError::PermissionDenied { path: format!("{}:{}", host_err, port) })
-            } else if e.contains("连接失败") || e.contains("timeout") || e.contains("connection") {
+                Aria2Error::Fatal(FatalError::PermissionDenied {
+                    path: format!("{}:{}", host_err, port),
+                })
+            } else if e.contains("连接失败") || e.contains("timeout") || e.contains("connection")
+            {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             } else {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("SFTP下载错误: {}", e) })
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("SFTP下载错误: {}", e),
+                })
             }
         })?;
 
@@ -223,11 +254,15 @@ impl Command for SftpDownloadCommand {
         }
 
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
-        let rate_limit = { let g = self.group.read().await; g.options().max_download_limit };
+        let rate_limit = {
+            let g = self.group.read().await;
+            g.options().max_download_limit
+        };
         let mut writer: Box<dyn DiskWriter> = match rate_limit {
-            Some(rate) if rate > 0 => {
-                Box::new(ThrottledWriter::new(raw_writer, RateLimiter::new(&RateLimiterConfig::new(Some(rate), None))))
-            }
+            Some(rate) if rate > 0 => Box::new(ThrottledWriter::new(
+                raw_writer,
+                RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)),
+            )),
             _ => Box::new(raw_writer),
         };
         let start_time = Instant::now();
@@ -258,7 +293,11 @@ impl Command for SftpDownloadCommand {
 
         let final_speed = {
             let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 { (self.completed_bytes as f64 / elapsed) as u64 } else { 0 }
+            if elapsed > 0.0 {
+                (self.completed_bytes as f64 / elapsed) as u64
+            } else {
+                0
+            }
         };
         {
             let mut g = self.group.write().await;
@@ -267,12 +306,20 @@ impl Command for SftpDownloadCommand {
             g.complete().await?;
         }
 
-        info!("SFTP下载完成: {} ({} bytes)", self.output_path.display(), self.completed_bytes);
+        info!(
+            "SFTP下载完成: {} ({} bytes)",
+            self.output_path.display(),
+            self.completed_bytes
+        );
         Ok(())
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 { CommandStatus::Running } else { CommandStatus::Pending }
+        if self.completed_bytes > 0 {
+            CommandStatus::Running
+        } else {
+            CommandStatus::Pending
+        }
     }
 
     fn timeout(&self) -> Option<Duration> {

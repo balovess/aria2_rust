@@ -5,8 +5,8 @@ use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
 use crate::rate_limiter::RateLimiterConfig;
 
-use aria2_protocol::bittorrent::peer::connection::PeerConnection;
 use aria2_protocol::bittorrent::message::types::BtMessage;
+use aria2_protocol::bittorrent::peer::connection::PeerConnection;
 
 pub trait PieceDataProvider: Send + Sync {
     fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>>;
@@ -41,9 +41,10 @@ pub struct BtUploadSession {
 
 impl BtUploadSession {
     pub fn new(conn: PeerConnection, config: &BtSeedingConfig) -> Self {
-        let upload_limiter = config.max_upload_bytes_per_sec.filter(|&r| r > 0).map(|r| {
-            RateLimiter::new(&RateLimiterConfig::new(None, Some(r)))
-        });
+        let upload_limiter = config
+            .max_upload_bytes_per_sec
+            .filter(|&r| r > 0)
+            .map(|r| RateLimiter::new(&RateLimiterConfig::new(None, Some(r))));
 
         Self {
             conn,
@@ -55,7 +56,10 @@ impl BtUploadSession {
         }
     }
 
-    pub async fn handle_incoming_messages(&mut self, provider: &dyn PieceDataProvider) -> Result<u64> {
+    pub async fn handle_incoming_messages(
+        &mut self,
+        provider: &dyn PieceDataProvider,
+    ) -> Result<u64> {
         if self.is_dead {
             return Ok(0);
         }
@@ -64,58 +68,76 @@ impl BtUploadSession {
 
         loop {
             match self.conn.read_message().await {
-                Ok(Some(msg)) => {
-                    match msg {
-                        BtMessage::Request { request } => {
-                            if !self.am_choke_state && self.peer_interested {
-                                debug!("Upload request: piece={}, offset={}, len={}", request.index, request.begin, request.length);
+                Ok(Some(msg)) => match msg {
+                    BtMessage::Request { request } => {
+                        if !self.am_choke_state && self.peer_interested {
+                            debug!(
+                                "Upload request: piece={}, offset={}, len={}",
+                                request.index, request.begin, request.length
+                            );
 
-                                let data = provider.get_piece_data(request.index, request.begin, request.length);
-                                if let Some(piece_data) = data {
-                                    let data_len = piece_data.len() as u64;
-                                    if let Some(ref lim) = self.upload_limiter {
-                                        lim.acquire_upload(data_len).await;
-                                    }
-                                    self.conn.send_message(&BtMessage::Piece {
+                            let data = provider.get_piece_data(
+                                request.index,
+                                request.begin,
+                                request.length,
+                            );
+                            if let Some(piece_data) = data {
+                                let data_len = piece_data.len() as u64;
+                                if let Some(ref lim) = self.upload_limiter {
+                                    lim.acquire_upload(data_len).await;
+                                }
+                                self.conn.send_message(&BtMessage::Piece {
                                         index: request.index,
                                         begin: request.begin,
                                         data: piece_data,
                                     }).await.map_err(|e| crate::error::Aria2Error::Recoverable(
                                         crate::error::RecoverableError::TemporaryNetworkFailure { message: e }
                                     ))?;
-                                    self.uploaded_bytes += data_len;
-                                } else {
-                                    warn!("No data for piece {} at offset {}", request.index, request.begin);
-                                }
+                                self.uploaded_bytes += data_len;
                             } else {
-                                debug!("Ignoring request: choked={} interested={}", self.am_choke_state, self.peer_interested);
+                                warn!(
+                                    "No data for piece {} at offset {}",
+                                    request.index, request.begin
+                                );
                             }
+                        } else {
+                            debug!(
+                                "Ignoring request: choked={} interested={}",
+                                self.am_choke_state, self.peer_interested
+                            );
                         }
-                        BtMessage::Interested => {
-                            self.peer_interested = true;
-                            if !self.am_choke_state {
-                                self.conn.send_unchoke().await.ok();
-                            }
-                        }
-                        BtMessage::NotInterested => {
-                            self.peer_interested = false;
-                        }
-                        BtMessage::Choke => { debug!("Peer choked us"); }
-                        BtMessage::Unchoke => { debug!("Peer unchoked us"); }
-                        BtMessage::Have { piece_index } => {
-                            debug!("Peer has piece {}", piece_index);
-                        }
-                        BtMessage::Cancel { request } => {
-                            debug!("Peer cancelled request for piece {} offset {}", request.index, request.begin);
-                        }
-                        BtMessage::Piece { .. } => {
-                            debug!("Unexpected Piece from peer during seeding");
-                        }
-                        BtMessage::Bitfield { .. } => {}
-                        BtMessage::KeepAlive => {}
-                        BtMessage::Port { port: _ } => {}
                     }
-                }
+                    BtMessage::Interested => {
+                        self.peer_interested = true;
+                        if !self.am_choke_state {
+                            self.conn.send_unchoke().await.ok();
+                        }
+                    }
+                    BtMessage::NotInterested => {
+                        self.peer_interested = false;
+                    }
+                    BtMessage::Choke => {
+                        debug!("Peer choked us");
+                    }
+                    BtMessage::Unchoke => {
+                        debug!("Peer unchoked us");
+                    }
+                    BtMessage::Have { piece_index } => {
+                        debug!("Peer has piece {}", piece_index);
+                    }
+                    BtMessage::Cancel { request } => {
+                        debug!(
+                            "Peer cancelled request for piece {} offset {}",
+                            request.index, request.begin
+                        );
+                    }
+                    BtMessage::Piece { .. } => {
+                        debug!("Unexpected Piece from peer during seeding");
+                    }
+                    BtMessage::Bitfield { .. } => {}
+                    BtMessage::KeepAlive => {}
+                    BtMessage::Port { port: _ } => {}
+                },
                 Ok(None) => {
                     debug!("EOF from peer, marking session as dead");
                     self.is_dead = true;
@@ -134,10 +156,11 @@ impl BtUploadSession {
 
     pub async fn unchoke_peer(&mut self) -> Result<()> {
         if self.am_choke_state {
-            self.conn.send_unchoke().await
-                .map_err(|e| crate::error::Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure { message: e }
-                ))?;
+            self.conn.send_unchoke().await.map_err(|e| {
+                crate::error::Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure { message: e },
+                )
+            })?;
             self.am_choke_state = false;
         }
         Ok(())
@@ -145,10 +168,11 @@ impl BtUploadSession {
 
     pub async fn choke_peer(&mut self) -> Result<()> {
         if !self.am_choke_state {
-            self.conn.send_choke().await
-                .map_err(|e| crate::error::Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure { message: e }
-                ))?;
+            self.conn.send_choke().await.map_err(|e| {
+                crate::error::Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure { message: e },
+                )
+            })?;
             self.am_choke_state = true;
         }
         Ok(())
@@ -186,7 +210,10 @@ impl InMemoryPieceProvider {
         for _ in 0..num_pieces {
             pieces.push(None);
         }
-        Self { pieces, piece_length }
+        Self {
+            pieces,
+            piece_length,
+        }
     }
 
     pub fn set_piece_data(&mut self, index: u32, data: Vec<u8>) {
@@ -196,7 +223,9 @@ impl InMemoryPieceProvider {
     }
 
     pub fn set_all_from_pattern<F>(&mut self, f: F)
-    where F: Fn(u32, u32) -> u8 {
+    where
+        F: Fn(u32, u32) -> u8,
+    {
         for i in 0..self.pieces.len() {
             let len = if i == self.pieces.len() - 1 {
                 let total = self.piece_length as usize * (self.pieces.len() - 1);
@@ -218,12 +247,16 @@ impl PieceDataProvider for InMemoryPieceProvider {
         let piece = self.pieces.get(piece_index as usize)?.as_ref()?;
         let start = offset as usize;
         let end = (start + length as usize).min(piece.len());
-        if start >= piece.len() { return None; }
+        if start >= piece.len() {
+            return None;
+        }
         Some(piece[start..end].to_vec())
     }
 
     fn has_piece(&self, piece_index: u32) -> bool {
-        self.pieces.get(piece_index as usize).map_or(false, |p| p.is_some())
+        self.pieces
+            .get(piece_index as usize)
+            .map_or(false, |p| p.is_some())
     }
 
     fn num_pieces(&self) -> u32 {
@@ -273,7 +306,9 @@ mod tests {
     #[test]
     fn test_in_memory_provider_set_all_from_pattern() {
         let mut provider = InMemoryPieceProvider::new(100, 5);
-        provider.set_all_from_pattern(|piece_idx, byte_idx| ((piece_idx * 37 + byte_idx * 13) % 256) as u8);
+        provider.set_all_from_pattern(|piece_idx, byte_idx| {
+            ((piece_idx * 37 + byte_idx * 13) % 256) as u8
+        });
 
         for i in 0..5u32 {
             assert!(provider.has_piece(i));

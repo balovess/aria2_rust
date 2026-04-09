@@ -1,4 +1,4 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 
@@ -25,13 +25,14 @@ impl Default for FtpDownloadOptions {
 
 fn is_transient_io_error(e: &std::io::Error) -> bool {
     use std::io::ErrorKind;
-    matches!(e.kind(),
+    matches!(
+        e.kind(),
         ErrorKind::Interrupted
-        | ErrorKind::WouldBlock
-        | ErrorKind::ConnectionReset
-        | ErrorKind::ConnectionAborted
-        | ErrorKind::BrokenPipe
-        | ErrorKind::TimedOut
+            | ErrorKind::WouldBlock
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::TimedOut
     ) || e.to_string().to_lowercase().contains("temporary")
 }
 
@@ -72,7 +73,7 @@ impl<'a> FtpDownload<'a> {
         let (data_host, data_port) = if self.conn.options.passive_mode {
             self.conn.pasv().await?
         } else {
-            return Err("主动模式暂未支持".to_string())
+            return Err("主动模式暂未支持".to_string());
         };
 
         self.conn.retr(remote_path).await?;
@@ -80,15 +81,18 @@ impl<'a> FtpDownload<'a> {
         let mut data_stream: TcpStream = timeout(
             Duration::from_secs(30),
             TcpStream::connect((data_host.as_str(), data_port)),
-        ).await
+        )
+        .await
         .map_err(|_| "FTP数据连接超时")?
         .map_err(|e| format!("FTP数据连接失败: {}", e))?;
 
-        let mut file = tokio::fs::File::create(local_path).await
+        let mut file = tokio::fs::File::create(local_path)
+            .await
             .map_err(|e| format!("创建本地文件失败: {}", e))?;
 
         if let Some(offset) = self.options.resume_offset {
-            file.seek(SeekFrom::Start(offset)).await
+            file.seek(SeekFrom::Start(offset))
+                .await
                 .map_err(|e| format!("设置文件偏移失败: {}", e))?;
         }
 
@@ -109,14 +113,19 @@ impl<'a> FtpDownload<'a> {
                         break;
                     }
 
-                    file.write_all(&buffer[..bytes_read]).await
+                    file.write_all(&buffer[..bytes_read])
+                        .await
                         .map_err(|e| format!("写入本地文件失败: {}", e))?;
 
                     total_downloaded += bytes_read as u64;
 
                     if let Some(cb) = progress_callback {
                         let elapsed = start_time.elapsed().as_secs_f64();
-                        let speed = if elapsed > 0.0 { total_downloaded as f64 / elapsed } else { 0.0 };
+                        let speed = if elapsed > 0.0 {
+                            total_downloaded as f64 / elapsed
+                        } else {
+                            0.0
+                        };
                         cb(DownloadProgress {
                             downloaded_bytes: total_downloaded,
                             total_bytes: file_size,
@@ -127,24 +136,42 @@ impl<'a> FtpDownload<'a> {
                 Err(ref e) if is_transient_io_error(e) && read_retry_count < MAX_READ_RETRIES => {
                     read_retry_count += 1;
                     let wait_ms = 1000u64 * (1 << (read_retry_count - 1));
-                    tracing::warn!("FTP读取错误 (#{})，{}ms 后重试...", read_retry_count, wait_ms);
+                    tracing::warn!(
+                        "FTP读取错误 (#{})，{}ms 后重试...",
+                        read_retry_count,
+                        wait_ms
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
-                Err(e) => return Err(format!("读取FTP数据流失败 (已重试{}次): {}", read_retry_count, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "读取FTP数据流失败 (已重试{}次): {}",
+                        read_retry_count, e
+                    ))
+                }
             }
         }
 
-        file.flush().await.map_err(|e| format!("刷新文件缓冲区失败: {}", e))?;
+        file.flush()
+            .await
+            .map_err(|e| format!("刷新文件缓冲区失败: {}", e))?;
         drop(data_stream);
 
         let final_resp = self.conn.read_response().await?;
         if !final_resp.is_positive_completion() {
-            return Err(format!("下载完成但服务器报告错误: {} {}", final_resp.code, final_resp.message));
+            return Err(format!(
+                "下载完成但服务器报告错误: {} {}",
+                final_resp.code, final_resp.message
+            ));
         }
 
         let elapsed = start_time.elapsed().as_secs_f64();
-        let avg_speed = if elapsed > 0.0 { total_downloaded as f64 / elapsed } else { 0.0 };
+        let avg_speed = if elapsed > 0.0 {
+            total_downloaded as f64 / elapsed
+        } else {
+            0.0
+        };
 
         Ok(DownloadResult {
             file_path: local_path.to_string(),
@@ -156,10 +183,7 @@ impl<'a> FtpDownload<'a> {
         })
     }
 
-    pub async fn download_to_memory(
-        &mut self,
-        remote_path: &str,
-    ) -> Result<Vec<u8>, String> {
+    pub async fn download_to_memory(&mut self, remote_path: &str) -> Result<Vec<u8>, String> {
         self.conn.type_image().await?;
 
         let file_size = self.conn.size(remote_path).await.ok();
@@ -171,16 +195,21 @@ impl<'a> FtpDownload<'a> {
         let (data_host, data_port) = self.conn.pasv().await?;
         self.conn.retr(remote_path).await?;
 
-        let mut data_stream = timeout(Duration::from_secs(30), TcpStream::connect((data_host.as_str(), data_port)))
-            .await
-            .map_err(|_| "FTP数据连接超时")?
-            .map_err(|e| format!("FTP数据连接失败: {}", e))?;
+        let mut data_stream = timeout(
+            Duration::from_secs(30),
+            TcpStream::connect((data_host.as_str(), data_port)),
+        )
+        .await
+        .map_err(|_| "FTP数据连接超时")?
+        .map_err(|e| format!("FTP数据连接失败: {}", e))?;
 
         let mut result = Vec::with_capacity(file_size.unwrap_or(1024 * 1024) as usize);
         let mut buffer = vec![0u8; self.options.buffer_size];
 
         loop {
-            let bytes_read = data_stream.read(&mut buffer).await
+            let bytes_read = data_stream
+                .read(&mut buffer)
+                .await
                 .map_err(|e| format!("读取FTP数据流失败: {}", e))?;
 
             if bytes_read == 0 {
@@ -209,10 +238,11 @@ pub struct DownloadResult {
 
 impl DownloadResult {
     pub fn is_complete(&self) -> bool {
-        self.success && match self.total_size {
-            Some(total) => self.bytes_downloaded >= total,
-            None => self.bytes_downloaded > 0,
-        }
+        self.success
+            && match self.total_size {
+                Some(total) => self.bytes_downloaded >= total,
+                None => self.bytes_downloaded > 0,
+            }
     }
 
     pub fn human_readable_size(bytes: u64) -> String {

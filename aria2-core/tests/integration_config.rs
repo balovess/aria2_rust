@@ -1,10 +1,12 @@
-use aria2_core::config::{ConfigManager, OptionValue};
+use aria2_core::config::netrc::NetRcFile;
 use aria2_core::config::parser::ConfigParser;
 use aria2_core::config::uri_list::UriListFile;
-use aria2_core::config::netrc::NetRcFile;
+use aria2_core::config::{ConfigManager, OptionValue};
 use std::fs;
 
-fn create_temp_dir() -> tempfile::TempDir { tempfile::tempdir().expect("创建临时目录失败") }
+fn create_temp_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("创建临时目录失败")
+}
 fn write_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
     let path = dir.path().join(name);
     fs::write(&path, content).expect("写入临时文件失败");
@@ -23,7 +25,9 @@ fn test_config_loading_priority() {
 
         mgr.load_file(&conf_path).await;
         mgr.load_env().await;
-        mgr.set_global_option("split", OptionValue::Int(10)).await.unwrap();
+        mgr.set_global_option("split", OptionValue::Int(10))
+            .await
+            .unwrap();
 
         let val = mgr.get_global_i64("split").await;
         assert_eq!(val, Some(10));
@@ -37,7 +41,9 @@ fn test_config_unknown_option_rejected() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let mut mgr = ConfigManager::new();
-        let result = mgr.set_global_option("nonexistent-option-xyz", OptionValue::Str("value".into())).await;
+        let result = mgr
+            .set_global_option("nonexistent-option-xyz", OptionValue::Str("value".into()))
+            .await;
         assert!(result.is_err());
     });
 }
@@ -47,7 +53,9 @@ fn test_config_boolean_inversion() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let mut mgr = ConfigManager::new();
-        mgr.set_global_option("check-certificate", OptionValue::Bool(false)).await.unwrap();
+        mgr.set_global_option("check-certificate", OptionValue::Bool(false))
+            .await
+            .unwrap();
         let val = mgr.get_global_bool("check-certificate").await;
         assert_eq!(val, Some(false));
     });
@@ -58,7 +66,9 @@ fn test_config_size_parsing() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let mut mgr = ConfigManager::new();
-        mgr.set_global_option("piece-length", OptionValue::Str("16M".into())).await.unwrap();
+        mgr.set_global_option("piece-length", OptionValue::Str("16M".into()))
+            .await
+            .unwrap();
         let val = mgr.get_global_i64("piece-length").await;
         assert_eq!(val, Some(16 * 1024 * 1024));
     });
@@ -69,8 +79,12 @@ fn test_task_options_inherit_and_override() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let mut mgr = ConfigManager::new();
-        mgr.set_global_option("split", OptionValue::Int(5)).await.unwrap();
-        mgr.set_task_option("gid-001", "split", OptionValue::Int(12)).await.unwrap();
+        mgr.set_global_option("split", OptionValue::Int(5))
+            .await
+            .unwrap();
+        mgr.set_task_option("gid-001", "split", OptionValue::Int(12))
+            .await
+            .unwrap();
 
         let global_split = mgr.get_global_i64("split").await;
         let task_split = mgr.get_task_default("gid-001", "split").await;
@@ -105,7 +119,10 @@ http://example.com/large.bin
 
     let file = UriListFile::from_file(&path).unwrap();
     assert_eq!(file.len(), 1);
-    assert_eq!(file.entries()[0].option("dir").map(|s| s.as_str()), Some("/downloads"));
+    assert_eq!(
+        file.entries()[0].option("dir").map(|s| s.as_str()),
+        Some("/downloads")
+    );
 }
 
 #[test]
@@ -135,8 +152,12 @@ fn test_session_save_load_roundtrip() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let mut mgr1 = ConfigManager::new();
-        mgr1.set_global_option("split", OptionValue::Int(7)).await.unwrap();
-        mgr1.set_global_option("dir", OptionValue::Str("/downloads".into())).await.unwrap();
+        mgr1.set_global_option("split", OptionValue::Int(7))
+            .await
+            .unwrap();
+        mgr1.set_global_option("dir", OptionValue::Str("/downloads".into()))
+            .await
+            .unwrap();
         mgr1.save_session(&session_path).await.unwrap();
 
         let mut mgr2 = ConfigManager::new();
@@ -153,7 +174,9 @@ fn test_change_event_broadcast() {
     rt.block_on(async {
         let mut mgr = ConfigManager::new();
         let mut rx = mgr.subscribe_changes();
-        mgr.set_global_option("quiet", OptionValue::Bool(true)).await.unwrap();
+        mgr.set_global_option("quiet", OptionValue::Bool(true))
+            .await
+            .unwrap();
 
         let event = rx.recv().await;
         assert!(event.is_ok());

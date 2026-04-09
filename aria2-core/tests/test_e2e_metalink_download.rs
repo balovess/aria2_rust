@@ -1,15 +1,14 @@
 mod fixtures {
-    pub mod test_server;
     pub mod test_metalink_builder;
+    pub mod test_server;
 }
-use fixtures::test_server::TestServer;
-use fixtures::test_metalink_builder::{
-    build_metalink_v3, build_metalink_v4,
-    compute_sha256, SMALL_CONTENT, MEDIUM_PATTERN,
-};
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::engine::command::Command;
-use aria2_core::request::request_group::{GroupId, DownloadOptions};
+use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use fixtures::test_metalink_builder::{
+    build_metalink_v3, build_metalink_v4, compute_sha256, MEDIUM_PATTERN, SMALL_CONTENT,
+};
+use fixtures::test_server::TestServer;
 use std::path::Path;
 
 async fn start_server() -> TestServer {
@@ -52,12 +51,17 @@ async fn test_e2e_metalink_small_file_download() {
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建MetalinkDownloadCommand失败");
+    )
+    .expect("创建MetalinkDownloadCommand失败");
 
     cmd.execute().await.expect("Metalink下载失败");
 
     let output_path = Path::new(dir.path()).join("small.bin");
-    assert!(output_path.exists(), "输出文件不存在: {}", output_path.display());
+    assert!(
+        output_path.exists(),
+        "输出文件不存在: {}",
+        output_path.display()
+    );
 
     let data = std::fs::read(&output_path).expect("读取下载文件失败");
     assert_eq!(data, SMALL_CONTENT, "内容不匹配");
@@ -78,7 +82,8 @@ async fn test_e2e_metalink_medium_file_download() {
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建MetalinkDownloadCommand失败");
+    )
+    .expect("创建MetalinkDownloadCommand失败");
 
     cmd.execute().await.expect("Medium文件下载失败");
 
@@ -98,24 +103,20 @@ async fn test_e2e_metalink_mirror_fallback() {
     let bad_url = format!("{}/error/500", server.base_url());
     let sha = compute_sha256(SMALL_CONTENT);
 
-    let metalink_xml = build_metalink_v3(
-        "fallback_test.bin",
-        4,
-        &[
-            (bad_url, 1),
-            (good_url, 2),
-        ],
-        &sha,
-    );
+    let metalink_xml =
+        build_metalink_v3("fallback_test.bin", 4, &[(bad_url, 1), (good_url, 2)], &sha);
 
     let mut cmd = MetalinkDownloadCommand::new(
         GroupId::new(3),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建MetalinkDownloadCommand失败");
+    )
+    .expect("创建MetalinkDownloadCommand失败");
 
-    cmd.execute().await.expect("镜像回退下载应成功（第一镜像500后使用第二镜像）");
+    cmd.execute()
+        .await
+        .expect("镜像回退下载应成功（第一镜像500后使用第二镜像）");
 
     let output_path = Path::new(dir.path()).join("fallback_test.bin");
     assert!(output_path.exists());
@@ -138,7 +139,8 @@ async fn test_e2e_metalink_v4_format_download() {
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("V4格式Metalink创建失败");
+    )
+    .expect("V4格式Metalink创建失败");
 
     cmd.execute().await.expect("V4格式Metalink下载失败");
 
@@ -175,7 +177,8 @@ async fn test_e2e_metalink_progress_tracking() {
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建MetalinkDownloadCommand失败");
+    )
+    .expect("创建MetalinkDownloadCommand失败");
 
     let progress_before = cmd.group().await.progress().await;
     assert!((progress_before - 0.0).abs() < 1.0, "下载前进度应为0%");
@@ -183,7 +186,11 @@ async fn test_e2e_metalink_progress_tracking() {
     cmd.execute().await.expect("Metalink下载失败");
 
     let progress_after = cmd.group().await.progress().await;
-    assert!((progress_after - 100.0).abs() < 1.0, "下载后进度应接近100%, got: {}", progress_after);
+    assert!(
+        (progress_after - 100.0).abs() < 1.0,
+        "下载后进度应接近100%, got: {}",
+        progress_after
+    );
 
     let status = cmd.group().await.status().await;
     assert!(status.is_completed());

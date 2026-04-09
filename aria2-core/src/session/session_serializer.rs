@@ -40,7 +40,9 @@ impl SessionEntry {
 }
 
 fn escape_uri(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
 }
 
 fn unescape_uri(s: &str) -> String {
@@ -50,10 +52,21 @@ fn unescape_uri(s: &str) -> String {
         if c == '\\' {
             if let Some(&next) = chars.peek() {
                 match next {
-                    't' => { result.push('\t'); chars.next(); }
-                    'n' => { result.push('\n'); chars.next(); }
-                    '\\' => { result.push('\\'); chars.next(); }
-                    _ => { result.push(c); }
+                    't' => {
+                        result.push('\t');
+                        chars.next();
+                    }
+                    'n' => {
+                        result.push('\n');
+                        chars.next();
+                    }
+                    '\\' => {
+                        result.push('\\');
+                        chars.next();
+                    }
+                    _ => {
+                        result.push(c);
+                    }
                 }
             } else {
                 result.push(c);
@@ -182,7 +195,11 @@ pub fn deserialize(text: &str) -> Result<Vec<SessionEntry>> {
         }
 
         let unescaped = unescape_uri(line.trim());
-        let uris: Vec<String> = unescaped.split('\t').map(|s| s.to_string()).filter(|s| !s.is_empty()).collect();
+        let uris: Vec<String> = unescaped
+            .split('\t')
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         if !uris.is_empty() {
             current = Some(SessionEntry::new(0, uris));
         }
@@ -196,7 +213,8 @@ pub fn deserialize(text: &str) -> Result<Vec<SessionEntry>> {
 }
 
 pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
-    let content = tokio::fs::read_to_string(path).await
+    let content = tokio::fs::read_to_string(path)
+        .await
         .map_err(|e| Aria2Error::Io(format!("读取 session 文件失败 {}: {}", path.display(), e)))?;
     deserialize(&content)
 }
@@ -204,9 +222,15 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 pub async fn save_to_file(path: &Path, groups: &[Arc<RwLock<RequestGroup>>]) -> Result<()> {
     let content = serialize_groups(groups).await?;
     let tmp_path = path.with_extension("sess.tmp");
-    tokio::fs::write(&tmp_path, &content).await
-        .map_err(|e| Aria2Error::Io(format!("写入 session 临时文件失败 {}: {}", tmp_path.display(), e)))?;
-    tokio::fs::rename(&tmp_path, path).await
+    tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
+        Aria2Error::Io(format!(
+            "写入 session 临时文件失败 {}: {}",
+            tmp_path.display(),
+            e
+        ))
+    })?;
+    tokio::fs::rename(&tmp_path, path)
+        .await
         .map_err(|e| Aria2Error::Io(format!("重命名 session 文件失败 {}: {}", path.display(), e)))
 }
 
@@ -216,9 +240,7 @@ mod tests {
 
     #[test]
     fn test_serialize_single_entry() {
-        let entry = SessionEntry::new(0xd270c8a2, vec![
-            "http://example.com/file.zip".to_string(),
-        ]);
+        let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
         let text = serialize_entry(&entry);
         assert!(text.contains("http://example.com/file.zip"), "应包含 URI");
         assert!(text.contains("GID=d270c8a2"), "应包含 GID");
@@ -227,15 +249,20 @@ mod tests {
     #[test]
     fn test_serialize_multiple_entries_roundtrip() {
         let entries = vec![
-            SessionEntry::new(1, vec!["http://a.com/1.bin".to_string()])
-                .with_options({
-                    let mut m = HashMap::new();
-                    m.insert("split".to_string(), "4".to_string());
-                    m.insert("dir".to_string(), "/tmp".to_string());
-                    m
-                }),
-            SessionEntry::new(2, vec!["ftp://b.com/2.iso".to_string(), "http://mirror.b.com/2.iso".to_string()])
-                .paused(),
+            SessionEntry::new(1, vec!["http://a.com/1.bin".to_string()]).with_options({
+                let mut m = HashMap::new();
+                m.insert("split".to_string(), "4".to_string());
+                m.insert("dir".to_string(), "/tmp".to_string());
+                m
+            }),
+            SessionEntry::new(
+                2,
+                vec![
+                    "ftp://b.com/2.iso".to_string(),
+                    "http://mirror.b.com/2.iso".to_string(),
+                ],
+            )
+            .paused(),
         ];
 
         let mut serialized = String::new();
@@ -299,8 +326,14 @@ ftp://server/big.iso
         let entries = deserialize(input).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].options.get("split").unwrap(), "4");
-        assert_eq!(entries[0].options.get("max-connection-per-server").unwrap(), "2");
-        assert_eq!(entries[0].options.get("dir").unwrap(), "C:\\Users\\test\\Downloads");
+        assert_eq!(
+            entries[0].options.get("max-connection-per-server").unwrap(),
+            "2"
+        );
+        assert_eq!(
+            entries[0].options.get("dir").unwrap(),
+            "C:\\Users\\test\\Downloads"
+        );
         assert_eq!(entries[0].options.get("out").unwrap(), "file.zip");
     }
 
@@ -320,11 +353,14 @@ ftp://server/big.iso
 
     #[test]
     fn test_serialize_tab_separated_uris() {
-        let entry = SessionEntry::new(99, vec![
-            "http://mirror1.com/f".to_string(),
-            "http://mirror2.com/f".to_string(),
-            "http://mirror3.com/f".to_string(),
-        ]);
+        let entry = SessionEntry::new(
+            99,
+            vec![
+                "http://mirror1.com/f".to_string(),
+                "http://mirror2.com/f".to_string(),
+                "http://mirror3.com/f".to_string(),
+            ],
+        );
         let text = serialize_entry(&entry);
         let uri_line = text.lines().next().unwrap();
         assert_eq!(uri_line.matches('\t').count(), 2, "3个URI应有2个tab分隔符");

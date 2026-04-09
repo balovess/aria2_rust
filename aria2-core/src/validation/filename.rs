@@ -16,7 +16,11 @@ pub fn sanitize(raw: &str) -> String {
         }
     }
     let trimmed = result.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    if trimmed.is_empty() { "download".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "download".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn make_unique(dir: &Path, name: &str) -> PathBuf {
@@ -25,8 +29,15 @@ pub fn make_unique(dir: &Path, name: &str) -> PathBuf {
         return candidate;
     }
     let path = std::path::Path::new(name);
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
     for i in 1u32..=9999 {
         let new_name = format!("{}_{}{}", stem, i, ext);
         let path = dir.join(&new_name);

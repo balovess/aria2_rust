@@ -12,7 +12,9 @@ pub struct MockTrackerServer {
 impl MockTrackerServer {
     pub async fn start(peer_port: u16) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = TcpListener::bind(addr).await.expect("绑定Mock Tracker端口失败");
+        let listener = TcpListener::bind(addr)
+            .await
+            .expect("绑定Mock Tracker端口失败");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -34,24 +36,40 @@ impl MockTrackerServer {
             }
         });
 
-        MockTrackerServer { addr: actual_addr, shutdown: Some(shutdown_tx), _peer_port: peer_port }
+        MockTrackerServer {
+            addr: actual_addr,
+            shutdown: Some(shutdown_tx),
+            _peer_port: peer_port,
+        }
     }
 
-    pub fn addr(&self) -> SocketAddr { self.addr }
-    pub fn announce_url(&self) -> String { format!("http://127.0.0.1:{}/announce", self.addr.port()) }
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+    pub fn announce_url(&self) -> String {
+        format!("http://127.0.0.1:{}/announce", self.addr.port())
+    }
 
     async fn handle_connection(mut stream: tokio::net::TcpStream, peer_port: u16) {
         use tokio::io::AsyncReadExt;
         let mut reader = tokio::io::BufReader::new(&mut stream);
 
         let mut request_line = String::new();
-        if reader.read_line(&mut request_line).await.is_err() { return; }
-        if !request_line.starts_with("GET ") { return; }
+        if reader.read_line(&mut request_line).await.is_err() {
+            return;
+        }
+        if !request_line.starts_with("GET ") {
+            return;
+        }
 
         loop {
             let mut line = String::new();
-            if reader.read_line(&mut line).await.is_err() { return; }
-            if line == "\r\n" || line == "\n" || line.is_empty() { break; }
+            if reader.read_line(&mut line).await.is_err() {
+                return;
+            }
+            if line == "\r\n" || line == "\n" || line.is_empty() {
+                break;
+            }
         }
 
         let body = build_tracker_response_bencode(peer_port);
@@ -61,8 +79,12 @@ impl MockTrackerServer {
             body.len()
         );
 
-        if stream.write_all(response.as_bytes()).await.is_err() { return; }
-        if stream.write_all(&body).await.is_err() { return; }
+        if stream.write_all(response.as_bytes()).await.is_err() {
+            return;
+        }
+        if stream.write_all(&body).await.is_err() {
+            return;
+        }
         let _ = stream.flush().await;
         let _ = stream.shutdown().await;
     }
@@ -79,9 +101,10 @@ fn build_tracker_response_bencode(peer_port: u16) -> Vec<u8> {
     resp_dict.insert(b"interval".to_vec(), BencodeValue::Int(300));
     resp_dict.insert(b"complete".to_vec(), BencodeValue::Int(1));
     resp_dict.insert(b"incomplete".to_vec(), BencodeValue::Int(1));
-    resp_dict.insert(b"peers".to_vec(), BencodeValue::List(vec![
-        BencodeValue::Dict(peer_dict),
-    ]));
+    resp_dict.insert(
+        b"peers".to_vec(),
+        BencodeValue::List(vec![BencodeValue::Dict(peer_dict)]),
+    );
 
     BencodeValue::Dict(resp_dict).encode()
 }

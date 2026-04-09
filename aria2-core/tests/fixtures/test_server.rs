@@ -14,7 +14,9 @@ pub struct TestServer {
 impl TestServer {
     pub async fn start() -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = TcpListener::bind(addr).await.expect("绑定测试服务器端口失败");
+        let listener = TcpListener::bind(addr)
+            .await
+            .expect("绑定测试服务器端口失败");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -37,7 +39,10 @@ impl TestServer {
             }
         });
 
-        TestServer { addr: actual_addr, shutdown: Some(shutdown_tx) }
+        TestServer {
+            addr: actual_addr,
+            shutdown: Some(shutdown_tx),
+        }
     }
 
     pub fn base_url(&self) -> String {
@@ -55,7 +60,8 @@ impl TestServer {
     fn handle_request(request: &[u8]) -> Vec<u8> {
         let request_str = String::from_utf8_lossy(request);
         let path = request_str
-            .lines().next()
+            .lines()
+            .next()
             .and_then(|line| line.split(' ').nth(1))
             .unwrap_or("/");
 
@@ -123,8 +129,14 @@ impl TestServer {
 fn http_response(code: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
     format!(
         "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        code, content_type, body.len()
-    ).into_bytes().into_iter().chain(body.to_vec().into_iter()).collect()
+        code,
+        content_type,
+        body.len()
+    )
+    .into_bytes()
+    .into_iter()
+    .chain(body.to_vec().into_iter())
+    .collect()
 }
 
 fn http_404() -> Vec<u8> {
@@ -139,9 +151,15 @@ impl Drop for TestServer {
     }
 }
 
-pub fn small_content() -> &'static [u8] { SMALL_CONTENT }
-pub fn medium_pattern() -> u8 { MEDIUM_PATTERN }
-pub fn large_pattern() -> u8 { LARGE_PATTERN }
+pub fn small_content() -> &'static [u8] {
+    SMALL_CONTENT
+}
+pub fn medium_pattern() -> u8 {
+    MEDIUM_PATTERN
+}
+pub fn large_pattern() -> u8 {
+    LARGE_PATTERN
+}
 pub fn small_sha256() -> &'static str {
     "9a5f529b616b7a64c8b0bf3a46d9d6e3e088ce9a98a2aeb3e7b3d6b1c3d4e5f6"
 }

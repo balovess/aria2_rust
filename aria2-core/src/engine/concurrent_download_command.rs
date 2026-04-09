@@ -1,17 +1,17 @@
+use async_trait::async_trait;
+use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
 use tracing::{info, warn};
-use futures::StreamExt;
 
-use crate::error::{Aria2Error, Result, RecoverableError, FatalError};
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
+use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::filesystem::control_file;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::file_allocation;
 use crate::rate_limiter::RateLimiter;
-use crate::filesystem::control_file;
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 pub struct ConcurrentDownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -33,13 +33,18 @@ impl ConcurrentDownloadCommand {
         output_dir: Option<&str>,
     ) -> Result<Self> {
         let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e))))?;
+            .map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
+            })?;
 
-        let file = doc.single_file()
+        let file = doc
+            .single_file()
             .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("No file in Metalink".into())))?;
 
         if file.urls.is_empty() {
-            return Err(Aria2Error::Fatal(FatalError::Config("No URLs in Metalink".into())));
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "No URLs in Metalink".into(),
+            )));
         }
 
         let dir = output_dir
@@ -48,7 +53,11 @@ impl ConcurrentDownloadCommand {
             .unwrap_or_else(|| ".".to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&file.name);
-        let urls: Vec<String> = file.get_sorted_urls().iter().map(|u| u.url.clone()).collect();
+        let urls: Vec<String> = file
+            .get_sorted_urls()
+            .iter()
+            .map(|u| u.url.clone())
+            .collect();
         let group = RequestGroup::new(gid, urls.clone(), options.clone());
         let max_conn = options.max_connection_per_server.unwrap_or(2);
 
@@ -58,12 +67,22 @@ impl ConcurrentDownloadCommand {
             .user_agent("aria2-rust/0.1.0")
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("HTTP client build failed: {}", e))))?;
+            .map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "HTTP client build failed: {}",
+                    e
+                )))
+            })?;
 
         let alloc = "prealloc".to_string();
         let cache_mb: Option<usize> = None;
 
-        info!("ConcurrentDownloadCommand created: {} -> {} ({} mirrors)", file.name, path.display(), urls.len());
+        info!(
+            "ConcurrentDownloadCommand created: {} -> {} ({} mirrors)",
+            file.name,
+            path.display(),
+            urls.len()
+        );
 
         Ok(Self {
             group: Arc::new(tokio::sync::RwLock::new(group)),
@@ -92,14 +111,20 @@ impl Command for ConcurrentDownloadCommand {
         }
 
         let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e))))?;
+            .map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
+            })?;
 
-        let file = doc.single_file()
+        let file = doc
+            .single_file()
             .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("No available file".into())))?;
 
         let sorted_urls = file.get_sorted_urls();
         if sorted_urls.len() < 2 {
-            warn!("Concurrent download requires 2+ mirrors, got {}. Falling back to sequential.", sorted_urls.len());
+            warn!(
+                "Concurrent download requires 2+ mirrors, got {}. Falling back to sequential.",
+                sorted_urls.len()
+            );
         }
 
         let urls: Vec<String> = sorted_urls.iter().map(|u| u.url.clone()).collect();
@@ -108,20 +133,19 @@ impl Command for ConcurrentDownloadCommand {
 
         if let Some(parent) = self.output_path.parent() {
             if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e))))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
+                })?;
             }
         }
 
-        let mut manager = ConcurrentSegmentManager::new(
-            expected_size.unwrap_or(0),
-            urls,
-            None,
-        );
+        let mut manager = ConcurrentSegmentManager::new(expected_size.unwrap_or(0), urls, None);
         manager.set_max_connections_per_mirror(self.max_connections_per_server as usize);
 
         if manager.num_segments() == 0 && expected_size != Some(0) {
-            return Err(Aria2Error::Fatal(FatalError::Config("Cannot determine file size for segmentation".into())));
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Cannot determine file size for segmentation".into(),
+            )));
         }
         if expected_size == Some(0) || manager.num_segments() == 0 {
             return Ok(());
@@ -129,37 +153,65 @@ impl Command for ConcurrentDownloadCommand {
 
         let total_len = expected_size.unwrap_or(0);
         if total_len > 0 {
-            file_allocation::preallocate_file(&self.output_path, total_len, &self.file_allocation).await?;
+            file_allocation::preallocate_file(&self.output_path, total_len, &self.file_allocation)
+                .await?;
         }
 
         let num_pieces = manager.num_segments().max(1);
         let ctrl_path = control_file::ControlFile::control_path_for(&self.output_path);
-        let mut ctrl_file = control_file::ControlFile::open_or_create(&ctrl_path, total_len, num_pieces).await?;
+        let mut ctrl_file =
+            control_file::ControlFile::open_or_create(&ctrl_path, total_len, num_pieces).await?;
         ctrl_file.save().await.ok();
 
-        let mut writer = CachedDiskWriter::new(&self.output_path, expected_size, self.disk_cache_size_mb);
+        let mut writer =
+            CachedDiskWriter::new(&self.output_path, expected_size, self.disk_cache_size_mb);
 
-        let rate_limit = { let g = self.group.read().await; g.options().max_download_limit };
+        let rate_limit = {
+            let g = self.group.read().await;
+            g.options().max_download_limit
+        };
         let limiter = rate_limit.filter(|&r| r > 0).map(|r| {
             use crate::rate_limiter::RateLimiterConfig;
             RateLimiter::new(&RateLimiterConfig::new(Some(r), None))
         });
 
-        Self::download_concurrent_to_disk(&self.client, &mut manager, &mut writer, &mut ctrl_file, limiter.as_ref()).await
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: format!("Concurrent download failed: {}", e) }))?;
+        Self::download_concurrent_to_disk(
+            &self.client,
+            &mut manager,
+            &mut writer,
+            &mut ctrl_file,
+            limiter.as_ref(),
+        )
+        .await
+        .map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Concurrent download failed: {}", e),
+            })
+        })?;
 
-        writer.flush().await.map_err(|e| Aria2Error::Io(e.to_string()))?;
+        writer
+            .flush()
+            .await
+            .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
         if let Some(ref hash) = hash_entry {
-            let file_data = writer.read_all().await.map_err(|e| Aria2Error::Io(e.to_string()))?;
+            let file_data = writer
+                .read_all()
+                .await
+                .map_err(|e| Aria2Error::Io(e.to_string()))?;
             if !Self::verify_hash(&file_data, hash)? {
-                return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "Hash verification failed after concurrent download".into(),
-                }));
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: "Hash verification failed after concurrent download".into(),
+                    },
+                ));
             }
         }
 
-        writer.close().await.map_err(|e| Aria2Error::Io(e.to_string()))?;
+        writer
+            .close()
+            .await
+            .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
         self.completed_bytes = total_len;
 
@@ -170,15 +222,26 @@ impl Command for ConcurrentDownloadCommand {
             g.complete().await?;
         }
 
-        info!("Concurrent download done: {} ({} bytes from {} mirrors)", self.output_path.display(), self.completed_bytes, manager.num_mirrors());
+        info!(
+            "Concurrent download done: {} ({} bytes from {} mirrors)",
+            self.output_path.display(),
+            self.completed_bytes,
+            manager.num_mirrors()
+        );
         Ok(())
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 { CommandStatus::Running } else { CommandStatus::Pending }
+        if self.completed_bytes > 0 {
+            CommandStatus::Running
+        } else {
+            CommandStatus::Pending
+        }
     }
 
-    fn timeout(&self) -> Option<Duration> { Some(Duration::from_secs(600)) }
+    fn timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(600))
+    }
 }
 
 impl ConcurrentDownloadCommand {
@@ -192,7 +255,8 @@ impl ConcurrentDownloadCommand {
         manager.allocate_segments();
 
         if manager.num_segments() <= 1 {
-            return Self::download_single_mirror_fallback_to_disk(client, manager, writer, limiter).await;
+            return Self::download_single_mirror_fallback_to_disk(client, manager, writer, limiter)
+                .await;
         }
 
         let mut iteration = 0u32;
@@ -200,20 +264,31 @@ impl ConcurrentDownloadCommand {
             let mut handles = Vec::new();
 
             for mi in 0..manager.num_mirrors() {
-                while let Some((seg_idx, offset, length)) = manager.next_pending_segment_for_mirror(mi) {
+                while let Some((seg_idx, offset, length)) =
+                    manager.next_pending_segment_for_mirror(mi)
+                {
                     let url = manager.mirror_url(mi).unwrap_or("").to_string();
                     let client_clone = client.clone();
                     let seg_idx_copy = seg_idx;
 
                     let handle = tokio::spawn(async move {
-                        Self::download_single_segment(&client_clone, &url, offset, length, seg_idx_copy).await
+                        Self::download_single_segment(
+                            &client_clone,
+                            &url,
+                            offset,
+                            length,
+                            seg_idx_copy,
+                        )
+                        .await
                     });
                     handles.push((mi, seg_idx, offset, handle));
                 }
             }
 
             if handles.is_empty() {
-                if manager.is_complete() { break; }
+                if manager.is_complete() {
+                    break;
+                }
                 if manager.has_failed_segments() {
                     return Err("Some segments exhausted max retries".to_string());
                 }
@@ -231,7 +306,9 @@ impl ConcurrentDownloadCommand {
             for (mi, seg_idx, offset, handle) in handles {
                 match handle.await {
                     Ok(Ok(data)) => {
-                        writer.write_at(offset, &data).await
+                        writer
+                            .write_at(offset, &data)
+                            .await
                             .map_err(|e| format!("Disk write error seg{}: {}", seg_idx, e))?;
                         manager.complete_segment(seg_idx, data);
                         ctrl_file.mark_piece_done(seg_idx as usize);
@@ -248,7 +325,9 @@ impl ConcurrentDownloadCommand {
                 }
             }
 
-            if manager.is_complete() { break; }
+            if manager.is_complete() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
@@ -264,9 +343,11 @@ impl ConcurrentDownloadCommand {
     ) -> std::result::Result<Vec<u8>, String> {
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
 
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .header("Range", &range_header)
-            .send().await
+            .send()
+            .await
             .map_err(|e| format!("HTTP Range request failed: {}", e))?;
 
         let status = response.status();
@@ -291,7 +372,10 @@ impl ConcurrentDownloadCommand {
         Ok(data)
     }
 
-    fn verify_hash(data: &[u8], hash: &aria2_protocol::metalink::parser::HashEntry) -> Result<bool> {
+    fn verify_hash(
+        data: &[u8],
+        hash: &aria2_protocol::metalink::parser::HashEntry,
+    ) -> Result<bool> {
         use aria2_protocol::metalink::parser::HashAlgorithm;
         match hash.algo {
             HashAlgorithm::Md5 => {
@@ -346,7 +430,9 @@ impl ConcurrentDownloadCommand {
                                     if let Some(lim) = limiter {
                                         lim.acquire_download(bytes.len() as u64).await;
                                     }
-                                    writer.write_at(offset, &bytes).await
+                                    writer
+                                        .write_at(offset, &bytes)
+                                        .await
                                         .map_err(|e| format!("Write error: {}", e))?;
                                     offset += bytes.len() as u64;
                                 }

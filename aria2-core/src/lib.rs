@@ -49,23 +49,23 @@
 //! }
 //! ```
 
-pub mod error;
-pub mod log;
-pub mod colorized_stream;
-pub mod engine;
-pub mod request;
-pub mod segment;
-pub mod filesystem;
-pub mod config;
-pub mod util;
-pub mod ui;
-pub mod retry;
-pub mod validation;
-pub mod rate_limiter;
-pub mod session;
 pub mod checksum;
-pub mod selector;
+pub mod colorized_stream;
+pub mod config;
+pub mod engine;
+pub mod error;
+pub mod filesystem;
 pub mod http;
+pub mod log;
+pub mod rate_limiter;
+pub mod request;
+pub mod retry;
+pub mod segment;
+pub mod selector;
+pub mod session;
+pub mod ui;
+pub mod util;
+pub mod validation;
 
 use tracing::Level;
 

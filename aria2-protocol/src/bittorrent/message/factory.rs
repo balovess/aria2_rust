@@ -34,7 +34,11 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
     let msg_type = MessageType::try_from(data[4])?;
     let payload = &data[5..4 + len];
 
-    debug!("解析BT消息: type={:?}, payload_len={}", msg_type, payload.len());
+    debug!(
+        "解析BT消息: type={:?}, payload_len={}",
+        msg_type,
+        payload.len()
+    );
 
     match msg_type {
         MessageType::Choke => Ok(Some(BtMessage::Choke)),
@@ -62,13 +66,18 @@ fn parse_bitfield(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.is_empty() {
         return Err("Bitfield消息payload为空".to_string());
     }
-    Ok(Some(BtMessage::Bitfield { data: payload.to_vec() }))
+    Ok(Some(BtMessage::Bitfield {
+        data: payload.to_vec(),
+    }))
 }
 
 fn parse_block_op(payload: &[u8], is_request: bool) -> Result<Option<BtMessage>, String> {
     if payload.len() < 12 {
-        return Err(format!("{}消息payload不足: {}字节",
-            if is_request { "Request" } else { "Cancel" }, payload.len()));
+        return Err(format!(
+            "{}消息payload不足: {}字节",
+            if is_request { "Request" } else { "Cancel" },
+            payload.len()
+        ));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -107,7 +116,10 @@ pub fn parse_message_stream(buffer: &[u8]) -> Vec<(Option<BtMessage>, usize)> {
             break;
         }
         let len = u32::from_be_bytes([
-            buffer[pos], buffer[pos+1], buffer[pos+2], buffer[pos+3],
+            buffer[pos],
+            buffer[pos + 1],
+            buffer[pos + 2],
+            buffer[pos + 3],
         ]) as usize;
         if len == 0 {
             results.push((Some(BtMessage::KeepAlive), 4));
@@ -176,7 +188,12 @@ mod tests {
     fn test_parse_bitfield() {
         let data = vec![0, 0, 0, 3, 5, 0xFF, 0x00];
         let msg = parse_message(&data).unwrap();
-        assert_eq!(msg, Some(BtMessage::Bitfield { data: vec![0xFF, 0x00] }));
+        assert_eq!(
+            msg,
+            Some(BtMessage::Bitfield {
+                data: vec![0xFF, 0x00]
+            })
+        );
     }
 
     #[test]
@@ -186,9 +203,12 @@ mod tests {
         data.extend_from_slice(&(1024u32).to_be_bytes());
         data.extend_from_slice(&(16384u32).to_be_bytes());
         let msg = parse_message(&data).unwrap();
-        assert_eq!(msg, Some(BtMessage::Request {
-            request: PieceBlockRequest::new(1, 1024, 16384)
-        }));
+        assert_eq!(
+            msg,
+            Some(BtMessage::Request {
+                request: PieceBlockRequest::new(1, 1024, 16384)
+            })
+        );
     }
 
     #[test]
@@ -201,7 +221,14 @@ mod tests {
         data.extend_from_slice(&(0u32).to_be_bytes());
         data.extend_from_slice(block_data);
         let msg = parse_message(&data).unwrap();
-        assert_eq!(msg, Some(BtMessage::Piece { index: 0, begin: 0, data: b"hi".to_vec() }));
+        assert_eq!(
+            msg,
+            Some(BtMessage::Piece {
+                index: 0,
+                begin: 0,
+                data: b"hi".to_vec()
+            })
+        );
     }
 
     #[test]
@@ -211,9 +238,12 @@ mod tests {
         data.extend_from_slice(&(200u32).to_be_bytes());
         data.extend_from_slice(&(8192u32).to_be_bytes());
         let msg = parse_message(&data).unwrap();
-        assert_eq!(msg, Some(BtMessage::Cancel {
-            request: PieceBlockRequest::new(5, 200, 8192)
-        }));
+        assert_eq!(
+            msg,
+            Some(BtMessage::Cancel {
+                request: PieceBlockRequest::new(5, 200, 8192)
+            })
+        );
     }
 
     #[test]

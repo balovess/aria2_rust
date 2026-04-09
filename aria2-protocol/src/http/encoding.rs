@@ -1,4 +1,4 @@
-use flate2::read::{GzDecoder, DeflateDecoder};
+use flate2::read::{DeflateDecoder, GzDecoder};
 use std::io::Read;
 use tracing::debug;
 
@@ -23,9 +23,14 @@ impl HttpEncoding {
         }
         let mut decoder = GzDecoder::new(data);
         let mut decompressed = Vec::with_capacity(data.len() * 4);
-        decoder.read_to_end(&mut decompressed)
+        decoder
+            .read_to_end(&mut decompressed)
             .map_err(|e| format!("gzip解压失败: {}", e))?;
-        debug!("gzip解压完成: {} -> {} 字节", data.len(), decompressed.len());
+        debug!(
+            "gzip解压完成: {} -> {} 字节",
+            data.len(),
+            decompressed.len()
+        );
         Ok(decompressed)
     }
 
@@ -35,9 +40,14 @@ impl HttpEncoding {
         }
         let mut decoder = DeflateDecoder::new(data);
         let mut decompressed = Vec::with_capacity(data.len() * 4);
-        decoder.read_to_end(&mut decompressed)
+        decoder
+            .read_to_end(&mut decompressed)
             .map_err(|e| format!("deflate解压失败: {}", e))?;
-        debug!("deflate解压完成: {} -> {} 字节", data.len(), decompressed.len());
+        debug!(
+            "deflate解压完成: {} -> {} 字节",
+            data.len(),
+            decompressed.len()
+        );
         Ok(decompressed)
     }
 
@@ -61,7 +71,8 @@ impl ChunkedDecoder {
         let mut pos = 0;
 
         while pos < data.len() {
-            let line_end = data[pos..].iter()
+            let line_end = data[pos..]
+                .iter()
                 .position(|&b| b == b'\r' || b == b'\n')
                 .ok_or("分块编码格式错误: 找不到块大小行")?;
 

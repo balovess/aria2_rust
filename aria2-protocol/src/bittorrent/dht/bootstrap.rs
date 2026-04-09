@@ -14,15 +14,20 @@ impl DhtBootstrap {
     pub fn get_bootstrap_nodes() -> Vec<DhtNode> {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        BOOTSTRAP_NODES.iter().map(|(host, port)| {
-            let mut id = [0u8; 20];
-            for byte in id.iter_mut() { *byte = rng.gen(); }
-            if let Ok(addr) = format!("{}:{}", host, port).parse::<std::net::SocketAddr>() {
-                DhtNode::new(id, addr)
-            } else {
-                DhtNode::new(id, "0.0.0.0:0".parse().unwrap())
-            }
-        }).collect()
+        BOOTSTRAP_NODES
+            .iter()
+            .map(|(host, port)| {
+                let mut id = [0u8; 20];
+                for byte in id.iter_mut() {
+                    *byte = rng.gen();
+                }
+                if let Ok(addr) = format!("{}:{}", host, port).parse::<std::net::SocketAddr>() {
+                    DhtNode::new(id, addr)
+                } else {
+                    DhtNode::new(id, "0.0.0.0:0".parse().unwrap())
+                }
+            })
+            .collect()
     }
 
     pub fn add_bootstrap_nodes_to_table(routing_table: &mut RoutingTable) -> usize {
@@ -37,7 +42,8 @@ impl DhtBootstrap {
     }
 
     pub fn bootstrap_node_list() -> Vec<String> {
-        BOOTSTRAP_NODES.iter()
+        BOOTSTRAP_NODES
+            .iter()
             .map(|(host, port)| format!("{}:{}", host, port))
             .collect()
     }

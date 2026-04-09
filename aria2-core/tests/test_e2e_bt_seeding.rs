@@ -1,5 +1,7 @@
-use aria2_core::engine::bt_upload_session::{BtUploadSession, BtSeedingConfig, InMemoryPieceProvider, PieceDataProvider};
 use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
+use aria2_core::engine::bt_upload_session::{
+    BtSeedingConfig, BtUploadSession, InMemoryPieceProvider, PieceDataProvider,
+};
 
 #[test]
 fn test_bt_upload_session_creation() {
@@ -88,7 +90,10 @@ fn test_seeding_config_limits() {
 
 #[test]
 fn test_exit_condition_combined_logic() {
-    let cond = SeedExitCondition { seed_time: Some(std::time::Duration::from_secs(10)), seed_ratio: Some(1.5) };
+    let cond = SeedExitCondition {
+        seed_time: Some(std::time::Duration::from_secs(10)),
+        seed_ratio: Some(1.5),
+    };
     let mut mgr = make_empty_mgr_with_downloaded(1000, 400, cond);
     assert!(!mgr.should_exit());
 
@@ -96,7 +101,14 @@ fn test_exit_condition_combined_logic() {
     mgr.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(15);
     assert!(mgr.should_exit(), "Both time and ratio met");
 
-    let mut mgr2 = make_empty_mgr_with_downloaded(1000, 1400, SeedExitCondition { seed_time: Some(std::time::Duration::from_secs(10)), seed_ratio: Some(1.5) });
+    let mut mgr2 = make_empty_mgr_with_downloaded(
+        1000,
+        1400,
+        SeedExitCondition {
+            seed_time: Some(std::time::Duration::from_secs(10)),
+            seed_ratio: Some(1.5),
+        },
+    );
     mgr2.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(9);
     assert!(!mgr2.should_exit(), "Neither time nor ratio fully met yet");
 }
@@ -108,7 +120,13 @@ fn test_inmemory_provider_all_pieces_complete() {
 
     for i in 0..3u32 {
         assert!(provider.has_piece(i), "piece {} should be set", i);
-        let data = provider.get_piece_data(i, 0, 512.min(provider.num_pieces() as u32 * 512 - i as u32 * 512)).unwrap();
+        let data = provider
+            .get_piece_data(
+                i,
+                0,
+                512.min(provider.num_pieces() as u32 * 512 - i as u32 * 512),
+            )
+            .unwrap();
         assert!(!data.is_empty());
         assert!(data.iter().all(|&b| b == 0xAA));
     }
@@ -118,7 +136,11 @@ fn make_empty_mgr(exit_cond: SeedExitCondition) -> BtSeedManager {
     make_empty_mgr_with_downloaded(0, 0, exit_cond)
 }
 
-fn make_empty_mgr_with_downloaded(downloaded: u64, uploaded: u64, exit_cond: SeedExitCondition) -> BtSeedManager {
+fn make_empty_mgr_with_downloaded(
+    downloaded: u64,
+    uploaded: u64,
+    exit_cond: SeedExitCondition,
+) -> BtSeedManager {
     let provider = std::sync::Arc::new(InMemoryPieceProvider::new(16384, 10));
     let config = BtSeedingConfig::default();
     let conds: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];

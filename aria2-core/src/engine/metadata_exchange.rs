@@ -1,15 +1,13 @@
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{info, debug, warn};
 use tokio::time::timeout;
+use tracing::{debug, info, warn};
 
-use aria2_protocol::bittorrent::peer::connection::{PeerConnection, PeerAddr};
-use aria2_protocol::bittorrent::extension::ut_metadata::{
-    ExtensionHandshake,
-    UtMetadataMsg,
-    MetadataCollector,
-};
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+use aria2_protocol::bittorrent::extension::ut_metadata::{
+    ExtensionHandshake, MetadataCollector, UtMetadataMsg,
+};
+use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
 
 pub struct MetadataExchangeConfig {
     pub max_peers_to_try: usize,
@@ -52,7 +50,11 @@ impl MetadataExchangeSession {
         for peer_addr in peers.iter().take(self.config.max_peers_to_try) {
             match self.exchange_with_peer(info_hash, peer_addr).await {
                 Ok(torrent_bytes) => {
-                    info!("Metadata fetched successfully from {} ({} bytes)", peer_addr, torrent_bytes.len());
+                    info!(
+                        "Metadata fetched successfully from {} ({} bytes)",
+                        peer_addr,
+                        torrent_bytes.len()
+                    );
                     return Ok(torrent_bytes);
                 }
                 Err(e) => {
@@ -62,11 +64,7 @@ impl MetadataExchangeSession {
             }
         }
 
-        Err(format!(
-            "All {} peers failed: {:?}",
-            errors.len(),
-            errors
-        ))
+        Err(format!("All {} peers failed: {:?}", errors.len(), errors))
     }
 
     async fn exchange_with_peer(
@@ -76,7 +74,11 @@ impl MetadataExchangeSession {
     ) -> Result<Vec<u8>, String> {
         let addr = PeerAddr::new(&peer_addr.ip().to_string(), peer_addr.port());
 
-        let conn_result = tokio::time::timeout(self.config.connect_timeout, PeerConnection::connect(&addr, info_hash)).await;
+        let conn_result = tokio::time::timeout(
+            self.config.connect_timeout,
+            PeerConnection::connect(&addr, info_hash),
+        )
+        .await;
         let mut conn = match conn_result {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => return Err(format!("Connect to {} failed: {}", peer_addr, e)),
@@ -98,8 +100,10 @@ impl MetadataExchangeSession {
         let remote_hs = ExtensionHandshake::parse(&remote_hs_data)
             .ok_or_else(|| "Failed to parse remote extension handshake".to_string())?;
 
-        let metadata_size = remote_hs.metadata_size
-            .ok_or_else(|| "Remote did not provide metadata_size".to_string())? as u64;
+        let metadata_size = remote_hs
+            .metadata_size
+            .ok_or_else(|| "Remote did not provide metadata_size".to_string())?
+            as u64;
 
         if metadata_size == 0 {
             return Err("metadata_size is 0".to_string());
@@ -111,11 +115,13 @@ impl MetadataExchangeSession {
         debug!("Remote reports metadata_size={} bytes", metadata_size);
 
         let num_pieces = ((metadata_size + self.config.piece_size as u64 - 1)
-                        / self.config.piece_size as u64) as u32;
+            / self.config.piece_size as u64) as u32;
         let mut collector = MetadataCollector::new(metadata_size, self.config.piece_size);
 
         for piece_idx in 0..num_pieces {
-            if collector.is_complete() { break; }
+            if collector.is_complete() {
+                break;
+            }
 
             let req_msg = UtMetadataMsg::Request(piece_idx);
             let encoded = req_msg.encode(20);
@@ -123,10 +129,20 @@ impl MetadataExchangeSession {
             conn.stream_write(&encoded).await?;
             conn.stream_flush().await?;
 
-            match timeout(self.config.request_timeout, self.read_ut_metadata_response(&mut conn)).await {
+            match timeout(
+                self.config.request_timeout,
+                self.read_ut_metadata_response(&mut conn),
+            )
+            .await
+            {
                 Ok(Ok(UtMetadataMsg::Data(recv_piece, data))) => {
                     collector.add_piece(recv_piece, &data);
-                    debug!("Received piece {}/{} ({} bytes)", recv_piece + 1, num_pieces, data.len());
+                    debug!(
+                        "Received piece {}/{} ({} bytes)",
+                        recv_piece + 1,
+                        num_pieces,
+                        data.len()
+                    );
                 }
                 Ok(Ok(UtMetadataMsg::Reject(_))) => {
                     debug!("Piece {} rejected by {}", piece_idx, peer_addr);
@@ -135,7 +151,10 @@ impl MetadataExchangeSession {
                     return Err("Unexpected Request from peer".to_string());
                 }
                 Ok(Err(inner_err)) => {
-                    return Err(format!("ut_metadata error for piece {}: {}", piece_idx, inner_err));
+                    return Err(format!(
+                        "ut_metadata error for piece {}: {}",
+                        piece_idx, inner_err
+                    ));
                 }
                 Err(_) => {
                     return Err(format!("ut_metadata timeout for piece {}", piece_idx));
@@ -143,13 +162,18 @@ impl MetadataExchangeSession {
             }
         }
 
-        collector.assemble()
+        collector
+            .assemble()
             .ok_or_else(|| "Incomplete metadata collection".to_string())
     }
 
-    async fn read_extension_message(&self, conn: &mut PeerConnection) -> Result<BencodeValue, String> {
+    async fn read_extension_message(
+        &self,
+        conn: &mut PeerConnection,
+    ) -> Result<BencodeValue, String> {
         let mut len_buf = [0u8; 4];
-        conn.stream_read_exact(&mut len_buf).await
+        conn.stream_read_exact(&mut len_buf)
+            .await
             .map_err(|e| format!("Read message length failed: {}", e))?;
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -158,7 +182,8 @@ impl MetadataExchangeSession {
         }
 
         let mut payload = vec![0u8; msg_len];
-        conn.stream_read_exact(&mut payload).await
+        conn.stream_read_exact(&mut payload)
+            .await
             .map_err(|e| format!("Read message body failed: {}", e))?;
 
         if payload.first().copied() != Some(20u8) {
@@ -170,9 +195,13 @@ impl MetadataExchangeSession {
             .map_err(|e| format!("Decode BEncode failed: {}", e))
     }
 
-    async fn read_ut_metadata_response(&self, conn: &mut PeerConnection) -> Result<UtMetadataMsg, String> {
+    async fn read_ut_metadata_response(
+        &self,
+        conn: &mut PeerConnection,
+    ) -> Result<UtMetadataMsg, String> {
         let mut len_buf = [0u8; 4];
-        conn.stream_read_exact(&mut len_buf).await
+        conn.stream_read_exact(&mut len_buf)
+            .await
             .map_err(|e| format!("Read ut_metadata length failed: {}", e))?;
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -181,7 +210,8 @@ impl MetadataExchangeSession {
         }
 
         let mut payload = vec![0u8; msg_len];
-        conn.stream_read_exact(&mut payload).await
+        conn.stream_read_exact(&mut payload)
+            .await
             .map_err(|e| format!("Read ut_metadata body failed: {}", e))?;
 
         UtMetadataMsg::decode(&payload)

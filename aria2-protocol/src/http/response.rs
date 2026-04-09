@@ -39,13 +39,15 @@ impl HttpResponse {
     }
 
     pub fn header(&self, name: &str) -> Option<&String> {
-        self.headers.iter()
+        self.headers
+            .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v)
     }
 
     pub fn header_all(&self, name: &str) -> Vec<&String> {
-        self.headers.iter()
+        self.headers
+            .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v)
             .collect()
@@ -190,8 +192,12 @@ mod tests {
     #[test]
     fn test_headers_lookup() {
         let mut resp = HttpResponse::new(200, "OK".into());
-        resp.headers.push(("Content-Length".to_string(), "1024".to_string()));
-        resp.headers.push(("Content-Type".to_string(), "application/octet-stream".to_string()));
+        resp.headers
+            .push(("Content-Length".to_string(), "1024".to_string()));
+        resp.headers.push((
+            "Content-Type".to_string(),
+            "application/octet-stream".to_string(),
+        ));
 
         assert_eq!(resp.content_length(), Some(1024));
         assert_eq!(resp.content_type(), Some("application/octet-stream"));
@@ -222,6 +228,9 @@ mod tests {
         assert_eq!(req.method, "GET");
         assert!(req.has_range());
         assert_eq!(req.get_header("Range"), Some(&"bytes=500-999".to_string()));
-        assert_eq!(req.get_header("User-Agent"), Some(&"aria2/1.37.0-Rust".to_string()));
+        assert_eq!(
+            req.get_header("User-Agent"),
+            Some(&"aria2/1.37.0-Rust".to_string())
+        );
     }
 }

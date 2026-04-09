@@ -1,50 +1,64 @@
-use criterion::{criterion_group, Criterion, BenchmarkId, black_box};
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use aria2_protocol::bittorrent::message::handshake::Handshake;
-use sha1::{Sha1, Digest};
+use criterion::{black_box, criterion_group, BenchmarkId, Criterion};
+use sha1::{Digest, Sha1};
 
 fn bench_bencode_encode_dict(c: &mut Criterion) {
-    let data: std::collections::BTreeMap<Vec<u8>, BencodeValue> =
-        (0..20).map(|i| (format!("key{}", i).into_bytes(), BencodeValue::Int(i))).collect();
-    c.bench_with_input(BenchmarkId::new("bencode_encode_dict_20_items", 20), &data, |b, d| {
-        b.iter(|| {
-            let encoded = BencodeValue::Dict(d.clone()).encode();
-            black_box(encoded.len());
-        });
-    });
+    let data: std::collections::BTreeMap<Vec<u8>, BencodeValue> = (0..20)
+        .map(|i| (format!("key{}", i).into_bytes(), BencodeValue::Int(i)))
+        .collect();
+    c.bench_with_input(
+        BenchmarkId::new("bencode_encode_dict_20_items", 20),
+        &data,
+        |b, d| {
+            b.iter(|| {
+                let encoded = BencodeValue::Dict(d.clone()).encode();
+                black_box(encoded.len());
+            });
+        },
+    );
 }
 
 fn bench_bencode_encode_list(c: &mut Criterion) {
-    let items: Vec<BencodeValue> =
-        (0..50).map(|i| BencodeValue::Int(i)).collect();
-    c.bench_with_input(BenchmarkId::new("bencode_encode_list_50_items", 50), &items, |b, itms| {
-        b.iter(|| {
-            let encoded = BencodeValue::List(itms.clone()).encode();
-            black_box(encoded.len());
-        });
-    });
+    let items: Vec<BencodeValue> = (0..50).map(|i| BencodeValue::Int(i)).collect();
+    c.bench_with_input(
+        BenchmarkId::new("bencode_encode_list_50_items", 50),
+        &items,
+        |b, itms| {
+            b.iter(|| {
+                let encoded = BencodeValue::List(itms.clone()).encode();
+                black_box(encoded.len());
+            });
+        },
+    );
 }
 
 fn bench_bencode_encode_bytes(c: &mut Criterion) {
     let data: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();
-    c.bench_with_input(BenchmarkId::new("bencode_encode_bytes_4KB", 4096), &data, |b, d| {
-        b.iter(|| {
-            let val = BencodeValue::Bytes(d.clone());
-            black_box(val.encode().len());
-        });
-    });
+    c.bench_with_input(
+        BenchmarkId::new("bencode_encode_bytes_4KB", 4096),
+        &data,
+        |b, d| {
+            b.iter(|| {
+                let val = BencodeValue::Bytes(d.clone());
+                black_box(val.encode().len());
+            });
+        },
+    );
 }
 
 fn bench_bencode_decode_bytes(c: &mut Criterion) {
-    let raw = BencodeValue::Bytes(
-        (0..4096).map(|i| (i % 256) as u8).collect()
-    ).encode();
-    c.bench_with_input(BenchmarkId::new("bencode_decode_bytes_4KB", 4096), &raw, |b, r| {
-        b.iter(|| {
-            let decoded = BencodeValue::decode(r);
-            black_box(decoded.is_ok());
-        });
-    });
+    let raw = BencodeValue::Bytes((0..4096).map(|i| (i % 256) as u8).collect()).encode();
+    c.bench_with_input(
+        BenchmarkId::new("bencode_decode_bytes_4KB", 4096),
+        &raw,
+        |b, r| {
+            b.iter(|| {
+                let decoded = BencodeValue::decode(r);
+                black_box(decoded.is_ok());
+            });
+        },
+    );
 }
 
 fn bench_bt_handshake_build(c: &mut Criterion) {
@@ -72,25 +86,31 @@ fn bench_sha1_hash(c: &mut Criterion) {
 
 fn bench_dht_xor_distance(c: &mut Criterion) {
     let target: [u8; 20] = [0xFF; 20];
-    let nodes: Vec<[u8; 20]> = (0..1000).map(|i| {
-        let mut id = [0u8; 20];
-        id[0] = (i >> 24) as u8;
-        id[1] = (i >> 16) as u8;
-        id[2] = (i >> 8) as u8;
-        id[3] = i as u8;
-        id
-    }).collect();
-    c.bench_with_input(BenchmarkId::new("dht_xor_distance_1000_nodes", 1000), &nodes, |b, ns| {
-        b.iter(|| {
-            let mut total_dist: u64 = 0;
-            for n in ns.iter() {
-                for (a, b) in target.iter().zip(n.iter()) {
-                    total_dist += (*a ^ *b) as u64;
+    let nodes: Vec<[u8; 20]> = (0..1000)
+        .map(|i| {
+            let mut id = [0u8; 20];
+            id[0] = (i >> 24) as u8;
+            id[1] = (i >> 16) as u8;
+            id[2] = (i >> 8) as u8;
+            id[3] = i as u8;
+            id
+        })
+        .collect();
+    c.bench_with_input(
+        BenchmarkId::new("dht_xor_distance_1000_nodes", 1000),
+        &nodes,
+        |b, ns| {
+            b.iter(|| {
+                let mut total_dist: u64 = 0;
+                for n in ns.iter() {
+                    for (a, b) in target.iter().zip(n.iter()) {
+                        total_dist += (*a ^ *b) as u64;
+                    }
                 }
-            }
-            black_box(total_dist);
-        });
-    });
+                black_box(total_dist);
+            });
+        },
+    );
 }
 
 fn bench_serde_json_parse(c: &mut Criterion) {
@@ -117,7 +137,8 @@ fn bench_serde_json_serialize(c: &mut Criterion) {
     });
 }
 
-criterion_group!(protocol_benches,
+criterion_group!(
+    protocol_benches,
     bench_bencode_encode_dict,
     bench_bencode_encode_list,
     bench_bencode_encode_bytes,

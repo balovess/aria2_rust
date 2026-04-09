@@ -1,30 +1,35 @@
 mod fixtures {
-    pub mod test_torrent_builder;
     pub mod mock_bt_peer;
     pub mod mock_dht_node;
+    pub mod test_torrent_builder;
 }
-use fixtures::test_torrent_builder::{build_test_torrent, expected_piece_data};
+use aria2_core::engine::command::{Command, CommandStatus};
+use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
+use aria2_core::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_protocol::bittorrent::dht::client::{
+    generate_random_node_id, DhtClient, DhtClientConfig,
+};
+use aria2_protocol::bittorrent::extension::ut_metadata::{
+    ExtensionHandshake, MetadataCollector, UtMetadataMsg,
+};
+use aria2_protocol::bittorrent::magnet::MagnetLink;
 use fixtures::mock_bt_peer::MockBtPeerServer;
 use fixtures::mock_dht_node::MockDhtNode;
-use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
-use aria2_core::engine::command::{Command, CommandStatus};
-use aria2_core::request::request_group::{GroupId, DownloadOptions};
-use aria2_core::engine::metadata_exchange::{MetadataExchangeSession, MetadataExchangeConfig};
-use aria2_protocol::bittorrent::magnet::MagnetLink;
-use aria2_protocol::bittorrent::extension::ut_metadata::{
-    ExtensionHandshake, UtMetadataMsg, MetadataCollector,
-};
-use aria2_protocol::bittorrent::dht::client::{
-    DhtClient, DhtClientConfig, generate_random_node_id,
-};
+use fixtures::test_torrent_builder::{build_test_torrent, expected_piece_data};
 
-fn tmp_dir() -> tempfile::TempDir { tempfile::tempdir().unwrap() }
+fn tmp_dir() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
+}
 
 #[test]
 fn test_magnet_parse_hex_hash() {
     let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu+22.04&tr=udp://tracker.example.com:1337/announce";
     let ml = MagnetLink::parse(magnet).unwrap();
-    assert_eq!(ml.info_hash_hex(), "3b245e04703a1ec5c91cef3f2295ee88ab63c50d");
+    assert_eq!(
+        ml.info_hash_hex(),
+        "3b245e04703a1ec5c91cef3f2295ee88ab63c50d"
+    );
     assert_eq!(ml.display_name, Some("Ubuntu 22.04".to_string()));
     assert_eq!(ml.trackers.len(), 1);
 }
@@ -149,10 +154,7 @@ async fn test_e2e_magnet_download_invalid_input() {
 
 #[test]
 fn test_magnet_url_decode() {
-    assert_eq!(
-        MagnetLink::url_decode("Hello%20World"),
-        "Hello World"
-    );
+    assert_eq!(MagnetLink::url_decode("Hello%20World"), "Hello World");
     assert_eq!(
         MagnetLink::url_decode("name+with+spaces"),
         "name with spaces"
@@ -166,8 +168,7 @@ async fn test_dht_client_discover_peers_via_mock() {
     let _mock = MockDhtNode::start(vec![peer_addr]).await;
     let dht_port = _mock.addr().port();
 
-    let bootstrap_addr: std::net::SocketAddr =
-        format!("127.0.0.1:{}", dht_port).parse().unwrap();
+    let bootstrap_addr: std::net::SocketAddr = format!("127.0.0.1:{}", dht_port).parse().unwrap();
 
     let config = DhtClientConfig {
         self_id: generate_random_node_id(),
@@ -179,10 +180,18 @@ async fn test_dht_client_discover_peers_via_mock() {
     let mut client = DhtClient::new(config);
 
     let result = client.discover_peers(&target_hash).await;
-    assert!(result.is_ok(), "discover_peers should not panic: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "discover_peers should not panic: {:?}",
+        result.err()
+    );
 
     let discovered = result.unwrap();
-    assert!(discovered.nodes_contacted > 0 || true, "Nodes contacted: {}", discovered.nodes_contacted);
+    assert!(
+        discovered.nodes_contacted > 0 || true,
+        "Nodes contacted: {}",
+        discovered.nodes_contacted
+    );
 }
 
 #[tokio::test]
@@ -254,13 +263,14 @@ async fn test_dht_client_extract_compact_peers_from_mock_response() {
 
     let peer_bytes: Vec<u8> = vec![192, 168, 1, 1, 0x1F, 0x90];
     let mut r_dict = BTreeMap::new();
-    r_dict.insert(b"values".to_vec(), BencodeValue::List(vec![
-        BencodeValue::Bytes(peer_bytes),
-    ]));
+    r_dict.insert(
+        b"values".to_vec(),
+        BencodeValue::List(vec![BencodeValue::Bytes(peer_bytes)]),
+    );
 
     let msg = aria2_protocol::bittorrent::dht::message::DhtMessage::new_response(
         vec![1, 2],
-        BencodeValue::Dict(r_dict)
+        BencodeValue::Dict(r_dict),
     );
 
     let peers = aria2_protocol::bittorrent::dht::client::extract_compact_peers_from_response(&msg);

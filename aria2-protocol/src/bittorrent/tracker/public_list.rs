@@ -136,7 +136,9 @@ impl PublicTrackerList {
         let mut result = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || !trimmed.contains("://") { continue; }
+            if trimmed.is_empty() || !trimmed.contains("://") {
+                continue;
+            }
 
             if let Some(entry) = parse_single_tracker_url(trimmed) {
                 result.push(entry);
@@ -147,7 +149,8 @@ impl PublicTrackerList {
 
     pub async fn get_http_trackers(&self) -> Vec<String> {
         let entries = self.entries.read().await;
-        entries.iter()
+        entries
+            .iter()
             .filter(|e| e.protocol == TrackerProtocol::Http || e.protocol == TrackerProtocol::Https)
             .map(|e| e.url.clone())
             .collect()
@@ -155,7 +158,8 @@ impl PublicTrackerList {
 
     pub async fn get_udp_trackers(&self) -> Vec<String> {
         let entries = self.entries.read().await;
-        entries.iter()
+        entries
+            .iter()
             .filter(|e| e.protocol == TrackerProtocol::Udp)
             .map(|e| e.url.clone())
             .collect()
@@ -176,7 +180,9 @@ impl PublicTrackerList {
             return Err(format!("HTTP error: {}", resp.status()));
         }
 
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Read body failed: {}", e))?;
 
         let new_entries = Self::parse(&text);
@@ -188,7 +194,10 @@ impl PublicTrackerList {
         *self.entries.write().await = new_entries;
         *self.last_updated.write().await = Some(Instant::now());
 
-        info!("Public tracker list updated from {}: {} trackers", url, count);
+        info!(
+            "Public tracker list updated from {}: {} trackers",
+            url, count
+        );
         Ok(count)
     }
 
@@ -199,7 +208,9 @@ impl PublicTrackerList {
             loop {
                 sleep(interval).await;
 
-                if !e.running.load(Ordering::Relaxed) { break; }
+                if !e.running.load(Ordering::Relaxed) {
+                    break;
+                }
 
                 match e.fetch_and_update(&url).await {
                     Ok(n) => debug!("Auto-update: refreshed {} public trackers", n),
@@ -216,14 +227,19 @@ impl PublicTrackerList {
 
     pub async fn stats(&self) -> PublicTrackerListStats {
         let entries = self.entries.read().await;
-        let http_count = entries.iter()
+        let http_count = entries
+            .iter()
             .filter(|e| matches!(e.protocol, TrackerProtocol::Http | TrackerProtocol::Https))
             .count();
-        let udp_count = entries.iter()
+        let udp_count = entries
+            .iter()
             .filter(|e| e.protocol == TrackerProtocol::Udp)
             .count();
 
-        let embedded = EMBEDDED_TRACKER_LIST.lines().filter(|l| l.trim().contains("://")).count();
+        let embedded = EMBEDDED_TRACKER_LIST
+            .lines()
+            .filter(|l| l.trim().contains("://"))
+            .count();
 
         PublicTrackerListStats {
             total_entries: entries.len(),
@@ -255,7 +271,9 @@ fn parse_single_tracker_url(url: &str) -> Option<TrackerEntry> {
     let addr_part = &rest[..host_end];
     let path = &rest[host_end..];
 
-    if path != "/announce" && path != "/announce/" { return None; }
+    if path != "/announce" && path != "/announce/" {
+        return None;
+    }
 
     let (_host_str, default_port): (&str, u16) = match protocol {
         TrackerProtocol::Http => ("http", 80),
@@ -277,7 +295,9 @@ fn parse_single_tracker_url(url: &str) -> Option<TrackerEntry> {
         addr_part
     };
 
-    if host.is_empty() || port == 0 { return None; }
+    if host.is_empty() || port == 0 {
+        return None;
+    }
 
     Some(TrackerEntry {
         url: url.to_string(),
@@ -294,7 +314,11 @@ mod tests {
     #[test]
     fn test_parse_embedded_list() {
         let entries = PublicTrackerList::parse(EMBEDDED_TRACKER_LIST);
-        assert!(entries.len() >= 50, "embedded list should have at least 50 trackers, got {}", entries.len());
+        assert!(
+            entries.len() >= 50,
+            "embedded list should have at least 50 trackers, got {}",
+            entries.len()
+        );
     }
 
     #[test]
@@ -336,7 +360,8 @@ mod tests {
             for url in &http {
                 assert!(
                     url.starts_with("http://") || url.starts_with("https://"),
-                    "{} should be http or https", url
+                    "{} should be http or https",
+                    url
                 );
                 assert!(!url.starts_with("udp://"), "{} should not be udp", url);
             }
@@ -364,7 +389,10 @@ mod tests {
         assert!(stats.total_entries >= 50);
         assert!(stats.http_count > 0);
         assert!(stats.udp_count > 0);
-        assert!(stats.is_embedded_fallback, "default instance uses embedded list");
+        assert!(
+            stats.is_embedded_fallback,
+            "default instance uses embedded list"
+        );
         assert!(stats.last_updated.is_some());
     }
 
@@ -373,7 +401,11 @@ mod tests {
         let ptl = PublicTrackerList::new();
         let all = ptl.get_all().await;
         let embedded_count = PublicTrackerList::parse(EMBEDDED_TRACKER_LIST).len();
-        assert_eq!(all.len(), embedded_count, "default instance should use all embedded entries");
+        assert_eq!(
+            all.len(),
+            embedded_count,
+            "default instance should use all embedded entries"
+        );
     }
 
     #[test]

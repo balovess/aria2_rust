@@ -2,10 +2,10 @@ use std::time::Instant;
 mod fixtures {
     pub mod mock_ftp_server;
 }
-use fixtures::mock_ftp_server::MockFtpServer;
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 use aria2_core::engine::command::Command;
-use aria2_core::request::request_group::{GroupId, DownloadOptions};
+use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use fixtures::mock_ftp_server::MockFtpServer;
 
 async fn start_server() -> MockFtpServer {
     MockFtpServer::start().await
@@ -23,16 +23,24 @@ async fn test_perf_ftp_small_file() {
     let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(100), &url, &DownloadOptions::default(),
-        dir.path().to_str(), None,
-    ).unwrap();
+        GroupId::new(100),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .unwrap();
 
     let start = Instant::now();
     cmd.execute().await.unwrap();
     let elapsed = start.elapsed();
 
     println!("[PERF-FTP] small.bin (4 bytes): {:?}", elapsed);
-    assert!(elapsed.as_millis() < 5000, "FTP小文件下载超时: {:?}", elapsed);
+    assert!(
+        elapsed.as_millis() < 5000,
+        "FTP小文件下载超时: {:?}",
+        elapsed
+    );
 }
 
 #[tokio::test]
@@ -43,9 +51,13 @@ async fn test_perf_ftp_medium_file() {
     let url = format!("ftp://127.0.0.1:{}/files/medium.bin", addr.port());
 
     let mut cmd = FtpDownloadCommand::new(
-        GroupId::new(101), &url, &DownloadOptions::default(),
-        dir.path().to_str(), None,
-    ).unwrap();
+        GroupId::new(101),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .unwrap();
 
     let start = Instant::now();
     cmd.execute().await.unwrap();
@@ -53,8 +65,15 @@ async fn test_perf_ftp_medium_file() {
     let size_mb = 1.0f64;
     let speed_mb_s = size_mb / elapsed.as_secs_f64();
 
-    println!("[PERF-FTP] medium.bin (1MB): {:?} => {:.2} MB/s", elapsed, speed_mb_s);
-    assert!(speed_mb_s > 0.1, "FTP 1MB download too slow: {:.2} MB/s", speed_mb_s);
+    println!(
+        "[PERF-FTP] medium.bin (1MB): {:?} => {:.2} MB/s",
+        elapsed, speed_mb_s
+    );
+    assert!(
+        speed_mb_s > 0.1,
+        "FTP 1MB download too slow: {:.2} MB/s",
+        speed_mb_s
+    );
 }
 
 #[tokio::test]
@@ -73,8 +92,11 @@ async fn test_perf_ftp_concurrent_downloads() -> Result<(), Box<dyn std::error::
         let dp = dir_path.clone();
         handles.push(tokio::spawn(async move {
             let mut cmd = FtpDownloadCommand::new(
-                GroupId::new(200 + i), &url, &DownloadOptions::default(),
-                Some(&dp), None,
+                GroupId::new(200 + i),
+                &url,
+                &DownloadOptions::default(),
+                Some(&dp),
+                None,
             )?;
             cmd.execute().await
         }));

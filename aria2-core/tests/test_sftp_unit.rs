@@ -1,7 +1,7 @@
-use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
 use aria2_core::engine::command::Command;
-use aria2_core::request::request_group::{GroupId, DownloadOptions};
+use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
 use aria2_core::error::{Aria2Error, FatalError};
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
 #[test]
 fn test_sftp_uri_parsing_valid() {
@@ -88,7 +88,8 @@ fn test_sftp_status_before_execute_is_pending() {
         &DownloadOptions::default(),
         None,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     match cmd.status() {
         aria2_core::engine::command::CommandStatus::Pending => {}
         other => panic!("执行前状态应为Pending, got: {:?}", other),
@@ -103,7 +104,8 @@ fn test_sftp_timeout_returns_value() {
         &DownloadOptions::default(),
         None,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(cmd.timeout().is_some(), "SFTP命令应有超时设置");
     assert_eq!(cmd.timeout().unwrap().as_secs(), 300);
 }

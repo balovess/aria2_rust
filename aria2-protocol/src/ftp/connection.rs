@@ -1,5 +1,5 @@
-use tokio::net::TcpStream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
@@ -58,7 +58,11 @@ pub struct FtpConnection {
 }
 
 impl FtpConnection {
-    pub async fn connect(host: &str, port: u16, options: Option<FtpOptions>) -> Result<Self, String> {
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        options: Option<FtpOptions>,
+    ) -> Result<Self, String> {
         let options = options.unwrap_or_default();
         info!("FTP连接中: {}:{}", host, port);
 
@@ -76,7 +80,10 @@ impl FtpConnection {
 
         let welcome = conn.read_response().await?;
         if !welcome.is_positive_completion() && !welcome.is_positive_preliminary() {
-            return Err(format!("FTP服务器拒绝连接: {} {}", welcome.code, welcome.message));
+            return Err(format!(
+                "FTP服务器拒绝连接: {} {}",
+                welcome.code, welcome.message
+            ));
         }
         debug!("FTP连接成功: {}", welcome.message);
 
@@ -85,15 +92,20 @@ impl FtpConnection {
 
     pub async fn login(&mut self) -> Result<(), String> {
         debug!("发送USER命令: {}", self.options.username);
-        self.send_command(&format!("USER {}", self.options.username)).await?;
+        self.send_command(&format!("USER {}", self.options.username))
+            .await?;
         let resp = self.read_response().await?;
 
         if resp.code == 331 || resp.code == 332 {
             debug!("需要密码认证，发送PASS命令");
-            self.send_command(&format!("PASS {}", self.options.password)).await?;
+            self.send_command(&format!("PASS {}", self.options.password))
+                .await?;
             let pass_resp = self.read_response().await?;
             if !pass_resp.is_positive_completion() {
-                return Err(format!("FTP登录失败: {} {}", pass_resp.code, pass_resp.message));
+                return Err(format!(
+                    "FTP登录失败: {} {}",
+                    pass_resp.code, pass_resp.message
+                ));
             }
             info!("FTP登录成功");
         } else if !resp.is_positive_completion() {
@@ -121,7 +133,8 @@ impl FtpConnection {
         let resp = self.read_response().await?;
         if resp.code == 213 {
             let size_str = resp.message.trim();
-            size_str.parse::<u64>()
+            size_str
+                .parse::<u64>()
                 .map_err(|e| format!("解析文件大小失败: {} ({})", e, size_str))
         } else {
             Err(format!("SIZE命令失败: {} {}", resp.code, resp.message))
@@ -218,11 +231,17 @@ impl FtpConnection {
 
     async fn send_command(&mut self, command: &str) -> Result<(), String> {
         debug!("FTP命令: {}", command.trim());
-        self.stream.write_all(command.as_bytes()).await
+        self.stream
+            .write_all(command.as_bytes())
+            .await
             .map_err(|e| format!("发送FTP命令失败: {}", e))?;
-        self.stream.write_all(b"\r\n").await
+        self.stream
+            .write_all(b"\r\n")
+            .await
             .map_err(|e| format!("发送换行符失败: {}", e))?;
-        self.stream.flush().await
+        self.stream
+            .flush()
+            .await
             .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
         Ok(())
     }
@@ -237,8 +256,8 @@ impl FtpConnection {
             line.clear();
             let bytes_read = timeout(self.options.read_timeout, self.stream.read_line(&mut line))
                 .await
-                .map_err(|_| format!("FTP读取超时"))?
-                .map_err(|e| format!("读取FTP响应失败: {}", e))?;
+                .map_err(|_| "FTP 读取超时".to_string())?
+                .map_err(|e| format!("读取 FTP 响应失败：{}", e))?;
 
             if bytes_read == 0 {
                 break;
@@ -249,8 +268,7 @@ impl FtpConnection {
                 continue;
             }
 
-            let response_code: u16 = trimmed[..3].parse()
-                .unwrap_or(0);
+            let response_code: u16 = trimmed[..3].parse().unwrap_or(0);
 
             if code.is_none() {
                 code = Some(response_code);
@@ -263,11 +281,7 @@ impl FtpConnection {
                 message.push('\n');
             } else if separator == b' ' {
                 message.push_str(&trimmed[4..]);
-                if is_multiline {
-                    break;
-                } else {
-                    break;
-                }
+                break;
             } else if is_multiline && trimmed.starts_with(&format!("{:3} ", code.unwrap_or(0))) {
                 message.push_str(&trimmed[4..]);
                 break;
@@ -279,7 +293,10 @@ impl FtpConnection {
 
         let code_val = code.unwrap_or(0);
         debug!("FTP响应: {} {}", code_val, message.trim());
-        Ok(FtpResponse { code: code_val, message })
+        Ok(FtpResponse {
+            code: code_val,
+            message,
+        })
     }
 
     fn parse_pasv_response(message: &str) -> Option<(String, u16)> {
@@ -319,15 +336,24 @@ mod tests {
 
     #[test]
     fn test_ftp_response_checks() {
-        let ok = FtpResponse { code: 226, message: "Transfer complete".into() };
+        let ok = FtpResponse {
+            code: 226,
+            message: "Transfer complete".into(),
+        };
         assert!(ok.is_success());
         assert!(ok.is_positive_completion());
 
-        let intermediate = FtpResponse { code: 150, message: "Opening data channel".into() };
+        let intermediate = FtpResponse {
+            code: 150,
+            message: "Opening data channel".into(),
+        };
         assert!(intermediate.is_success());
         assert!(intermediate.is_positive_preliminary());
 
-        let error = FtpResponse { code: 550, message: "File not found".into() };
+        let error = FtpResponse {
+            code: 550,
+            message: "File not found".into(),
+        };
         assert!(!error.is_success());
     }
 

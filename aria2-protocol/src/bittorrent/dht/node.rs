@@ -58,7 +58,9 @@ impl DhtNode {
 }
 
 impl PartialEq for DhtNode {
-    fn eq(&self, other: &Self) -> bool { self.id == other.id }
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
 }
 
 impl Eq for DhtNode {}
@@ -86,11 +88,15 @@ mod tests {
     #[test]
     fn test_node_failures() {
         let mut node = DhtNode::new([2u8; 20], "0.0.0.0:0".parse().unwrap());
-        for _ in 0..3 { node.record_failure(); }
+        for _ in 0..3 {
+            node.record_failure();
+        }
         assert!(node.is_bad());
 
         let mut good_node = DhtNode::new([3u8; 20], "0.0.0.0:0".parse().unwrap());
-        for _ in 0..3 { good_node.record_failure(); }
+        for _ in 0..3 {
+            good_node.record_failure();
+        }
         good_node.touch();
         assert!(good_node.is_good());
     }

@@ -1,6 +1,6 @@
+use crate::error::Result;
 use async_trait::async_trait;
 use std::path::Path;
-use crate::error::Result;
 
 #[async_trait]
 pub trait DiskAdaptor: Send + Sync {
@@ -38,25 +38,31 @@ impl DiskAdaptor for DirectDiskAdaptor {
     async fn open(&mut self, path: &Path) -> Result<()> {
         self.path = path.to_path_buf();
         let mut open_opts = tokio::fs::OpenOptions::new();
-        
+
         if path.exists() {
             open_opts.write(true).read(true);
         } else {
             open_opts.write(true).create(true).read(true);
         }
-        
-        self.file = Some(open_opts.open(path).await
-            .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?);
-        
+
+        self.file = Some(
+            open_opts
+                .open(path)
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?,
+        );
+
         Ok(())
     }
 
     async fn write(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         if let Some(ref mut file) = self.file {
             use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-            file.seek(std::io::SeekFrom::Start(offset)).await
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            file.write_all(data).await
+            file.write_all(data)
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
         }
         Ok(())
@@ -64,13 +70,14 @@ impl DiskAdaptor for DirectDiskAdaptor {
 
     async fn read(&mut self, offset: u64, length: u64) -> Result<Vec<u8>> {
         if let Some(ref mut file) = self.file {
-            use tokio::io::{AsyncSeekExt, AsyncReadExt};
-            file.seek(std::io::SeekFrom::Start(offset)).await
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            
+
             let mut buffer = vec![0u8; length as usize];
             let bytes_read = file.read_exact(&mut buffer).await;
-            
+
             match bytes_read {
                 Ok(_) => Ok(buffer),
                 Err(e) => {
@@ -83,7 +90,7 @@ impl DiskAdaptor for DirectDiskAdaptor {
             }
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
-                "文件未打开".to_string()
+                "文件未打开".to_string(),
             ))
         }
     }
@@ -95,7 +102,8 @@ impl DiskAdaptor for DirectDiskAdaptor {
 
     async fn truncate(&mut self, length: u64) -> Result<()> {
         if let Some(ref mut file) = self.file {
-            file.set_len(length).await
+            file.set_len(length)
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
         }
         Ok(())
@@ -104,7 +112,8 @@ impl DiskAdaptor for DirectDiskAdaptor {
     async fn flush(&mut self) -> Result<()> {
         if let Some(ref mut file) = self.file {
             use tokio::io::AsyncWriteExt;
-            file.flush().await
+            file.flush()
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
         }
         Ok(())
@@ -112,12 +121,14 @@ impl DiskAdaptor for DirectDiskAdaptor {
 
     async fn size(&self) -> Result<u64> {
         if let Some(ref file) = self.file {
-            let metadata = file.metadata().await
+            let metadata = file
+                .metadata()
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
             Ok(metadata.len())
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
-                "文件未打开".to_string()
+                "文件未打开".to_string(),
             ))
         }
     }

@@ -8,7 +8,10 @@ pub struct UriListEntry {
 
 impl UriListEntry {
     pub fn new(uris: Vec<String>) -> Self {
-        Self { uris, options: std::collections::HashMap::new() }
+        Self {
+            uris,
+            options: std::collections::HashMap::new(),
+        }
     }
 
     pub fn with_options(mut self, options: std::collections::HashMap<String, String>) -> Self {
@@ -16,11 +19,17 @@ impl UriListEntry {
         self
     }
 
-    pub fn is_valid(&self) -> bool { !self.uris.is_empty() }
+    pub fn is_valid(&self) -> bool {
+        !self.uris.is_empty()
+    }
 
-    pub fn primary_uri(&self) -> Option<&String> { self.uris.first() }
+    pub fn primary_uri(&self) -> Option<&String> {
+        self.uris.first()
+    }
 
-    pub fn option(&self, key: &str) -> Option<&String> { self.options.get(key) }
+    pub fn option(&self, key: &str) -> Option<&String> {
+        self.options.get(key)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,12 +59,17 @@ impl std::error::Error for UriListError {}
 
 impl UriListFile {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), path: None }
+        Self {
+            entries: Vec::new(),
+            path: None,
+        }
     }
 
     pub fn from_file(path: &str) -> Result<Self, UriListError> {
         let p = std::path::Path::new(path);
-        if !p.exists() { return Err(UriListError::FileNotFound(path.to_string())); }
+        if !p.exists() {
+            return Err(UriListError::FileNotFound(path.to_string()));
+        }
         let content = std::fs::read_to_string(path)
             .map_err(|e| UriListError::IoError(format!("{}: {}", path, e)))?;
         let mut parser = Self::new();
@@ -66,7 +80,8 @@ impl UriListFile {
 
     pub fn parse(&mut self, content: &str) -> Result<(), UriListError> {
         let mut current_uris: Vec<String> = Vec::new();
-        let mut current_options: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut current_options: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for raw_line in content.lines() {
             let line = raw_line.trim();
@@ -87,7 +102,7 @@ impl UriListFile {
                 let opt_line = line.trim();
                 if let Some(eq_pos) = opt_line.find('=') {
                     let opt_name = opt_line[..eq_pos].trim().to_string();
-                    let opt_value = opt_line[eq_pos+1..].trim().to_string();
+                    let opt_value = opt_line[eq_pos + 1..].trim().to_string();
                     current_options.insert(opt_name, opt_value);
                 }
                 continue;
@@ -122,13 +137,24 @@ impl UriListFile {
         Ok(())
     }
 
-    pub fn entries(&self) -> &[UriListEntry] { &self.entries }
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
-    pub fn path(&self) -> Option<&str> { self.path.as_deref() }
+    pub fn entries(&self) -> &[UriListEntry] {
+        &self.entries
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
 
     pub fn all_uris(&self) -> Vec<&str> {
-        self.entries.iter().flat_map(|e| e.uris.iter().map(|s| s.as_str())).collect()
+        self.entries
+            .iter()
+            .flat_map(|e| e.uris.iter().map(|s| s.as_str()))
+            .collect()
     }
 
     pub fn valid_entries(&self) -> Vec<&UriListEntry> {
@@ -136,14 +162,17 @@ impl UriListFile {
     }
 
     pub fn filter_by_option(&self, key: &str, value: &str) -> Vec<&UriListEntry> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|e| e.option(key).map_or(false, |v| v == value))
             .collect()
     }
 }
 
 impl Default for UriListFile {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn parse_uri_list(content: &str) -> Result<Vec<UriListEntry>, UriListError> {
@@ -154,13 +183,19 @@ pub fn parse_uri_list(content: &str) -> Result<Vec<UriListEntry>, UriListError> 
 
 pub fn parse_single_line(line: &str) -> Option<Vec<String>> {
     let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') { return None; }
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
     let uris: Vec<String> = trimmed
         .split('\t')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if uris.is_empty() { None } else { Some(uris) }
+    if uris.is_empty() {
+        None
+    } else {
+        Some(uris)
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +209,10 @@ mod tests {
         file.parse(content).unwrap();
         assert_eq!(file.len(), 2);
         assert_eq!(file.entries()[0].uris.len(), 1);
-        assert_eq!(file.entries()[0].primary_uri().unwrap(), "http://example.com/file1.iso");
+        assert_eq!(
+            file.entries()[0].primary_uri().unwrap(),
+            "http://example.com/file1.iso"
+        );
     }
 
     #[test]
@@ -195,8 +233,14 @@ http://example.com/large.bin
         let mut file = UriListFile::new();
         file.parse(content).unwrap();
         assert_eq!(file.len(), 1);
-        assert_eq!(file.entries()[0].option("dir"), Some(&"/downloads".to_string()));
-        assert_eq!(file.entries()[0].option("out"), Some(&"myfile.iso".to_string()));
+        assert_eq!(
+            file.entries()[0].option("dir"),
+            Some(&"/downloads".to_string())
+        );
+        assert_eq!(
+            file.entries()[0].option("out"),
+            Some(&"myfile.iso".to_string())
+        );
     }
 
     #[test]
@@ -212,8 +256,14 @@ http://example.com/b.dat
         let mut file = UriListFile::new();
         file.parse(content).unwrap();
         assert_eq!(file.len(), 2);
-        assert_eq!(file.entries()[0].option("dir").map(|s| s.as_str()), Some("/tmp"));
-        assert_eq!(file.entries()[1].option("dir").map(|s| s.as_str()), Some("/opt"));
+        assert_eq!(
+            file.entries()[0].option("dir").map(|s| s.as_str()),
+            Some("/tmp")
+        );
+        assert_eq!(
+            file.entries()[1].option("dir").map(|s| s.as_str()),
+            Some("/opt")
+        );
     }
 
     #[test]
@@ -328,7 +378,13 @@ https://example.com/music/song.mp3
         file.parse(content).unwrap();
         assert_eq!(file.len(), 2);
         assert_eq!(file.entries()[0].uris.len(), 2);
-        assert_eq!(file.entries()[0].option("split").map(|s| s.as_str()), Some("5"));
-        assert_eq!(file.entries()[1].option("out").map(|s| s.as_str()), Some("song.mp3"));
+        assert_eq!(
+            file.entries()[0].option("split").map(|s| s.as_str()),
+            Some("5")
+        );
+        assert_eq!(
+            file.entries()[1].option("out").map(|s| s.as_str()),
+            Some("song.mp3")
+        );
     }
 }

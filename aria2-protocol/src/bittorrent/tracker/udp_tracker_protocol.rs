@@ -46,10 +46,19 @@ impl fmt::Display for UdpEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UdpState { Pending, Complete }
+pub enum UdpState {
+    Pending,
+    Complete,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UdpError { Success, TrackerError, Timeout, Network, Shutdown }
+pub enum UdpError {
+    Success,
+    TrackerError,
+    Timeout,
+    Network,
+    Shutdown,
+}
 
 impl fmt::Display for UdpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -110,7 +119,10 @@ pub struct ConnectResponse {
 
 pub fn parse_connect_response(data: &[u8]) -> Result<ConnectResponse, String> {
     if data.len() < 16 {
-        return Err(format!("CONNECT response too short: {} bytes (min 16)", data.len()));
+        return Err(format!(
+            "CONNECT response too short: {} bytes (min 16)",
+            data.len()
+        ));
     }
     let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     if action != UdpAction::Connect as i32 {
@@ -120,7 +132,10 @@ pub fn parse_connect_response(data: &[u8]) -> Result<ConnectResponse, String> {
     let conn_id = u64::from_be_bytes([
         data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
     ]);
-    Ok(ConnectResponse { transaction_id: txn_id, connection_id: conn_id })
+    Ok(ConnectResponse {
+        transaction_id: txn_id,
+        connection_id: conn_id,
+    })
 }
 
 #[derive(Clone)]
@@ -152,7 +167,13 @@ fn parse_compact_peers(data: &[u8]) -> Vec<(String, u16)> {
     for chunk in data.chunks_exact(6) {
         let ip = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-        let ip_str = format!("{}.{}.{}.{}", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+        let ip_str = format!(
+            "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF
+        );
         peers.push((ip_str, port));
     }
     peers
@@ -160,7 +181,10 @@ fn parse_compact_peers(data: &[u8]) -> Vec<(String, u16)> {
 
 pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
     if data.len() < 20 {
-        return Err(format!("ANNOUNCE response too short: {} bytes (min 20)", data.len()));
+        return Err(format!(
+            "ANNOUNCE response too short: {} bytes (min 20)",
+            data.len()
+        ));
     }
     let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     match UdpAction::from_i32(action) {
@@ -180,12 +204,21 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
     } else {
         Vec::new()
     };
-    Ok(AnnounceResponse { transaction_id: txn_id, interval, leechers, seeders, peers })
+    Ok(AnnounceResponse {
+        transaction_id: txn_id,
+        interval,
+        leechers,
+        seeders,
+        peers,
+    })
 }
 
+#[allow(dead_code)]
 fn random_txn_id() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     (dur.as_nanos() & 0xFFFFFFFF) as u32
 }
 
@@ -198,7 +231,9 @@ mod tests {
         let req = build_connect_request(0x12345678);
         assert_eq!(req.len(), 16);
 
-        let conn_id = u64::from_be_bytes([req[0], req[1], req[2], req[3], req[4], req[5], req[6], req[7]]);
+        let conn_id = u64::from_be_bytes([
+            req[0], req[1], req[2], req[3], req[4], req[5], req[6], req[7],
+        ]);
         assert_eq!(conn_id, INITIAL_CONNECTION_ID);
 
         let action = i32::from_be_bytes([req[8], req[9], req[10], req[11]]);
@@ -213,11 +248,18 @@ mod tests {
         let info_hash = [0xABu8; 20];
         let peer_id = [0xCDu8; 20];
         let req = build_announce_request(
-            0x123456789ABCDEF0, 0xDEADBEEF,
-            &info_hash, &peer_id,
-            1024, 2048, 4096,
-            UdpEvent::Started, 0, 0x12345678,
-            50, 6881,
+            0x123456789ABCDEF0,
+            0xDEADBEEF,
+            &info_hash,
+            &peer_id,
+            1024,
+            2048,
+            4096,
+            UdpEvent::Started,
+            0,
+            0x12345678,
+            50,
+            6881,
         );
         assert_eq!(req.len(), 98);
 
@@ -266,8 +308,8 @@ mod tests {
         data[16..20].copy_from_slice(&3u32.to_be_bytes()); // seeders
 
         data.extend_from_slice(&[
-            192, 168, 1, 1, 0x19, 0xFA,       // 192.168.1.1:6650
-            10, 0, 0, 1, 0x17, 0x70,         // 10.0.0.1:6000
+            192, 168, 1, 1, 0x19, 0xFA, // 192.168.1.1:6650
+            10, 0, 0, 1, 0x17, 0x70, // 10.0.0.1:6000
         ]);
 
         let resp = parse_announce_response(&data).unwrap();
@@ -311,9 +353,9 @@ mod tests {
     #[test]
     fn test_parse_compact_peer_format() {
         let data = [
-            127, 0, 0, 1, 0x1F, 0x90,     // 127.0.0.1:8080
+            127, 0, 0, 1, 0x1F, 0x90, // 127.0.0.1:8080
             255, 255, 255, 255, 0x00, 0x50, // 255.255.255.255:80
-            10, 0, 0, 1, 0xBB, 0x82,       // 10.0.0.1:48002
+            10, 0, 0, 1, 0xBB, 0x82, // 10.0.0.1:48002
         ];
         let peers = parse_compact_peers(&data);
         assert_eq!(peers.len(), 3);
@@ -347,7 +389,12 @@ mod tests {
 
     #[test]
     fn test_udp_action_roundtrip() {
-        for a in &[UdpAction::Connect, UdpAction::Announce, UdpAction::Scrape, UdpAction::Error] {
+        for a in &[
+            UdpAction::Connect,
+            UdpAction::Announce,
+            UdpAction::Scrape,
+            UdpAction::Error,
+        ] {
             assert_eq!(UdpAction::from_i32(*a as i32), Some(*a));
         }
         assert_eq!(UdpAction::from_i32(99), None);

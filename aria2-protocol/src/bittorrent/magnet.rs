@@ -1,5 +1,3 @@
-
-
 #[derive(Debug, Clone)]
 pub struct MagnetLink {
     pub info_hash: [u8; 20],
@@ -24,7 +22,9 @@ impl MagnetLink {
         let mut ws = Vec::new();
 
         for pair in query_part.split('&') {
-            if pair.is_empty() { continue; }
+            if pair.is_empty() {
+                continue;
+            }
             let pair_str: &str = pair;
             let (key, value) = if let Some(pos) = pair_str.find('=') {
                 (&pair_str[..pos], &pair_str[pos + 1..])
@@ -78,7 +78,10 @@ impl MagnetLink {
         if hash_str.len() == 40 {
             let bytes = (0..40)
                 .step_by(2)
-                .map(|i| u8::from_str_radix(&hash_str[i..i + 2], 16).map_err(|e| format!("Invalid hex: {}", e)))
+                .map(|i| {
+                    u8::from_str_radix(&hash_str[i..i + 2], 16)
+                        .map_err(|e| format!("Invalid hex: {}", e))
+                })
                 .collect::<Result<Vec<u8>, _>>()?;
             if bytes.len() == 20 {
                 let mut arr = [0u8; 20];
@@ -122,7 +125,10 @@ impl MagnetLink {
     }
 
     pub fn info_hash_hex(&self) -> String {
-        self.info_hash.iter().map(|b| format!("{:02x}", b)).collect()
+        self.info_hash
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect()
     }
 }
 
@@ -134,7 +140,10 @@ mod tests {
     fn test_parse_magnet_with_hex_hash() {
         let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu+22.04&tr=udp://tracker.example.com:1337/announce";
         let ml = MagnetLink::parse(magnet).unwrap();
-        assert_eq!(ml.info_hash_hex(), "3b245e04703a1ec5c91cef3f2295ee88ab63c50d");
+        assert_eq!(
+            ml.info_hash_hex(),
+            "3b245e04703a1ec5c91cef3f2295ee88ab63c50d"
+        );
         assert_eq!(ml.display_name, Some("Ubuntu 22.04".to_string()));
         assert_eq!(ml.trackers.len(), 1);
     }
@@ -160,7 +169,10 @@ mod tests {
     #[test]
     fn test_url_decode_spaces() {
         assert_eq!(MagnetLink::url_decode("Hello%20World"), "Hello World");
-        assert_eq!(MagnetLink::url_decode("name+with+spaces"), "name with spaces");
+        assert_eq!(
+            MagnetLink::url_decode("name+with+spaces"),
+            "name with spaces"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
+use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
+use aria2_core::retry::{RetryExecutor, RetryPolicy, RetryStats};
 use std::sync::Arc;
 use std::time::Duration;
-use aria2_core::retry::{RetryPolicy, RetryStats, RetryExecutor};
-use aria2_core::error::{Aria2Error, RecoverableError, FatalError};
 
 #[test]
 fn test_retry_policy_default() {
@@ -24,8 +24,16 @@ fn test_should_retry_recoverable_error() {
     assert!(policy.should_retry(1, &Aria2Error::Recoverable(RecoverableError::Timeout)));
     assert!(!policy.should_retry(2, &Aria2Error::Recoverable(RecoverableError::Timeout)));
 
-    assert!(policy.should_retry(0, &Aria2Error::Recoverable(RecoverableError::ServerError { code: 500 })));
-    assert!(policy.should_retry(0, &Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "conn reset".into() })));
+    assert!(policy.should_retry(
+        0,
+        &Aria2Error::Recoverable(RecoverableError::ServerError { code: 500 })
+    ));
+    assert!(policy.should_retry(
+        0,
+        &Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: "conn reset".into()
+        })
+    ));
 }
 
 #[test]
@@ -47,7 +55,8 @@ fn test_should_not_retry_max_tries_exceeded() {
 
 #[test]
 fn test_wait_duration_exponential_backoff() {
-    let policy = RetryPolicy::new(10, Duration::from_secs(1)).with_max_wait(Duration::from_secs(1000));
+    let policy =
+        RetryPolicy::new(10, Duration::from_secs(1)).with_max_wait(Duration::from_secs(1000));
 
     assert_eq!(policy.wait_duration(0), Duration::from_secs(1));
     assert_eq!(policy.wait_duration(1), Duration::from_secs(2));
@@ -59,7 +68,8 @@ fn test_wait_duration_exponential_backoff() {
 
 #[test]
 fn test_wait_duration_capped_at_max() {
-    let policy = RetryPolicy::new(10, Duration::from_secs(1)).with_max_wait(Duration::from_secs(10));
+    let policy =
+        RetryPolicy::new(10, Duration::from_secs(1)).with_max_wait(Duration::from_secs(10));
 
     assert_eq!(policy.wait_duration(0), Duration::from_secs(1));
     assert_eq!(policy.wait_duration(1), Duration::from_secs(2));
@@ -75,7 +85,9 @@ async fn test_executor_success_no_retry() {
     let stats = RetryStats::default();
     let executor = RetryExecutor::new(&policy, &stats);
 
-    let result = executor.execute(|_attempt| async { Ok::<_, Aria2Error>(42u32) }).await;
+    let result = executor
+        .execute(|_attempt| async { Ok::<_, Aria2Error>(42u32) })
+        .await;
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 42);
@@ -90,17 +102,23 @@ async fn test_executor_retry_then_success() {
     let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     let cc = call_count.clone();
-    let result = executor.execute(move |attempt| {
-        let cc = cc.clone();
-        async move {
-            cc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if attempt < 2 {
-                Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: "retry me".into() }))
-            } else {
-                Ok::<_, Aria2Error>("success")
+    let result = executor
+        .execute(move |attempt| {
+            let cc = cc.clone();
+            async move {
+                cc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if attempt < 2 {
+                    Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: "retry me".into(),
+                        },
+                    ))
+                } else {
+                    Ok::<_, Aria2Error>("success")
+                }
             }
-        }
-    }).await;
+        })
+        .await;
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "success");
@@ -115,9 +133,13 @@ async fn test_executor_max_tries_exhausted() {
     let stats = RetryStats::default();
     let executor = RetryExecutor::new(&policy, &stats);
 
-    let result: Result<(), _> = executor.execute(|_attempt| async {
-        Err(Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 }))
-    }).await;
+    let result: Result<(), _> = executor
+        .execute(|_attempt| async {
+            Err(Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 503,
+            }))
+        })
+        .await;
 
     assert!(result.is_err());
     assert_eq!(stats.total(), 3);
@@ -130,9 +152,9 @@ async fn test_executor_fatal_error_no_retry() {
     let stats = RetryStats::default();
     let executor = RetryExecutor::new(&policy, &stats);
 
-    let result: Result<(), _> = executor.execute(|_attempt| async {
-        Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted))
-    }).await;
+    let result: Result<(), _> = executor
+        .execute(|_attempt| async { Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted)) })
+        .await;
 
     assert!(result.is_err());
     assert_eq!(stats.total(), 1);
@@ -142,7 +164,9 @@ async fn test_executor_fatal_error_no_retry() {
 fn test_stats_reset() {
     let stats = RetryStats::default();
     stats.record_retry(&Aria2Error::Recoverable(RecoverableError::Timeout));
-    stats.record_retry(&Aria2Error::Recoverable(RecoverableError::ServerError { code: 500 }));
+    stats.record_retry(&Aria2Error::Recoverable(RecoverableError::ServerError {
+        code: 500,
+    }));
 
     assert_eq!(stats.total(), 2);
     assert_eq!(stats.timeouts(), 1);
@@ -157,8 +181,7 @@ fn test_stats_reset() {
 
 #[test]
 fn test_with_max_per_server() {
-    let policy = RetryPolicy::new(10, Duration::from_secs(1))
-        .with_max_per_server(3);
+    let policy = RetryPolicy::new(10, Duration::from_secs(1)).with_max_per_server(3);
     assert_eq!(policy.max_tries(), 10);
 }
 
@@ -175,9 +198,9 @@ async fn test_concurrent_executors_independent() {
             let result: Result<u32, Aria2Error> = if i % 2 == 0 {
                 executor.execute(|_| async { Ok(i) }).await
             } else {
-                executor.execute(|_| async {
-                    Err(Aria2Error::Recoverable(RecoverableError::Timeout))
-                }).await
+                executor
+                    .execute(|_| async { Err(Aria2Error::Recoverable(RecoverableError::Timeout)) })
+                    .await
             };
             let _ = result;
         }));

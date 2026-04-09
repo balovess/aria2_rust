@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 
 pub struct MockDhtNode {
@@ -37,14 +37,21 @@ impl MockDhtNode {
         let mut result = format!("d4:idi20:{}{}5:valuesl", "0".repeat(20), "e").to_string();
         for p in peers {
             if let std::net::IpAddr::V4(ip4) = p.ip() {
-                for b in &ip4.octets() { result.push_str(&format!("{:02x}", b)); }
-                result.push_str(&format!("{:02x}{:02x}",
-                    (p.port() >> 8) as u8, p.port() as u8));
+                for b in &ip4.octets() {
+                    result.push_str(&format!("{:02x}", b));
+                }
+                result.push_str(&format!(
+                    "{:02x}{:02x}",
+                    (p.port() >> 8) as u8,
+                    p.port() as u8
+                ));
             }
         }
         result.push_str("e");
         result.into_bytes()
     }
 
-    pub fn addr(&self) -> SocketAddr { self.addr }
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
 }

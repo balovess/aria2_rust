@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::time::{interval, timeout as tokio_timeout};
-use std::time::Duration;
-use tracing::{info, error, debug, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::error::{Aria2Error, Result, RecoverableError};
-use crate::retry::{RetryPolicy, RetryStats};
-use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use super::command::{Command, CommandStatus};
+use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+use crate::request::request_group_man::RequestGroupMan;
+use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::session::save_session_command::SaveSessionCommand;
-use crate::request::request_group_man::RequestGroupMan;
 
 pub struct DownloadEngine {
     command_tx: mpsc::UnboundedSender<Box<dyn Command>>,
@@ -52,15 +52,21 @@ impl DownloadEngine {
             auto_save: None,
         };
 
-        info!("下载引擎初始化完成, tick间隔: {}ms, 最大重试次数: {}", tick_interval_ms, max_tries);
+        info!(
+            "下载引擎初始化完成, tick间隔: {}ms, 最大重试次数: {}",
+            tick_interval_ms, max_tries
+        );
 
         engine
     }
 
     pub fn set_global_rate_limiter(&mut self, config: RateLimiterConfig) {
         self.global_limiter = Some(RateLimiter::new(&config));
-        info!("全局限速已设置: download={:?}, upload={:?}",
-            config.download_rate(), config.upload_rate());
+        info!(
+            "全局限速已设置: download={:?}, upload={:?}",
+            config.download_rate(),
+            config.upload_rate()
+        );
     }
 
     pub fn global_rate_limiter(&self) -> Option<&RateLimiter> {
@@ -108,7 +114,8 @@ impl DownloadEngine {
     }
 
     pub fn add_command(&self, command: Box<dyn Command>) -> Result<()> {
-        self.command_tx.send(command)
+        self.command_tx
+            .send(command)
             .map_err(|e| Aria2Error::DownloadFailed(format!("添加命令失败: {}", e)))
     }
 
@@ -128,7 +135,9 @@ impl DownloadEngine {
         let mut failed_commands: Vec<(Box<dyn Command>, u32)> = Vec::new();
 
         let mut ticker = interval(self.tick_interval);
-        let mut shutdown_rx = self.shutdown_rx.take()
+        let mut shutdown_rx = self
+            .shutdown_rx
+            .take()
             .expect("shutdown_rx should exist in run()");
         let policy = self.retry_policy.clone();
         let stats = self.retry_stats.clone();
@@ -167,15 +176,20 @@ impl DownloadEngine {
             }
         }
 
-        info!("下载引擎停止, 重试统计: 总计={}, 超时={}, 服务错误={}, 网络故障={}",
-            stats.total(), stats.timeouts(), stats.server_errors(), stats.network_failures());
+        info!(
+            "下载引擎停止, 重试统计: 总计={}, 超时={}, 服务错误={}, 网络故障={}",
+            stats.total(),
+            stats.timeouts(),
+            stats.server_errors(),
+            stats.network_failures()
+        );
         Ok(())
     }
 
     async fn dispatch_commands(
         &self,
         pending: &mut Vec<Box<dyn Command>>,
-        running: &mut Vec<Box<dyn Command>>
+        running: &mut Vec<Box<dyn Command>>,
     ) -> Result<()> {
         while !pending.is_empty() {
             let cmd = pending.remove(0);
@@ -216,14 +230,18 @@ impl DownloadEngine {
 
     async fn collect_completed(&self, running: &mut Vec<Box<dyn Command>>) -> Result<()> {
         running.retain(|cmd| {
-            matches!(cmd.status(), CommandStatus::Running | CommandStatus::Pending)
+            matches!(
+                cmd.status(),
+                CommandStatus::Running | CommandStatus::Pending
+            )
         });
         Ok(())
     }
 
     async fn shutdown(&self, running: &mut Vec<Box<dyn Command>>) {
         info!("正在关闭运行中的命令...");
-        if let (Some(ref path), Some(ref man)) = (&self.save_session_path, &self.request_group_man) {
+        if let (Some(ref path), Some(ref man)) = (&self.save_session_path, &self.request_group_man)
+        {
             let mut cmd = SaveSessionCommand::new(path.clone(), man.clone());
             match cmd.execute().await {
                 Ok(_) => info!("关闭时已保存 session 到 {}", path.display()),

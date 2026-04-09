@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{Client, ClientBuilder, redirect, Certificate};
+use reqwest::{redirect, Certificate, Client, ClientBuilder};
 use tracing::{debug, info};
 
 use crate::http::request::HttpRequest;
@@ -63,11 +63,14 @@ impl HttpClient {
             }
         }
 
-        let inner = builder.build()
+        let inner = builder
+            .build()
             .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
 
-        info!("HttpClient初始化完成 (超时={:?}, 重定向上限={}, TLS验证={})",
-              options.timeout, options.max_redirects, options.verify_tls);
+        info!(
+            "HttpClient初始化完成 (超时={:?}, 重定向上限={}, TLS验证={})",
+            options.timeout, options.max_redirects, options.verify_tls
+        );
 
         Ok(Self { inner, options })
     }
@@ -90,7 +93,8 @@ impl HttpClient {
         if let Some(ref headers) = request.headers {
             for (key, value) in headers.iter() {
                 reqwest_request = reqwest_request.header(
-                    key.as_str().parse::<reqwest::header::HeaderName>()
+                    key.as_str()
+                        .parse::<reqwest::header::HeaderName>()
                         .map_err(|e| format!("无效的请求头名称: {}", e))?,
                     value.as_str(),
                 );
@@ -101,20 +105,24 @@ impl HttpClient {
             reqwest_request = reqwest_request.body(body);
         }
 
-        let response = reqwest_request.send().await
+        let response = reqwest_request
+            .send()
+            .await
             .map_err(|e| format!("HTTP请求失败: {}", e))?;
 
         let status = response.status();
         let status_code = status.as_u16();
         debug!("收到HTTP响应: 状态码={}", status_code);
 
-        let headers_map: Vec<(String, String)> = response.headers().iter()
-            .map(|(k, v)| {
-                (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
-            })
+        let headers_map: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
 
-        let body_bytes = response.bytes().await
+        let body_bytes = response
+            .bytes()
+            .await
             .map_err(|e| format!("读取响应体失败: {}", e))?
             .to_vec();
 
@@ -165,8 +173,11 @@ impl<'a> HttpRequestBuilder<'a> {
     pub fn header(mut self, name: &str, value: &str) -> Self {
         let mut headers = self.headers.take().unwrap_or_default();
         headers.insert(
-            name.parse::<reqwest::header::HeaderName>().expect("无效的请求头名称"),
-            value.parse::<reqwest::header::HeaderValue>().expect("无效的请求头值"),
+            name.parse::<reqwest::header::HeaderName>()
+                .expect("无效的请求头名称"),
+            value
+                .parse::<reqwest::header::HeaderValue>()
+                .expect("无效的请求头值"),
         );
         self.headers = Some(headers);
         self
@@ -208,7 +219,8 @@ impl<'a> HttpRequestBuilder<'a> {
 
     pub async fn send(self) -> Result<HttpResponse, String> {
         let headers_map = self.headers.map(|h| {
-            h.iter().map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            h.iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect::<Vec<_>>()
         });
 
@@ -321,16 +333,15 @@ mod tests {
         let url = RedirectHandler::resolve_redirect_url(
             "http://example.com/page",
             "http://other.example.com/new",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(url, "http://other.example.com/new");
     }
 
     #[test]
     fn test_resolve_relative_redirect() {
-        let url = RedirectHandler::resolve_redirect_url(
-            "http://example.com/old/path",
-            "/new/path",
-        ).unwrap();
+        let url = RedirectHandler::resolve_redirect_url("http://example.com/old/path", "/new/path")
+            .unwrap();
         assert_eq!(url, "http://example.com/new/path");
     }
 
@@ -339,7 +350,8 @@ mod tests {
         let url = RedirectHandler::resolve_redirect_url(
             "http://example.com/old/page.html",
             "new-page.html",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(url, "http://example.com/old/new-page.html");
     }
 

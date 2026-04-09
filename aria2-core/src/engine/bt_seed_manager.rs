@@ -1,12 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 
-use super::bt_upload_session::{
-    BtUploadSession, BtSeedingConfig, PieceDataProvider,
-};
+use super::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
 
 #[derive(Debug, Clone)]
 pub struct SeedExitCondition {
@@ -25,14 +23,20 @@ impl Default for SeedExitCondition {
 
 impl SeedExitCondition {
     pub fn infinite() -> Self {
-        Self { seed_time: None, seed_ratio: None }
+        Self {
+            seed_time: None,
+            seed_ratio: None,
+        }
     }
 
     pub fn with_time(secs: u64) -> Self {
         if secs == 0 {
             Self::infinite()
         } else {
-            Self { seed_time: Some(Duration::from_secs(secs)), seed_ratio: None }
+            Self {
+                seed_time: Some(Duration::from_secs(secs)),
+                seed_ratio: None,
+            }
         }
     }
 
@@ -40,14 +44,24 @@ impl SeedExitCondition {
         if ratio <= 0.0 {
             Self::infinite()
         } else {
-            Self { seed_time: None, seed_ratio: Some(ratio) }
+            Self {
+                seed_time: None,
+                seed_ratio: Some(ratio),
+            }
         }
     }
 
     pub fn with_time_and_ratio(secs: u64, ratio: f64) -> Self {
-        let time = if secs == 0 { None } else { Some(Duration::from_secs(secs)) };
+        let time = if secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(secs))
+        };
         let r = if ratio <= 0.0 { None } else { Some(ratio) };
-        Self { seed_time: time, seed_ratio: r }
+        Self {
+            seed_time: time,
+            seed_ratio: r,
+        }
     }
 }
 
@@ -90,8 +104,11 @@ impl BtSeedManager {
     }
 
     pub async fn run_seeding_loop(&mut self) -> Result<()> {
-        info!("Seeding started: {} peers, condition={:?}",
-            self.sessions.len(), self.exit_condition);
+        info!(
+            "Seeding started: {} peers, condition={:?}",
+            self.sessions.len(),
+            self.exit_condition
+        );
 
         for session in &mut self.sessions {
             session.unchoke_peer().await.ok();
@@ -101,8 +118,13 @@ impl BtSeedManager {
             let mut alive_sessions = Vec::new();
             for session in &mut self.sessions {
                 if !session.is_dead() {
-                    match session.handle_incoming_messages(self.piece_data.as_ref()).await {
-                        Ok(uploaded) => { self.total_uploaded += uploaded; }
+                    match session
+                        .handle_incoming_messages(self.piece_data.as_ref())
+                        .await
+                    {
+                        Ok(uploaded) => {
+                            self.total_uploaded += uploaded;
+                        }
                         Err(e) => {
                             warn!("Upload session error: {}", e);
                             session.is_dead = true;
@@ -117,7 +139,10 @@ impl BtSeedManager {
             self.maybe_optimistic_unchoke().await;
 
             if self.should_exit() {
-                info!("Seeding exit condition met after {:?}", self.seeding_start_time.elapsed());
+                info!(
+                    "Seeding exit condition met after {:?}",
+                    self.seeding_start_time.elapsed()
+                );
                 break;
             }
 
@@ -167,7 +192,9 @@ impl BtSeedManager {
         self.last_optimistic_unchoke = Instant::now();
         self.optimistic_round += 1;
 
-        let choked_indices: Vec<usize> = self.sessions.iter()
+        let choked_indices: Vec<usize> = self
+            .sessions
+            .iter()
             .enumerate()
             .filter(|(_, s)| !s.is_dead() && s.is_peer_choked())
             .map(|(i, _)| i)
@@ -247,11 +274,7 @@ mod tests {
 
     #[test]
     fn test_should_exit_by_time() {
-        let manager = make_test_manager(
-            SeedExitCondition::with_time(1),
-            1000,
-            500,
-        );
+        let manager = make_test_manager(SeedExitCondition::with_time(1), 1000, 500);
         assert!(!manager.should_exit());
 
         let mut manager = manager;
@@ -261,11 +284,7 @@ mod tests {
 
     #[test]
     fn test_should_exit_by_ratio() {
-        let manager = make_test_manager(
-            SeedExitCondition::with_ratio(1.0),
-            1000,
-            499,
-        );
+        let manager = make_test_manager(SeedExitCondition::with_ratio(1.0), 1000, 499);
         assert!(!manager.should_exit());
 
         let mut manager = manager;
@@ -275,11 +294,7 @@ mod tests {
 
     #[test]
     fn test_should_not_exit_early() {
-        let manager = make_test_manager(
-            SeedExitCondition::with_time_and_ratio(10, 3.0),
-            1000,
-            100,
-        );
+        let manager = make_test_manager(SeedExitCondition::with_time_and_ratio(10, 3.0), 1000, 100);
         assert!(!manager.should_exit());
 
         let mut manager = manager;
@@ -290,17 +305,17 @@ mod tests {
 
     #[test]
     fn test_seed_manager_stats() {
-        let manager = make_test_manager(
-            SeedExitCondition::infinite(),
-            1024 * 100,
-            51200,
-        );
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1024 * 100, 51200);
         assert_eq!(manager.num_total_peers(), 0);
         assert_eq!(manager.num_alive_peers(), 0);
         assert_eq!(manager.total_uploaded(), 51200);
     }
 
-    fn make_test_manager(exit_cond: SeedExitCondition, downloaded: u64, uploaded: u64) -> BtSeedManager {
+    fn make_test_manager(
+        exit_cond: SeedExitCondition,
+        downloaded: u64,
+        uploaded: u64,
+    ) -> BtSeedManager {
         let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
         let config = BtSeedingConfig::default();
         let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];

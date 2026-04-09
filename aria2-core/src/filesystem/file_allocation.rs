@@ -1,6 +1,6 @@
-use std::path::Path;
+use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use crate::error::{Aria2Error, Result};
-use super::disk_adaptor::{DiskAdaptor, DirectDiskAdaptor};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AllocationStrategy {
@@ -11,7 +11,9 @@ pub enum AllocationStrategy {
 }
 
 impl Default for AllocationStrategy {
-    fn default() -> Self { AllocationStrategy::None }
+    fn default() -> Self {
+        AllocationStrategy::None
+    }
 }
 
 impl AllocationStrategy {
@@ -39,11 +41,7 @@ pub async fn allocate_file<D: DiskAdaptor>(
     }
 }
 
-pub async fn preallocate_file(
-    path: &Path,
-    length: u64,
-    strategy: &str,
-) -> Result<()> {
+pub async fn preallocate_file(path: &Path, length: u64, strategy: &str) -> Result<()> {
     let alloc_strategy = AllocationStrategy::from_str(strategy);
 
     if length == 0 || alloc_strategy == AllocationStrategy::None {
@@ -53,7 +51,8 @@ pub async fn preallocate_file(
     if let Some(parent) = path.parent() {
         let parent: &Path = parent;
         if !parent.exists() {
-            tokio::fs::create_dir_all(parent).await
+            tokio::fs::create_dir_all(parent)
+                .await
                 .map_err(|e: std::io::Error| Aria2Error::Io(e.to_string()))?;
         }
     }
@@ -78,7 +77,7 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
                 let ret = libc::posix_fallocate64(fd, 0, length as i64);
                 if ret != 0 {
                     return Err(Aria2Error::Io(
-                        std::io::Error::from_raw_os_error(ret).to_string()
+                        std::io::Error::from_raw_os_error(ret).to_string(),
                     ));
                 }
             }
@@ -99,20 +98,20 @@ async fn truncate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
 }
 
 pub async fn get_available_space(path: &Path) -> Result<u64> {
-    let parent = path.parent()
-        .unwrap_or_else(|| Path::new("."));
-    
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let metadata = tokio::fs::metadata(parent).await
+        let metadata = tokio::fs::metadata(parent)
+            .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
-        
+
         let statvfs_result = unsafe {
             let mut stat: libc::statvfs64 = std::mem::zeroed();
             let ret = libc::statvfs64(
                 parent.to_str().unwrap_or(".").as_ptr() as *const i8,
-                &mut stat
+                &mut stat,
             );
             (ret, stat)
         };
@@ -127,11 +126,16 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
 
     #[cfg(windows)]
     {
-        let metadata = tokio::fs::metadata(parent).await
+        let metadata = tokio::fs::metadata(parent)
+            .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
         let free = metadata.len();
-        if free > 0 { Ok(free) } else { Ok(u64::MAX / 2) }
+        if free > 0 {
+            Ok(free)
+        } else {
+            Ok(u64::MAX / 2)
+        }
     }
 
     #[cfg(all(not(unix), not(windows)))]
@@ -146,11 +150,26 @@ mod tests {
 
     #[test]
     fn test_allocation_strategy_from_str() {
-        assert_eq!(AllocationStrategy::from_str("none"), AllocationStrategy::None);
-        assert_eq!(AllocationStrategy::from_str("prealloc"), AllocationStrategy::Prealloc);
-        assert_eq!(AllocationStrategy::from_str("falloc"), AllocationStrategy::Falloc);
-        assert_eq!(AllocationStrategy::from_str("trunc"), AllocationStrategy::Trunc);
-        assert_eq!(AllocationStrategy::from_str("invalid"), AllocationStrategy::None);
+        assert_eq!(
+            AllocationStrategy::from_str("none"),
+            AllocationStrategy::None
+        );
+        assert_eq!(
+            AllocationStrategy::from_str("prealloc"),
+            AllocationStrategy::Prealloc
+        );
+        assert_eq!(
+            AllocationStrategy::from_str("falloc"),
+            AllocationStrategy::Falloc
+        );
+        assert_eq!(
+            AllocationStrategy::from_str("trunc"),
+            AllocationStrategy::Trunc
+        );
+        assert_eq!(
+            AllocationStrategy::from_str("invalid"),
+            AllocationStrategy::None
+        );
         assert_eq!(AllocationStrategy::from_str(""), AllocationStrategy::None);
     }
 
@@ -176,7 +195,9 @@ mod tests {
     async fn test_preallocate_file_prealloc() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_prealloc.bin");
-        preallocate_file(&path, 1024 * 1024, "prealloc").await.unwrap();
+        preallocate_file(&path, 1024 * 1024, "prealloc")
+            .await
+            .unwrap();
 
         let metadata = tokio::fs::metadata(&path).await.unwrap();
         assert_eq!(metadata.len(), 1024 * 1024);

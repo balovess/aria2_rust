@@ -1,5 +1,5 @@
-use std::ops::Range;
 use crate::error::{Aria2Error, Result};
+use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SegmentStatus {
@@ -75,18 +75,19 @@ impl Segment {
 
     pub fn write_data(&mut self, offset: u64, length: u64) -> Result<()> {
         if offset < self.start || offset + length > self.end {
-            return Err(Aria2Error::DownloadFailed(
-                format!("数据偏移超出分段范围: {}-{}", offset, self.end)
-            ));
+            return Err(Aria2Error::DownloadFailed(format!(
+                "数据偏移超出分段范围: {}-{}",
+                offset, self.end
+            )));
         }
-        
+
         self.completed_length += length;
         self.status = SegmentStatus::InProgress;
-        
+
         if self.completed_length >= self.length() {
             self.status = SegmentStatus::Completed;
         }
-        
+
         Ok(())
     }
 

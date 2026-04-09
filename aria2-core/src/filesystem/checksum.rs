@@ -1,5 +1,5 @@
-use std::io::{Read, Cursor};
 use crate::error::{Aria2Error, Result};
+use std::io::{Cursor, Read};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ChecksumType {
@@ -32,9 +32,10 @@ impl Checksum {
 
     pub fn verify<R: Read>(&self, mut reader: R) -> Result<bool> {
         let mut data = Vec::new();
-        reader.read_to_end(&mut data)
+        reader
+            .read_to_end(&mut data)
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
-        
+
         let actual = match self.checksum_type {
             ChecksumType::Md5 => md5_hex(&data),
             ChecksumType::Sha1 => sha1_hex(&data),
@@ -43,7 +44,7 @@ impl Checksum {
         };
 
         let matches = actual.to_lowercase() == self.expected.to_lowercase();
-        
+
         if matches {
             Ok(true)
         } else {
@@ -63,7 +64,7 @@ impl Checksum {
         };
 
         let matches = actual.to_lowercase() == self.expected.to_lowercase();
-        
+
         if matches {
             Ok(true)
         } else {

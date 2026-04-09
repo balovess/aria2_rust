@@ -31,15 +31,34 @@ impl NsCookieParser {
 mod tests {
     use super::*;
 
-    fn ns_line(domain: &str, sub: &str, path: &str, secure: &str, expiry: &str, name: &str, value: &str) -> String {
+    fn ns_line(
+        domain: &str,
+        sub: &str,
+        path: &str,
+        secure: &str,
+        expiry: &str,
+        name: &str,
+        value: &str,
+    ) -> String {
         let t = "\t";
-        [domain, t, sub, t, path, t, secure, t, expiry, t, name, t, value].concat()
+        [
+            domain, t, sub, t, path, t, secure, t, expiry, t, name, t, value,
+        ]
+        .concat()
     }
 
     #[test]
     #[ignore]
     fn test_parse_standard_line() {
-        let line = ns_line(".example.com", "TRUE", "/", "FALSE", "0", "session_id", "abc123");
+        let line = ns_line(
+            ".example.com",
+            "TRUE",
+            "/",
+            "FALSE",
+            "0",
+            "session_id",
+            "abc123",
+        );
         let c = NsCookieParser::parse_line(&line).unwrap();
         assert_eq!(c.domain, "example.com");
         assert_eq!(c.name, "session_id");
@@ -51,7 +70,15 @@ mod tests {
     #[test]
     #[ignore]
     fn test_parse_secure_line() {
-        let line = ns_line(".secure.com", "TRUE", "/", "TRUE", "0", "token", "secret_val");
+        let line = ns_line(
+            ".secure.com",
+            "TRUE",
+            "/",
+            "TRUE",
+            "0",
+            "token",
+            "secret_val",
+        );
         let c = NsCookieParser::parse_line(&line).unwrap();
         assert!(c.secure);
         assert_eq!(c.value, "secret_val");

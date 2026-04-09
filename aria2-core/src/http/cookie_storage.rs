@@ -11,7 +11,9 @@ pub struct CookieStorage {
 
 impl CookieStorage {
     pub fn new() -> Self {
-        Self { cookies: RwLock::new(Vec::new()) }
+        Self {
+            cookies: RwLock::new(Vec::new()),
+        }
     }
 
     pub fn add(&self, cookie: Cookie) {
@@ -29,7 +31,8 @@ impl CookieStorage {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        cookies.iter()
+        cookies
+            .iter()
             .filter(|c| c.match_request(host, path, date, secure))
             .cloned()
             .collect()
@@ -87,8 +90,14 @@ impl CookieStorage {
 
     pub fn to_header_string(&self, host: &str, path: &str, secure: bool) -> String {
         let cookies = self.find_cookies(host, path, secure);
-        if cookies.is_empty() { return String::new(); }
-        cookies.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; ")
+        if cookies.is_empty() {
+            return String::new();
+        }
+        cookies
+            .iter()
+            .map(|c| format!("{}={}", c.name, c.value))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     pub fn is_empty(&self) -> bool {
@@ -97,7 +106,9 @@ impl CookieStorage {
 }
 
 impl Default for CookieStorage {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

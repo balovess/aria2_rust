@@ -121,7 +121,13 @@ impl HttpHeaderProcessor {
     }
 
     pub fn guess_filename_from_url(url: &str) -> Option<String> {
-        let path = url.rsplit('/').next()?.split('?').next()?.split('#').next()?;
+        let path = url
+            .rsplit('/')
+            .next()?
+            .split('?')
+            .next()?
+            .split('#')
+            .next()?;
         if path.is_empty() || path == "/" {
             return None;
         }

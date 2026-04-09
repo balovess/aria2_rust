@@ -17,7 +17,10 @@ pub struct Cookie {
 
 impl Cookie {
     pub fn new(name: &str, value: &str, domain: &str) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         Self {
             name: name.to_string(),
             value: value.to_string(),
@@ -34,15 +37,25 @@ impl Cookie {
     }
 
     pub fn match_request(&self, host: &str, path: &str, date: i64, secure: bool) -> bool {
-        if self.secure && !secure { return false; }
-        if self.persistent && self.is_expired(date) { return false; }
-        if !self.domain_matches(host) { return false; }
-        if !self.path_matches(path) { return false; }
+        if self.secure && !secure {
+            return false;
+        }
+        if self.persistent && self.is_expired(date) {
+            return false;
+        }
+        if !self.domain_matches(host) {
+            return false;
+        }
+        if !self.path_matches(path) {
+            return false;
+        }
         true
     }
 
     pub fn is_expired(&self, base_time: i64) -> bool {
-        if !self.persistent { return false; }
+        if !self.persistent {
+            return false;
+        }
         self.expiry_time < base_time
     }
 
@@ -60,39 +73,65 @@ impl Cookie {
             s.push_str("; Path=");
             s.push_str(&self.path);
         }
-        if self.secure { s.push_str("; Secure"); }
-        if self.http_only { s.push_str("; HttpOnly"); }
+        if self.secure {
+            s.push_str("; Secure");
+        }
+        if self.http_only {
+            s.push_str("; HttpOnly");
+        }
         s
     }
 
     pub fn to_netscape_line(&self) -> String {
-        let d = if self.host_only { format!(".{}", self.domain) } else { self.domain.clone() };
+        let d = if self.host_only {
+            format!(".{}", self.domain)
+        } else {
+            self.domain.clone()
+        };
         let sub = if self.host_only { "FALSE" } else { "TRUE" };
         let sec = if self.secure { "TRUE" } else { "FALSE" };
-        format!("{}\t{}\t{}\t{}\t{}\t{}\t{}", d, sub, self.path, sec, self.expiry_time, self.name, self.value)
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            d, sub, self.path, sec, self.expiry_time, self.name, self.value
+        )
     }
 
-    pub fn from_set_cookie_header(header: &str, default_domain: &str, default_path: &str) -> Option<Self> {
+    pub fn from_set_cookie_header(
+        header: &str,
+        default_domain: &str,
+        default_path: &str,
+    ) -> Option<Self> {
         let header = header.trim();
-        if header.is_empty() { return None; }
+        if header.is_empty() {
+            return None;
+        }
 
         let (name_value, attrs_part) = header.split_once(';')?;
         let nv = name_value.trim();
         let eq_pos = nv.find('=')?;
         let name = nv[..eq_pos].trim();
         let value = nv[eq_pos + 1..].trim();
-        if name.is_empty() { return None; }
+        if name.is_empty() {
+            return None;
+        }
 
         let mut cookie = Self::new(name, value, default_domain);
         cookie.path = default_path.to_string();
 
         for attr in attrs_part.split(';') {
             let attr = attr.trim();
-            if attr.is_empty() { continue; }
+            if attr.is_empty() {
+                continue;
+            }
             if let Some((k, v)) = attr.split_once('=') {
                 match k.trim().to_lowercase().as_str() {
-                    "domain" => { cookie.domain = v.trim().to_string(); cookie.host_only = false; }
-                    "path" => { cookie.path = v.trim().to_string(); }
+                    "domain" => {
+                        cookie.domain = v.trim().to_string();
+                        cookie.host_only = false;
+                    }
+                    "path" => {
+                        cookie.path = v.trim().to_string();
+                    }
                     "max-age" => {
                         if let Ok(secs) = v.trim().parse::<i64>() {
                             cookie.expiry_time = now_secs() + secs;
@@ -120,10 +159,14 @@ impl Cookie {
 
     pub fn parse_netscape_line(line: &str) -> Option<Self> {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { return None; }
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
 
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 7 { return None; }
+        if parts.len() < 7 {
+            return None;
+        }
 
         let raw_domain = parts[0];
         let include_subdomains = parts[1];
@@ -131,7 +174,11 @@ impl Cookie {
         let secure = parts[3] == "TRUE";
         let expiry: i64 = parts[5].trim().parse().ok()?;
         let name = parts[6].trim().to_string();
-        let value = if parts.len() > 7 { parts[7].trim().to_string() } else { String::new() };
+        let value = if parts.len() > 7 {
+            parts[7].trim().to_string()
+        } else {
+            String::new()
+        };
 
         let domain = raw_domain.trim_start_matches('.').to_string();
         let host_only = (include_subdomains != "TRUE") || domain.is_empty();
@@ -157,13 +204,21 @@ impl Cookie {
         } else {
             let d = self.domain.to_lowercase();
             let h = host.to_lowercase();
-            h == d || (d.starts_with('.') && h.ends_with(&d)) || (!d.starts_with('.') && h.ends_with(&format!(".{}", d)))
+            h == d
+                || (d.starts_with('.') && h.ends_with(&d))
+                || (!d.starts_with('.') && h.ends_with(&format!(".{}", d)))
         }
     }
 
     fn path_matches(&self, path: &str) -> bool {
-        if self.path == "/" { return true; }
-        let p = if self.path.ends_with('/') { self.path.clone() } else { format!("{}/", self.path) };
+        if self.path == "/" {
+            return true;
+        }
+        let p = if self.path.ends_with('/') {
+            self.path.clone()
+        } else {
+            format!("{}/", self.path)
+        };
         path.starts_with(&p)
     }
 }
@@ -175,12 +230,17 @@ impl PartialEq for Cookie {
 }
 
 fn now_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn format_http_date(epoch: i64) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let epoch = epoch as u64;
     let days_since_epoch = epoch / 86400;
     let mut y = 1970u32;
@@ -188,15 +248,23 @@ fn format_http_date(epoch: i64) -> String {
     loop {
         let leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
         let days_in_year = if leap { 366 } else { 365 };
-        if remaining < days_in_year { break; }
+        if remaining < days_in_year {
+            break;
+        }
         remaining -= days_in_year;
         y += 1;
     }
-    let mdays = [31,28,31,30,31,30,31,31,30,31,30,31];
+    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut m = 0u32;
     while m < 12 {
-        let dim = if m == 1 && ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) { 29 } else { mdays[m as usize] };
-        if remaining < dim { break; }
+        let dim = if m == 1 && ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
+            29
+        } else {
+            mdays[m as usize]
+        };
+        if remaining < dim {
+            break;
+        }
         remaining -= dim;
         m += 1;
     }
@@ -205,28 +273,51 @@ fn format_http_date(epoch: i64) -> String {
     let hour = secs / 3600;
     let min = (secs % 3600) / 60;
     let sec = secs % 60;
-    let dow = ((y + (y/4) - (y/100) + (y/400) + (13*m+1)/5 + day + 308) % 7) as usize;
-    format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT", DAYS[dow], day, MONTHS[m as usize], y, hour, min, sec)
+    let dow = ((y + (y / 4) - (y / 100) + (y / 400) + (13 * m + 1) / 5 + day + 308) % 7) as usize;
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+        DAYS[dow], day, MONTHS[m as usize], y, hour, min, sec
+    )
 }
 
 fn parse_http_date(s: &str) -> Option<i64> {
-    const MONTHS: [&str; 12] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let s = s.trim();
     let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() < 5 { return None; }
+    if parts.len() < 5 {
+        return None;
+    }
     let day: u32 = parts[1].parse().ok()?;
     let month_idx = MONTHS.iter().position(|&m| m == parts[2])? as u32;
     let year: u32 = parts[3].parse().ok()?;
     let time_parts: Vec<u32> = parts[4].split(':').filter_map(|x| x.parse().ok()).collect();
-    if time_parts.len() < 3 { return None; }
-    let mdays = [31,28,31,30,31,30,31,31,30,31,30,31];
+    if time_parts.len() < 3 {
+        return None;
+    }
+    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
     let feb_days = if leap { 29 } else { 28 };
-    let dim = [31,feb_days,31,30,31,30,31,31,30,31,30,31];
-    let total_days = (0..year).map(|y| if (y%4==0&&y%100!=0)||y%400==0{366}else{365}).sum::<u32>()
+    let dim = [31, feb_days, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let total_days = (0..year)
+        .map(|y| {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                366
+            } else {
+                365
+            }
+        })
+        .sum::<u32>()
         + (0..month_idx).map(|m| dim[m as usize]).sum::<u32>()
-        + day - 1;
-    Some(total_days as i64 * 86400 + time_parts[0] as i64 * 3600 + time_parts[1] as i64 * 60 + time_parts[2] as i64)
+        + day
+        - 1;
+    Some(
+        total_days as i64 * 86400
+            + time_parts[0] as i64 * 3600
+            + time_parts[1] as i64 * 60
+            + time_parts[2] as i64,
+    )
 }
 
 #[cfg(test)]
@@ -357,7 +448,22 @@ mod tests {
     #[ignore]
     fn test_parse_netscape_line() {
         let t = "\t";
-        let line = [".example.com", t, "TRUE", t, "/", t, "FALSE", t, "0", t, "session_id", t, "abc123"].concat();
+        let line = [
+            ".example.com",
+            t,
+            "TRUE",
+            t,
+            "/",
+            t,
+            "FALSE",
+            t,
+            "0",
+            t,
+            "session_id",
+            t,
+            "abc123",
+        ]
+        .concat();
         let c = Cookie::parse_netscape_line(&line).unwrap();
         assert_eq!(c.domain, "example.com");
         assert_eq!(c.path, "/");
@@ -382,7 +488,22 @@ mod tests {
     #[ignore]
     fn test_parse_netscape_secure_true() {
         let t = "\t";
-        let line = [".example.com", t, "TRUE", t, "/", t, "TRUE", t, "0", t, "token", t, "secret"].concat();
+        let line = [
+            ".example.com",
+            t,
+            "TRUE",
+            t,
+            "/",
+            t,
+            "TRUE",
+            t,
+            "0",
+            t,
+            "token",
+            t,
+            "secret",
+        ]
+        .concat();
         let c = Cookie::parse_netscape_line(&line).unwrap();
         assert!(c.secure);
     }

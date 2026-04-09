@@ -33,8 +33,7 @@ impl ChunkChecksum {
             return 0;
         }
         (self.piece_count() as u64 - 1) * self.piece_length
-            + (self.piece_length as usize).min(256)
-            as u64
+            + (self.piece_length as usize).min(256) as u64
     }
 
     pub fn verify_chunk(&self, chunk_data: &[u8], index: usize) -> bool {

@@ -1,8 +1,8 @@
-use criterion::{criterion_group, Criterion, black_box};
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::xml_rpc::XmlRpcRequest;
 use base64::Engine;
+use criterion::{black_box, criterion_group, Criterion};
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {
     JsonRpcRequest {
@@ -29,7 +29,9 @@ fn bench_add_uri_qps(c: &mut Criterion) {
     c.bench_function("add_uri_single", |b| {
         b.iter(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().unwrap();
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async {
                 let resp = engine.handle_request(&req).await;
                 black_box(resp.is_success());
@@ -45,7 +47,9 @@ fn bench_tell_active_empty(c: &mut Criterion) {
     c.bench_function("tell_active_empty_engine", |b| {
         b.iter(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().unwrap();
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async {
                 let resp = engine.handle_request(&req).await;
                 black_box(resp.is_success());
@@ -61,7 +65,9 @@ fn bench_get_global_stat(c: &mut Criterion) {
     c.bench_function("get_global_stat", |b| {
         b.iter(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().unwrap();
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async {
                 let resp = engine.handle_request(&req).await;
                 black_box(resp.is_success());
@@ -98,10 +104,7 @@ fn bench_jsonrpc_serialize(c: &mut Criterion) {
 fn bench_xmlrpc_build_serialize(c: &mut Criterion) {
     c.bench_function("xmlrpc_build_and_serialize", |b| {
         b.iter(|| {
-            let req = XmlRpcRequest::new(
-                "system.listMethods",
-                vec![],
-            );
+            let req = XmlRpcRequest::new("system.listMethods", vec![]);
             let xml = req.to_xml();
             black_box(xml.len());
         });
@@ -119,13 +122,19 @@ fn bench_xmlrpc_response(c: &mut Criterion) {
 
 fn bench_base64_encode_decode(c: &mut Criterion) {
     let data: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
-    c.bench_with_input(BenchmarkId::new("base64_encode_decode_1KB", 1024), &data, |b, d| {
-        b.iter(|| {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(d);
-            let decoded = base64::engine::general_purpose::STANDARD.decode(&encoded).ok();
-            black_box(decoded.map_or(0, |v| v.len()));
-        });
-    });
+    c.bench_with_input(
+        BenchmarkId::new("base64_encode_decode_1KB", 1024),
+        &data,
+        |b, d| {
+            b.iter(|| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(d);
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&encoded)
+                    .ok();
+                black_box(decoded.map_or(0, |v| v.len()));
+            });
+        },
+    );
 }
 
 fn bench_auth_token_verify(c: &mut Criterion) {
@@ -133,19 +142,24 @@ fn bench_auth_token_verify(c: &mut Criterion) {
     let valid_token = "my-secret-token-12345678";
     let invalid_tokens: Vec<String> = (0..100).map(|i| format!("wrong-token-{}", i)).collect();
 
-    c.bench_with_input(BenchmarkId::new("auth_token_verify_101_calls", 101), &invalid_tokens, |b, tokens| {
-        b.iter(|| {
-            let ok = auth.verify_token(valid_token);
-            for t in tokens.iter() {
-                let bad = auth.verify_token(t);
-                std::hint::black_box(bad);
-            }
-            black_box(ok);
-        });
-    });
+    c.bench_with_input(
+        BenchmarkId::new("auth_token_verify_101_calls", 101),
+        &invalid_tokens,
+        |b, tokens| {
+            b.iter(|| {
+                let ok = auth.verify_token(valid_token);
+                for t in tokens.iter() {
+                    let bad = auth.verify_token(t);
+                    std::hint::black_box(bad);
+                }
+                black_box(ok);
+            });
+        },
+    );
 }
 
-criterion_group!(rpc_benches,
+criterion_group!(
+    rpc_benches,
     bench_add_uri_qps,
     bench_tell_active_empty,
     bench_get_global_stat,

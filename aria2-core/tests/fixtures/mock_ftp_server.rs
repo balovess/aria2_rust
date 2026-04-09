@@ -37,7 +37,9 @@ pub struct MockFtpServer {
 impl MockFtpServer {
     pub async fn start() -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = TcpListener::bind(addr).await.expect("绑定Mock FTP服务器端口失败");
+        let listener = TcpListener::bind(addr)
+            .await
+            .expect("绑定Mock FTP服务器端口失败");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -61,7 +63,10 @@ impl MockFtpServer {
             }
         });
 
-        MockFtpServer { addr: actual_addr, shutdown: Some(shutdown_tx) }
+        MockFtpServer {
+            addr: actual_addr,
+            shutdown: Some(shutdown_tx),
+        }
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -82,7 +87,9 @@ impl MockFtpServer {
                 _ => {}
             }
             let trimmed = line.trim();
-            if trimmed.is_empty() { continue; }
+            if trimmed.is_empty() {
+                continue;
+            }
             let (verb, args) = if let Some(space_idx) = trimmed.find(' ') {
                 (&trimmed[..space_idx], trimmed[space_idx + 1..].trim())
             } else {
@@ -132,7 +139,8 @@ impl MockFtpServer {
             sess.data_host = Some("127.0.0.1".to_string());
             sess.data_port = Some(port);
             return Some(format!(
-                "227 Entering Passive Mode (127,0,0,1,{},{})\r\n", p1, p2
+                "227 Entering Passive Mode (127,0,0,1,{},{})\r\n",
+                p1, p2
             ));
         }
         if verb == "SIZE" {
@@ -196,7 +204,10 @@ impl MockFtpServer {
         if verb == "PWD" {
             return Some("257 \"/\" is current directory\r\n".into());
         }
-        Some(format!("502 Command not implemented: {} {}\r\n", verb, args))
+        Some(format!(
+            "502 Command not implemented: {} {}\r\n",
+            verb, args
+        ))
     }
 
     fn file_size(path: &str) -> u64 {
@@ -226,6 +237,12 @@ impl Drop for MockFtpServer {
     }
 }
 
-pub fn small_content() -> &'static [u8] { SMALL_CONTENT }
-pub fn medium_pattern() -> u8 { MEDIUM_PATTERN }
-pub fn large_pattern() -> u8 { LARGE_PATTERN }
+pub fn small_content() -> &'static [u8] {
+    SMALL_CONTENT
+}
+pub fn medium_pattern() -> u8 {
+    MEDIUM_PATTERN
+}
+pub fn large_pattern() -> u8 {
+    LARGE_PATTERN
+}

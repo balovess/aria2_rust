@@ -1,11 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub trait UriSelector: Send + Sync {
-    fn select(
-        &self,
-        uris: &[String],
-        used_hosts: &[(usize, String)],
-    ) -> Option<usize>;
+    fn select(&self, uris: &[String], used_hosts: &[(usize, String)]) -> Option<usize>;
 
     fn tune_command(&self, _uris: &[String], _speed: u64) {}
 
@@ -18,17 +14,23 @@ pub struct InorderUriSelector {
 
 impl InorderUriSelector {
     pub fn new() -> Self {
-        Self { current_index: AtomicU32::new(0) }
+        Self {
+            current_index: AtomicU32::new(0),
+        }
     }
 }
 
 impl Default for InorderUriSelector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UriSelector for InorderUriSelector {
     fn select(&self, uris: &[String], _used_hosts: &[(usize, String)]) -> Option<usize> {
-        if uris.is_empty() { return None; }
+        if uris.is_empty() {
+            return None;
+        }
         let idx = self.current_index.fetch_add(1, Ordering::Relaxed) as usize % uris.len();
         Some(idx)
     }
@@ -99,10 +101,7 @@ mod tests {
     #[test]
     fn test_used_hosts_ignored_by_inorder() {
         let selector = InorderUriSelector::new();
-        let uris = vec![
-            "http://a.com".to_string(),
-            "http://b.com".to_string(),
-        ];
+        let uris = vec!["http://a.com".to_string(), "http://b.com".to_string()];
         let used = vec![(0, "a.com".to_string())];
         let result = selector.select(&uris, &used);
         assert!(result.is_some());

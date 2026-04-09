@@ -78,7 +78,11 @@ pub struct ConcurrentSegmentManager {
 impl ConcurrentSegmentManager {
     pub fn new(total_size: u64, urls: Vec<String>, segment_size: Option<u64>) -> Self {
         let seg_size = segment_size.unwrap_or(1_048_576);
-        let num_segments = if total_size == 0 { 0 } else { ((total_size + seg_size - 1) / seg_size) as usize };
+        let num_segments = if total_size == 0 {
+            0
+        } else {
+            ((total_size + seg_size - 1) / seg_size) as usize
+        };
 
         let mut segments = Vec::with_capacity(num_segments);
         for i in 0..num_segments {
@@ -116,12 +120,20 @@ impl ConcurrentSegmentManager {
     }
 
     fn find_pending_segment(&mut self) -> Option<&mut Segment> {
-        self.segments.iter_mut()
+        self.segments
+            .iter_mut()
             .find(|s| s.status == SegmentStatus::Pending)
     }
 
-    pub fn next_pending_segment_for_mirror(&mut self, mirror_idx: usize) -> Option<(u32, u64, u64)> {
-        if !self.mirrors.get(mirror_idx).map_or(false, |m| m.can_accept_more()) {
+    pub fn next_pending_segment_for_mirror(
+        &mut self,
+        mirror_idx: usize,
+    ) -> Option<(u32, u64, u64)> {
+        if !self
+            .mirrors
+            .get(mirror_idx)
+            .map_or(false, |m| m.can_accept_more())
+        {
             return None;
         }
 
@@ -198,7 +210,8 @@ impl ConcurrentSegmentManager {
     }
 
     fn find_available_mirror_for_reassignment(&self, exclude: usize) -> Option<usize> {
-        self.mirrors.iter()
+        self.mirrors
+            .iter()
             .enumerate()
             .filter(|(i, m)| *i != exclude && m.is_available())
             .map(|(i, _)| i)
@@ -206,15 +219,21 @@ impl ConcurrentSegmentManager {
     }
 
     pub fn is_complete(&self) -> bool {
-        self.segments.iter().all(|s| s.status == SegmentStatus::Done)
+        self.segments
+            .iter()
+            .all(|s| s.status == SegmentStatus::Done)
     }
 
     pub fn has_failed_segments(&self) -> bool {
-        self.segments.iter().any(|s| s.status == SegmentStatus::Failed)
+        self.segments
+            .iter()
+            .any(|s| s.status == SegmentStatus::Failed)
     }
 
     pub fn has_pending_segments(&self) -> bool {
-        self.segments.iter().any(|s| s.status == SegmentStatus::Pending)
+        self.segments
+            .iter()
+            .any(|s| s.status == SegmentStatus::Pending)
     }
 
     pub fn assemble(&self) -> Option<Vec<u8>> {
@@ -234,25 +253,40 @@ impl ConcurrentSegmentManager {
     }
 
     pub fn progress(&self) -> f64 {
-        if self.total_size == 0 { return 100.0; }
-        let done = self.segments.iter().filter(|s| s.status == SegmentStatus::Done).count();
+        if self.total_size == 0 {
+            return 100.0;
+        }
+        let done = self
+            .segments
+            .iter()
+            .filter(|s| s.status == SegmentStatus::Done)
+            .count();
         done as f64 / self.segments.len() as f64 * 100.0
     }
 
-    pub fn num_segments(&self) -> usize { self.segments.len() }
+    pub fn num_segments(&self) -> usize {
+        self.segments.len()
+    }
     pub fn segment_status(&self, index: usize) -> Option<SegmentStatus> {
         self.segments.get(index).map(|s| s.status.clone())
     }
-    pub fn num_mirrors(&self) -> usize { self.mirrors.len() }
-    pub fn total_size(&self) -> u64 { self.total_size }
-    pub fn completed_bytes(&self) -> u64 { self.completed_bytes }
+    pub fn num_mirrors(&self) -> usize {
+        self.mirrors.len()
+    }
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+    pub fn completed_bytes(&self) -> u64 {
+        self.completed_bytes
+    }
 
     pub fn mirror_url(&self, index: usize) -> Option<&str> {
         self.mirrors.get(index).map(|m| m.url.as_str())
     }
 
     pub fn available_mirrors(&self) -> Vec<usize> {
-        self.mirrors.iter()
+        self.mirrors
+            .iter()
             .enumerate()
             .filter(|(_, m)| m.is_available())
             .map(|(i, _)| i)
@@ -274,14 +308,17 @@ impl ConcurrentSegmentManager {
     }
 
     pub fn segment_retry_count(&self, seg_idx: u32) -> u32 {
-        self.segments.iter()
+        self.segments
+            .iter()
             .find(|s| s.index == seg_idx)
             .map(|s| s.retry_count)
             .unwrap_or(0)
     }
 
     pub fn has_permanently_failed_segments(&self) -> bool {
-        self.segments.iter().any(|s| s.status == SegmentStatus::Failed && s.retry_count >= self.max_retries_per_segment)
+        self.segments.iter().any(|s| {
+            s.status == SegmentStatus::Failed && s.retry_count >= self.max_retries_per_segment
+        })
     }
 
     pub fn mark_completed_up_to(&mut self, offset: u64, length: u64) {
@@ -296,14 +333,21 @@ impl ConcurrentSegmentManager {
                 let overlap_start = std::cmp::max(segment.offset, offset);
                 let overlap_end = std::cmp::min(segment.offset + segment.length, end_offset);
                 if overlap_end > overlap_start {
-                    debug!("段 {} 部分已完成: {}/{} bytes", segment.index, overlap_end - segment.offset, segment.length);
+                    debug!(
+                        "段 {} 部分已完成: {}/{} bytes",
+                        segment.index,
+                        overlap_end - segment.offset,
+                        segment.length
+                    );
                 }
             }
         }
     }
 
     pub fn segment_info(&self, index: usize) -> Option<(u64, u64, &SegmentStatus)> {
-        self.segments.get(index).map(|s| (s.offset, s.length, &s.status))
+        self.segments
+            .get(index)
+            .map(|s| (s.offset, s.length, &s.status))
     }
 }
 
@@ -323,28 +367,34 @@ mod tests {
 
     #[test]
     fn test_manager_large_file_multi_segment() {
-        let mgr = ConcurrentSegmentManager::new(3_000_000, vec![
-            "http://a.com/f".to_string(),
-            "http://b.com/f".to_string(),
-        ], Some(1_000_000));
+        let mgr = ConcurrentSegmentManager::new(
+            3_000_000,
+            vec!["http://a.com/f".to_string(), "http://b.com/f".to_string()],
+            Some(1_000_000),
+        );
         assert_eq!(mgr.num_segments(), 3);
         assert_eq!(mgr.num_mirrors(), 2);
     }
 
     #[test]
     fn test_allocate_segments_round_robin() {
-        let mut mgr = ConcurrentSegmentManager::new(3_000_000, vec![
-            "http://a.com/f".to_string(),
-            "http://b.com/f".to_string(),
-        ], Some(1_000_000));
+        let mut mgr = ConcurrentSegmentManager::new(
+            3_000_000,
+            vec!["http://a.com/f".to_string(), "http://b.com/f".to_string()],
+            Some(1_000_000),
+        );
 
         mgr.allocate_segments();
 
-        let assigned_a: Vec<_> = mgr.segments.iter()
+        let assigned_a: Vec<_> = mgr
+            .segments
+            .iter()
             .filter(|s| s.assigned_mirror == Some(0))
             .map(|s| s.index)
             .collect();
-        let assigned_b: Vec<_> = mgr.segments.iter()
+        let assigned_b: Vec<_> = mgr
+            .segments
+            .iter()
             .filter(|s| s.assigned_mirror == Some(1))
             .map(|s| s.index)
             .collect();
@@ -356,7 +406,8 @@ mod tests {
 
     #[test]
     fn test_complete_and_assemble() {
-        let mut mgr = ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
+        let mut mgr =
+            ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
 
         mgr.allocate_segments();
         assert_eq!(mgr.progress(), 0.0);
@@ -377,10 +428,11 @@ mod tests {
 
     #[test]
     fn test_fail_and_reassign() {
-        let mut mgr = ConcurrentSegmentManager::new(200, vec![
-            "http://a.com/f".to_string(),
-            "http://b.com/f".to_string(),
-        ], Some(100));
+        let mut mgr = ConcurrentSegmentManager::new(
+            200,
+            vec!["http://a.com/f".to_string(), "http://b.com/f".to_string()],
+            Some(100),
+        );
 
         mgr.allocate_segments();
 
@@ -395,9 +447,8 @@ mod tests {
 
     #[test]
     fn test_max_retries_exhausted() {
-        let mut mgr = ConcurrentSegmentManager::new(100, vec![
-            "http://a.com/f".to_string(),
-        ], Some(100));
+        let mut mgr =
+            ConcurrentSegmentManager::new(100, vec!["http://a.com/f".to_string()], Some(100));
         mgr.set_max_retries(2);
 
         mgr.fail_segment(0);
@@ -418,10 +469,11 @@ mod tests {
 
     #[test]
     fn test_next_pending_for_specific_mirror() {
-        let mut mgr = ConcurrentSegmentManager::new(300, vec![
-            "http://a.com/f".to_string(),
-            "http://b.com/f".to_string(),
-        ], Some(100));
+        let mut mgr = ConcurrentSegmentManager::new(
+            300,
+            vec!["http://a.com/f".to_string(), "http://b.com/f".to_string()],
+            Some(100),
+        );
 
         let r = mgr.next_pending_segment_for_mirror(0);
         assert!(r.is_some());

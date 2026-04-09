@@ -1,9 +1,9 @@
-use criterion::{criterion_group, Criterion, black_box};
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::request::request_group::GroupId;
 use aria2_core::segment::bitfield::Bitfield;
 use aria2_core::segment::Segment;
-use aria2_core::ui::{ProgressBar, MultiProgress};
+use aria2_core::ui::{MultiProgress, ProgressBar};
+use criterion::{black_box, criterion_group, Criterion};
 
 fn bench_engine_creation(c: &mut Criterion) {
     c.bench_function("engine_create_destroy", |b| {
@@ -43,7 +43,13 @@ fn bench_segment_creation(c: &mut Criterion) {
         b.iter(|| {
             let segment_size = 1024 * 1024 / 16;
             let segments: Vec<Segment> = (0..16)
-                .map(|i| Segment::new(i, (i as u64) * segment_size, ((i + 1) as u64) * segment_size))
+                .map(|i| {
+                    Segment::new(
+                        i,
+                        (i as u64) * segment_size,
+                        ((i + 1) as u64) * segment_size,
+                    )
+                })
                 .collect();
             black_box(segments.len());
         });
@@ -80,7 +86,8 @@ fn bench_multi_progress_render(c: &mut Criterion) {
     });
 }
 
-criterion_group!(engine_benches,
+criterion_group!(
+    engine_benches,
     bench_engine_creation,
     bench_group_id_generation,
     bench_bitfield_set_unset,

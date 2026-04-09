@@ -1,4 +1,4 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -46,7 +46,9 @@ impl HttpAuth {
         credentials: &AuthCredentials,
     ) -> crate::http::request::HttpRequest {
         match credentials.scheme {
-            AuthScheme::Basic => request.with_header("Authorization", &credentials.basic_auth_header()),
+            AuthScheme::Basic => {
+                request.with_header("Authorization", &credentials.basic_auth_header())
+            }
             AuthScheme::Digest => request,
         }
     }
@@ -86,9 +88,13 @@ impl HttpAuth {
             realm: params.get("realm").cloned().unwrap_or_default(),
             nonce: params.get("nonce").cloned().unwrap_or_default(),
             qop: params.get("qop").cloned().unwrap_or_default(),
-            algorithm: params.get("algorithm").cloned().unwrap_or_else(|| "MD5".to_string()),
+            algorithm: params
+                .get("algorithm")
+                .cloned()
+                .unwrap_or_else(|| "MD5".to_string()),
             opaque: params.get("opaque").cloned().unwrap_or_default(),
-            stale: params.get("stale")
+            stale: params
+                .get("stale")
                 .map(|v: &String| v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
         }))
@@ -112,7 +118,10 @@ impl HttpAuth {
         let ha2 = Self::compute_ha2(method, uri);
 
         let response = if challenge.qop.is_empty() {
-            format!("{:x}", md5::compute(format!("{}:{}{}", ha1, challenge.nonce, ha2)))
+            format!(
+                "{:x}",
+                md5::compute(format!("{}:{}{}", ha1, challenge.nonce, ha2))
+            )
         } else {
             format!(
                 "{:x}",
@@ -213,7 +222,8 @@ mod tests {
             stale: false,
         };
         let creds = AuthCredentials::new_digest("user", "pass");
-        let response = HttpAuth::build_digest_response(&challenge, &creds, "GET", "/path", 1, "abc");
+        let response =
+            HttpAuth::build_digest_response(&challenge, &creds, "GET", "/path", 1, "abc");
         assert!(response.starts_with("Digest "));
         assert!(response.contains("username=\"user\""));
         assert!(response.contains("realm=\"testrealm\""));

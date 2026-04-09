@@ -15,7 +15,9 @@ pub enum TransferMode {
 }
 
 impl Default for TransferMode {
-    fn default() -> Self { Self::Binary }
+    fn default() -> Self {
+        Self::Binary
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +87,9 @@ pub struct SftpTransfer<'a> {
 
 impl<'a> SftpTransfer<'a> {
     pub fn new(session: &'a SftpSession) -> Self {
-        Self { ops: SftpFileOps::new(session) }
+        Self {
+            ops: SftpFileOps::new(session),
+        }
     }
 
     pub fn ops(&self) -> &SftpFileOps<'a> {
@@ -98,11 +102,18 @@ impl<'a> SftpTransfer<'a> {
         local_path: &std::path::Path,
         options: &TransferOptions,
     ) -> Result<TransferProgress, String> {
-        info!("SFTP download start: {} -> {}", remote_path, local_path.display());
+        info!(
+            "SFTP download start: {} -> {}",
+            remote_path,
+            local_path.display()
+        );
 
         let remote_attr = self.ops.lstat(remote_path)?;
         if !remote_attr.is_regular_file {
-            return Err(format!("remote path is not a regular file: {}", remote_path));
+            return Err(format!(
+                "remote path is not a regular file: {}",
+                remote_path
+            ));
         }
 
         let total_size = remote_attr.size;
@@ -129,9 +140,13 @@ impl<'a> SftpTransfer<'a> {
         };
 
         if start_offset > 0 {
-            local_file.set_len(start_offset).await
+            local_file
+                .set_len(start_offset)
+                .await
                 .map_err(|e| format!("set file length failed: {}", e))?;
-            local_file.seek(std::io::SeekFrom::Start(start_offset)).await
+            local_file
+                .seek(std::io::SeekFrom::Start(start_offset))
+                .await
                 .map_err(|e| format!("seek to resume position failed: {}", e))?;
         }
 
@@ -153,7 +168,8 @@ impl<'a> SftpTransfer<'a> {
                 break;
             }
 
-            tokio::io::AsyncWriteExt::write_all(&mut local_file, &buf[..n]).await
+            tokio::io::AsyncWriteExt::write_all(&mut local_file, &buf[..n])
+                .await
                 .map_err(|e| format!("write local file failed: {}", e))?;
 
             transferred += n as u64;
@@ -166,10 +182,13 @@ impl<'a> SftpTransfer<'a> {
                 } else {
                     0.0
                 };
-                debug!("progress: {:.1}% ({}/{}, {:.1} KB/s)",
+                debug!(
+                    "progress: {:.1}% ({}/{}, {:.1} KB/s)",
                     (transferred as f64 / total_size as f64) * 100.0,
-                    transferred, total_size,
-                    speed / 1024.0);
+                    transferred,
+                    total_size,
+                    speed / 1024.0
+                );
             }
         }
 
@@ -190,8 +209,12 @@ impl<'a> SftpTransfer<'a> {
             elapsed_secs: elapsed,
         };
 
-        info!("SFTP download done: {:.1}%, {:.1} KB/s, {:.1}s",
-            progress.percent(), avg_speed / 1024.0, elapsed);
+        info!(
+            "SFTP download done: {:.1}%, {:.1} KB/s, {:.1}s",
+            progress.percent(),
+            avg_speed / 1024.0,
+            elapsed
+        );
 
         Ok(progress)
     }
@@ -202,13 +225,22 @@ impl<'a> SftpTransfer<'a> {
         remote_path: &str,
         options: &TransferOptions,
     ) -> Result<TransferProgress, String> {
-        info!("SFTP upload start: {} -> {}", local_path.display(), remote_path);
+        info!(
+            "SFTP upload start: {} -> {}",
+            local_path.display(),
+            remote_path
+        );
 
-        let metadata = tokio::fs::metadata(local_path).await
+        let metadata = tokio::fs::metadata(local_path)
+            .await
             .map_err(|e| format!("get local file metadata failed: {}", e))?;
         let total_size = metadata.len();
 
-        let mut remote_file = self.ops.open(remote_path, OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE, 0o644)?;
+        let mut remote_file = self.ops.open(
+            remote_path,
+            OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
+            0o644,
+        )?;
 
         let start_offset = if options.resume_offset > 0 {
             options.resume_offset.min(total_size)
@@ -226,11 +258,14 @@ impl<'a> SftpTransfer<'a> {
             debug!("resume mode, start offset: {}", start_offset);
         }
 
-        let mut local_file = tokio::fs::File::open(local_path).await
+        let mut local_file = tokio::fs::File::open(local_path)
+            .await
             .map_err(|e| format!("open local file failed: {}", e))?;
 
         if start_offset > 0 {
-            local_file.seek(std::io::SeekFrom::Start(start_offset)).await
+            local_file
+                .seek(std::io::SeekFrom::Start(start_offset))
+                .await
                 .map_err(|e| format!("seek to resume position failed: {}", e))?;
         }
 
@@ -246,7 +281,8 @@ impl<'a> SftpTransfer<'a> {
             }
 
             let to_read = (options.buffer_size as u64).min(remaining) as usize;
-            let n = tokio::io::AsyncReadExt::read(&mut local_file, &mut buf[..to_read]).await
+            let n = tokio::io::AsyncReadExt::read(&mut local_file, &mut buf[..to_read])
+                .await
                 .map_err(|e| format!("read local file failed: {}", e))?;
 
             if n == 0 {
@@ -264,10 +300,13 @@ impl<'a> SftpTransfer<'a> {
                 } else {
                     0.0
                 };
-                debug!("upload progress: {:.1}% ({}/{}, {:.1} KB/s)",
+                debug!(
+                    "upload progress: {:.1}% ({}/{}, {:.1} KB/s)",
                     (transferred as f64 / total_size as f64) * 100.0,
-                    transferred, total_size,
-                    speed / 1024.0);
+                    transferred,
+                    total_size,
+                    speed / 1024.0
+                );
             }
         }
 
@@ -288,10 +327,13 @@ impl<'a> SftpTransfer<'a> {
             #[cfg(not(unix))]
             let perm = 0o644u32;
 
-            if let Err(e) = self.ops.set_stat(remote_path, &FileAttributes {
-                permissions: perm,
-                ..Default::default()
-            }) {
+            if let Err(e) = self.ops.set_stat(
+                remote_path,
+                &FileAttributes {
+                    permissions: perm,
+                    ..Default::default()
+                },
+            ) {
                 warn!("set remote file permissions failed: {}", e);
             }
         }
@@ -303,8 +345,12 @@ impl<'a> SftpTransfer<'a> {
             elapsed_secs: elapsed,
         };
 
-        info!("SFTP upload done: {:.1}%, {:.1} KB/s, {:.1}s",
-            progress.percent(), avg_speed / 1024.0, elapsed);
+        info!(
+            "SFTP upload done: {:.1}%, {:.1} KB/s, {:.1}s",
+            progress.percent(),
+            avg_speed / 1024.0,
+            elapsed
+        );
 
         Ok(progress)
     }

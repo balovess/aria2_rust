@@ -15,9 +15,15 @@ pub struct CacheEntry {
 }
 
 impl CacheEntry {
-    pub fn offset(&self) -> u64 { self.offset }
-    pub fn data(&self) -> &[u8] { &self.data }
-    pub fn is_dirty(&self) -> bool { self.dirty }
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 }
 
 pub struct WrDiskCache {
@@ -29,9 +35,9 @@ pub struct WrDiskCache {
 impl WrDiskCache {
     pub fn new(max_size_mb: usize) -> Self {
         let max_size = max_size_mb * 1024 * 1024;
-        
+
         debug!("初始化写缓存, 最大容量: {} MB", max_size_mb);
-        
+
         WrDiskCache {
             entries: Mutex::new(VecDeque::new()),
             max_size,
@@ -42,43 +48,41 @@ impl WrDiskCache {
     pub async fn write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
         let mut entries = self.entries.lock().await;
         let mut current_size = self.current_size.lock().await;
-        
+
         let entry_size = data.len();
-        
+
         if *current_size + entry_size > self.max_size {
-            self.evict_if_needed(&mut entries, &mut current_size, entry_size).await;
+            self.evict_if_needed(&mut entries, &mut current_size, entry_size)
+                .await;
         }
-        
+
         let entry = CacheEntry {
             offset,
             data,
             dirty: true,
             last_access: Instant::now(),
         };
-        
+
         entries.push_back(entry);
         *current_size += entry_size;
-        
+
         debug!(
             "写入缓存, 偏移: {}, 大小: {}, 缓存使用: {}/{}",
-            offset,
-            entry_size,
-            *current_size,
-            self.max_size
+            offset, entry_size, *current_size, self.max_size
         );
-        
+
         Ok(())
     }
 
     pub async fn read(&self, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
         let entries = self.entries.lock().await;
-        
+
         for entry in entries.iter() {
             if entry.offset == offset && entry.data.len() >= length as usize {
                 return Ok(Some(entry.data[..length as usize].to_vec()));
             }
-            
-            if entry.offset <= offset 
+
+            if entry.offset <= offset
                 && (entry.offset + entry.data.len() as u64) >= (offset + length)
             {
                 let start = (offset - entry.offset) as usize;
@@ -88,34 +92,31 @@ impl WrDiskCache {
                 }
             }
         }
-        
+
         Ok(None)
     }
 
     pub async fn flush(&self) -> Result<Vec<CacheEntry>> {
         let mut entries = self.entries.lock().await;
-        
-        let flushed: Vec<CacheEntry> = entries.iter()
-            .filter(|e| e.dirty)
-            .cloned()
-            .collect();
-        
+
+        let flushed: Vec<CacheEntry> = entries.iter().filter(|e| e.dirty).cloned().collect();
+
         for entry in entries.iter_mut() {
             entry.dirty = false;
         }
-        
+
         debug!("刷新缓存，刷新条目数：{}", flushed.len());
-        
+
         Ok(flushed)
     }
 
     pub async fn clear(&self) -> Result<()> {
         let mut entries = self.entries.lock().await;
         let mut current_size = self.current_size.lock().await;
-        
+
         entries.clear();
         *current_size = 0;
-        
+
         debug!("清除缓存");
         Ok(())
     }

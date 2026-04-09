@@ -35,17 +35,17 @@ pub struct TorrentMeta {
 impl TorrentMeta {
     pub fn parse(data: &[u8]) -> Result<Self, String> {
         info!("开始解析torrent文件 ({} 字节)", data.len());
-        let (root, _) = BencodeValue::decode(data)
-            .map_err(|e| format!("bencode解码失败: {}", e))?;
+        let (root, _) =
+            BencodeValue::decode(data).map_err(|e| format!("bencode解码失败: {}", e))?;
 
-        let announce = root.dict_get_str("announce")
+        let announce = root
+            .dict_get_str("announce")
             .ok_or("缺少announce字段")?
             .to_string();
 
         let announce_list = Self::parse_announce_list(&root);
 
-        let info = root.dict_get(b"info")
-            .ok_or("缺少info字典")?;
+        let info = root.dict_get(b"info").ok_or("缺少info字典")?;
 
         let info_hash = InfoHash::from_info_value(info);
         debug!("info_hash: {}", info_hash.as_hex());
@@ -58,8 +58,12 @@ impl TorrentMeta {
         let encoding = root.dict_get_str("encoding").map(|s| s.to_string());
 
         let total_size = Self::compute_total_size(&info_dict);
-        info!("Torrent解析完成: name={}, pieces={}, size={}",
-              info_dict.name, info_dict.pieces.len(), total_size);
+        info!(
+            "Torrent解析完成: name={}, pieces={}, size={}",
+            info_dict.name,
+            info_dict.pieces.len(),
+            total_size
+        );
 
         Ok(Self {
             announce,
@@ -75,12 +79,15 @@ impl TorrentMeta {
 
     fn parse_announce_list(root: &BencodeValue) -> Vec<Vec<String>> {
         match root.dict_get(b"announce-list") {
-            Some(BencodeValue::List(tiers)) => tiers.iter()
-                .filter_map(|tier| tier.as_list().map(|urls| {
-                    urls.iter()
-                        .filter_map(|u| u.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                }))
+            Some(BencodeValue::List(tiers)) => tiers
+                .iter()
+                .filter_map(|tier| {
+                    tier.as_list().map(|urls| {
+                        urls.iter()
+                            .filter_map(|u| u.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                })
                 .filter(|t| !t.is_empty())
                 .collect(),
             _ => Vec::new(),
@@ -88,21 +95,23 @@ impl TorrentMeta {
     }
 
     fn parse_info_dict(info: &BencodeValue) -> Result<InfoDict, String> {
-        let dict = info.as_dict()
-            .ok_or("info不是字典类型")?;
+        let dict = info.as_dict().ok_or("info不是字典类型")?;
 
-        let name = dict.get(&b"name"[..])
+        let name = dict
+            .get(&b"name"[..])
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unnamed".to_string());
 
-        let piece_length = dict.get(&b"piece length"[..])
+        let piece_length = dict
+            .get(&b"piece length"[..])
             .and_then(|v| v.as_int())
             .filter(|&n| n > 0 && n <= i32::MAX as i64)
             .map(|n| n as u32)
             .ok_or("无效或缺失的piece length")?;
 
-        let pieces_raw = dict.get(&b"pieces"[..])
+        let pieces_raw = dict
+            .get(&b"pieces"[..])
             .and_then(|v| v.as_bytes())
             .ok_or("缺失pieces字段")?;
 
@@ -118,7 +127,10 @@ impl TorrentMeta {
             })
             .collect();
 
-        let length = dict.get(&b"length"[..]).and_then(|v| v.as_int()).map(|n| n as u64);
+        let length = dict
+            .get(&b"length"[..])
+            .and_then(|v| v.as_int())
+            .map(|n| n as u64);
 
         let files = if length.is_some() {
             None
@@ -139,7 +151,8 @@ impl TorrentMeta {
     }
 
     fn parse_files(dict: &BTreeMap<Vec<u8>, BencodeValue>) -> Result<Vec<FileEntry>, String> {
-        let files_val = dict.get(&b"files"[..])
+        let files_val = dict
+            .get(&b"files"[..])
             .and_then(|v| v.as_list())
             .ok_or("多文件模式缺少files字段")?;
 
@@ -150,14 +163,17 @@ impl TorrentMeta {
         let mut entries = Vec::with_capacity(files_val.len());
         for file in files_val {
             let fd = file.as_dict().ok_or("file条目不是字典")?;
-            let length = fd.get(&b"length"[..])
+            let length = fd
+                .get(&b"length"[..])
                 .and_then(|v| v.as_int())
                 .map(|n| n as u64)
                 .ok_or("文件缺少length字段")?;
-            let path_val = fd.get(&b"path"[..])
+            let path_val = fd
+                .get(&b"path"[..])
                 .and_then(|v| v.as_list())
                 .ok_or("文件缺少path字段")?;
-            let path: Vec<String> = path_val.iter()
+            let path: Vec<String> = path_val
+                .iter()
                 .filter_map(|p| p.as_str().map(|s| s.to_string()))
                 .collect();
             if path.is_empty() {
@@ -208,16 +224,24 @@ mod tests {
 
     fn make_simple_torrent() -> Vec<u8> {
         let mut pieces_data = vec![0u8; 40];
-        for i in 0..40 { pieces_data[i] = i as u8; }
+        for i in 0..40 {
+            pieces_data[i] = i as u8;
+        }
 
         let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test_file.bin".to_vec()));
+        info.insert(
+            b"name".to_vec(),
+            BencodeValue::Bytes(b"test_file.bin".to_vec()),
+        );
         info.insert(b"length".to_vec(), BencodeValue::Int(1024));
         info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
         info.insert(b"pieces".to_vec(), BencodeValue::Bytes(pieces_data));
 
         let mut root = BTreeMap::new();
-        root.insert(b"announce".to_vec(), BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()));
+        root.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
+        );
         root.insert(b"info".to_vec(), BencodeValue::Dict(info));
 
         BencodeValue::Dict(root).encode()
@@ -247,27 +271,36 @@ mod tests {
 
         let mut f1 = BTreeMap::new();
         f1.insert(b"length".to_vec(), BencodeValue::Int(500));
-        f1.insert(b"path".to_vec(), BencodeValue::List(vec![
-            BencodeValue::Bytes(b"dir1".to_vec()),
-            BencodeValue::Bytes(b"file1.txt".to_vec()),
-        ]));
+        f1.insert(
+            b"path".to_vec(),
+            BencodeValue::List(vec![
+                BencodeValue::Bytes(b"dir1".to_vec()),
+                BencodeValue::Bytes(b"file1.txt".to_vec()),
+            ]),
+        );
 
         let mut f2 = BTreeMap::new();
         f2.insert(b"length".to_vec(), BencodeValue::Int(524));
-        f2.insert(b"path".to_vec(), BencodeValue::List(vec![
-            BencodeValue::Bytes(b"dir2".to_vec()),
-            BencodeValue::Bytes(b"file2.dat".to_vec()),
-        ]));
+        f2.insert(
+            b"path".to_vec(),
+            BencodeValue::List(vec![
+                BencodeValue::Bytes(b"dir2".to_vec()),
+                BencodeValue::Bytes(b"file2.dat".to_vec()),
+            ]),
+        );
 
-        info.insert(b"files".to_vec(), BencodeValue::List(vec![
-            BencodeValue::Dict(f1),
-            BencodeValue::Dict(f2),
-        ]));
+        info.insert(
+            b"files".to_vec(),
+            BencodeValue::List(vec![BencodeValue::Dict(f1), BencodeValue::Dict(f2)]),
+        );
         info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
         info.insert(b"pieces".to_vec(), BencodeValue::Bytes(pieces_data));
 
         let mut root = BTreeMap::new();
-        root.insert(b"announce".to_vec(), BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()));
+        root.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
+        );
         root.insert(b"info".to_vec(), BencodeValue::Dict(info));
 
         let data = BencodeValue::Dict(root).encode();
@@ -283,9 +316,18 @@ mod tests {
         let _data = make_simple_torrent();
 
         let mut root = BTreeMap::new();
-        root.insert(b"announce".to_vec(), BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()));
-        root.insert(b"comment".to_vec(), BencodeValue::Bytes(b"A test torrent".to_vec()));
-        root.insert(b"created by".to_vec(), BencodeValue::Bytes(b"aria2-rust-tester".to_vec()));
+        root.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
+        );
+        root.insert(
+            b"comment".to_vec(),
+            BencodeValue::Bytes(b"A test torrent".to_vec()),
+        );
+        root.insert(
+            b"created by".to_vec(),
+            BencodeValue::Bytes(b"aria2-rust-tester".to_vec()),
+        );
         root.insert(b"creation date".to_vec(), BencodeValue::Int(1700000000));
 
         let mut info = BTreeMap::new();
@@ -311,7 +353,10 @@ mod tests {
         assert!(TorrentMeta::parse(&empty).is_err());
 
         let mut r = BTreeMap::new();
-        r.insert(b"announce".to_vec(), BencodeValue::Bytes(b"http://x".to_vec()));
+        r.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://x".to_vec()),
+        );
         let no_info = BencodeValue::Dict(r).encode();
         assert!(TorrentMeta::parse(&no_info).is_err());
     }

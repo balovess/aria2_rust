@@ -55,12 +55,18 @@ impl std::error::Error for NetRcError {}
 
 impl NetRcFile {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), default_entry: None, path: None }
+        Self {
+            entries: Vec::new(),
+            default_entry: None,
+            path: None,
+        }
     }
 
     pub fn from_file(path: &str) -> Result<Self, NetRcError> {
         let p = Path::new(path);
-        if !p.exists() { return Err(NetRcError::FileNotFound(path.to_string())); }
+        if !p.exists() {
+            return Err(NetRcError::FileNotFound(path.to_string()));
+        }
         let content = std::fs::read_to_string(path)
             .map_err(|e| NetRcError::IoError(format!("{}: {}", path, e)))?;
         let mut parser = Self::new();
@@ -77,7 +83,9 @@ impl NetRcFile {
 
         for line in content.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
 
             if in_macdef {
                 if line.is_empty() {
@@ -93,7 +101,9 @@ impl NetRcFile {
             }
 
             let tokens: Vec<&str> = line.split_whitespace().collect();
-            if tokens.is_empty() { continue; }
+            if tokens.is_empty() {
+                continue;
+            }
 
             match tokens[0].to_lowercase().as_str() {
                 "machine" => {
@@ -104,7 +114,11 @@ impl NetRcFile {
                             self.entries.push(prev);
                         }
                     }
-                    let machine_name = if tokens.len() > 1 { tokens[1].to_string() } else { String::new() };
+                    let machine_name = if tokens.len() > 1 {
+                        tokens[1].to_string()
+                    } else {
+                        String::new()
+                    };
                     current_entry = Some(NetRcEntry::new(machine_name));
                 }
                 "default" => {
@@ -115,21 +129,37 @@ impl NetRcFile {
                 }
                 "login" => {
                     if let Some(ref mut entry) = current_entry {
-                        entry.login = if tokens.len() > 1 { Some(tokens[1].to_string()) } else { None };
+                        entry.login = if tokens.len() > 1 {
+                            Some(tokens[1].to_string())
+                        } else {
+                            None
+                        };
                     }
                 }
                 "password" | "passwd" => {
                     if let Some(ref mut entry) = current_entry {
-                        entry.password = if tokens.len() > 1 { Some(tokens[1].to_string()) } else { None };
+                        entry.password = if tokens.len() > 1 {
+                            Some(tokens[1].to_string())
+                        } else {
+                            None
+                        };
                     }
                 }
                 "account" => {
                     if let Some(ref mut entry) = current_entry {
-                        entry.account = if tokens.len() > 1 { Some(tokens[1].to_string()) } else { None };
+                        entry.account = if tokens.len() > 1 {
+                            Some(tokens[1].to_string())
+                        } else {
+                            None
+                        };
                     }
                 }
                 "macdef" => {
-                    macdef_name = if tokens.len() > 1 { Some(tokens[1].to_string()) } else { None };
+                    macdef_name = if tokens.len() > 1 {
+                        Some(tokens[1].to_string())
+                    } else {
+                        None
+                    };
                     in_macdef = true;
                     macdef_lines.clear();
                 }
@@ -186,16 +216,29 @@ impl NetRcFile {
         None
     }
 
-    pub fn entries(&self) -> &[NetRcEntry] { &self.entries }
-    pub fn default_entry(&self) -> Option<&NetRcEntry> { self.default_entry.as_ref() }
-    pub fn path(&self) -> Option<&str> { self.path.as_deref() }
-    pub fn len(&self) -> usize { self.entries.len() + if self.default_entry.is_some() { 1 } else { 0 } }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() && self.default_entry.is_none() }
+    pub fn entries(&self) -> &[NetRcEntry] {
+        &self.entries
+    }
+    pub fn default_entry(&self) -> Option<&NetRcEntry> {
+        self.default_entry.as_ref()
+    }
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len() + if self.default_entry.is_some() { 1 } else { 0 }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.default_entry.is_none()
+    }
 
     pub fn to_map(&self) -> HashMap<String, (Option<String>, Option<String>)> {
         let mut map = HashMap::new();
         for entry in &self.entries {
-            map.insert(entry.machine.clone(), (entry.login.clone(), entry.password.clone()));
+            map.insert(
+                entry.machine.clone(),
+                (entry.login.clone(), entry.password.clone()),
+            );
         }
         if let Some(def) = &self.default_entry {
             map.insert("default".into(), (def.login.clone(), def.password.clone()));
@@ -205,22 +248,30 @@ impl NetRcFile {
 }
 
 impl Default for NetRcFile {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn find_netrc_file() -> Option<String> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .or_else(|| std::env::var_os("HOMEDRIVE").and_then(|d| std::env::var_os("HOMEPATH").map(|p| {
-            let mut s = d.to_os_string();
-            s.push(p);
-            s
-        })));
+        .or_else(|| {
+            std::env::var_os("HOMEDRIVE").and_then(|d| {
+                std::env::var_os("HOMEPATH").map(|p| {
+                    let mut s = d.to_os_string();
+                    s.push(p);
+                    s
+                })
+            })
+        });
     home.and_then(|h| {
         let h = h.to_string_lossy().to_string();
         for name in &[".netrc", "_netrc", ".netrc.txt"] {
             let candidate = format!("{}/{}", h, name);
-            if Path::new(&candidate).exists() { return Some(candidate); }
+            if Path::new(&candidate).exists() {
+                return Some(candidate);
+            }
         }
         None
     })

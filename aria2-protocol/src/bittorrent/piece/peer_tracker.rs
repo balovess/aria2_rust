@@ -54,12 +54,15 @@ impl PeerBitfieldTracker {
                     self.piece_peer_count[i] += 1;
                 }
             }
-            self.peers.insert(peer_id.to_string(), PeerBitfieldEntry {
-                peer_id: peer_id.to_string(),
-                have_pieces: have,
-                raw_bitfield: bitfield.to_vec(),
-                last_updated: Instant::now(),
-            });
+            self.peers.insert(
+                peer_id.to_string(),
+                PeerBitfieldEntry {
+                    peer_id: peer_id.to_string(),
+                    have_pieces: have,
+                    raw_bitfield: bitfield.to_vec(),
+                    last_updated: Instant::now(),
+                },
+            );
         }
     }
 
@@ -75,7 +78,8 @@ impl PeerBitfieldTracker {
 
     pub fn peers_having_piece(&self, piece_index: u32) -> Vec<String> {
         let idx = piece_index as usize;
-        self.peers.iter()
+        self.peers
+            .iter()
             .filter(|(_, e)| idx < e.have_pieces.len() && e.have_pieces[idx])
             .map(|(id, _)| id.clone())
             .collect()
@@ -83,7 +87,8 @@ impl PeerBitfieldTracker {
 
     pub fn peer_has_piece(&self, peer_id: &str, piece_index: u32) -> bool {
         let idx = piece_index as usize;
-        self.peers.get(peer_id)
+        self.peers
+            .get(peer_id)
             .map(|e| idx < e.have_pieces.len() && e.have_pieces[idx])
             .unwrap_or(false)
     }
@@ -93,7 +98,8 @@ impl PeerBitfieldTracker {
     }
 
     pub fn should_enter_endgame(&self, threshold: u32, completed: &[bool]) -> bool {
-        let missing: usize = completed.iter()
+        let missing: usize = completed
+            .iter()
             .take(self.total_pieces as usize)
             .filter(|c| !**c)
             .count();
@@ -101,7 +107,8 @@ impl PeerBitfieldTracker {
     }
 
     pub fn missing_pieces(&self, completed: &[bool]) -> Vec<u32> {
-        completed.iter()
+        completed
+            .iter()
             .enumerate()
             .take(self.total_pieces as usize)
             .filter(|(_, c)| !**c)
@@ -111,7 +118,11 @@ impl PeerBitfieldTracker {
 
     pub fn stats(&self, completed: Option<&[bool]>) -> PeerTrackerStats {
         let total_have: usize = self.piece_peer_count.iter().sum();
-        let avg = if self.peers.is_empty() { 0.0 } else { total_have as f64 / self.peers.len() as f64 };
+        let avg = if self.peers.is_empty() {
+            0.0
+        } else {
+            total_have as f64 / self.peers.len() as f64
+        };
         let rarest = self.piece_peer_count.iter().filter(|&&c| c == 1).count();
 
         let is_endgame = completed.map_or(false, |c| self.should_enter_endgame(20, c));
@@ -130,7 +141,9 @@ impl PeerBitfieldTracker {
     }
 
     pub fn get_peer_bitfield_or_empty(&self, peer_id: &str) -> Vec<u8> {
-        self.get_peer_bitfield_raw(peer_id).map(|b| b.to_vec()).unwrap_or_default()
+        self.get_peer_bitfield_raw(peer_id)
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
     }
 
     pub fn peer_count(&self) -> usize {
@@ -143,7 +156,9 @@ fn expand_bitfield(bitfield: &[u8], total_pieces: u32) -> Vec<bool> {
     for (i, &byte) in bitfield.iter().enumerate() {
         for bit in 0..8u32 {
             let piece_idx = (i as u32) * 8 + (7 - bit);
-            if piece_idx >= total_pieces { continue; }
+            if piece_idx >= total_pieces {
+                continue;
+            }
             if byte & (1 << bit) != 0 {
                 result[piece_idx as usize] = true;
             }
@@ -196,12 +211,24 @@ mod tests {
         let bf2 = make_bf(6, &[2, 3, 4]);
         tracker.update_peer_bitfield("p2", &bf2);
 
-        assert_eq!(tracker.piece_frequencies()[2], 2, "piece 2 should be owned by 2 peers");
+        assert_eq!(
+            tracker.piece_frequencies()[2],
+            2,
+            "piece 2 should be owned by 2 peers"
+        );
 
         tracker.remove_peer("p1");
         assert_eq!(tracker.peer_count(), 1);
-        assert_eq!(tracker.piece_frequencies()[2], 1, "after remove p1, piece 2 count drops to 1");
-        assert_eq!(tracker.piece_frequencies()[0], 0, "after remove p1, piece 0 count drops to 0");
+        assert_eq!(
+            tracker.piece_frequencies()[2],
+            1,
+            "after remove p1, piece 2 count drops to 1"
+        );
+        assert_eq!(
+            tracker.piece_frequencies()[0],
+            0,
+            "after remove p1, piece 0 count drops to 0"
+        );
     }
 
     #[test]
@@ -241,11 +268,17 @@ mod tests {
         let tracker = PeerBitfieldTracker::new(100);
         let completed_all_false = vec![false; 100];
 
-        assert!(!tracker.should_enter_endgame(20, &completed_all_false), "100 missing > 20 threshold");
+        assert!(
+            !tracker.should_enter_endgame(20, &completed_all_false),
+            "100 missing > 20 threshold"
+        );
 
         let mut mostly_done = vec![true; 95];
         mostly_done.resize(100, false);
-        assert!(tracker.should_enter_endgame(20, &mostly_done), "5 missing ≤ 20 → endgame");
+        assert!(
+            tracker.should_enter_endgame(20, &mostly_done),
+            "5 missing ≤ 20 → endgame"
+        );
     }
 
     #[test]
@@ -292,7 +325,11 @@ mod tests {
 
         tracker.update_peer_bitfield("p", &make_bf(6, &[3, 4, 5]));
 
-        assert_eq!(tracker.piece_frequencies()[0], 0, "old piece 0 no longer counted");
+        assert_eq!(
+            tracker.piece_frequencies()[0],
+            0,
+            "old piece 0 no longer counted"
+        );
         assert_eq!(tracker.piece_frequencies()[3], 1, "new piece 3 now counted");
         assert_eq!(tracker.peer_count(), 1, "still only 1 peer");
     }

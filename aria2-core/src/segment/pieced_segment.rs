@@ -1,5 +1,5 @@
-use crate::error::Result;
 use super::bitfield::Bitfield;
+use crate::error::Result;
 
 pub struct PiecedSegment {
     piece_index: usize,

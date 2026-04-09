@@ -1,12 +1,12 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
-use crate::bittorrent::peer::connection::{PeerConnection, PeerAddr};
-use crate::bittorrent::peer::state::PeerState;
-use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
-use crate::bittorrent::message::handshake::Handshake;
+use crate::bittorrent::extension::mse_crypto::MseCryptoState;
 use crate::bittorrent::extension::mse_handshake::MseHandshake;
-use crate::bittorrent::extension::mse_crypto::{MseCryptoMethod, MseCryptoState};
+use crate::bittorrent::message::handshake::Handshake;
+use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
+use crate::bittorrent::peer::connection::{PeerAddr, PeerConnection};
+use crate::bittorrent::peer::state::PeerState;
 
 pub struct EncryptedConnection {
     inner: PeerConnection,
@@ -26,7 +26,8 @@ impl EncryptedConnection {
         let mut stream = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             tokio::net::TcpStream::connect(&socket_addr),
-        ).await
+        )
+        .await
         .map_err(|_| format!("连接peer超时: {}", socket_addr))?
         .map_err(|e| format!("连接peer失败: {}", e))?;
 
@@ -34,14 +35,18 @@ impl EncryptedConnection {
         let handshake = Handshake::new(info_hash, &my_peer_id).with_extensions(true);
         let handshake_bytes = handshake.to_bytes();
 
-        stream.write_all(&handshake_bytes).await
+        stream
+            .write_all(&handshake_bytes)
+            .await
             .map_err(|e| format!("发送握手失败: {}", e))?;
 
         let mut response = [0u8; 68];
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            stream.read_exact(&mut response)
-        ).await {
+            stream.read_exact(&mut response),
+        )
+        .await
+        {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(format!("读取握手响应失败: {}", e)),
             Err(_) => return Err("读取握手响应超时".to_string()),
@@ -55,8 +60,7 @@ impl EncryptedConnection {
         let local_supports_mse = true;
 
         if MseHandshake::should_negotiate(local_supports_mse, &remote_hs.reserved) {
-            Self::complete_mse_handshake(stream, info_hash, &remote_hs, require_encryption)
-                .await
+            Self::complete_mse_handshake(stream, info_hash, &remote_hs, require_encryption).await
         } else if require_encryption {
             Err(format!("Peer {} 不支持加密，但要求强制加密", socket_addr))
         } else {
@@ -73,15 +77,22 @@ impl EncryptedConnection {
         let mut initiator = MseHandshake::new_initiator();
 
         let step1_i = initiator.build_step1();
-        stream.write_all(&step1_i).await
+        stream
+            .write_all(&step1_i)
+            .await
             .map_err(|e| format!("MSE Step1 send failed: {}", e))?;
-        stream.flush().await
+        stream
+            .flush()
+            .await
             .map_err(|e| format!("MSE Step1 flush failed: {}", e))?;
 
         let mut step1_r_buf = vec![0u8; step1_i.len()];
         match stream.read_exact(&mut step1_r_buf).await {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof || e.to_string().contains("eof") => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::UnexpectedEof
+                    || e.to_string().contains("eof") =>
+            {
                 return Err("MSE Step1: peer closed connection".to_string());
             }
             Err(e) => return Err(format!("MSE Step1 read failed: {}", e)),
@@ -90,9 +101,13 @@ impl EncryptedConnection {
         initiator.receive_step1(&step1_r_buf)?;
 
         let step2_i = initiator.build_step2()?;
-        stream.write_all(&step2_i).await
+        stream
+            .write_all(&step2_i)
+            .await
             .map_err(|e| format!("MSE Step2 send failed: {}", e))?;
-        stream.flush().await
+        stream
+            .flush()
+            .await
             .map_err(|e| format!("MSE Step2 flush failed: {}", e))?;
 
         let mut step2_r_buf = vec![0u8; step2_i.len()];
@@ -220,17 +235,22 @@ impl EncryptedConnection {
 
     pub async fn send_request(&mut self, req: PieceBlockRequest) -> Result<(), String> {
         self.inner.state.add_request(req.clone());
-        self.send_message(&BtMessage::Request { request: req }).await
+        self.send_message(&BtMessage::Request { request: req })
+            .await
     }
 
     pub async fn send_cancel(&mut self, req: &PieceBlockRequest) -> Result<(), String> {
         self.inner.state.remove_request(req);
-        self.send_message(&BtMessage::Cancel { request: req.clone() }).await
+        self.send_message(&BtMessage::Cancel {
+            request: req.clone(),
+        })
+        .await
     }
 
     pub async fn send_bitfield(&mut self, bitfield: Vec<u8>) -> Result<(), String> {
         self.inner.remote_bitfield = bitfield.clone();
-        self.send_message(&BtMessage::Bitfield { data: bitfield }).await
+        self.send_message(&BtMessage::Bitfield { data: bitfield })
+            .await
     }
 
     pub fn state(&self) -> &PeerState {
@@ -277,7 +297,8 @@ mod tests {
             &PeerAddr::new("127.0.0.1", 1),
             &[0xAB; 20],
             false,
-        ).await;
+        )
+        .await;
         assert!(result.is_err(), "unreachable address should fail");
     }
 }

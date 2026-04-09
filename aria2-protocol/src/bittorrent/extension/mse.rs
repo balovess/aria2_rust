@@ -21,7 +21,9 @@ impl Default for MseSession {
 }
 
 impl MseSession {
-    pub fn new_plain() -> Self { Self::default() }
+    pub fn new_plain() -> Self {
+        Self::default()
+    }
 
     pub fn new_rc4() -> Self {
         Self {
@@ -30,7 +32,9 @@ impl MseSession {
         }
     }
 
-    pub fn is_encrypted(&self) -> bool { self.encrypted }
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted
+    }
 
     pub fn handshake_supported(reserved_bytes: &[u8; 8]) -> bool {
         reserved_bytes[0] & 0x01 != 0

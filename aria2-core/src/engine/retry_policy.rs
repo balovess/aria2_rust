@@ -43,7 +43,9 @@ impl RetryPolicy {
     }
 
     pub fn compute_wait(&self, attempt: u32) -> Option<Duration> {
-        if attempt == 0 { return None; }
+        if attempt == 0 {
+            return None;
+        }
         let raw = (self.base_wait_ms as f64) * self.backoff_factor.powi(attempt as i32 - 1);
         let ms = raw.min(self.max_wait_ms as f64) as u64;
         Some(Duration::from_millis(ms))
@@ -152,7 +154,12 @@ mod tests {
     fn test_compute_wait_capped_at_max() {
         let p = RetryPolicy::default();
         let w5 = p.compute_wait(5).unwrap().as_millis();
-        assert!(w5 <= p.max_wait_ms as u128, "wait={} should be capped at {}", w5, p.max_wait_ms);
+        assert!(
+            w5 <= p.max_wait_ms as u128,
+            "wait={} should be capped at {}",
+            w5,
+            p.max_wait_ms
+        );
     }
 
     #[test]
@@ -164,18 +171,39 @@ mod tests {
     #[test]
     fn test_should_retry_http_408_true() {
         let p = RetryPolicy::default();
-        assert!(p.should_retry_http(408), "Request Timeout should be retryable");
-        assert!(p.should_retry_http(429), "Too Many Requests should be retryable");
-        assert!(p.should_retry_http(500), "Internal Server Error should be retryable");
-        assert!(p.should_retry_http(503), "Service Unavailable should be retryable");
+        assert!(
+            p.should_retry_http(408),
+            "Request Timeout should be retryable"
+        );
+        assert!(
+            p.should_retry_http(429),
+            "Too Many Requests should be retryable"
+        );
+        assert!(
+            p.should_retry_http(500),
+            "Internal Server Error should be retryable"
+        );
+        assert!(
+            p.should_retry_http(503),
+            "Service Unavailable should be retryable"
+        );
     }
 
     #[test]
     fn test_should_retry_http_404_false() {
         let p = RetryPolicy::default();
-        assert!(!p.should_retry_http(404), "Not Found should NOT be retryable");
-        assert!(!p.should_retry_http(403), "Forbidden should NOT be retryable");
-        assert!(!p.should_retry_http(400), "Bad Request should NOT be retryable");
+        assert!(
+            !p.should_retry_http(404),
+            "Not Found should NOT be retryable"
+        );
+        assert!(
+            !p.should_retry_http(403),
+            "Forbidden should NOT be retryable"
+        );
+        assert!(
+            !p.should_retry_http(400),
+            "Bad Request should NOT be retryable"
+        );
     }
 
     #[test]
@@ -209,7 +237,10 @@ mod tests {
     #[test]
     fn test_is_exhausted_true_at_limit() {
         let p = RetryPolicy::with_max_retries(RetryPolicy::default(), 3);
-        assert!(p.is_exhausted(4), "attempt 4 should be exhausted when max=3");
+        assert!(
+            p.is_exhausted(4),
+            "attempt 4 should be exhausted when max=3"
+        );
     }
 
     #[test]

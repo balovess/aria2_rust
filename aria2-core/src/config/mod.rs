@@ -1,14 +1,14 @@
+pub mod netrc;
 pub mod option;
 pub mod parser;
-pub mod netrc;
 pub mod uri_list;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{OptionCategory, OptionDef, OptionRegistry, OptionType, OptionValue};
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
-pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
 
 /// Emitted when a global option value changes via `set_global_option`.
@@ -65,7 +65,13 @@ impl ConfigManager {
         let registry = OptionRegistry::new();
         let mut parser = ConfigParser::with_registry(registry.clone());
         parser.load_defaults_first();
-        Self { global_opts: Arc::new(tokio::sync::RwLock::new(parser.options().clone())), task_defaults: Arc::new(tokio::sync::RwLock::new(HashMap::new())), parser, registry, change_tx }
+        Self {
+            global_opts: Arc::new(tokio::sync::RwLock::new(parser.options().clone())),
+            task_defaults: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            parser,
+            registry,
+            change_tx,
+        }
     }
 
     /// Create a `ConfigManager` with a custom `OptionRegistry`.
@@ -76,7 +82,13 @@ impl ConfigManager {
         let (change_tx, _) = tokio::sync::broadcast::channel(64);
         let mut parser = ConfigParser::with_registry(registry.clone());
         parser.load_defaults_first();
-        Self { global_opts: Arc::new(tokio::sync::RwLock::new(parser.options().clone())), task_defaults: Arc::new(tokio::sync::RwLock::new(HashMap::new())), parser, registry, change_tx }
+        Self {
+            global_opts: Arc::new(tokio::sync::RwLock::new(parser.options().clone())),
+            task_defaults: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            parser,
+            registry,
+            change_tx,
+        }
     }
 
     /// Parse and load command-line arguments into global options.
@@ -119,21 +131,42 @@ impl ConfigManager {
     ///
     /// Returns `None` if the option doesn't exist or is not a string type.
     pub async fn get_global_str(&self, name: &str) -> Option<String> {
-        self.global_opts.read().await.get(name).and_then(|v| match v { OptionValue::Str(s) => Some(s.clone()), _ => None })
+        self.global_opts
+            .read()
+            .await
+            .get(name)
+            .and_then(|v| match v {
+                OptionValue::Str(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     /// Convenience: get a global option as an `i64` integer.
     ///
     /// Returns `None` if the option doesn't exist or is not an integer type.
     pub async fn get_global_i64(&self, name: &str) -> Option<i64> {
-        self.global_opts.read().await.get(name).and_then(|v| match v { OptionValue::Int(n) => Some(*n), _ => None })
+        self.global_opts
+            .read()
+            .await
+            .get(name)
+            .and_then(|v| match v {
+                OptionValue::Int(n) => Some(*n),
+                _ => None,
+            })
     }
 
     /// Convenience: get a global option as a `bool`.
     ///
     /// Returns `None` if the option doesn't exist or is not a boolean type.
     pub async fn get_global_bool(&self, name: &str) -> Option<bool> {
-        self.global_opts.read().await.get(name).and_then(|v| match v { OptionValue::Bool(b) => Some(*b), _ => None })
+        self.global_opts
+            .read()
+            .await
+            .get(name)
+            .and_then(|v| match v {
+                OptionValue::Bool(b) => Some(*b),
+                _ => None,
+            })
     }
 
     /// Set a global option value with validation.
@@ -141,7 +174,11 @@ impl ConfigManager {
     /// Validates against the `OptionRegistry` (type checking, range validation).
     /// Emits a `ConfigChangeEvent` on success. Returns an error for unknown
     /// options or validation failures.
-    pub async fn set_global_option(&mut self, name: &str, value: OptionValue) -> Result<(), String> {
+    pub async fn set_global_option(
+        &mut self,
+        name: &str,
+        value: OptionValue,
+    ) -> Result<(), String> {
         if !self.registry.contains(name) {
             return Err(format!("unknown option '{}'", name));
         }
@@ -183,7 +220,10 @@ impl ConfigManager {
         let opts = self.global_opts.read().await;
         let mut map = serde_json::Map::new();
         for (k, v) in opts.iter() {
-            map.insert(k.clone(), <&OptionValue as Into<serde_json::Value>>::into(v));
+            map.insert(
+                k.clone(),
+                <&OptionValue as Into<serde_json::Value>>::into(v),
+            );
         }
         serde_json::Value::Object(map)
     }
@@ -191,12 +231,19 @@ impl ConfigManager {
     pub async fn get_task_default(&self, gid: &str, name: &str) -> Option<OptionValue> {
         let tasks = self.task_defaults.read().await;
         let task_val = tasks.get(gid).and_then(|m| m.get(name)).cloned();
-        if task_val.is_some() { return task_val; }
+        if task_val.is_some() {
+            return task_val;
+        }
         drop(tasks);
         self.global_opts.read().await.get(name).cloned()
     }
 
-    pub async fn set_task_option(&mut self, gid: &str, name: &str, value: OptionValue) -> Result<(), String> {
+    pub async fn set_task_option(
+        &mut self,
+        gid: &str,
+        name: &str,
+        value: OptionValue,
+    ) -> Result<(), String> {
         if !self.registry.contains(name) {
             return Err(format!("unknown option '{}'", name));
         }
@@ -208,10 +255,17 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub async fn change_task_options(&mut self, gid: &str, options: HashMap<String, String>) -> Vec<String> {
+    pub async fn change_task_options(
+        &mut self,
+        gid: &str,
+        options: HashMap<String, String>,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
         for (key, value) in options {
-            if let Err(e) = self.set_task_option(gid, &key, OptionValue::Str(value)).await {
+            if let Err(e) = self
+                .set_task_option(gid, &key, OptionValue::Str(value))
+                .await
+            {
                 errors.push(e);
             }
         }
@@ -245,17 +299,29 @@ impl ConfigManager {
         self.change_tx.subscribe()
     }
 
-    pub fn registry(&self) -> &OptionRegistry { &self.registry }
-    pub fn parser(&self) -> &ConfigParser { &self.parser }
-    pub fn has_errors(&self) -> bool { self.parser.has_errors() }
-    pub fn errors(&self) -> &[ConfigError] { self.parser.errors() }
+    pub fn registry(&self) -> &OptionRegistry {
+        &self.registry
+    }
+    pub fn parser(&self) -> &ConfigParser {
+        &self.parser
+    }
+    pub fn has_errors(&self) -> bool {
+        self.parser.has_errors()
+    }
+    pub fn errors(&self) -> &[ConfigError] {
+        self.parser.errors()
+    }
 
     pub async fn save_session(&self, path: &str) -> Result<(), String> {
         let opts = self.global_opts.read().await;
-        let content = opts.iter()
+        let content = opts
+            .iter()
             .filter_map(|(k, v)| {
-                if matches!(v, OptionValue::None) { None }
-                else { Some(format!("{}={}", k, v)) }
+                if matches!(v, OptionValue::None) {
+                    None
+                } else {
+                    Some(format!("{}={}", k, v))
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -268,7 +334,10 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub async fn create_task_config(&self, overrides: HashMap<String, OptionValue>) -> HashMap<String, OptionValue> {
+    pub async fn create_task_config(
+        &self,
+        overrides: HashMap<String, OptionValue>,
+    ) -> HashMap<String, OptionValue> {
         let global = self.global_opts.read().await;
         let mut config = global.clone();
         for (k, v) in overrides {
@@ -279,7 +348,9 @@ impl ConfigManager {
 }
 
 impl Default for ConfigManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -306,7 +377,9 @@ mod tests {
     #[tokio::test]
     async fn test_set_unknown_option_fails() {
         let mut mgr = ConfigManager::new();
-        let result = mgr.set_global_option("nonexistent-option", OptionValue::Str("value".into())).await;
+        let result = mgr
+            .set_global_option("nonexistent-option", OptionValue::Str("value".into()))
+            .await;
         assert!(result.is_err());
     }
 
@@ -342,7 +415,9 @@ mod tests {
     #[tokio::test]
     async fn test_task_options_inherit_global() {
         let mut mgr = ConfigManager::new();
-        mgr.set_global_option("split", OptionValue::Int(8)).await.unwrap();
+        mgr.set_global_option("split", OptionValue::Int(8))
+            .await
+            .unwrap();
         let task_val = mgr.get_task_default("gid-001", "split").await;
         assert_eq!(task_val.as_ref().and_then(|v| v.as_i64()), Some(8));
     }
@@ -350,8 +425,12 @@ mod tests {
     #[tokio::test]
     async fn test_task_options_override_global() {
         let mut mgr = ConfigManager::new();
-        mgr.set_global_option("split", OptionValue::Int(5)).await.unwrap();
-        mgr.set_task_option("gid-001", "split", OptionValue::Int(12)).await.unwrap();
+        mgr.set_global_option("split", OptionValue::Int(5))
+            .await
+            .unwrap();
+        mgr.set_task_option("gid-001", "split", OptionValue::Int(12))
+            .await
+            .unwrap();
         let task_val = mgr.get_task_default("gid-001", "split").await;
         assert_eq!(task_val.and_then(|v| v.as_i64()), Some(12));
     }
@@ -368,7 +447,9 @@ mod tests {
     #[tokio::test]
     async fn test_remove_task() {
         let mut mgr = ConfigManager::new();
-        mgr.set_task_option("gid-003", "out", OptionValue::Str("file.txt".into())).await.unwrap();
+        mgr.set_task_option("gid-003", "out", OptionValue::Str("file.txt".into()))
+            .await
+            .unwrap();
         mgr.remove_task("gid-003").await;
         let val = mgr.get_task_default("gid-003", "out").await;
         assert_eq!(val.map(|v| v.as_str().map(|s| s.to_string())), None);
@@ -378,7 +459,9 @@ mod tests {
     async fn test_change_event_broadcast() {
         let mut mgr = ConfigManager::new();
         let mut rx = mgr.subscribe_changes();
-        mgr.set_global_option("quiet", OptionValue::Bool(true)).await.unwrap();
+        mgr.set_global_option("quiet", OptionValue::Bool(true))
+            .await
+            .unwrap();
         let event = rx.recv().await;
         assert!(event.is_ok());
         let evt = event.unwrap();
@@ -388,7 +471,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_task_config_merges_overrides() {
         let mut mgr = ConfigManager::new();
-        mgr.set_global_option("dir", OptionValue::Str("/global".into())).await.unwrap();
+        mgr.set_global_option("dir", OptionValue::Str("/global".into()))
+            .await
+            .unwrap();
         let mut overrides = HashMap::new();
         overrides.insert("dir".into(), OptionValue::Str("/local".into()));
         overrides.insert("out".into(), OptionValue::Str("file.txt".into()));
@@ -400,9 +485,15 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_load_session() {
         let mut mgr = ConfigManager::new();
-        mgr.set_global_option("split", OptionValue::Int(7)).await.unwrap();
+        mgr.set_global_option("split", OptionValue::Int(7))
+            .await
+            .unwrap();
         let tmp_dir = std::env::temp_dir();
-        let session_path = format!("{}/aria2_test_session_{}.txt", tmp_dir.display(), std::process::id());
+        let session_path = format!(
+            "{}/aria2_test_session_{}.txt",
+            tmp_dir.display(),
+            std::process::id()
+        );
         mgr.save_session(&session_path).await.unwrap();
 
         let mut mgr2 = ConfigManager::new();
@@ -416,7 +507,8 @@ mod tests {
     #[tokio::test]
     async fn test_load_cli_args() {
         let mut mgr = ConfigManager::new();
-        mgr.load_cli(&["--dir=/custom/path".to_string(), "--split=12".to_string()]).await;
+        mgr.load_cli(&["--dir=/custom/path".to_string(), "--split=12".to_string()])
+            .await;
         assert_eq!(mgr.get_global_str("dir").await, Some("/custom/path".into()));
         assert_eq!(mgr.get_global_i64("split").await, Some(12));
     }

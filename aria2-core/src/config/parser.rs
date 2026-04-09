@@ -44,18 +44,28 @@ pub struct ConfigParser {
 
 impl ConfigParser {
     pub fn new() -> Self {
-        Self { options: HashMap::new(), sources: Vec::new(), errors: Vec::new(), registry: OptionRegistry::new() }
+        Self {
+            options: HashMap::new(),
+            sources: Vec::new(),
+            errors: Vec::new(),
+            registry: OptionRegistry::new(),
+        }
     }
 
     pub fn with_registry(registry: OptionRegistry) -> Self {
-        Self { registry, ..Self::new() }
+        Self {
+            registry,
+            ..Self::new()
+        }
     }
 
     pub fn set(&mut self, name: impl Into<String>, value: OptionValue) {
         let key = name.into();
         if let Some(def) = self.registry.get(&key.as_str()) {
             match def.parse_value(&value.to_string()) {
-                Ok(v) => { self.options.insert(key, v); }
+                Ok(v) => {
+                    self.options.insert(key, v);
+                }
                 Err(e) => self.errors.push(ConfigError {
                     source: ConfigSource::CommandLine,
                     option: key.clone(),
@@ -71,7 +81,9 @@ impl ConfigParser {
         let key = name.into();
         if let Some(def) = self.registry.get(&key.as_str()) {
             match def.parse_value(&value.into()) {
-                Ok(v) => { self.options.insert(key, v); }
+                Ok(v) => {
+                    self.options.insert(key, v);
+                }
                 Err(e) => self.errors.push(ConfigError {
                     source: ConfigSource::CommandLine,
                     option: key.clone(),
@@ -83,11 +95,21 @@ impl ConfigParser {
         }
     }
 
-    pub fn get(&self, name: &str) -> Option<&OptionValue> { self.options.get(name) }
-    pub fn get_str(&self, name: &str) -> Option<&str> { self.options.get(name).and_then(|v| v.as_str()) }
-    pub fn get_i64(&self, name: &str) -> Option<i64> { self.options.get(name).and_then(|v| v.as_i64()) }
-    pub fn get_bool(&self, name: &str) -> Option<bool> { self.options.get(name).and_then(|v| v.as_bool()) }
-    pub fn contains(&self, name: &str) -> bool { self.options.contains_key(name) }
+    pub fn get(&self, name: &str) -> Option<&OptionValue> {
+        self.options.get(name)
+    }
+    pub fn get_str(&self, name: &str) -> Option<&str> {
+        self.options.get(name).and_then(|v| v.as_str())
+    }
+    pub fn get_i64(&self, name: &str) -> Option<i64> {
+        self.options.get(name).and_then(|v| v.as_i64())
+    }
+    pub fn get_bool(&self, name: &str) -> Option<bool> {
+        self.options.get(name).and_then(|v| v.as_bool())
+    }
+    pub fn contains(&self, name: &str) -> bool {
+        self.options.contains_key(name)
+    }
 
     pub fn parse_cli_args(&mut self, args: &[&str]) {
         self.sources.push(ConfigSource::CommandLine);
@@ -101,9 +123,11 @@ impl ConfigParser {
                     self.set(real_name, OptionValue::Bool(false));
                 } else if opt_name.contains('=') {
                     let parts: Vec<&str> = opt_name.splitn(2, '=').collect();
-                    if parts.len() == 2 { self.set_raw(parts[0], parts[1]); }
-                } else if i + 1 < args.len() && !args[i+1].starts_with('-') {
-                            self.set_raw(opt_name, args[i+1]);
+                    if parts.len() == 2 {
+                        self.set_raw(parts[0], parts[1]);
+                    }
+                } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    self.set_raw(opt_name, args[i + 1]);
                     i += 1;
                 } else {
                     if let Some(def) = self.registry.get(opt_name) {
@@ -118,12 +142,15 @@ impl ConfigParser {
                 }
             } else if arg.starts_with('-') && arg.len() == 2 {
                 let c = arg.chars().nth(1).unwrap();
-                let opt_name = self.registry.all().values()
+                let opt_name = self
+                    .registry
+                    .all()
+                    .values()
                     .find(|def| def.short_name() == Some(c))
                     .map(|def| def.name().to_string());
                 if let Some(name) = opt_name {
-                    if i + 1 < args.len() && !args[i+1].starts_with('-') {
-                            self.set_raw(&name, args[i+1]);
+                    if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                        self.set_raw(&name, args[i + 1]);
                         i += 1;
                     } else {
                         self.set(&name, OptionValue::Bool(true));
@@ -143,13 +170,19 @@ impl ConfigParser {
         if let Ok(content) = std::fs::read_to_string(path) {
             for line in content.lines() {
                 let line = line.trim();
-                if line.is_empty() || line.starts_with('#') || line.starts_with('[') || line.starts_with(';') {
+                if line.is_empty()
+                    || line.starts_with('#')
+                    || line.starts_with('[')
+                    || line.starts_with(';')
+                {
                     continue;
                 }
                 if let Some(eq_pos) = line.find('=') {
                     let name = line[..eq_pos].trim();
-                    let value = line[eq_pos+1..].trim();
-                    if !name.is_empty() { self.set_raw(name, value); }
+                    let value = line[eq_pos + 1..].trim();
+                    if !name.is_empty() {
+                        self.set_raw(name, value);
+                    }
                 }
             }
         }
@@ -169,7 +202,9 @@ impl ConfigParser {
         self.sources.push(ConfigSource::Defaults);
         for def in self.registry.all().values() {
             if !matches!(def.default_value(), OptionValue::None) {
-                self.options.entry(def.name().to_string()).or_insert_with(|| def.default_value().clone());
+                self.options
+                    .entry(def.name().to_string())
+                    .or_insert_with(|| def.default_value().clone());
             }
         }
     }
@@ -177,7 +212,8 @@ impl ConfigParser {
     pub fn load_defaults_first(&mut self) {
         self.apply_defaults();
         self.parse_env_vars();
-        let conf_path = self.get_str("conf-path")
+        let conf_path = self
+            .get_str("conf-path")
             .map(|s| s.to_string())
             .unwrap_or_else(|| String::new());
         if !conf_path.is_empty() && std::path::Path::new(&conf_path).exists() {
@@ -185,22 +221,35 @@ impl ConfigParser {
         }
     }
 
-    pub fn options(&self) -> &HashMap<String, OptionValue> { &self.options }
-    pub fn errors(&self) -> &[ConfigError] { &self.errors }
-    pub fn has_errors(&self) -> bool { !self.errors.is_empty() }
-    pub fn source_count(&self) -> usize { self.sources.len() }
+    pub fn options(&self) -> &HashMap<String, OptionValue> {
+        &self.options
+    }
+    pub fn errors(&self) -> &[ConfigError] {
+        &self.errors
+    }
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
 
     pub fn to_json_map(&self) -> serde_json::Value {
         let mut map = serde_json::Map::new();
         for (k, v) in &self.options {
-            map.insert(k.clone(), <&OptionValue as Into<serde_json::Value>>::into(v));
+            map.insert(
+                k.clone(),
+                <&OptionValue as Into<serde_json::Value>>::into(v),
+            );
         }
         serde_json::Value::Object(map)
     }
 }
 
 impl Default for ConfigParser {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

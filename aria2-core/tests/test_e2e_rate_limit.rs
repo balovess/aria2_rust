@@ -1,10 +1,10 @@
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::filesystem::disk_writer::{ByteArrayDiskWriter, DiskWriter};
+use aria2_core::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter, TokenBucket};
+use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use aria2_core::rate_limiter::{RateLimiter, RateLimiterConfig, TokenBucket, ThrottledWriter};
-use aria2_core::engine::download_engine::DownloadEngine;
-use aria2_core::request::request_group::{RequestGroup, GroupId, DownloadOptions};
-use aria2_core::filesystem::disk_writer::{DiskWriter, ByteArrayDiskWriter};
 
 fn create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
     let options = DownloadOptions {
@@ -39,7 +39,10 @@ fn create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
 async fn test_rate_limiter_token_bucket_refill() {
     let mut tb = TokenBucket::new(10000, Some(2000));
     tb.acquire(1500).await;
-    assert!(tb.available_tokens() < 1000.0, "should have consumed tokens");
+    assert!(
+        tb.available_tokens() < 1000.0,
+        "should have consumed tokens"
+    );
 }
 
 #[tokio::test]
@@ -72,8 +75,7 @@ async fn test_rate_limiter_clone_shares_state() {
 #[tokio::test]
 async fn test_throttled_writer_data_integrity() {
     let raw = ByteArrayDiskWriter::new();
-    let cfg = RateLimiterConfig::new(Some(1_000_000), None)
-        .with_burst(Some(512), None);
+    let cfg = RateLimiterConfig::new(Some(1_000_000), None).with_burst(Some(512), None);
     let limiter = RateLimiter::new(&cfg);
     let mut tw = ThrottledWriter::new(raw, limiter);
 
@@ -86,8 +88,7 @@ async fn test_throttled_writer_data_integrity() {
 #[tokio::test]
 async fn test_throttled_writer_multiple_writes() {
     let raw = ByteArrayDiskWriter::new();
-    let cfg = RateLimiterConfig::new(Some(50_000), None)
-        .with_burst(Some(256), None);
+    let cfg = RateLimiterConfig::new(Some(50_000), None).with_burst(Some(256), None);
     let limiter = RateLimiter::new(&cfg);
     let mut tw = ThrottledWriter::new(raw, limiter);
 
@@ -111,14 +112,20 @@ async fn test_engine_global_lifecycle() {
     let policy = RetryPolicy::default();
     let mut engine = DownloadEngine::with_retry_policy(10, policy.clone());
 
-    assert!(engine.global_rate_limiter().is_none(), "no limiter by default");
+    assert!(
+        engine.global_rate_limiter().is_none(),
+        "no limiter by default"
+    );
 
     engine.set_global_rate_limiter(RateLimiterConfig::new(Some(9999), Some(5555)));
     assert!(engine.global_rate_limiter().is_some());
 
     let taken = engine.take_global_rate_limiter();
     assert!(taken.is_some());
-    assert!(engine.global_rate_limiter().is_none(), "limiter removed after take");
+    assert!(
+        engine.global_rate_limiter().is_none(),
+        "limiter removed after take"
+    );
 }
 
 #[tokio::test]
@@ -127,7 +134,7 @@ async fn test_engine_global_limiter_limits() {
 
     let mut engine = DownloadEngine::with_retry_policy(10, RetryPolicy::default());
     engine.set_global_rate_limiter(
-        RateLimiterConfig::new(Some(10000), None).with_burst(Some(1000), None)
+        RateLimiterConfig::new(Some(10000), None).with_burst(Some(1000), None),
     );
 
     let limiter = engine.global_rate_limiter().unwrap();
@@ -159,8 +166,7 @@ async fn test_zero_limit_means_no_limit() {
 
 #[tokio::test]
 async fn test_rate_limiter_high_rate_low_latency() {
-    let cfg = RateLimiterConfig::new(Some(100_000_000), None)
-        .with_burst(Some(1_000_000), None);
+    let cfg = RateLimiterConfig::new(Some(100_000_000), None).with_burst(Some(1_000_000), None);
     let rl = RateLimiter::new(&cfg);
 
     let start = Instant::now();

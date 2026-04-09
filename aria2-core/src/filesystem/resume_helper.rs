@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use crate::error::{Aria2Error, Result};
+use std::path::{Path, PathBuf};
 
 use super::control_file::ControlFile;
 
@@ -28,7 +28,9 @@ impl ResumeHelper {
         }
     }
 
-    pub fn control_path(&self) -> &Path { &self.control_path }
+    pub fn control_path(&self) -> &Path {
+        &self.control_path
+    }
 
     pub async fn detect(&self, total_length: u64) -> Result<ResumeState> {
         if !self.continue_opt || total_length == 0 {
@@ -43,7 +45,8 @@ impl ResumeHelper {
 
         let file_exists = self.output_path.exists();
         let existing_length = if file_exists {
-            tokio::fs::metadata(&self.output_path).await
+            tokio::fs::metadata(&self.output_path)
+                .await
                 .map(|m| m.len())
                 .unwrap_or(0)
         } else {
@@ -64,16 +67,11 @@ impl ResumeHelper {
         let (start_offset, should_resume, is_complete) = match (&ctrl, existing_length) {
             (Some(cf), _) if cf.completed_pieces() > 0 => {
                 let offset = std::cmp::max(existing_length, cf.completed_length());
-                let complete = existing_length >= total_length
-                    && cf.total_length() == total_length;
+                let complete = existing_length >= total_length && cf.total_length() == total_length;
                 (offset, true, complete)
             }
-            (_, len) if len >= total_length => {
-                (0, false, true)
-            }
-            (_, len) if len > 0 => {
-                (len, true, false)
-            }
+            (_, len) if len >= total_length => (0, false, true),
+            (_, len) if len > 0 => (len, true, false),
             _ => (0, false, false),
         };
 
@@ -145,7 +143,9 @@ mod tests {
 
         tokio::fs::write(&out_path, vec![0xCD; 300]).await.unwrap();
 
-        let mut cf = ControlFile::open_or_create(&ctrl_path, 1000, 10).await.unwrap();
+        let mut cf = ControlFile::open_or_create(&ctrl_path, 1000, 10)
+            .await
+            .unwrap();
         cf.mark_piece_done(0);
         cf.mark_piece_done(1);
         cf.mark_piece_done(2);
@@ -212,10 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_control_path_generation() {
-        let helper = ResumeHelper::new(
-            Path::new("/downloads/bigfile.iso"),
-            true,
-        );
+        let helper = ResumeHelper::new(Path::new("/downloads/bigfile.iso"), true);
         let cp = helper.control_path();
         assert!(cp.to_str().unwrap().ends_with(".aria2"));
     }

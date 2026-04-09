@@ -1,4 +1,6 @@
-use aria2_core::config::{ConfigManager, OptionValue, OptionRegistry, OptionDef, OptionType, OptionCategory};
+use aria2_core::config::{
+    ConfigManager, OptionCategory, OptionDef, OptionRegistry, OptionType, OptionValue,
+};
 use colored::Colorize;
 
 fn main() {
@@ -12,7 +14,12 @@ fn main() {
     let general = registry.by_category(OptionCategory::General);
     println!("通用选项: {} 个", general.len());
     for def in general.iter().take(5) {
-        println!("  - {}: {} (默认: {})", def.name(), def.opt_type(), def.default_value());
+        println!(
+            "  - {}: {} (默认: {})",
+            def.name(),
+            def.opt_type(),
+            def.default_value()
+        );
     }
 
     println!("\n--- 2. 创建自定义选项注册表 ---");
@@ -22,13 +29,13 @@ fn main() {
             .short('C')
             .default(OptionValue::Str("/var/cache/aria2".into()))
             .desc("自定义缓存目录")
-            .category(OptionCategory::Advanced)
+            .category(OptionCategory::Advanced),
     );
     custom_reg.register(
         OptionDef::new("max-retry-delay", OptionType::Integer)
             .default(OptionValue::Int(300))
             .desc("最大重试延迟(秒)")
-            .range(0, 3600)
+            .range(0, 3600),
     );
 
     println!("自定义注册表大小: {}", custom_reg.count());
@@ -40,9 +47,15 @@ fn main() {
     rt.block_on(async {
         let mut mgr = ConfigManager::new_with_registry(custom_reg);
 
-        mgr.set_global_option("dir", OptionValue::Str("/opt/downloads".into())).await.unwrap();
-        mgr.set_global_option("split", OptionValue::Int(16)).await.unwrap();
-        mgr.set_global_option("custom-cache-dir", OptionValue::Str("/tmp/cache".into())).await.unwrap();
+        mgr.set_global_option("dir", OptionValue::Str("/opt/downloads".into()))
+            .await
+            .unwrap();
+        mgr.set_global_option("split", OptionValue::Int(16))
+            .await
+            .unwrap();
+        mgr.set_global_option("custom-cache-dir", OptionValue::Str("/tmp/cache".into()))
+            .await
+            .unwrap();
 
         let dir = mgr.get_global_str("dir").await;
         let split = mgr.get_global_i64("split").await;
@@ -55,7 +68,9 @@ fn main() {
         println!("\n--- 4. 变更事件订阅 ---");
         let mut subscriber = mgr.subscribe_changes();
 
-        mgr.set_global_option("quiet", OptionValue::Bool(true)).await.unwrap();
+        mgr.set_global_option("quiet", OptionValue::Bool(true))
+            .await
+            .unwrap();
 
         if let Ok(event) = subscriber.try_recv() {
             println!("收到变更事件: {} → {:?}", event.key, event.new_value);
@@ -63,7 +78,10 @@ fn main() {
 
         println!("\n--- 5. JSON 导出 ---");
         let json = mgr.get_all_global_options_json().await;
-        println!("完整配置(JSON):\n{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+        println!(
+            "完整配置(JSON):\n{}",
+            serde_json::to_string_pretty(&json).unwrap_or_default()
+        );
 
         println!("\n{} 自定义配置示例完成!", "✓".green().bold());
     });

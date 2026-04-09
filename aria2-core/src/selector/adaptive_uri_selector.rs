@@ -9,14 +9,18 @@ const DEFAULT_NB_CONNECTIONS: i32 = 1;
 
 fn extract_host(uri: &str) -> Option<String> {
     let uri = uri.trim();
-    if !uri.contains("://") { return None; }
+    if !uri.contains("://") {
+        return None;
+    }
     let after_scheme = &uri[uri.find("://").unwrap() + 3..];
     let host_part = if let Some(slash_idx) = after_scheme.find('/') {
         &after_scheme[..slash_idx]
     } else {
         after_scheme
     };
-    if host_part.is_empty() { return None; }
+    if host_part.is_empty() {
+        return None;
+    }
     Some(host_part.to_string())
 }
 
@@ -50,13 +54,22 @@ impl AdaptiveUriSelector {
             .collect()
     }
 
-    fn get_first_not_tested<'a>(&self, hosts: &'a [(usize, String)]) -> Option<&'a (usize, String)> {
+    fn get_first_not_tested<'a>(
+        &self,
+        hosts: &'a [(usize, String)],
+    ) -> Option<&'a (usize, String)> {
         hosts.iter().find(|(_, host)| {
-            self.stat_man.find_stat(host).map_or(true, |s| s.get_counter() == 0)
+            self.stat_man
+                .find_stat(host)
+                .map_or(true, |s| s.get_counter() == 0)
         })
     }
 
-    fn get_first_to_test<'a>(&self, hosts: &'a [(usize, String)], max_test: i32) -> Option<&'a (usize, String)> {
+    fn get_first_to_test<'a>(
+        &self,
+        hosts: &'a [(usize, String)],
+        max_test: i32,
+    ) -> Option<&'a (usize, String)> {
         let tested_count = self.get_nb_tested_servers(hosts);
         if tested_count < max_test as usize {
             self.get_first_not_tested(hosts)
@@ -65,35 +78,49 @@ impl AdaptiveUriSelector {
         }
     }
 
-    fn get_best_mirror(&self, hosts: &[(usize, String)], used_hosts: &[(usize, String)]) -> Option<usize> {
-        let mut candidates: Vec<(usize, u64)> = hosts.iter()
+    fn get_best_mirror(
+        &self,
+        hosts: &[(usize, String)],
+        used_hosts: &[(usize, String)],
+    ) -> Option<usize> {
+        let mut candidates: Vec<(usize, u64)> = hosts
+            .iter()
             .filter_map(|(idx, host)| {
                 let stat = self.stat_man.find_stat(host)?;
-                if !stat.is_ok() { return None; }
+                if !stat.is_ok() {
+                    return None;
+                }
                 Some((*idx, stat.get_avg_speed()))
             })
             .collect();
 
         candidates.sort_by(|a, b| b.1.cmp(&a.1));
 
-        let used_set: std::collections::HashSet<&str> = used_hosts.iter()
-            .map(|(_, h)| h.as_str())
-            .collect();
+        let used_set: std::collections::HashSet<&str> =
+            used_hosts.iter().map(|(_, h)| h.as_str()).collect();
 
         for (idx, _) in &candidates {
             let host = &hosts[*idx].1;
-            if !used_set.contains(host.as_str()) { return Some(*idx); }
+            if !used_set.contains(host.as_str()) {
+                return Some(*idx);
+            }
         }
 
         candidates.first().map(|(idx, _)| *idx)
     }
 
     fn select_one(&self, uris: &[String], used_hosts: &[(usize, String)]) -> Option<usize> {
-        if uris.is_empty() { return None; }
-        if uris.len() == 1 { return Some(0); }
+        if uris.is_empty() {
+            return None;
+        }
+        if uris.len() == 1 {
+            return Some(0);
+        }
 
         let hosts = self.extract_hosts(uris);
-        if hosts.is_empty() { return Some(0); }
+        if hosts.is_empty() {
+            return Some(0);
+        }
 
         let max_eval = self.nb_server_toevaluate.load(Ordering::Relaxed);
 
@@ -109,20 +136,30 @@ impl AdaptiveUriSelector {
     }
 
     fn get_nb_tested_servers(&self, hosts: &[(usize, String)]) -> usize {
-        hosts.iter().filter(|(_, host)| {
-            self.stat_man.find_stat(host).map_or(false, |s| s.get_counter() > 0)
-        }).count()
+        hosts
+            .iter()
+            .filter(|(_, host)| {
+                self.stat_man
+                    .find_stat(host)
+                    .map_or(false, |s| s.get_counter() > 0)
+            })
+            .count()
     }
 
     pub fn adjust_lowest_speed_limit(&self, uris: &[String]) -> u64 {
         let hosts = self.extract_hosts(uris);
-        let speeds: Vec<u64> = hosts.iter().filter_map(|(_, host)| {
-            self.stat_man.find_stat(host).map(|s| s.get_avg_speed())
-        }).collect();
+        let speeds: Vec<u64> = hosts
+            .iter()
+            .filter_map(|(_, host)| self.stat_man.find_stat(host).map(|s| s.get_avg_speed()))
+            .collect();
 
-        if speeds.is_empty() { return 0; }
+        if speeds.is_empty() {
+            return 0;
+        }
         let max = *speeds.iter().max().unwrap_or(&0u64);
-        if max == 0 { return 0; }
+        if max == 0 {
+            return 0;
+        }
         (max as f64 * 0.3) as u64
     }
 
@@ -252,9 +289,7 @@ mod tests {
     #[test]
     fn test_select_falls_back_to_used_if_no_alternative() {
         let sel = create_selector();
-        let uris = vec![
-            "http://only.com/a".to_string(),
-        ];
+        let uris = vec!["http://only.com/a".to_string()];
 
         sel.stat_man.update("only.com", 5000, false);
         let s = sel.stat_man.find_stat("only.com").unwrap();
@@ -286,15 +321,26 @@ mod tests {
 
         let r2 = sel.select(&uris, &[]).unwrap();
 
-        assert!(sel.stat_man.find_stat("a.com").is_some() || sel.stat_man.find_stat("b.com").is_some(),
-            "Stats should be created for tested hosts");
+        assert!(
+            sel.stat_man.find_stat("a.com").is_some() || sel.stat_man.find_stat("b.com").is_some(),
+            "Stats should be created for tested hosts"
+        );
     }
 
     #[test]
     fn test_extract_host() {
-        assert_eq!(extract_host("http://example.com/path"), Some("example.com".to_string()));
-        assert_eq!(extract_host("https://host:8080/file?q=1"), Some("host:8080".to_string()));
-        assert_eq!(extract_host("ftp://server.com"), Some("server.com".to_string()));
+        assert_eq!(
+            extract_host("http://example.com/path"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_host("https://host:8080/file?q=1"),
+            Some("host:8080".to_string())
+        );
+        assert_eq!(
+            extract_host("ftp://server.com"),
+            Some("server.com".to_string())
+        );
         assert!(extract_host("not-a-uri").is_none());
         assert!(extract_host("").is_none());
     }
@@ -302,7 +348,10 @@ mod tests {
     #[test]
     fn test_adjust_lowest_speed_limit() {
         let sel = create_selector();
-        let uris = vec!["http://fast.com/f".to_string(), "http://slow.com/s".to_string()];
+        let uris = vec![
+            "http://fast.com/f".to_string(),
+            "http://slow.com/s".to_string(),
+        ];
         for _ in 0..20 {
             sel.stat_man.update("fast.com", 10000, false);
         }
@@ -311,7 +360,12 @@ mod tests {
         let limit = sel.adjust_lowest_speed_limit(&uris);
         assert!(limit > 0);
         let expected = (10000u64 as f64 * 0.3) as u64;
-        assert!((limit as i64 - expected as i64).abs() <= 1, "limit={} expected={}", limit, expected);
+        assert!(
+            (limit as i64 - expected as i64).abs() <= 1,
+            "limit={} expected={}",
+            limit,
+            expected
+        );
     }
 
     #[test]

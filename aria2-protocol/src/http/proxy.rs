@@ -47,7 +47,9 @@ impl ProxyConfig {
         match (&self.username, &self.password) {
             (Some(user), Some(pass)) => match self.proxy_type {
                 ProxyType::Http => format!("http://{}:{}@{}:{}", user, pass, self.host, self.port),
-                ProxyType::Socks5 => format!("socks5://{}:{}@{}:{}", user, pass, self.host, self.port),
+                ProxyType::Socks5 => {
+                    format!("socks5://{}:{}@{}:{}", user, pass, self.host, self.port)
+                }
             },
             _ => match self.proxy_type {
                 ProxyType::Http => format!("http://{}:{}", self.host, self.port),
@@ -175,7 +177,10 @@ pub struct ProxyManager {
 impl ProxyManager {
     pub fn new(config: Option<ProxyConfig>) -> Self {
         if let Some(ref cfg) = config {
-            info!("代理配置已启用: {}:{} ({:?})", cfg.host, cfg.port, cfg.proxy_type);
+            info!(
+                "代理配置已启用: {}:{} ({:?})",
+                cfg.host, cfg.port, cfg.proxy_type
+            );
         }
         Self { config }
     }
@@ -201,7 +206,8 @@ impl ProxyManager {
     }
 
     fn extract_hostname(url: &str) -> Option<String> {
-        let url = url.strip_prefix("http://")
+        let url = url
+            .strip_prefix("http://")
             .or_else(|| url.strip_prefix("https://"))
             .or_else(|| url.strip_prefix("ftp://"))?;
         let end_pos = url.find('/')?;
@@ -221,9 +227,11 @@ mod tests {
         let socks = ProxyConfig::new_socks5("localhost", 1080);
         assert_eq!(socks.to_url(), "socks5://localhost:1080");
 
-        let with_auth = ProxyConfig::new_http("proxy.example.com", 8080)
-            .with_auth("user", "pass");
-        assert_eq!(with_auth.to_url(), "http://user:pass@proxy.example.com:8080");
+        let with_auth = ProxyConfig::new_http("proxy.example.com", 8080).with_auth("user", "pass");
+        assert_eq!(
+            with_auth.to_url(),
+            "http://user:pass@proxy.example.com:8080"
+        );
     }
 
     #[test]

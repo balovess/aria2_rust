@@ -5,13 +5,13 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use super::persistence::DhtPersistence;
-use super::socket::DhtSocket;
-use super::node::DhtNode;
-use super::routing_table::RoutingTable;
 use super::bootstrap::DhtBootstrap;
+use super::client::{extract_compact_nodes_from_response, extract_compact_peers_from_response};
 use super::message::{DhtMessage, DhtMessageBuilder};
-use super::client::{extract_compact_peers_from_response, extract_compact_nodes_from_response};
+use super::node::DhtNode;
+use super::persistence::DhtPersistence;
+use super::routing_table::RoutingTable;
+use super::socket::DhtSocket;
 
 fn generate_random_id() -> [u8; 20] {
     let mut id = [0u8; 20];
@@ -77,7 +77,11 @@ impl DhtEngine {
             match DhtPersistence::load_from_file(std::path::Path::new(path)).await {
                 Ok(data) => {
                     self_id = data.self_id;
-                    info!("DHT: 从 {} 加载了 {} 个节点 (self_id 已恢复)", path, data.nodes.len());
+                    info!(
+                        "DHT: 从 {} 加载了 {} 个节点 (self_id 已恢复)",
+                        path,
+                        data.nodes.len()
+                    );
                     for pn in &data.nodes {
                         loaded_nodes.push(DhtNode::new(pn.id, pn.addr));
                     }
@@ -128,12 +132,16 @@ impl DhtEngine {
         const MAX_ROUNDS: usize = 3;
 
         for round in 0..MAX_ROUNDS {
-            if !all_peers.is_empty() { break; }
+            if !all_peers.is_empty() {
+                break;
+            }
 
             let closest_owned: Vec<DhtNode> = {
                 let rt = self.routing_table.read().await;
                 rt.find_closest(info_hash, self.config.max_concurrent_queries)
-                    .into_iter().cloned().collect()
+                    .into_iter()
+                    .cloned()
+                    .collect()
             };
 
             if closest_owned.is_empty() && round == 0 {
@@ -142,20 +150,26 @@ impl DhtEngine {
                 continue;
             }
 
-            if closest_owned.is_empty() { break; }
+            if closest_owned.is_empty() {
+                break;
+            }
 
             let results = self.query_get_peers_batch(&closest_owned, info_hash).await;
             contacted += results.nodes_queried;
 
             all_peers.extend(results.peers);
             for (addr, nid) in results.new_nodes {
-                self.routing_table.write().await.insert(DhtNode::new(nid, addr));
+                self.routing_table
+                    .write()
+                    .await
+                    .insert(DhtNode::new(nid, addr));
             }
 
             sleep(Duration::from_millis(200)).await;
         }
 
-        all_peers.sort(); all_peers.dedup();
+        all_peers.sort();
+        all_peers.dedup();
         let is_empty = all_peers.is_empty();
 
         DhtPeerDiscoveryResult {
@@ -175,7 +189,11 @@ impl DhtEngine {
         for node in &closest {
             if let Some(ref token) = node.token {
                 let msg = DhtMessageBuilder::announce_peer(
-                    self.next_tx_id(), &self.config.self_id, info_hash, port, token.as_str(),
+                    self.next_tx_id(),
+                    &self.config.self_id,
+                    info_hash,
+                    port,
+                    token.as_str(),
                 );
                 if let Ok(data) = msg.encode() {
                     if self.socket.send_to(node.addr, &data).await.is_ok() {
@@ -185,7 +203,10 @@ impl DhtEngine {
             }
         }
 
-        info!("DHT announce_peer: 向 {} 个节点宣告 (port={})", announced, port);
+        info!(
+            "DHT announce_peer: 向 {} 个节点宣告 (port={})",
+            announced, port
+        );
         Ok(())
     }
 
@@ -202,9 +223,8 @@ impl DhtEngine {
         let mut buf = [0u8; 8192];
 
         for target in targets {
-            let msg = DhtMessageBuilder::get_peers(
-                self.next_tx_id(), &self.config.self_id, info_hash,
-            );
+            let msg =
+                DhtMessageBuilder::get_peers(self.next_tx_id(), &self.config.self_id, info_hash);
             let data = match msg.encode() {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -216,13 +236,23 @@ impl DhtEngine {
 
             result.nodes_queried += 1;
 
-            match self.socket.recv_with_timeout(&mut buf, self.config.query_timeout).await {
+            match self
+                .socket
+                .recv_with_timeout(&mut buf, self.config.query_timeout)
+                .await
+            {
                 Ok((n, _)) => {
-                    if n == 0 { continue; }
+                    if n == 0 {
+                        continue;
+                    }
                     match DhtMessage::decode(&buf[..n]) {
                         Ok(response) => {
-                            result.peers.extend(extract_compact_peers_from_response(&response));
-                            result.new_nodes.extend(extract_compact_nodes_from_response(&response));
+                            result
+                                .peers
+                                .extend(extract_compact_peers_from_response(&response));
+                            result
+                                .new_nodes
+                                .extend(extract_compact_nodes_from_response(&response));
                         }
                         Err(_) => {}
                     }
@@ -238,7 +268,10 @@ impl DhtEngine {
         let target_id = self.config.self_id;
         let closest: Vec<DhtNode> = {
             let rt = self.routing_table.read().await;
-            rt.find_closest(&target_id, 4).into_iter().cloned().collect()
+            rt.find_closest(&target_id, 4)
+                .into_iter()
+                .cloned()
+                .collect()
         };
         self.send_find_node_to_all(&closest).await;
     }
@@ -254,7 +287,9 @@ impl DhtEngine {
                         e.refresh_closest_buckets().await;
                     }
                 }
-                if !e.running.load(Ordering::Relaxed) { break; }
+                if !e.running.load(Ordering::Relaxed) {
+                    break;
+                }
             }
             info!("DHT 维护循环已退出");
         });
@@ -270,7 +305,9 @@ impl DhtEngine {
                 std::path::Path::new(path),
                 &self.config.self_id,
                 &nodes,
-            ).await {
+            )
+            .await
+            {
                 Ok(n) => debug!("DHT 自动保存: {} 个 good 节点", n),
                 Err(e) => warn!("DHT 自动保存失败: {}", e),
             }
@@ -279,9 +316,8 @@ impl DhtEngine {
 
     async fn send_find_node_to_all(&self, targets: &[DhtNode]) {
         for target in targets {
-            let msg = DhtMessageBuilder::find_node(
-                self.next_tx_id(), &self.config.self_id, &target.id,
-            );
+            let msg =
+                DhtMessageBuilder::find_node(self.next_tx_id(), &self.config.self_id, &target.id);
             if let Ok(data) = msg.encode() {
                 let _ = self.socket.send_to(target.addr, &data).await;
             }
@@ -319,7 +355,9 @@ impl DhtEngine {
                 std::path::Path::new(path),
                 &self.config.self_id,
                 &nodes,
-            ).await {
+            )
+            .await
+            {
                 Ok(n) => info!("DHT: 已保存 {} 个 good 节点到 {}", n, path),
                 Err(e) => warn!("DHT: 保存路由表失败: {}", e),
             }
@@ -357,7 +395,10 @@ mod tests {
         };
         let engine = DhtEngine::start(config).await.expect("engine should start");
         let stats = engine.stats().await;
-        assert!(stats.total_nodes >= 4, "should have at least bootstrap nodes");
+        assert!(
+            stats.total_nodes >= 4,
+            "should have at least bootstrap nodes"
+        );
         engine.shutdown();
     }
 
@@ -372,7 +413,10 @@ mod tests {
         let hash = [0xABu8; 20];
         let result = engine.find_peers(&hash).await;
 
-        assert!(result.rounds_completed > 0, "should complete at least one round");
+        assert!(
+            result.rounds_completed > 0,
+            "should complete at least one round"
+        );
         let _ = result.nodes_contacted;
         engine.shutdown();
     }
@@ -412,7 +456,10 @@ mod tests {
         let engine = DhtEngine::start(DhtEngineConfig::default()).await.unwrap();
         engine.start_maintenance_loop();
         sleep(Duration::from_millis(50)).await;
-        assert!(engine.running.load(Ordering::Relaxed), "maintenance should keep engine running");
+        assert!(
+            engine.running.load(Ordering::Relaxed),
+            "maintenance should keep engine running"
+        );
         engine.shutdown();
         sleep(Duration::from_millis(200)).await;
     }
@@ -424,18 +471,29 @@ mod tests {
         let self_id = [0xBBu8; 20];
         let addr: std::net::SocketAddr = "10.0.0.1:6881".parse().unwrap();
         let node = DhtNode::new([0xAAu8; 20], addr);
-        DhtPersistence::save_to_file(&path, &self_id, &[node]).await.unwrap();
+        DhtPersistence::save_to_file(&path, &self_id, &[node])
+            .await
+            .unwrap();
 
         let config = DhtEngineConfig {
             port: 0,
             dht_file_path: Some(path.to_string_lossy().to_string()),
             ..Default::default()
         };
-        let engine = DhtEngine::start(config).await.expect("should start with persisted data");
+        let engine = DhtEngine::start(config)
+            .await
+            .expect("should start with persisted data");
 
-        assert_eq!(engine.config.self_id, self_id, "self_id should come from file");
+        assert_eq!(
+            engine.config.self_id, self_id,
+            "self_id should come from file"
+        );
         let stats = engine.stats().await;
-        assert!(stats.total_nodes >= 5, "should have bootstrap + persisted nodes (got {})", stats.total_nodes);
+        assert!(
+            stats.total_nodes >= 5,
+            "should have bootstrap + persisted nodes (got {})",
+            stats.total_nodes
+        );
         engine.shutdown_async().await;
     }
 
@@ -446,9 +504,14 @@ mod tests {
             dht_file_path: Some("/nonexistent/path/dht.dat".to_string()),
             ..Default::default()
         };
-        let engine = DhtEngine::start(config).await.expect("should fallback to bootstrap when no file");
+        let engine = DhtEngine::start(config)
+            .await
+            .expect("should fallback to bootstrap when no file");
         let stats = engine.stats().await;
-        assert!(stats.total_nodes >= 4, "should have bootstrap nodes despite missing file");
+        assert!(
+            stats.total_nodes >= 4,
+            "should have bootstrap nodes despite missing file"
+        );
         engine.shutdown_async().await;
     }
 
@@ -456,9 +519,14 @@ mod tests {
     async fn test_start_uses_persisted_self_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("self_id_test.dat");
-        let custom_id = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let custom_id = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
 
-        DhtPersistence::save_to_file(&path, &custom_id, &[]).await.unwrap();
+        DhtPersistence::save_to_file(&path, &custom_id, &[])
+            .await
+            .unwrap();
 
         let config = DhtEngineConfig {
             port: 0,
@@ -467,7 +535,10 @@ mod tests {
         };
         let engine = DhtEngine::start(config).await.unwrap();
 
-        assert_eq!(engine.config.self_id, custom_id, "engine should use persisted self_id");
+        assert_eq!(
+            engine.config.self_id, custom_id,
+            "engine should use persisted self_id"
+        );
         engine.shutdown_async().await;
     }
 
@@ -508,7 +579,10 @@ mod tests {
             engine.shutdown_async().await;
         });
 
-        assert!(!path.exists(), "no file should be created when dht_file_path is None");
+        assert!(
+            !path.exists(),
+            "no file should be created when dht_file_path is None"
+        );
     }
 
     #[tokio::test]
@@ -543,7 +617,10 @@ mod tests {
 
         engine.save_routing_table_if_configured().await;
         let stats = engine.stats().await;
-        assert!(stats.total_nodes >= 4, "engine should still work after skipped save");
+        assert!(
+            stats.total_nodes >= 4,
+            "engine should still work after skipped save"
+        );
         engine.shutdown();
     }
 }

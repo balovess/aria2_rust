@@ -9,7 +9,9 @@ pub enum HostKeyCheckingMode {
 }
 
 impl Default for HostKeyCheckingMode {
-    fn default() -> Self { Self::Strict }
+    fn default() -> Self {
+        Self::Strict
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -40,9 +42,18 @@ impl SshOptions {
         }
     }
 
-    pub fn with_password(mut self, password: &str) -> Self { self.password = Some(password.to_string()); self }
-    pub fn with_port(mut self, port: u16) -> Self { self.port = port; self }
-    pub fn with_host_key_mode(mut self, mode: HostKeyCheckingMode) -> Self { self.host_key_mode = mode; self }
+    pub fn with_password(mut self, password: &str) -> Self {
+        self.password = Some(password.to_string());
+        self
+    }
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+    pub fn with_host_key_mode(mut self, mode: HostKeyCheckingMode) -> Self {
+        self.host_key_mode = mode;
+        self
+    }
 
     pub fn target(&self) -> String {
         format!("{}@{}:{}", self.username, self.host, self.port)
@@ -74,8 +85,8 @@ impl SshConnection {
             .map_err(|_| format!("TCP connect timeout ({}s)", tcp_timeout.as_secs()))?
             .map_err(|e| format!("TCP connect failed: {}", e))?;
 
-        let mut sess = ssh2::Session::new()
-            .map_err(|e| format!("SSH session creation failed: {}", e))?;
+        let mut sess =
+            ssh2::Session::new().map_err(|e| format!("SSH session creation failed: {}", e))?;
         sess.set_tcp_stream(tcp);
 
         // Host key checking is configured via the session's known_hosts API;
@@ -87,14 +98,22 @@ impl SshConnection {
                 .map_err(|e| format!("password auth failed: {}", e))?;
         } else if let Some(ref key_path) = options.private_key_path {
             let passphrase: Option<&str> = options.private_key_passphrase.as_deref();
-            sess.userauth_pubkey_file(&options.username, None, std::path::Path::new(key_path), passphrase)
-                .map_err(|e| format!("public key auth failed: {}", e))?;
+            sess.userauth_pubkey_file(
+                &options.username,
+                None,
+                std::path::Path::new(key_path),
+                passphrase,
+            )
+            .map_err(|e| format!("public key auth failed: {}", e))?;
         } else {
             return Err("no auth method provided (password or private_key)".to_string());
         }
 
         info!("SSH connected: {}", options.target());
-        Ok(Self { session: sess, options })
+        Ok(Self {
+            session: sess,
+            options,
+        })
     }
 
     pub async fn disconnect(self) -> Result<(), String> {

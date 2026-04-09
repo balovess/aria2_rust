@@ -18,7 +18,9 @@ pub fn generate_peer_id_with_prefix(prefix: &str) -> [u8; 20] {
     let copy_len = prefix_bytes.len().min(8);
     id[..copy_len].copy_from_slice(&prefix_bytes[..copy_len]);
     if copy_len < 8 {
-        for i in copy_len..8 { id[i] = b'-'; }
+        for i in copy_len..8 {
+            id[i] = b'-';
+        }
     }
     let mut rng = rand::thread_rng();
     for i in 8..20 {

@@ -1,10 +1,10 @@
+use crate::error::{Aria2Error, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::error::{Aria2Error, Result};
 
-use super::disk_adaptor::{DiskAdaptor, DirectDiskAdaptor};
+use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use super::disk_cache::WrDiskCache;
 
 #[async_trait]
@@ -35,13 +35,17 @@ impl DefaultDiskWriter {
 impl DiskWriter for DefaultDiskWriter {
     async fn write(&mut self, data: &[u8]) -> Result<()> {
         if self.file.is_none() {
-            self.file = Some(tokio::fs::File::create(&self.path).await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?);
+            self.file = Some(
+                tokio::fs::File::create(&self.path)
+                    .await
+                    .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?,
+            );
         }
-        
+
         if let Some(ref mut file) = self.file {
             use tokio::io::AsyncWriteExt;
-            file.write_all(data).await
+            file.write_all(data)
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
         }
         Ok(())
@@ -50,7 +54,8 @@ impl DiskWriter for DefaultDiskWriter {
     async fn finalize(&mut self) -> Result<Vec<u8>> {
         if let Some(ref mut file) = self.file {
             use tokio::io::AsyncWriteExt;
-            file.flush().await
+            file.flush()
+                .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
         }
         Ok(vec![])
@@ -63,9 +68,7 @@ pub struct ByteArrayDiskWriter {
 
 impl ByteArrayDiskWriter {
     pub fn new() -> Self {
-        ByteArrayDiskWriter {
-            buffer: Vec::new(),
-        }
+        ByteArrayDiskWriter { buffer: Vec::new() }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
@@ -84,7 +87,9 @@ impl ByteArrayDiskWriter {
 }
 
 impl Default for ByteArrayDiskWriter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -146,7 +151,9 @@ impl CachedDiskWriter {
         self
     }
 
-    pub fn is_opened(&self) -> bool { self.opened }
+    pub fn is_opened(&self) -> bool {
+        self.opened
+    }
 }
 
 #[async_trait]
@@ -163,7 +170,8 @@ impl SeekableDiskWriter for CachedDiskWriter {
                 if let Some(parent) = self.path.parent() {
                     let parent: &Path = parent;
                     if !parent.exists() {
-                        tokio::fs::create_dir_all(parent).await
+                        tokio::fs::create_dir_all(parent)
+                            .await
                             .map_err(|e: std::io::Error| Aria2Error::Io(e.to_string()))?;
                     }
                 }
@@ -400,7 +408,10 @@ mod tests {
 
         let mut writer = CachedDiskWriter::new(&path, Some(1000), None);
         writer.open().await.unwrap();
-        writer.write_at(0, b"hello world - this is longer than 20 bytes of data").await.unwrap();
+        writer
+            .write_at(0, b"hello world - this is longer than 20 bytes of data")
+            .await
+            .unwrap();
         writer.flush().await.unwrap();
 
         writer.truncate(20).await.unwrap();

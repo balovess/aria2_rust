@@ -1,4 +1,4 @@
-use aria2_core::segment::{Segment, Bitfield};
+use aria2_core::segment::{Bitfield, Segment};
 use aria2_core::ui::ProgressBar;
 
 #[test]

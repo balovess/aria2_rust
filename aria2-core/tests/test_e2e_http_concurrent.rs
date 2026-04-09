@@ -1,7 +1,7 @@
+use aria2_core::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::http_segment_downloader::HttpSegmentDownloader;
-use aria2_core::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-use aria2_core::request::request_group::{RequestGroup, GroupId, DownloadOptions};
+use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> DownloadCommand {
     let options = DownloadOptions {
@@ -28,7 +28,14 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         http_proxy: None,
         dht_file_path: None,
     };
-    DownloadCommand::new(GroupId::new(1), uri, &options, options.dir.as_deref(), options.out.as_deref()).unwrap()
+    DownloadCommand::new(
+        GroupId::new(1),
+        uri,
+        &options,
+        options.dir.as_deref(),
+        options.out.as_deref(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -38,7 +45,14 @@ fn test_download_command_creation() {
 
 #[test]
 fn test_download_command_split_1_default() {
-    let _cmd = DownloadCommand::new(GroupId::new(1), "http://example.com", &DownloadOptions::default(), None, None).unwrap();
+    let _cmd = DownloadCommand::new(
+        GroupId::new(1),
+        "http://example.com",
+        &DownloadOptions::default(),
+        None,
+        None,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -58,22 +72,16 @@ fn test_concurrent_segment_manager_creation() {
 
 #[test]
 fn test_concurrent_segment_manager_single_segment() {
-    let mut manager = ConcurrentSegmentManager::new(
-        100,
-        vec!["http://example.com/tiny".to_string()],
-        Some(100),
-    );
+    let mut manager =
+        ConcurrentSegmentManager::new(100, vec!["http://example.com/tiny".to_string()], Some(100));
     manager.allocate_segments();
     assert_eq!(manager.num_segments(), 1);
 }
 
 #[test]
 fn test_concurrent_segment_manager_complete_all() {
-    let mut manager = ConcurrentSegmentManager::new(
-        200,
-        vec!["http://example.com/med".to_string()],
-        Some(100),
-    );
+    let mut manager =
+        ConcurrentSegmentManager::new(200, vec!["http://example.com/med".to_string()], Some(100));
     manager.allocate_segments();
     manager.complete_segment(0, vec![0u8; 100]);
     manager.complete_segment(1, vec![0u8; 100]);
@@ -85,11 +93,8 @@ fn test_concurrent_segment_manager_complete_all() {
 
 #[test]
 fn test_concurrent_segment_manager_fail_marks_failed() {
-    let mut manager = ConcurrentSegmentManager::new(
-        300,
-        vec!["http://example.com/med".to_string()],
-        Some(100),
-    );
+    let mut manager =
+        ConcurrentSegmentManager::new(300, vec!["http://example.com/med".to_string()], Some(100));
     manager.allocate_segments();
     manager.fail_segment(0);
 

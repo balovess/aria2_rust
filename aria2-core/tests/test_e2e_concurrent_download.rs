@@ -1,18 +1,18 @@
 mod fixtures {
-    pub mod test_server;
     pub mod test_metalink_builder;
+    pub mod test_server;
 }
-use fixtures::test_server::TestServer;
-use fixtures::test_metalink_builder::{build_metalink_v3, compute_sha256, SMALL_CONTENT};
-use aria2_core::engine::concurrent_download_command::ConcurrentDownloadCommand;
 use aria2_core::engine::command::{Command, CommandStatus};
-use aria2_core::engine::concurrent_segment_manager::{
-    ConcurrentSegmentManager, SegmentStatus,
-};
-use aria2_core::request::request_group::{GroupId, DownloadOptions};
+use aria2_core::engine::concurrent_download_command::ConcurrentDownloadCommand;
+use aria2_core::engine::concurrent_segment_manager::{ConcurrentSegmentManager, SegmentStatus};
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use fixtures::test_metalink_builder::{build_metalink_v3, compute_sha256, SMALL_CONTENT};
+use fixtures::test_server::TestServer;
 use std::path::Path;
 
-fn tmp_dir() -> tempfile::TempDir { tempfile::tempdir().unwrap() }
+fn tmp_dir() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
+}
 
 #[tokio::test]
 async fn test_e2e_concurrent_two_mirrors() {
@@ -24,22 +24,24 @@ async fn test_e2e_concurrent_two_mirrors() {
     let url2 = format!("{}/files/small.bin", server2.base_url());
     let sha = compute_sha256(SMALL_CONTENT);
 
-    let metalink_xml = build_metalink_v3("concurrent_small.bin", 4, &[
-        (url1, 1),
-        (url2, 1),
-    ], &sha);
+    let metalink_xml = build_metalink_v3("concurrent_small.bin", 4, &[(url1, 1), (url2, 1)], &sha);
 
     let mut cmd = ConcurrentDownloadCommand::new(
         GroupId::new(100),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建ConcurrentDownloadCommand失败");
+    )
+    .expect("创建ConcurrentDownloadCommand失败");
 
     cmd.execute().await.expect("并发下载失败");
 
     let output_path = Path::new(dir.path()).join("concurrent_small.bin");
-    assert!(output_path.exists(), "输出文件不存在: {}", output_path.display());
+    assert!(
+        output_path.exists(),
+        "输出文件不存在: {}",
+        output_path.display()
+    );
 
     let data = std::fs::read(&output_path).expect("读取下载文件失败");
     assert_eq!(data, SMALL_CONTENT, "内容不匹配");
@@ -47,14 +49,14 @@ async fn test_e2e_concurrent_two_mirrors() {
 
 #[tokio::test]
 async fn test_e2e_concurrent_three_mirrors() {
-    let servers: Vec<TestServer> = futures::future::join_all(
-        (0..3).map(|_| TestServer::start()).collect::<Vec<_>>()
-    ).await;
+    let servers: Vec<TestServer> =
+        futures::future::join_all((0..3).map(|_| TestServer::start()).collect::<Vec<_>>()).await;
 
     let dir = tmp_dir();
-    let urls: Vec<(String, i32)> = (0..3).map(|i| {
-        format!("{}/files/medium.bin", servers[i].base_url())
-    }).map(|u| (u, 1)).collect();
+    let urls: Vec<(String, i32)> = (0..3)
+        .map(|i| format!("{}/files/medium.bin", servers[i].base_url()))
+        .map(|u| (u, 1))
+        .collect();
 
     let medium_data = vec![0xABu8; 1024 * 1024];
     let sha = compute_sha256(&medium_data);
@@ -67,7 +69,8 @@ async fn test_e2e_concurrent_three_mirrors() {
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建ConcurrentDownloadCommand失败");
+    )
+    .expect("创建ConcurrentDownloadCommand失败");
 
     cmd.execute().await.expect("三镜像并发下载失败");
 
@@ -89,17 +92,16 @@ async fn test_e2e_concurrent_one_mirror_fails() {
     let bad_url = format!("{}/error/500", bad_server.base_url());
     let sha = compute_sha256(SMALL_CONTENT);
 
-    let metalink_xml = build_metalink_v3("failover_test.bin", 4, &[
-        (bad_url, 1),
-        (good_url, 2),
-    ], &sha);
+    let metalink_xml =
+        build_metalink_v3("failover_test.bin", 4, &[(bad_url, 1), (good_url, 2)], &sha);
 
     let mut cmd = ConcurrentDownloadCommand::new(
         GroupId::new(102),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建ConcurrentDownloadCommand失败");
+    )
+    .expect("创建ConcurrentDownloadCommand失败");
 
     cmd.execute().await.expect("镜像故障回退应成功");
 
@@ -125,7 +127,8 @@ async fn test_e2e_concurrent_hash_verify() {
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建ConcurrentDownloadCommand失败");
+    )
+    .expect("创建ConcurrentDownloadCommand失败");
 
     cmd.execute().await.expect("正确hash应通过验证");
 
@@ -151,7 +154,8 @@ async fn test_e2e_concurrent_progress_tracking() {
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
-    ).expect("创建ConcurrentDownloadCommand失败");
+    )
+    .expect("创建ConcurrentDownloadCommand失败");
 
     let progress_before = cmd.group().await.progress().await;
     assert!((progress_before - 0.0).abs() < 1.0, "下载前进度应为0%");
@@ -229,16 +233,15 @@ fn test_segment_manager_fail_reassign() {
 
     let seg_status = mgr.segment_status(first_seg_idx as usize);
     assert_eq!(seg_status, Some(SegmentStatus::Pending));
-    assert_eq!(mgr.segment_info(first_seg_idx as usize).unwrap().2, &SegmentStatus::Pending);
+    assert_eq!(
+        mgr.segment_info(first_seg_idx as usize).unwrap().2,
+        &SegmentStatus::Pending
+    );
 }
 
 #[test]
 fn test_segment_manager_assemble() {
-    let mut mgr = ConcurrentSegmentManager::new(
-        200,
-        vec!["http://x.com/f".to_string()],
-        Some(100),
-    );
+    let mut mgr = ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
 
     mgr.complete_segment(0, vec![0xAA; 100]);
     assert!((mgr.progress() - 50.0).abs() < 0.01);

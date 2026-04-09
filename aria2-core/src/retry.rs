@@ -1,7 +1,7 @@
-use std::time::Duration;
-use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::warn;
 use crate::error::{Aria2Error, RecoverableError};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -53,7 +53,10 @@ impl RetryPolicy {
     }
 
     pub fn wait_duration(&self, attempt: u32) -> Duration {
-        let secs = self.retry_wait_base.as_secs().saturating_mul(1 << attempt.min(20));
+        let secs = self
+            .retry_wait_base
+            .as_secs()
+            .saturating_mul(1 << attempt.min(20));
         let dur = Duration::from_secs(secs);
         if dur > self.retry_wait_max {
             self.retry_wait_max
@@ -141,13 +144,21 @@ impl<'a> RetryExecutor<'a> {
                 Ok(value) => return Ok(value),
                 Err(error) => {
                     if !self.policy.should_retry(attempt, &error) {
-                        warn!("重试失败 (尝试 {}/{}, 不再重试): {}", attempt + 1, self.policy.max_tries(), error);
+                        warn!(
+                            "重试失败 (尝试 {}/{}, 不再重试): {}",
+                            attempt + 1,
+                            self.policy.max_tries(),
+                            error
+                        );
                         self.stats.record_retry(&error);
                         return Err(error);
                     }
                     attempt += 1;
                     let wait = self.policy.wait_duration(attempt);
-                    warn!("第 {} 次重试, 等待 {:?} 后执行 (原因: {})", attempt, wait, error);
+                    warn!(
+                        "第 {} 次重试, 等待 {:?} 后执行 (原因: {})",
+                        attempt, wait, error
+                    );
                     self.stats.record_retry(&error);
                     tokio::time::sleep(wait).await;
                 }

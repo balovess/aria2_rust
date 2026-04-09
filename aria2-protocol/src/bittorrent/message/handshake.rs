@@ -90,7 +90,12 @@ impl Handshake {
             id
         };
 
-        Ok(Self { protocol, reserved, info_hash, peer_id })
+        Ok(Self {
+            protocol,
+            reserved,
+            info_hash,
+            peer_id,
+        })
     }
 
     pub fn supports_mse(&self) -> bool {
@@ -106,7 +111,9 @@ impl Handshake {
     }
 
     pub fn peer_id_readable(&self) -> Option<String> {
-        std::str::from_utf8(&self.peer_id).ok().map(|s| s.to_string())
+        std::str::from_utf8(&self.peer_id)
+            .ok()
+            .map(|s| s.to_string())
     }
 }
 
@@ -159,7 +166,10 @@ mod tests {
     #[test]
     fn test_peer_id_string() {
         let mut pid = [0u8; 20];
-        b"-AR0001-".iter().enumerate().for_each(|(i, &b)| pid[i] = b);
+        b"-AR0001-"
+            .iter()
+            .enumerate()
+            .for_each(|(i, &b)| pid[i] = b);
         let hs = Handshake::new(&[0u8; 20], &pid);
         assert!(hs.peer_id_readable().unwrap().starts_with("-AR"));
         assert_eq!(hs.peer_id_str().len(), 40);

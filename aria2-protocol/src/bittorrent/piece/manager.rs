@@ -10,12 +10,7 @@ pub struct PieceManager {
 }
 
 impl PieceManager {
-    pub fn new(
-        num_pieces: u32,
-        piece_length: u32,
-        total_size: u64,
-        hashes: Vec<[u8; 20]>,
-    ) -> Self {
+    pub fn new(num_pieces: u32, piece_length: u32, total_size: u64, hashes: Vec<[u8; 20]>) -> Self {
         assert_eq!(num_pieces as usize, hashes.len());
         Self {
             num_pieces,
@@ -30,7 +25,11 @@ impl PieceManager {
     pub fn piece_size(&self, index: u32) -> u32 {
         if index >= self.num_pieces - 1 {
             let remainder = (self.total_size % self.piece_length as u64) as u64;
-            if remainder > 0 { remainder as u32 } else { self.piece_length }
+            if remainder > 0 {
+                remainder as u32
+            } else {
+                self.piece_length
+            }
         } else {
             self.piece_length
         }
@@ -54,7 +53,9 @@ impl PieceManager {
 
     pub fn verify_piece_hash(&self, index: u32, data: &[u8]) -> bool {
         use sha1::Sha1;
-        if (index as usize) >= self.piece_hashes.len() { return false; }
+        if (index as usize) >= self.piece_hashes.len() {
+            return false;
+        }
         let hash = Sha1::digest(data);
         hash.as_slice() == &self.piece_hashes[index as usize]
     }
@@ -64,14 +65,22 @@ impl PieceManager {
     }
 
     pub fn total_progress(&self) -> f64 {
-        if self.total_size == 0 { return 100.0; }
+        if self.total_size == 0 {
+            return 100.0;
+        }
         let downloaded: u64 = self.downloaded_bytes_per_piece.iter().sum();
         downloaded as f64 / self.total_size as f64 * 100.0
     }
 
-    pub fn num_pieces(&self) -> u32 { self.num_pieces }
-    pub fn piece_length(&self) -> u32 { self.piece_length }
-    pub fn total_size(&self) -> u64 { self.total_size }
+    pub fn num_pieces(&self) -> u32 {
+        self.num_pieces
+    }
+    pub fn piece_length(&self) -> u32 {
+        self.piece_length
+    }
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
 }
 
 #[cfg(test)]
@@ -80,9 +89,12 @@ mod tests {
 
     #[test]
     fn test_manager_creation() {
-        let hashes: Vec<[u8; 20]> = (0..3).map(|_| {
-            let h = [0u8; 20]; h
-        }).collect();
+        let hashes: Vec<[u8; 20]> = (0..3)
+            .map(|_| {
+                let h = [0u8; 20];
+                h
+            })
+            .collect();
         let mgr = PieceManager::new(3, 512, 1024, hashes);
         assert_eq!(mgr.num_pieces(), 3);
         assert_eq!(mgr.piece_length(), 512);
@@ -91,9 +103,12 @@ mod tests {
 
     #[test]
     fn test_last_piece_size() {
-        let hashes: Vec<[u8; 20]> = (0..3).map(|_| {
-            let h = [0u8; 20]; h
-        }).collect();
+        let hashes: Vec<[u8; 20]> = (0..3)
+            .map(|_| {
+                let h = [0u8; 20];
+                h
+            })
+            .collect();
         let mgr = PieceManager::new(3, 512, 1100, hashes);
         assert_eq!(mgr.piece_size(0), 512);
         assert_eq!(mgr.piece_size(1), 512);
@@ -102,9 +117,12 @@ mod tests {
 
     #[test]
     fn test_mark_and_verify() {
-        let hashes: Vec<[u8; 20]> = (0..2).map(|_| {
-            let h = [0u8; 20]; h
-        }).collect();
+        let hashes: Vec<[u8; 20]> = (0..2)
+            .map(|_| {
+                let h = [0u8; 20];
+                h
+            })
+            .collect();
         let mut mgr = PieceManager::new(2, 100, 150, hashes);
         assert!(!mgr.is_completed(0));
 
@@ -121,9 +139,12 @@ mod tests {
 
     #[test]
     fn test_total_progress() {
-        let hashes: Vec<[u8; 20]> = (0..4).map(|_| {
-            let h = [0u8; 20]; h
-        }).collect();
+        let hashes: Vec<[u8; 20]> = (0..4)
+            .map(|_| {
+                let h = [0u8; 20];
+                h
+            })
+            .collect();
         let mut mgr = PieceManager::new(4, 256, 800, hashes);
         assert_eq!(mgr.total_progress(), 0.0);
 

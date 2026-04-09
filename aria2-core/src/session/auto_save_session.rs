@@ -7,10 +7,10 @@ use tokio::sync::RwLock;
 use async_trait::async_trait;
 use tracing::debug;
 
-use crate::error::Result;
-use crate::engine::command::{Command, CommandStatus};
-use crate::request::request_group_man::RequestGroupMan;
 use super::save_session_command::SaveSessionCommand;
+use crate::engine::command::{Command, CommandStatus};
+use crate::error::Result;
+use crate::request::request_group_man::RequestGroupMan;
 
 pub struct AutoSaveSession {
     inner: SaveSessionCommand,
@@ -21,11 +21,7 @@ pub struct AutoSaveSession {
 }
 
 impl AutoSaveSession {
-    pub fn new(
-        path: PathBuf,
-        interval: Duration,
-        man: Arc<RwLock<RequestGroupMan>>,
-    ) -> Self {
+    pub fn new(path: PathBuf, interval: Duration, man: Arc<RwLock<RequestGroupMan>>) -> Self {
         AutoSaveSession {
             inner: SaveSessionCommand::new(path, man),
             interval,
@@ -127,11 +123,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_autosave_clean_{}.sess", std::process::id()));
 
-        let mut auto = AutoSaveSession::new(
-            path.clone(),
-            Duration::from_secs(0),
-            man,
-        );
+        let mut auto = AutoSaveSession::new(path.clone(), Duration::from_secs(0), man);
 
         auto.execute().await.unwrap();
         assert!(!path.exists(), "非 dirty 不应写入文件");
@@ -143,13 +135,12 @@ mod tests {
     async fn test_auto_save_skip_when_interval_not_reached() {
         let man = Arc::new(RwLock::new(RequestGroupMan::new()));
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_autosave_interval_{}.sess", std::process::id()));
+        let path = dir.join(format!(
+            "test_autosave_interval_{}.sess",
+            std::process::id()
+        ));
 
-        let mut auto = AutoSaveSession::new(
-            path.clone(),
-            Duration::from_secs(999999),
-            man,
-        );
+        let mut auto = AutoSaveSession::new(path.clone(), Duration::from_secs(999999), man);
         auto.mark_dirty();
 
         auto.execute().await.unwrap();
@@ -161,19 +152,22 @@ mod tests {
     #[tokio::test]
     async fn test_auto_save_triggers_on_both_conditions() {
         let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-        man.write().await.add_group(
-            vec!["http://example.com/auto.bin".into()],
-            DownloadOptions { split: Some(2), ..Default::default() },
-        ).await.unwrap();
+        man.write()
+            .await
+            .add_group(
+                vec!["http://example.com/auto.bin".into()],
+                DownloadOptions {
+                    split: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
 
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_autosave_trigger_{}.sess", std::process::id()));
 
-        let mut auto = AutoSaveSession::new(
-            path.clone(),
-            Duration::from_secs(0),
-            man,
-        );
+        let mut auto = AutoSaveSession::new(path.clone(), Duration::from_secs(0), man);
         auto.mark_dirty();
 
         auto.execute().await.unwrap();
@@ -191,11 +185,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_autosave_reset_{}.sess", std::process::id()));
 
-        let mut auto = AutoSaveSession::new(
-            path.clone(),
-            Duration::from_secs(0),
-            man,
-        );
+        let mut auto = AutoSaveSession::new(path.clone(), Duration::from_secs(0), man);
         auto.mark_dirty();
         assert!(auto.is_dirty());
 

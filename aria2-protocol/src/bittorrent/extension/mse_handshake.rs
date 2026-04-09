@@ -1,6 +1,6 @@
-use rand::Rng;
-use super::mse_dh::DhKeyPair;
 use super::mse_crypto::{MseCryptoMethod, MseCryptoState, MseDerivedKeys};
+use super::mse_dh::DhKeyPair;
+use rand::Rng;
 
 const PAD_A_MIN: usize = 0;
 const PAD_A_MAX: usize = 512;
@@ -92,8 +92,7 @@ impl MseHandshake {
         if !matches!(self.phase, MseHandshakePhase::KeysExchanged) {
             return Err("Cannot build Step2: keys not yet exchanged".to_string());
         }
-        let remote_pub = self.remote_public.as_ref()
-            .ok_or("No remote public key")?;
+        let remote_pub = self.remote_public.as_ref().ok_or("No remote public key")?;
         let shared_secret = self.dh_keypair.compute_shared_secret(remote_pub);
         let keys = MseDerivedKeys::derive(&shared_secret);
 
@@ -107,7 +106,11 @@ impl MseHandshake {
 
         let crypto_provide = MseCryptoMethod::Rc4.as_u32().to_be_bytes();
 
-        let vc = if self.initiator { &keys.vc_a } else { &keys.vc_b };
+        let vc = if self.initiator {
+            &keys.vc_a
+        } else {
+            &keys.vc_b
+        };
 
         let mut plain = Vec::with_capacity(8 + 4 + 2 + pad_d_len + 2 + pad_e_len);
         plain.extend_from_slice(vc);
@@ -117,7 +120,11 @@ impl MseHandshake {
         plain.extend_from_slice(&(pad_e_len as u16).to_be_bytes());
         plain.extend_from_slice(&pad_e);
 
-        let enc_key = if self.initiator { &keys.enc_key_a } else { &keys.enc_key_b };
+        let enc_key = if self.initiator {
+            &keys.enc_key_a
+        } else {
+            &keys.enc_key_b
+        };
         let mut crypto = super::mse_crypto::init_rc4(enc_key);
         crypto.process(&mut plain);
 
@@ -126,13 +133,23 @@ impl MseHandshake {
     }
 
     pub fn receive_step2(&mut self, encrypted_data: &[u8]) -> Result<MseCryptoMethod, String> {
-        let remote_pub = self.remote_public.as_ref()
+        let remote_pub = self
+            .remote_public
+            .as_ref()
             .ok_or("No remote public key for step2")?;
         let shared_secret = self.dh_keypair.compute_shared_secret(remote_pub);
         let keys = MseDerivedKeys::derive(&shared_secret);
 
-        let recv_enc_key = if self.initiator { &keys.enc_key_b } else { &keys.enc_key_a };
-        let expected_vc = if self.initiator { &keys.vc_b } else { &keys.vc_a };
+        let recv_enc_key = if self.initiator {
+            &keys.enc_key_b
+        } else {
+            &keys.enc_key_a
+        };
+        let expected_vc = if self.initiator {
+            &keys.vc_b
+        } else {
+            &keys.vc_a
+        };
 
         let mut dec = encrypted_data.to_vec();
         let mut crypto = super::mse_crypto::init_rc4(recv_enc_key);
@@ -144,7 +161,10 @@ impl MseHandshake {
 
         let received_vc = &dec[0..8];
         if received_vc != *expected_vc {
-            return Err(format!("VC verification failed: expected {:?}, got {:?}", expected_vc, received_vc));
+            return Err(format!(
+                "VC verification failed: expected {:?}, got {:?}",
+                expected_vc, received_vc
+            ));
         }
 
         let crypto_provide = u32::from_be_bytes([dec[8], dec[9], dec[10], dec[11]]);
@@ -201,20 +221,28 @@ mod tests {
         let step1_i = initiator.build_step1();
         assert!(step1_i.len() >= 16, "Step1 must include padding");
 
-        responder.receive_step1(&step1_i).expect("Responder receive step1");
+        responder
+            .receive_step1(&step1_i)
+            .expect("Responder receive step1");
 
         let step1_r = responder.build_step1();
-        initiator.receive_step1(&step1_r).expect("Initiator receive step1");
+        initiator
+            .receive_step1(&step1_r)
+            .expect("Initiator receive step1");
 
         let step2_i = initiator.build_step2().expect("Initiator build step2");
         assert!(!step2_i.is_empty(), "Step2 should have data");
 
         let step2_r = responder.build_step2().expect("Responder build step2");
 
-        let method_r = responder.receive_step2(&step2_i).expect("Responder receive step2");
+        let method_r = responder
+            .receive_step2(&step2_i)
+            .expect("Responder receive step2");
         assert_eq!(method_r, MseCryptoMethod::Rc4);
 
-        let method_i = initiator.receive_step2(&step2_r).expect("Initiator receive step2");
+        let method_i = initiator
+            .receive_step2(&step2_r)
+            .expect("Initiator receive step2");
 
         let crypto_i = initiator.finalize().expect("Initiator finalize");
         let crypto_r = responder.finalize().expect("Responder finalize");

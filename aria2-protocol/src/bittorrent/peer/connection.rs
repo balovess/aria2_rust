@@ -2,10 +2,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 
-use crate::bittorrent::peer::id;
+use super::state::PeerState;
 use crate::bittorrent::message::handshake::Handshake;
 use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
-use super::state::PeerState;
+use crate::bittorrent::peer::id;
 
 #[derive(Debug, Clone)]
 pub struct PeerAddr {
@@ -15,18 +15,25 @@ pub struct PeerAddr {
 
 impl PeerAddr {
     pub fn new(ip: &str, port: u16) -> Self {
-        Self { ip: ip.to_string(), port }
+        Self {
+            ip: ip.to_string(),
+            port,
+        }
     }
 
     pub fn from_compact(data: &[u8]) -> Option<Self> {
-        if data.len() < 6 { return None; }
+        if data.len() < 6 {
+            return None;
+        }
         let ip = format!("{}.{}.{}.{}", data[0], data[1], data[2], data[3]);
         let port = u16::from_be_bytes([data[4], data[5]]);
         Some(Self { ip, port })
     }
 
     pub fn to_socket_addr(&self) -> std::net::SocketAddr {
-        format!("{}:{}", self.ip, self.port).parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap())
+        format!("{}:{}", self.ip, self.port)
+            .parse()
+            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap())
     }
 
     pub fn to_compact(&self) -> [u8; 6] {
@@ -54,7 +61,8 @@ impl PeerConnection {
         let stream = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             tokio::net::TcpStream::connect(&socket_addr),
-        ).await
+        )
+        .await
         .map_err(|_| format!("连接peer超时: {}", socket_addr))?
         .map_err(|e| format!("连接peer失败: {}", e))?;
 
@@ -65,19 +73,22 @@ impl PeerConnection {
         mut stream: tokio::net::TcpStream,
         info_hash: &[u8; 20],
     ) -> Result<Self, String> {
-
         let my_peer_id = id::generate_peer_id();
         let handshake = Handshake::new(info_hash, &my_peer_id);
         let handshake_bytes = handshake.to_bytes();
 
-        stream.write_all(&handshake_bytes).await
+        stream
+            .write_all(&handshake_bytes)
+            .await
             .map_err(|e| format!("发送握手失败: {}", e))?;
 
         let mut response = [0u8; 68];
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            stream.read_exact(&mut response)
-        ).await {
+            stream.read_exact(&mut response),
+        )
+        .await
+        {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(format!("读取握手响应失败: {}", e)),
             Err(_) => return Err("读取握手响应超时".to_string()),
@@ -99,10 +110,7 @@ impl PeerConnection {
         })
     }
 
-    pub fn from_stream_with_peer(
-        stream: tokio::net::TcpStream,
-        peer_id: [u8; 20],
-    ) -> Self {
+    pub fn from_stream_with_peer(stream: tokio::net::TcpStream, peer_id: [u8; 20]) -> Self {
         Self {
             stream,
             state: PeerState::new(),
@@ -115,9 +123,13 @@ impl PeerConnection {
         use crate::bittorrent::message::serializer::serialize;
         let data = serialize(message);
 
-        self.stream.write_all(&data).await
+        self.stream
+            .write_all(&data)
+            .await
             .map_err(|e| format!("发送消息失败: {}", e))?;
-        self.stream.flush().await
+        self.stream
+            .flush()
+            .await
             .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
 
         debug!("发送消息: {:?}", message.message_id());
@@ -140,7 +152,9 @@ impl PeerConnection {
         }
 
         let mut payload_buf = vec![0u8; msg_len];
-        self.stream.read_exact(&mut payload_buf).await
+        self.stream
+            .read_exact(&mut payload_buf)
+            .await
             .map_err(|e| format!("读取消息体失败: {}", e))?;
 
         let mut full_msg = vec![0u8; 4 + msg_len];
@@ -176,17 +190,22 @@ impl PeerConnection {
 
     pub async fn send_request(&mut self, req: PieceBlockRequest) -> Result<(), String> {
         self.state.add_request(req.clone());
-        self.send_message(&BtMessage::Request { request: req }).await
+        self.send_message(&BtMessage::Request { request: req })
+            .await
     }
 
     pub async fn send_cancel(&mut self, req: &PieceBlockRequest) -> Result<(), String> {
         self.state.remove_request(req);
-        self.send_message(&BtMessage::Cancel { request: req.clone() }).await
+        self.send_message(&BtMessage::Cancel {
+            request: req.clone(),
+        })
+        .await
     }
 
     pub async fn send_bitfield(&mut self, bitfield: Vec<u8>) -> Result<(), String> {
         self.remote_bitfield = bitfield.clone();
-        self.send_message(&BtMessage::Bitfield { data: bitfield }).await
+        self.send_message(&BtMessage::Bitfield { data: bitfield })
+            .await
     }
 
     pub fn is_connected(&self) -> bool {
@@ -194,17 +213,23 @@ impl PeerConnection {
     }
 
     pub async fn stream_write(&mut self, data: &[u8]) -> Result<(), String> {
-        self.stream.write_all(data).await
+        self.stream
+            .write_all(data)
+            .await
             .map_err(|e| format!("Stream write failed: {}", e))
     }
 
     pub async fn stream_flush(&mut self) -> Result<(), String> {
-        self.stream.flush().await
+        self.stream
+            .flush()
+            .await
             .map_err(|e| format!("Stream flush failed: {}", e))
     }
 
     pub async fn stream_read_exact(&mut self, buf: &mut [u8]) -> Result<(), String> {
-        self.stream.read_exact(buf).await
+        self.stream
+            .read_exact(buf)
+            .await
             .map(|_| ())
             .map_err(|e| format!("Stream read failed: {}", e))
     }

@@ -116,7 +116,10 @@ impl ChokeAlgorithm {
         let mut unchoke_indices: Vec<usize> = (0..peers.len()).collect();
 
         unchoke_indices.sort_by(|&a, &b| {
-            peers[b].download_speed.partial_cmp(&peers[a].download_speed).unwrap_or(std::cmp::Ordering::Equal)
+            peers[b]
+                .download_speed
+                .partial_cmp(&peers[a].download_speed)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         let max_unchoke = if is_seeder {
@@ -159,8 +162,12 @@ impl ChokeAlgorithm {
         to_unchoke
     }
 
-    pub fn select_optimistic_unchoke(peers: &[&PeerState], _current_optimistic: Option<usize>) -> Option<usize> {
-        let choked_interested: Vec<usize> = peers.iter()
+    pub fn select_optimistic_unchoke(
+        peers: &[&PeerState],
+        _current_optimistic: Option<usize>,
+    ) -> Option<usize> {
+        let choked_interested: Vec<usize> = peers
+            .iter()
             .enumerate()
             .filter(|(_, p)| p.am_choking && p.peer_interested)
             .map(|(i, _)| i)
@@ -224,11 +231,26 @@ mod tests {
     #[test]
     fn test_choke_algorithm_basic() {
         let mut peers: Vec<PeerState> = vec![
-            PeerState { download_speed: 100.0, ..PeerState::new() },
-            PeerState { download_speed: 500.0, ..PeerState::new() },
-            PeerState { download_speed: 300.0, ..PeerState::new() },
-            PeerState { download_speed: 50.0, ..PeerState::new() },
-            PeerState { download_speed: 200.0, ..PeerState::new() },
+            PeerState {
+                download_speed: 100.0,
+                ..PeerState::new()
+            },
+            PeerState {
+                download_speed: 500.0,
+                ..PeerState::new()
+            },
+            PeerState {
+                download_speed: 300.0,
+                ..PeerState::new()
+            },
+            PeerState {
+                download_speed: 50.0,
+                ..PeerState::new()
+            },
+            PeerState {
+                download_speed: 200.0,
+                ..PeerState::new()
+            },
         ];
         let mut refs: Vec<&mut PeerState> = peers.iter_mut().collect();
         let unchoked = ChokeAlgorithm::evaluate_choke(&mut refs, false);

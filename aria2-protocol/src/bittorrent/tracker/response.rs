@@ -64,7 +64,10 @@ impl TrackerResponse {
 
         debug!(
             "Tracker响应: interval={}s, seeders={}, leechers={}, peers={}",
-            interval, seeders, leechers, peers.len()
+            interval,
+            seeders,
+            leechers,
+            peers.len()
         );
 
         Ok(Self {
@@ -78,7 +81,9 @@ impl TrackerResponse {
         })
     }
 
-    fn parse_peers(root: &crate::bittorrent::bencode::codec::BencodeValue) -> Result<Vec<PeerInfo>, String> {
+    fn parse_peers(
+        root: &crate::bittorrent::bencode::codec::BencodeValue,
+    ) -> Result<Vec<PeerInfo>, String> {
         match root.dict_get(b"peers") {
             Some(crate::bittorrent::bencode::codec::BencodeValue::Bytes(data)) => {
                 Self::parse_compact_peers(data)
@@ -99,7 +104,11 @@ impl TrackerResponse {
         for chunk in data.chunks_exact(6) {
             let ip = format!("{}.{}.{}.{}", chunk[0], chunk[1], chunk[2], chunk[3]);
             let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-            peers.push(PeerInfo { ip, port, peer_id: None });
+            peers.push(PeerInfo {
+                ip,
+                port,
+                peer_id: None,
+            });
         }
         Ok(peers)
     }
@@ -110,15 +119,18 @@ impl TrackerResponse {
         let mut peers = Vec::new();
         for item in list {
             let dict = item.as_dict().ok_or("peer条目不是字典")?;
-            let ip = dict.get(&b"ip"[..])
+            let ip = dict
+                .get(&b"ip"[..])
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_default();
-            let port = dict.get(&b"port"[..])
+            let port = dict
+                .get(&b"port"[..])
                 .and_then(|v| v.as_int())
                 .map(|n| n as u16)
                 .unwrap_or(0);
-            let peer_id = dict.get(&b"peer id"[..])
+            let peer_id = dict
+                .get(&b"peer id"[..])
                 .and_then(|v| v.as_bytes())
                 .filter(|b| b.len() == 20)
                 .map(|b| {
@@ -174,7 +186,10 @@ mod tests {
     #[test]
     fn test_parse_failure_response() {
         let mut d = BTreeMap::new();
-        d.insert(b"failure reason".to_vec(), BencodeValue::Bytes(b"tracker offline".to_vec()));
+        d.insert(
+            b"failure reason".to_vec(),
+            BencodeValue::Bytes(b"tracker offline".to_vec()),
+        );
         let root = BencodeValue::Dict(d);
         let resp = TrackerResponse::parse(&root.encode()).unwrap();
         assert!(resp.is_failure());
