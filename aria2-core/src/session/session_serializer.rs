@@ -12,6 +12,23 @@ pub struct SessionEntry {
     pub uris: Vec<String>,
     pub options: HashMap<String, String>,
     pub paused: bool,
+
+    // New progress & status fields
+    pub total_length: u64,
+    pub completed_length: u64,
+    pub upload_length: u64,
+    pub download_speed: u64,
+    pub status: String,           // "active"/"waiting"/"paused"/"error"
+    pub error_code: Option<i32>,
+
+    // BT-specific fields (only populated for BT downloads)
+    pub bitfield: Option<Vec<u8>>,       // completed piece bitmap as hex string in file
+    pub num_pieces: Option<u32>,
+    pub piece_length: Option<u32>,
+    pub info_hash_hex: Option<String>,   // for matching torrent files
+
+    // HTTP/FTP resume info
+    pub resume_offset: Option<u64>,      // already written file offset
 }
 
 impl SessionEntry {
@@ -21,6 +38,23 @@ impl SessionEntry {
             uris,
             options: HashMap::new(),
             paused: false,
+
+            // Default values for new fields
+            total_length: 0,
+            completed_length: 0,
+            upload_length: 0,
+            download_speed: 0,
+            status: "active".to_string(),
+            error_code: None,
+
+            // BT-specific fields (None for non-BT downloads)
+            bitfield: None,
+            num_pieces: None,
+            piece_length: None,
+            info_hash_hex: None,
+
+            // HTTP/FTP resume info
+            resume_offset: None,
         }
     }
 
@@ -95,6 +129,44 @@ pub fn serialize_entry(entry: &SessionEntry) -> String {
         lines.push_str(&format!(" {}={}\n", key, value));
     }
 
+    // Serialize new progress & status fields
+    lines.push_str(&format!(" TOTAL_LENGTH={}\n", entry.total_length));
+    lines.push_str(&format!(" COMPLETED_LENGTH={}\n", entry.completed_length));
+    lines.push_str(&format!(" UPLOAD_LENGTH={}\n", entry.upload_length));
+    lines.push_str(&format!(" DOWNLOAD_SPEED={}\n", entry.download_speed));
+    lines.push_str(&format!(" STATUS={}\n", entry.status));
+
+    // ERROR_CODE (optional)
+    match entry.error_code {
+        Some(code) => lines.push_str(&format!(" ERROR_CODE={}\n", code)),
+        None => lines.push_str(" ERROR_CODE=\n"),
+    }
+
+    // BITFIELD (hex encoded or empty)
+    match &entry.bitfield {
+        Some(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            lines.push_str(&format!(" BITFIELD={}\n", hex));
+        }
+        None => lines.push_str(" BITFIELD=\n"),
+    }
+
+    // NUM_PIECES and PIECE_LENGTH
+    lines.push_str(&format!(" NUM_PIECES={}\n",
+        entry.num_pieces.unwrap_or(0)));
+    lines.push_str(&format!(" PIECE_LENGTH={}\n",
+        entry.piece_length.unwrap_or(0)));
+
+    // INFO_HASH (optional)
+    match &entry.info_hash_hex {
+        Some(hash) => lines.push_str(&format!(" INFO_HASH={}\n", hash)),
+        None => lines.push_str(" INFO_HASH=\n"),
+    }
+
+    // RESUME_OFFSET (optional)
+    lines.push_str(&format!(" RESUME_OFFSET={}\n",
+        entry.resume_offset.unwrap_or(0)));
+
     lines
 }
 
@@ -140,11 +212,49 @@ async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
             let options = download_options_to_map(group.options());
             let paused = matches!(status, DownloadStatus::Paused);
 
+            // Extract progress information
+            let total_length = group.total_length();
+            let completed_length = group.completed_length().await;
+            let upload_length = 0u64; // TODO: Track actual upload length if needed
+            let download_speed = group.download_speed().await;
+
+            // Convert DownloadStatus to string
+            let status_str = match status {
+                DownloadStatus::Active => "active",
+                DownloadStatus::Waiting => "waiting",
+                DownloadStatus::Paused => "paused",
+                DownloadStatus::Complete | DownloadStatus::Removed => "complete",
+                DownloadStatus::Error(_) => "error",
+            }.to_string();
+
+            // Extract error code if in error state
+            let error_code = match &status {
+                DownloadStatus::Error(_) => Some(1), // Generic error code
+                _ => None,
+            };
+
             Some(SessionEntry {
                 gid,
                 uris,
                 options,
                 paused,
+
+                // Progress fields
+                total_length,
+                completed_length,
+                upload_length,
+                download_speed,
+                status: status_str,
+                error_code,
+
+                // BT-specific fields (None for HTTP/FTP downloads)
+                bitfield: None,
+                num_pieces: None,
+                piece_length: None,
+                info_hash_hex: None,
+
+                // Resume offset (use completed_length for now as a reasonable default)
+                resume_offset: if completed_length > 0 { Some(completed_length) } else { None },
             })
         }
     }
@@ -179,14 +289,106 @@ pub fn deserialize(text: &str) -> Result<Vec<SessionEntry>> {
                 if let Some((key, value)) = rest_trimmed.split_once('=') {
                     let key = key.to_string();
                     let value = value.to_string();
-                    if key == "GID" {
-                        if let Ok(gid) = u64::from_str_radix(&value, 16) {
-                            entry.gid = gid;
+
+                    // Handle known keys
+                    match key.as_str() {
+                        "GID" => {
+                            if let Ok(gid) = u64::from_str_radix(&value, 16) {
+                                entry.gid = gid;
+                            }
                         }
-                    } else if key == "PAUSE" && value == "true" {
-                        entry.paused = true;
-                    } else {
-                        entry.options.insert(key, value);
+                        "PAUSE" => {
+                            if value == "true" {
+                                entry.paused = true;
+                            }
+                        }
+                        // New progress & status fields
+                        "TOTAL_LENGTH" => {
+                            if let Ok(v) = value.parse::<u64>() {
+                                entry.total_length = v;
+                            }
+                        }
+                        "COMPLETED_LENGTH" => {
+                            if let Ok(v) = value.parse::<u64>() {
+                                entry.completed_length = v;
+                            }
+                        }
+                        "UPLOAD_LENGTH" => {
+                            if let Ok(v) = value.parse::<u64>() {
+                                entry.upload_length = v;
+                            }
+                        }
+                        "DOWNLOAD_SPEED" => {
+                            if let Ok(v) = value.parse::<u64>() {
+                                entry.download_speed = v;
+                            }
+                        }
+                        "STATUS" => {
+                            if !value.is_empty() {
+                                entry.status = value;
+                            }
+                        }
+                        "ERROR_CODE" => {
+                            if !value.is_empty() {
+                                if let Ok(code) = value.parse::<i32>() {
+                                    entry.error_code = Some(code);
+                                }
+                            } else {
+                                entry.error_code = None;
+                            }
+                        }
+                        "BITFIELD" => {
+                            if !value.is_empty() {
+                                // Decode hex string back to Vec<u8>
+                                if let Ok(bytes) = decode_hex(&value) {
+                                    entry.bitfield = Some(bytes);
+                                } else {
+                                    tracing::warn!("Invalid BITFIELD hex string, ignoring");
+                                    entry.bitfield = None;
+                                }
+                            } else {
+                                entry.bitfield = None;
+                            }
+                        }
+                        "NUM_PIECES" => {
+                            if let Ok(v) = value.parse::<u32>() {
+                                if v > 0 {
+                                    entry.num_pieces = Some(v);
+                                } else {
+                                    entry.num_pieces = None;
+                                }
+                            }
+                        }
+                        "PIECE_LENGTH" => {
+                            if let Ok(v) = value.parse::<u32>() {
+                                if v > 0 {
+                                    entry.piece_length = Some(v);
+                                } else {
+                                    entry.piece_length = None;
+                                }
+                            }
+                        }
+                        "INFO_HASH" => {
+                            if !value.is_empty() {
+                                entry.info_hash_hex = Some(value);
+                            } else {
+                                entry.info_hash_hex = None;
+                            }
+                        }
+                        "RESUME_OFFSET" => {
+                            if let Ok(v) = value.parse::<u64>() {
+                                if v > 0 {
+                                    entry.resume_offset = Some(v);
+                                } else {
+                                    entry.resume_offset = None;
+                                }
+                            }
+                        }
+                        _ => {
+                            // Unknown key - store in options map (forward compatibility)
+                            tracing::debug!("Unknown session key '{}', storing in options", key);
+                            entry.options.insert(key, value);
+                        }
                     }
                 }
                 continue;
@@ -212,6 +414,27 @@ pub fn deserialize(text: &str) -> Result<Vec<SessionEntry>> {
     Ok(entries)
 }
 
+/// Decode a hex string to Vec<u8>
+fn decode_hex(hex: &str) -> Result<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return Err(Aria2Error::Io(format!(
+            "Hex string has odd length: {}",
+            hex.len()
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        let byte_str = &hex[i..i + 2];
+        let byte = u8::from_str_radix(byte_str, 16).map_err(|e| {
+            Aria2Error::Io(format!("Invalid hex character at position {}: {}", i, e))
+        })?;
+        bytes.push(byte);
+    }
+
+    Ok(bytes)
+}
+
 pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
     let content = tokio::fs::read_to_string(path)
         .await
@@ -221,6 +444,29 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 
 pub async fn save_to_file(path: &Path, groups: &[Arc<RwLock<RequestGroup>>]) -> Result<()> {
     let content = serialize_groups(groups).await?;
+    let tmp_path = path.with_extension("sess.tmp");
+    tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
+        Aria2Error::Io(format!(
+            "写入 session 临时文件失败 {}: {}",
+            tmp_path.display(),
+            e
+        ))
+    })?;
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(|e| Aria2Error::Io(format!("重命名 session 文件失败 {}: {}", path.display(), e)))
+}
+
+/// 直接保存 SessionEntry 列表到文件（不经过 RequestGroup 转换）
+///
+/// 使用原子写入策略：先写入 .tmp 临时文件，然后重命名为目标文件
+pub async fn save_to_file_with_entries(path: &Path, entries: &[SessionEntry]) -> Result<()> {
+    let mut content = String::new();
+    for entry in entries {
+        content.push_str(&serialize_entry(entry));
+        content.push('\n');
+    }
+
     let tmp_path = path.with_extension("sess.tmp");
     tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
         Aria2Error::Io(format!(
@@ -399,5 +645,257 @@ ftp://server/big.iso
         let empty_opts = DownloadOptions::default();
         let empty_map = download_options_to_map(&empty_opts);
         assert!(empty_map.is_empty());
+    }
+
+    // ==================== 新增测试用例 (Session 持久化增强) ====================
+
+    #[test]
+    fn test_serialize_new_fields() {
+        let mut entry = SessionEntry::new(1, vec!["http://example.com/file.bin".to_string()]);
+        entry.total_length = 1024 * 1024; // 1MB
+        entry.completed_length = 512 * 1024; // 512KB
+        entry.upload_length = 1024;
+        entry.download_speed = 2048;
+        entry.status = "active".to_string();
+        entry.error_code = None;
+
+        let text = serialize_entry(&entry);
+
+        // 验证新字段出现在输出中
+        assert!(text.contains("TOTAL_LENGTH=1048576"), "应包含 TOTAL_LENGTH");
+        assert!(text.contains("COMPLETED_LENGTH=524288"), "应包含 COMPLETED_LENGTH");
+        assert!(text.contains("UPLOAD_LENGTH=1024"), "应包含 UPLOAD_LENGTH");
+        assert!(text.contains("DOWNLOAD_SPEED=2048"), "应包含 DOWNLOAD_SPEED");
+        assert!(text.contains("STATUS=active"), "应包含 STATUS");
+    }
+
+    #[test]
+    fn test_deserialize_with_all_fields() {
+        let input = r#"http://example.com/bigfile.zip
+ GID=1
+ TOTAL_LENGTH=10485760
+ COMPLETED_LENGTH=5242880
+ UPLOAD_LENGTH=2048
+ DOWNLOAD_SPEED=4096
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=5242880
+"#;
+
+        let entries = deserialize(input).unwrap();
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry.total_length, 10485760);
+        assert_eq!(entry.completed_length, 5242880);
+        assert_eq!(entry.upload_length, 2048);
+        assert_eq!(entry.download_speed, 4096);
+        assert_eq!(entry.status, "active");
+        assert_eq!(entry.error_code, None);
+        assert_eq!(entry.resume_offset, Some(5242880));
+    }
+
+    #[test]
+    fn test_deserialize_backward_compat() {
+        // 旧格式（没有新字段）应该能正常加载
+        let input = r#"http://example.com/old-format.zip
+ GID=abc123
+ split=4
+ dir=/downloads
+"#;
+
+        let entries = deserialize(input).unwrap();
+        assert_eq!(entries.len(), 1);
+
+        // 验证默认值
+        assert_eq!(entries[0].total_length, 0, "旧格式应使用默认值 0");
+        assert_eq!(entries[0].completed_length, 0, "旧格式应使用默认值 0");
+        assert_eq!(entries[0].upload_length, 0, "旧格式应使用默认值 0");
+        assert_eq!(entries[0].download_speed, 0, "旧格式应使用默认值 0");
+        assert_eq!(entries[0].status, "active", "旧格式应使用默认状态 active");
+        assert_eq!(entries[0].error_code, None, "旧格式应无错误代码");
+        assert_eq!(entries[0].bitfield, None, "旧格式应无 bitfield");
+        assert_eq!(entries[0].resume_offset, None, "旧格式应无 resume_offset");
+
+        // 原有字段仍然正确
+        assert_eq!(entries[0].options.get("split").unwrap(), "4");
+    }
+
+    #[test]
+    fn test_deserialize_unknown_keys_ignored() {
+        // 包含未知键的输入不应导致解析失败（向前兼容）
+        let input = r#"http://example.com/file.zip
+ GID=1
+ UNKNOWN_KEY=some_value
+ ANOTHER_UNKNOWN=42
+ FUTURE_FIELD=data
+ TOTAL_LENGTH=1000
+"#;
+
+        let entries = deserialize(input).unwrap();
+        assert_eq!(entries.len(), 1);
+
+        // 已知字段正常解析
+        assert_eq!(entries[0].total_length, 1000);
+
+        // 未知键被存储到 options 中
+        assert_eq!(
+            entries[0].options.get("UNKNOWN_KEY").unwrap(),
+            "some_value"
+        );
+        assert_eq!(
+            entries[0].options.get("ANOTHER_UNKNOWN").unwrap(),
+            "42"
+        );
+        assert_eq!(
+            entries[0].options.get("FUTURE_FIELD").unwrap(),
+            "data"
+        );
+    }
+
+    #[test]
+    fn test_bitfield_roundtrip() {
+        let mut entry = SessionEntry::new(1, vec!["http://example.com/torrent.torrent".to_string()]);
+        // 设置 bitfield: [0xFF, 0xF0, 0x0F] - 表示某些 piece 已完成
+        entry.bitfield = Some(vec![0xFF, 0xF0, 0x0F]);
+        entry.num_pieces = Some(24); // 3 bytes * 8 bits = 24 pieces
+        entry.piece_length = Some(262144); // 256KB
+
+        let text = serialize_entry(&entry);
+
+        // 验证 hex 编码
+        assert!(text.contains("BITFIELD=fff00f"), "bitfield 应编码为 hex 字符串");
+
+        // 反序列化验证
+        let deserialized = deserialize(&text).unwrap();
+        assert_eq!(deserialized.len(), 1);
+
+        let restored = &deserialized[0];
+        assert_eq!(restored.bitfield, Some(vec![0xFF, 0xF0, 0x0F]), "bitfield 应正确还原");
+        assert_eq!(restored.num_pieces, Some(24));
+        assert_eq!(restored.piece_length, Some(262144));
+    }
+
+    #[test]
+    fn test_empty_bitfield_serialized_as_empty() {
+        let entry = SessionEntry::new(1, vec!["http://example.com/file.zip".to_string()]);
+        // bitfield 默认为 None
+
+        let text = serialize_entry(&entry);
+
+        // None bitfield 应该产生空值或空行
+        assert!(text.contains("BITFIELD=\n"), "None bitfield 应序列化为空值");
+
+        // 反序列化验证
+        let deserialized = deserialize(&text).unwrap();
+        assert_eq!(deserialized[0].bitfield, None, "空 bitfield 应还原为 None");
+    }
+
+    #[test]
+    fn test_default_session_entry_has_zero_progress() {
+        let entry = SessionEntry::new(99, vec!["http://test.com/f".to_string()]);
+
+        // 验证所有新字段的默认值
+        assert_eq!(entry.total_length, 0);
+        assert_eq!(entry.completed_length, 0);
+        assert_eq!(entry.upload_length, 0);
+        assert_eq!(entry.download_speed, 0);
+        assert_eq!(entry.status, "active", "默认状态应为 active");
+        assert_eq!(entry.error_code, None);
+        assert_eq!(entry.bitfield, None);
+        assert_eq!(entry.num_pieces, None);
+        assert_eq!(entry.piece_length, None);
+        assert_eq!(entry.info_hash_hex, None);
+        assert_eq!(entry.resume_offset, None);
+    }
+
+    #[test]
+    fn test_status_field_values() {
+        let statuses = ["active", "waiting", "paused", "error"];
+
+        for status in statuses {
+            let mut entry = SessionEntry::new(1, vec!["http://example.com/f".to_string()]);
+            entry.status = status.to_string();
+
+            let text = serialize_entry(&entry);
+            assert!(
+                text.contains(&format!("STATUS={}", status)),
+                "状态 '{}' 应正确序列化",
+                status
+            );
+
+            // 反序列化验证
+            let deserialized = deserialize(&text).unwrap();
+            assert_eq!(deserialized[0].status, status, "状态 '{}' 应正确反序列化", status);
+        }
+    }
+
+    #[test]
+    fn test_resume_offset_for_http_ftp() {
+        let mut entry = SessionEntry::new(
+            1,
+            vec!["http://example.com/large-file.iso".to_string()],
+        );
+        // 模拟 HTTP 下载已写入部分数据
+        entry.total_length = 1073741824; // 1GB
+        entry.completed_length = 536870912; // 512MB 已完成
+        entry.resume_offset = Some(536870912); // 从 512MB 处恢复
+        entry.status = "paused".to_string();
+
+        let text = serialize_entry(&entry);
+
+        // 验证 resume offset 被正确序列化
+        assert!(
+            text.contains("RESUME_OFFSET=536870912"),
+            "resume offset 应正确序列化"
+        );
+
+        // 反序列化并验证
+        let deserialized = deserialize(&text).unwrap();
+        assert_eq!(deserialized.len(), 1);
+        assert_eq!(
+            deserialized[0].resume_offset, Some(536870912),
+            "resume offset 应正确还原"
+        );
+        assert_eq!(deserialized[0].status, "paused");
+    }
+
+    #[test]
+    fn test_bt_specific_fields_only_when_present() {
+        // 测试 BT 特定字段是可选的
+        let mut entry = SessionEntry::new(
+            1,
+            vec!["magnet:?xt=urn:btih:abc123".to_string()],
+        );
+
+        // 不设置任何 BT 字段（保持 None）
+        let text_without_bt = serialize_entry(&entry);
+        let deserialized_without_bt = deserialize(&text_without_bt).unwrap();
+
+        assert_eq!(deserialized_without_bt[0].bitfield, None);
+        assert_eq!(deserialized_without_bt[0].num_pieces, None);
+        assert_eq!(deserialized_without_bt[0].piece_length, None);
+        assert_eq!(deserialized_without_bt[0].info_hash_hex, None);
+
+        // 现在设置 BT 字段
+        entry.bitfield = Some(vec![0xAA, 0xBB]);
+        entry.num_pieces = Some(16);
+        entry.piece_length = Some(524288);
+        entry.info_hash_hex = Some("abc123def456".to_string());
+
+        let text_with_bt = serialize_entry(&entry);
+        let deserialized_with_bt = deserialize(&text_with_bt).unwrap();
+
+        assert_eq!(deserialized_with_bt[0].bitfield, Some(vec![0xAA, 0xBB]));
+        assert_eq!(deserialized_with_bt[0].num_pieces, Some(16));
+        assert_eq!(deserialized_with_bt[0].piece_length, Some(524288));
+        assert_eq!(
+            deserialized_with_bt[0].info_hash_hex,
+            Some("abc123def456".to_string())
+        );
     }
 }
