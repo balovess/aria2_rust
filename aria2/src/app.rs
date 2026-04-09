@@ -1,5 +1,7 @@
 use colored::Colorize;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
 use aria2_core::config::{ConfigManager, OptionValue};
@@ -14,8 +16,10 @@ use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
 use aria2_core::init_logging;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::session::active_session::ActiveSessionManager;
+use aria2_core::session::session_serializer::SessionEntry;
 use aria2_core::validation::protocol_detector::{detect, DetectedInput, InputType};
-use tracing::{error, info, warn, Level};
+use tracing::{debug, error, info, warn, Level};
 
 /// Top-level application runtime for aria2-rust CLI.
 ///
@@ -244,6 +248,235 @@ impl App {
         info!("引擎初始化完成");
     }
 
+    /// 从会话文件加载并恢复未完成的下载任务
+    ///
+    /// 此方法在启动时调用，用于从 --input-file 指定的会话文件中恢复之前中断的下载。
+    ///
+    /// # 恢复逻辑
+    /// 1. 跳过状态为 "complete" 的条目（已完成的不需要恢复）
+    /// 2. 跳过 completed_length 和 total_length 都为 0 的条目（无进度信息）
+    /// 3. 对于有进度的条目，重新创建下载任务
+    /// 4. BT 下载的 bitfield 信息会被保留供后续使用
+    ///
+    /// # 返回值
+    /// - `Ok(usize)`: 成功恢复的任务数量
+    /// - `Err(String)`: 恢复过程中的错误信息
+    pub async fn restore_session(&self) -> std::result::Result<usize, String> {
+        let input_file = match self.get_opt_str("input-file").await {
+            Some(path) => path,
+            None => return Ok(0), // 未指定 input-file，无需恢复
+        };
+
+        let session_path = PathBuf::from(&input_file);
+        if !session_path.exists() {
+            info!("会话文件不存在，跳过恢复: {}", input_file);
+            return Ok(0);
+        }
+
+        info!("正在从会话文件恢复下载任务: {}", input_file);
+
+        let mgr = ActiveSessionManager::new(
+            session_path.clone(),
+            Duration::from_secs(60), // 默认间隔，恢复时不启用自动保存
+        );
+
+        let entries = match mgr.load_session().await {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!("加载会话文件失败: {}", e);
+                return Err(e);
+            }
+        };
+
+        if entries.is_empty() {
+            info!("会话文件为空或无可恢复条目");
+            return Ok(0);
+        }
+
+        let mut restored_count = 0;
+
+        for entry in &entries {
+            // 跳过已完成的条目
+            if entry.status == "complete" {
+                debug!("跳过已完成条目: GID={:x}", entry.gid);
+                continue;
+            }
+
+            // 跳过无进度信息的条目（可能是新添加但尚未开始下载的）
+            if entry.completed_length == 0 && entry.total_length == 0 {
+                debug!("跳过无进度条目: GID={:x}, URIs={:?}", entry.gid, entry.uris);
+                continue;
+            }
+
+            // 将 SessionEntry 的 options 映射回 DownloadOptions
+            let opts = Self::map_entry_to_download_options(&entry.options);
+
+            info!(
+                "恢复下载任务: GID={:x}, URIs={:?}, 进度={}/{}",
+                entry.gid,
+                entry.uris,
+                entry.completed_length,
+                entry.total_length
+            );
+
+            // 通过 RequestGroupMan 添加组
+            {
+                let man = self.request_man.read().await;
+                match man.add_group(entry.uris.clone(), opts).await {
+                    Ok(gid) => {
+                        restored_count += 1;
+                        info!("成功恢复任务 #{}", gid.value());
+
+                        // 如果有 BT bitfield，将其存储到 RequestGroup 中供后续使用
+                        if entry.bitfield.is_some() {
+                            if let Some(group_lock) = man.get_group(gid).await {
+                                let mut group = group_lock.write().await;
+                                *group.bt_bitfield.write().await = entry.bitfield.clone();
+                                debug!(
+                                    "已设置 BT bitfield for GID={}, bits={}",
+                                    gid.value(),
+                                    entry.bitfield.as_ref().map(|b| b.len()).unwrap_or(0)
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("恢复任务失败 (GID={:x}): {}", entry.gid, e);
+                    }
+                }
+            }
+        }
+
+        info!("会话恢复完成: 共 {} 个条目, 恢复 {} 个任务", entries.len(), restored_count);
+        Ok(restored_count)
+    }
+
+    /// 在应用退出时保存当前活动会话
+    ///
+    /// 此方法应在引擎运行结束后调用，用于将所有未完成的下载任务保存到会话文件中。
+    ///
+    /// # 返回值
+    /// - `Ok(Option<usize>)`: 成功保存的条目数量（如果配置了 save-session）
+    /// - `Err(String)`: 保存失败时的错误信息
+    pub async fn save_session_on_shutdown(&self) -> std::result::Result<Option<usize>, String> {
+        let save_path = match self.get_opt_str("save-session").await {
+            Some(path) => path,
+            None => {
+                debug!("未配置 save-session，跳过关闭保存");
+                return Ok(None);
+            }
+        };
+
+        info!("正在保存会话到: {}", save_path);
+
+        let session_path = PathBuf::from(&save_path);
+        let interval = self
+            .get_opt_i64("save-session-interval")
+            .await
+            .unwrap_or(60)
+            .max(1); // 至少 1 秒
+
+        let mgr = ActiveSessionManager::new(
+            session_path,
+            Duration::from_secs(interval as u64),
+        );
+
+        // 获取所有活动组
+        let man = self.request_man.read().await;
+        let groups = man.list_groups().await;
+
+        if groups.is_empty() {
+            info!("没有活动下载任务，不保存会话");
+            return Ok(Some(0));
+        }
+
+        match mgr.save_session(&groups).await {
+            Ok(n) => {
+                info!("成功保存 {} 个条目到 {}", n, save_path);
+                Ok(Some(n))
+            }
+            Err(e) => {
+                warn!("保存会话失败: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    /// 将 SessionEntry 的 options HashMap 映射回 DownloadOptions
+    fn map_entry_to_download_options(options: &std::collections::HashMap<String, String>) -> DownloadOptions {
+        DownloadOptions {
+            split: options.get("split").and_then(|v| v.parse::<u16>().ok()),
+            max_connection_per_server: options
+                .get("max-connection-per-server")
+                .and_then(|v| v.parse::<u16>().ok()),
+            max_download_limit: options
+                .get("max-download-limit")
+                .and_then(|v| v.parse::<u64>().ok()),
+            max_upload_limit: options
+                .get("max-upload-limit")
+                .and_then(|v| v.parse::<u64>().ok()),
+            dir: options.get("dir").cloned(),
+            out: options.get("out").cloned(),
+            seed_time: options.get("seed-time").and_then(|v| v.parse::<u64>().ok()),
+            seed_ratio: options.get("seed-ratio").and_then(|v| v.parse::<f64>().ok()),
+            checksum: options.get("checksum").and_then(|v| {
+                if let Some((algo, val)) = v.split_once('=') {
+                    Some((algo.trim().to_string(), val.trim().to_string()))
+                } else {
+                    None
+                }
+            }),
+            cookie_file: options.get("cookie-file").cloned(),
+            cookies: options.get("cookies").cloned(),
+            bt_force_encrypt: options
+                .get("bt-force-encrypt")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            bt_require_crypto: options
+                .get("bt-require-crypto")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            enable_dht: options
+                .get("enable-dht")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            dht_listen_port: options
+                .get("dht-listen-port")
+                .and_then(|v| v.parse::<u16>().ok()),
+            enable_public_trackers: options
+                .get("enable-public-trackers")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            bt_piece_selection_strategy: options
+                .get("bt-piece-selection-strategy")
+                .cloned()
+                .unwrap_or_else(|| "rarest-first".to_string()),
+            bt_endgame_threshold: options
+                .get("bt-endgame-threshold")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(20),
+            max_retries: options
+                .get("max-retries")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(3),
+            retry_wait: options
+                .get("retry-wait")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1),
+            http_proxy: options.get("http-proxy").cloned(),
+            dht_file_path: options.get("dht-file-path").cloned(),
+            bt_max_upload_slots: options
+                .get("bt-max-upload-slots")
+                .and_then(|v| v.parse::<u32>().ok()),
+            bt_optimistic_unchoke_interval: options
+                .get("bt-optimistic-unchoke-interval")
+                .and_then(|v| v.parse::<u64>().ok()),
+            bt_snubbed_timeout: options
+                .get("bt-snubbed-timeout")
+                .and_then(|v| v.parse::<u64>().ok()),
+        }
+    }
+
     pub async fn add_downloads(&self) -> std::result::Result<Vec<u64>, String> {
         if self.detected_inputs.is_empty() {
             return Err("No download inputs provided".to_string());
@@ -341,6 +574,19 @@ impl App {
                 .unwrap_or(1),
             http_proxy: self.get_opt_str("http-proxy").await,
             dht_file_path: self.get_opt_str("dht-file-path").await,
+            // Choking algorithm configuration (opt-in)
+            bt_max_upload_slots: self
+                .get_opt_i64("bt-max-upload-slots")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
+            bt_optimistic_unchoke_interval: self
+                .get_opt_i64("bt-optimistic-unchoke-interval")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+            bt_snubbed_timeout: self
+                .get_opt_i64("bt-snubbed-timeout")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
         };
 
         let mut engine_lock = self.engine.lock().await;
@@ -445,8 +691,10 @@ impl App {
     /// 1. Handles `--help` / `--version` flags
     /// 2. Loads config from env → file → CLI args (4-source merge)
     /// 3. Initializes the download engine
-    /// 4. Adds download tasks from positional URIs
-    /// 5. Runs the engine event loop
+    /// 4. **Restores session from input-file (if configured)**
+    /// 5. Adds download tasks from positional URIs
+    /// 6. Runs the engine event loop
+    /// 7. **Saves session on shutdown (if configured)**
     ///
     /// Returns exit code: `0` = success, `1` = error.
     pub async fn run(&mut self, args: &[String]) -> i32 {
@@ -475,29 +723,61 @@ impl App {
 
         self.print_banner();
 
-        if self.detected_inputs.is_empty() {
-            eprintln!("{}", "错误: 请提供下载URI或torrent文件路径".red());
-            return 1;
-        }
-
+        // 初始化引擎（必须在恢复会话之前）
         self.initialize_engine().await;
 
-        match self.add_downloads().await {
-            Ok(gids) => {
-                info!("已添加 {} 个下载任务", gids.len());
-                for gid in &gids {
-                    println!("  {} 任务 #{}", "#".cyan(), gid.to_string().yellow());
+        // 步骤 4: 从会话文件恢复未完成的下载任务
+        match self.restore_session().await {
+            Ok(count) => {
+                if count > 0 {
+                    info!("成功恢复 {} 个下载任务", count);
                 }
             }
             Err(e) => {
-                eprintln!("{}", format!("添加任务失败: {}", e).red());
-                return 1;
+                warn!("会话恢复失败（将继续执行）: {}", e);
+                // 恢复失败不阻止程序运行，只记录警告
             }
+        }
+
+        // 检查是否有任何输入（恢复的任务或命令行指定的 URI）
+        let man = self.request_man.read().await;
+        let has_restored_tasks = man.count().await > 0;
+
+        if !has_restored_tasks && self.detected_inputs.is_empty() {
+            eprintln!("{}", "错误: 请提供下载URI或torrent文件路径，或使用 --input-file 恢复之前的下载".red());
+            return 1;
+        }
+
+        // 步骤 5: 添加命令行指定的下载任务
+        if !self.detected_inputs.is_empty() {
+            match self.add_downloads().await {
+                Ok(gids) => {
+                    info!("已添加 {} 个下载任务", gids.len());
+                    for gid in &gids {
+                        println!("  {} 任务 #{}", "#".cyan(), gid.to_string().yellow());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}", format!("添加任务失败: {}", e).red());
+                    return 1;
+                }
+            }
+        } else if has_restored_tasks {
+            info!("仅使用恢复的下载任务");
         }
 
         println!();
 
-        match self.run_engine().await {
+        // 步骤 6: 运行引擎
+        let run_result = self.run_engine().await;
+
+        // 步骤 7: 关闭时保存会话
+        if let Err(e) = self.save_session_on_shutdown().await {
+            warn!("关闭保存会话失败: {}", e);
+            // 保存失败不影响退出码
+        }
+
+        match run_result {
             Ok(()) => {
                 println!("{}", "所有任务完成!".green().bold());
                 0
@@ -569,7 +849,9 @@ impl App {
         println!("  --rpc-listen-port=<PORT>      RPC监听端口 (default: 6800)");
         println!();
         println!("{}", "通用选项:".yellow());
-        println!("  -i, --input-file=<FILE>       URI列表输入文件");
+        println!("  -i, --input-file=<FILE>       URI列表输入文件/会话文件");
+        println!("  --save-session=<FILE>         退出时保存会话到指定文件");
+        println!("  --save-session-interval=<SEC> 自动保存间隔（默认: 60秒）");
         println!("  --conf-path=<PATH>            配置文件路径");
         println!("  --log=<PATH>                  日志文件路径");
         println!("  -q, --quiet                   安静模式");
@@ -626,5 +908,481 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    /// 测试 1: 从会话文件加载条目
+    ///
+    /// 验证 restore_session() 能正确从 mock 的会话文件中加载并恢复条目
+    #[tokio::test]
+    async fn test_input_file_loads_entries() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let session_file = temp_dir.path().join("test_session.txt");
+
+        // 创建一个包含 3 个条目的测试会话文件
+        let session_content = r#"http://example.com/file1.zip
+ GID=1
+ TOTAL_LENGTH=1048576
+ COMPLETED_LENGTH=524288
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=524288
+
+http://example.com/file2.iso
+ GID=2
+ split=4
+ dir=/downloads
+ TOTAL_LENGTH=10485760
+ COMPLETED_LENGTH=0
+ STATUS=waiting
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=
+
+ftp://server.com/bigfile.bin
+ GID=3
+ TOTAL_LENGTH=1073741824
+ COMPLETED_LENGTH=536870912
+ STATUS=paused
+ ERROR_CODE=
+ BITFIELD=fff00f
+ NUM_PIECES=24
+ PIECE_LENGTH=262144
+ INFO_HASH=abc123def456
+ RESUME_OFFSET=536870912
+"#;
+
+        // 写入会话文件
+        tokio::fs::write(&session_file, session_content)
+            .await
+            .expect("写入会话文件失败");
+
+        // 创建 App 实例并配置 input-file
+        let app = App::new();
+        {
+            let mut conf = app.config.write().await;
+            conf.set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().to_string()),
+            )
+            .await
+            .expect("设置 input-file 失败");
+        }
+
+        // 调用恢复方法
+        let result = app.restore_session().await;
+
+        // 验证结果
+        assert!(result.is_ok(), "恢复应成功");
+        let count = result.unwrap();
+
+        // 应该恢复 2 个条目（跳过 completed_length=0 且 total_length>0 的 file2）
+        // 但根据我们的逻辑：completed_length=0 && total_length=0 才跳过
+        // file2: completed_length=0, total_length=10485760 -> 不跳过
+        // 所以应该恢复 3 个条目（没有 complete 状态的）
+        assert_eq!(count, 3, "应恢复 3 个非完成状态的条目");
+
+        // 验证 RequestGroupMan 中有对应的组
+        let man = app.request_man.read().await;
+        let group_count = man.count().await;
+        assert_eq!(group_count, 3, "RequestGroupMan 中应有 3 个组");
+    }
+
+    /// 测试 2: 跳过已完成的条目
+    ///
+    /// 验证状态为 "complete" 的条目在恢复时被正确跳过
+    #[tokio::test]
+    async fn test_skip_completed_entries() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let session_file = temp_dir.path().join("test_complete_session.txt");
+
+        // 创建包含已完成条目的会话文件
+        let session_content = r#"http://example.com/complete1.zip
+ GID=1
+ TOTAL_LENGTH=1048576
+ COMPLETED_LENGTH=1048576
+ STATUS=complete
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=1048576
+
+http://example.com/active2.zip
+ GID=2
+ TOTAL_LENGTH=2048576
+ COMPLETED_LENGTH=1024288
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=1024288
+
+http://example.com/complete3.bin
+ GID=3
+ TOTAL_LENGTH=512
+ COMPLETED_LENGTH=512
+ STATUS=complete
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=512
+
+http://example.com/paused4.iso
+ GID=4
+ TOTAL_LENGTH=10485760
+ COMPLETED_LENGTH=5242880
+ STATUS=paused
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=5242880
+"#;
+
+        tokio::fs::write(&session_file, session_content)
+            .await
+            .expect("写入会话文件失败");
+
+        let app = App::new();
+        {
+            let mut conf = app.config.write().await;
+            conf.set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().to_string()),
+            )
+            .await
+            .expect("设置 input-file 失败");
+        }
+
+        let result = app.restore_session().await;
+        assert!(result.is_ok(), "恢复应成功");
+        let count = result.unwrap();
+
+        // 应只恢复 2 个条目（active 和 paused），跳过 2 个 complete
+        assert_eq!(count, 2, "应只恢复 2 个非完成状态的条目");
+
+        let man = app.request_man.read().await;
+        let group_count = man.count().await;
+        assert_eq!(group_count, 2, "RequestGroupMan 中应有 2 个组");
+    }
+
+    /// 测试 3: 关闭时保存会话
+    ///
+    /// 验证 save_session_on_shutdown() 在配置了 save-session 时正确保存
+    #[tokio::test]
+    async fn test_save_session_on_shutdown() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let save_file = temp_dir.path().join("shutdown_save.txt");
+
+        let app = App::new();
+
+        // 配置 save-session 选项
+        {
+            let mut conf = app.config.write().await;
+            conf.set_global_option(
+                "save-session",
+                OptionValue::Str(save_file.to_string_lossy().to_string()),
+            )
+            .await
+            .expect("设置 save-session 失败");
+            conf.set_global_option(
+                "save-session-interval",
+                OptionValue::Str("60".to_string()),
+            )
+            .await
+            .expect("设置 save-session-interval 失败");
+        }
+
+        // 添加一些下载任务到 RequestGroupMan
+        let opts = DownloadOptions {
+            dir: Some("/downloads".to_string()),
+            ..Default::default()
+        };
+
+        {
+            let man = app.request_man.read().await;
+            man.add_group(
+                vec!["http://example.com/file1.zip".to_string()],
+                opts.clone(),
+            )
+            .await
+            .expect("添加组 1 失败");
+
+            man.add_group(
+                vec!["http://mirror.com/file2.iso".to_string()],
+                opts,
+            )
+            .await
+            .expect("添加组 2 失败");
+        }
+
+        // 调用关闭保存
+        let result = app.save_session_on_shutdown().await;
+
+        // 验证结果
+        assert!(result.is_ok(), "保存应成功");
+        let saved_count = result.expect("应有返回值");
+        assert!(
+            saved_count.is_some(),
+            "配置了 save-session 时应返回 Some"
+        );
+        assert_eq!(
+            saved_count.unwrap(),
+            2,
+            "应保存 2 个活动任务"
+        );
+
+        // 验证文件已创建且包含正确的 URI
+        assert!(
+            save_file.exists(),
+            "保存后会话文件应存在"
+        );
+
+        let content = tokio::fs::read_to_string(&save_file)
+            .await
+            .expect("读取保存的文件失败");
+        assert!(
+            content.contains("http://example.com/file1.zip"),
+            "文件应包含第一个 URI"
+        );
+        assert!(
+            content.contains("http://mirror.com/file2.iso"),
+            "文件应包含第二个 URI"
+        );
+    }
+
+    /// 测试 4: 未配置 save-session 时不保存
+    ///
+    /// 验证当未配置 save-session 选项时，save_session_on_shutdown() 返回 Ok(None)
+    #[tokio::test]
+    async fn test_no_save_when_not_configured() {
+        let app = App::new();
+
+        // 不配置 save-session
+
+        let result = app.save_session_on_shutdown().await;
+
+        assert!(result.is_ok(), "未配置时应返回 Ok");
+        assert!(
+            result.unwrap().is_none(),
+            "未配置 save-session 时应返回 None"
+        );
+    }
+
+    /// 测试 5: map_entry_to_download_options 正确映射选项
+    #[test]
+    fn test_map_entry_to_download_options() {
+        let mut options = HashMap::new();
+        options.insert("split".to_string(), "8".to_string());
+        options.insert("dir".to_string(), "/tmp/downloads".to_string());
+        options.insert("out".to_string(), "output.bin".to_string());
+        options.insert("max-download-limit".to_string(), "102400".to_string());
+        options.insert("bt-force-encrypt".to_string(), "true".to_string());
+        options.insert("enable-dht".to_string(), "false".to_string());
+
+        let opts = App::map_entry_to_download_options(&options);
+
+        assert_eq!(opts.split, Some(8), "split 应正确映射");
+        assert_eq!(opts.dir, Some("/tmp/downloads".to_string()), "dir 应正确映射");
+        assert_eq!(opts.out, Some("output.bin".to_string()), "out 应正确映射");
+        assert_eq!(opts.max_download_limit, Some(102400), "max-download-limit 应正确映射");
+        assert_eq!(opts.bt_force_encrypt, true, "bt-force-encrypt=true 应正确映射");
+        assert_eq!(opts.enable_dht, false, "enable-dht=false 应正确映射");
+    }
+
+    /// 测试 6: 会话文件不存在时的优雅处理
+    #[tokio::test]
+    async fn test_restore_nonexistent_session_file() {
+        let app = App::new();
+
+        // 配置指向不存在的文件
+        {
+            let mut conf = app.config.write().await;
+            conf.set_global_option(
+                "input-file",
+                OptionValue::Str("/nonexistent/path/session.txt".to_string()),
+            )
+            .await
+            .expect("设置 input-file 失败");
+        }
+
+        let result = app.restore_session().await;
+
+        // 文件不存在时应返回 Ok(0)，不是错误
+        assert!(result.is_ok(), "文件不存在时应返回 Ok");
+        assert_eq!(result.unwrap(), 0, "文件不存在时应返回 0 个恢复条目");
+    }
+
+    /// 测试 7: 未配置 input-file 时不执行恢复
+    #[tokio::test]
+    async fn test_restore_without_input_file() {
+        let app = App::new();
+
+        // 不配置 input-file
+
+        let result = app.restore_session().await;
+
+        assert!(result.is_ok(), "未配置时应返回 Ok");
+        assert_eq!(result.unwrap(), 0, "未配置 input-file 时应返回 0");
+    }
+
+    /// 测试 8: BT bitfield 在恢复时被保留
+    #[tokio::test]
+    async fn test_bt_bitfield_preserved_on_restore() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let session_file = temp_dir.path().join("bt_session.txt");
+
+        // 创建带有 BT bitfield 的会话条目
+        let session_content = r#"magnet:?xt=urn:btih:abc123def456
+ GID=1
+ TOTAL_LENGTH=104857600
+ COMPLETED_LENGTH=52428800
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=ffaabb
+ NUM_PIECES=20
+ PIECE_LENGTH=5242880
+ INFO_HASH=abc123def456
+ RESUME_OFFSET=52428800
+"#;
+
+        tokio::fs::write(&session_file, session_content)
+            .await
+            .expect("写入会话文件失败");
+
+        let app = App::new();
+        {
+            let mut conf = app.config.write().await;
+            conf.set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().to_string()),
+            )
+            .await
+            .expect("设置 input-file 失败");
+        }
+
+        let result = app.restore_session().await;
+        assert!(result.is_ok(), "恢复应成功");
+        assert_eq!(result.unwrap(), 1, "应恢复 1 个 BT 任务");
+
+        // 验证 bitfield 被保留在 RequestGroup 中
+        let man = app.request_man.read().await;
+        let groups = man.list_groups().await;
+        assert_eq!(groups.len(), 1, "应有 1 个组");
+
+        let group = groups[0].read().await;
+        let bitfield = group.bt_bitfield.read().await;
+        assert!(
+            bitfield.is_some(),
+            "BT bitfield 应被保留"
+        );
+        assert_eq!(
+            bitfield.as_ref().unwrap(),
+            &vec![0xFF, 0xAA, 0xBB],
+            "bitfield 值应正确"
+        );
+    }
+
+    /// 测试 9: 空会话文件的优雅处理
+    #[tokio::test]
+    async fn test_restore_empty_session_file() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let session_file = temp_dir.path().join("empty_session.txt");
+
+        // 创建空会话文件
+        tokio::fs::write(&session_file, "")
+            .await
+            .expect("写入空文件失败");
+
+        let app = App::new();
+        {
+            let mut conf = app.config.write().await;
+            conf.set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().to_string()),
+            )
+            .await
+            .expect("设置 input-file 失败");
+        }
+
+        let result = app.restore_session().await;
+        assert!(result.is_ok(), "空文件应返回 Ok");
+        assert_eq!(result.unwrap(), 0, "空文件应返回 0 个恢复条目");
+    }
+
+    /// 测试 10: 无进度信息条目被跳过
+    #[tokio::test]
+    async fn test_skip_entries_with_zero_progress() {
+        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let session_file = temp_dir.path().join("zero_progress_session.txt");
+
+        // 创建所有条目都无进度的会话文件
+        let session_content = r#"http://example.com/new1.zip
+ GID=1
+ TOTAL_LENGTH=0
+ COMPLETED_LENGTH=0
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=
+
+http://example.com/new2.iso
+ GID=2
+ TOTAL_LENGTH=0
+ COMPLETED_LENGTH=0
+ STATUS=waiting
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=
+"#;
+
+        tokio::fs::write(&session_file, session_content)
+            .await
+            .expect("写入会话文件失败");
+
+        let app = App::new();
+        {
+            let mut conf = app.config.write().await;
+            conf.set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().to_string()),
+            )
+            .await
+            .expect("设置 input-file 失败");
+        }
+
+        let result = app.restore_session().await;
+        assert!(result.is_ok(), "应返回 Ok");
+        assert_eq!(result.unwrap(), 0, "无进度的条目应全部被跳过");
+
+        let man = app.request_man.read().await;
+        let group_count = man.count().await;
+        assert_eq!(group_count, 0, "不应添加任何组");
     }
 }

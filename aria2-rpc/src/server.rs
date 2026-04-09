@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use aria2_core::engine::multi_file_layout::TorrentFileEntry;
+
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     pub token: Option<String>,
@@ -142,7 +144,7 @@ impl ServerConfig {
 pub type GlobalOptions = Arc<RwLock<HashMap<String, serde_json::Value>>>;
 pub type TaskOptions = Arc<RwLock<HashMap<String, HashMap<String, serde_json::Value>>>>;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub gid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,12 +158,18 @@ pub struct StatusInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_speed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     pub status: DownloadStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<FileInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub torrent_files: Option<Vec<TorrentFileEntry>>,
 }
 
 impl Default for StatusInfo {
@@ -173,10 +181,13 @@ impl Default for StatusInfo {
             upload_length: None,
             download_speed: None,
             upload_speed: None,
+            connections: None,
             error_code: None,
+            error_message: None,
             status: DownloadStatus::Active,
             dir: None,
             files: None,
+            torrent_files: None,
         }
     }
 }
@@ -213,8 +224,28 @@ impl StatusInfo {
         self.files = Some(f);
         self
     }
+    pub fn with_torrent_files(mut self, files: Vec<TorrentFileEntry>) -> Self {
+        self.torrent_files = Some(files);
+        self
+    }
     pub fn with_error_code(mut self, c: i32) -> Self {
         self.error_code = Some(c);
+        self
+    }
+    pub fn with_error_message(mut self, m: impl Into<String>) -> Self {
+        self.error_message = Some(m.into());
+        self
+    }
+    pub fn with_connections(mut self, c: u16) -> Self {
+        self.connections = Some(c);
+        self
+    }
+    pub fn with_upload_length(mut self, v: u64) -> Self {
+        self.upload_length = Some(v);
+        self
+    }
+    pub fn with_upload_speed(mut self, v: u64) -> Self {
+        self.upload_speed = Some(v);
         self
     }
 
@@ -256,7 +287,7 @@ impl DownloadStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
     pub index: usize,
     pub path: String,
@@ -298,7 +329,7 @@ impl FileInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UriEntry {
     pub uri: String,
     pub status: UriStatus,
@@ -321,11 +352,22 @@ impl UriEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub enum UriStatus {
     Used,
     #[default]
     Waiting,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub peer_id: String,
+    pub ip: String,
+    pub port: u16,
+    pub am_choking: bool,
+    pub peer_choking: bool,
+    pub download_speed: u64,
+    pub upload_speed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -490,5 +532,60 @@ mod tests {
         let gid2 = create_gid();
         assert_eq!(gid1.len(), 16);
         assert_ne!(gid1, gid2);
+    }
+
+    #[test]
+    fn test_status_info_holds_torrent_file_entries() {
+        let entries = vec![
+            TorrentFileEntry { index: 0, path: "dir/file1.txt".to_string(), length: 500, completed_length: 500 },
+            TorrentFileEntry { index: 1, path: "dir/file2.dat".to_string(), length: 524, completed_length: 200 },
+        ];
+
+        let info = StatusInfo::new("gid-torrent-001")
+            .with_total_length(1024)
+            .with_completed_length(700)
+            .with_torrent_files(entries.clone());
+
+        assert!(info.torrent_files.is_some(), "torrent_files should be Some after with_torrent_files");
+        let files = info.torrent_files.as_ref().unwrap();
+        assert_eq!(files.len(), 2, "Should hold 2 file entries");
+        assert_eq!(files[0].index, 0);
+        assert_eq!(files[0].path, "dir/file1.txt");
+        assert_eq!(files[0].length, 500);
+        assert_eq!(files[1].index, 1);
+        assert_eq!(files[1].path, "dir/file2.dat");
+        assert_eq!(files[1].length, 524);
+
+        let default_info = StatusInfo::default();
+        assert!(default_info.torrent_files.is_none(), "Default StatusInfo should have None torrent_files");
+
+        let serialized = serde_json::to_value(&info).unwrap();
+        assert!(serialized.get("torrent_files").is_some(), "torrent_files should appear in JSON output");
+        let tf_arr = serialized.get("torrent_files").unwrap().as_array().unwrap();
+        assert_eq!(tf_arr.len(), 2);
+    }
+
+    #[test]
+    fn test_peer_info_serialization() {
+        let peer = PeerInfo {
+            peer_id: "peer-abc123".to_string(),
+            ip: "192.168.1.100".to_string(),
+            port: 6881,
+            am_choking: false,
+            peer_choking: true,
+            download_speed: 1048576,
+            upload_speed: 512000,
+        };
+        let json = serde_json::to_value(&peer).unwrap();
+        assert_eq!(json["peer_id"], "peer-abc123");
+        assert_eq!(json["ip"], "192.168.1.100");
+        assert_eq!(json["port"], 6881);
+        assert_eq!(json["am_choking"], false);
+        assert_eq!(json["peer_choking"], true);
+        assert_eq!(json["download_speed"], 1048576);
+        assert_eq!(json["upload_speed"], 512000);
+
+        let roundtrip: PeerInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.port, 6881);
     }
 }

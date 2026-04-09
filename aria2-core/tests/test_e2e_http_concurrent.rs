@@ -27,6 +27,9 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         retry_wait: 1,
         http_proxy: None,
         dht_file_path: None,
+        bt_max_upload_slots: None,
+        bt_optimistic_unchoke_interval: None,
+        bt_snubbed_timeout: None,
     };
     DownloadCommand::new(
         GroupId::new(1),
@@ -144,6 +147,9 @@ fn test_download_options_with_values() {
         retry_wait: 1,
         http_proxy: None,
         dht_file_path: None,
+        bt_max_upload_slots: None,
+        bt_optimistic_unchoke_interval: None,
+        bt_snubbed_timeout: None,
     };
     assert_eq!(opts.split, Some(16));
     assert_eq!(opts.max_connection_per_server, Some(8));

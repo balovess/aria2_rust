@@ -235,6 +235,8 @@ impl DownloadCommand {
         {
             let mut g = self.group.write().await;
             g.set_total_length(actual_total).await;
+            // Export to atomic field for session persistence
+            g.set_total_length_atomic(actual_total);
         }
 
         let start_offset = if resume_state.should_resume {
@@ -273,12 +275,17 @@ impl DownloadCommand {
             {
                 let g = self.group.write().await;
                 g.update_progress(self.completed_bytes).await;
+                // Export to atomic fields for session persistence
+                g.set_completed_length(self.completed_bytes);
+                g.set_download_speed_cached(0); // Will be updated below
 
                 let elapsed = last_speed_update.elapsed();
                 if elapsed.as_millis() >= 500 {
                     let delta = self.completed_bytes - last_completed;
                     let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
                     g.update_speed(speed, 0).await;
+                    // Update cached download speed for session persistence
+                    g.set_download_speed_cached(speed);
                     last_speed_update = Instant::now();
                     last_completed = self.completed_bytes;
                 }
@@ -299,6 +306,9 @@ impl DownloadCommand {
             let mut g = self.group.write().await;
             g.update_progress(self.completed_bytes).await;
             g.update_speed(final_speed, 0).await;
+            // Export final progress to atomic fields for session persistence
+            g.set_completed_length(self.completed_bytes);
+            g.set_download_speed_cached(final_speed);
             g.complete().await?;
         }
 
@@ -404,6 +414,8 @@ impl DownloadCommand {
 
                                 let mut g = self.group.write().await;
                                 g.update_progress(self.completed_bytes).await;
+                                // Export to atomic fields for session persistence
+                                g.set_completed_length(self.completed_bytes);
                             }
                             Ok(Err(e)) => {
                                 warn!("段 {} 下载失败: {}", seg_idx, e);
@@ -456,6 +468,9 @@ impl DownloadCommand {
             let mut g = self.group.write().await;
             g.update_progress(self.completed_bytes).await;
             g.update_speed(final_speed, 0).await;
+            // Export final progress to atomic fields for session persistence
+            g.set_completed_length(self.completed_bytes);
+            g.set_download_speed_cached(final_speed);
             g.complete().await?;
         }
 
@@ -565,6 +580,8 @@ impl DownloadCommand {
                 self.completed_bytes = manager.completed_bytes();
                 let g = self.group.write().await;
                 g.update_progress(self.completed_bytes).await;
+                // Export to atomic fields for session persistence
+                g.set_completed_length(self.completed_bytes);
             }
 
             if manager.is_complete() {
@@ -592,6 +609,9 @@ impl DownloadCommand {
         self.completed_bytes = manager.completed_bytes();
         let mut g = self.group.write().await;
         g.set_total_length(self.completed_bytes).await;
+        // Export to atomic fields for session persistence
+        g.set_total_length_atomic(self.completed_bytes);
+        g.set_completed_length(self.completed_bytes);
         g.complete().await?;
         Ok(())
     }
@@ -669,6 +689,9 @@ impl Command for DownloadCommand {
             let mut g = self.group.write().await;
             g.set_total_length(self.completed_bytes).await;
             g.update_progress(self.completed_bytes).await;
+            // Export to atomic fields for session persistence
+            g.set_total_length_atomic(self.completed_bytes);
+            g.set_completed_length(self.completed_bytes);
             g.complete().await?;
             return Ok(());
         }

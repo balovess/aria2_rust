@@ -159,7 +159,6 @@ impl UtMetadataMsg {
 pub struct MetadataCollector {
     total_size: u64,
     collected: Vec<Option<Vec<u8>>>,
-    #[allow(dead_code)]
     piece_size: u32,
 }
 

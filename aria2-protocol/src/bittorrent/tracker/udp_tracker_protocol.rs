@@ -213,7 +213,6 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
     })
 }
 
-#[allow(dead_code)]
 fn random_txn_id() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let dur = SystemTime::now()

@@ -12,6 +12,7 @@ pub enum EventType {
     DownloadError,
     BtDownloadComplete,
     BtDownloadError,
+    DownloadResume,
 }
 
 impl EventType {
@@ -24,6 +25,7 @@ impl EventType {
             Self::DownloadError => "aria2.onDownloadError",
             Self::BtDownloadComplete => "aria2.onBtDownloadComplete",
             Self::BtDownloadError => "aria2.onBtDownloadError",
+            Self::DownloadResume => "aria2.onDownloadResume",
         }
     }
 
@@ -36,6 +38,7 @@ impl EventType {
             "aria2.onDownloadError" => Some(Self::DownloadError),
             "aria2.onBtDownloadComplete" => Some(Self::BtDownloadComplete),
             "aria2.onBtDownloadError" => Some(Self::BtDownloadError),
+            "aria2.onDownloadResume" => Some(Self::DownloadResume),
             _ => None,
         }
     }
@@ -126,6 +129,13 @@ impl DownloadEvent {
         Self::new(
             EventType::BtDownloadError,
             vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})],
+        )
+    }
+
+    pub fn download_resume(gid: impl Into<String>) -> Self {
+        Self::new(
+            EventType::DownloadResume,
+            vec![serde_json::json!({"gid": gid.into()})],
         )
     }
 }
@@ -271,6 +281,7 @@ mod tests {
         let _ = DownloadEvent::download_error("g5", 0, vec![]);
         let _ = DownloadEvent::bt_download_complete("g6", vec![]);
         let _ = DownloadEvent::bt_download_error("g7", 0, vec![]);
+        let _ = DownloadEvent::download_resume("g8");
     }
 
     #[tokio::test]

@@ -7,13 +7,14 @@ license.workspace = true
 repository.workspace = true
 description = "RPC server for aria2-rust with JSON-RPC 2.0, XML-RPC, and WebSocket support"
 documentation = "https://docs.rs/aria2-rpc"
-homepage = "https://github.com/balovess/aria2_rust"
+homepage = "https://github.com/balovess/aria2-rust"
 readme = "../README.md"
 keywords = ["rpc", "json-rpc", "xml-rpc", "websocket", "aria2"]
 categories = ["network-programming", "web-programming"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [dependencies]
+aria2-core.workspace = true
 tokio.workspace = true
 futures.workspace = true
 serde.workspace = true

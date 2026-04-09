@@ -37,7 +37,6 @@ pub struct DiscoveredPeers {
 pub struct DhtClient {
     config: DhtClientConfig,
     routing_table: RoutingTable,
-    #[allow(dead_code)]
     tx_manager: TransactionManager,
 }
 

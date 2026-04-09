@@ -79,6 +79,9 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         retry_wait: 1,
         http_proxy: None,
         dht_file_path: None,
+        bt_max_upload_slots: None,
+        bt_optimistic_unchoke_interval: None,
+        bt_snubbed_timeout: None,
     };
 
     match man.add_group(vec![uri.to_string()], download_opts).await {

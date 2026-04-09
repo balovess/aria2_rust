@@ -21,6 +21,9 @@ tracing.workspace = true
 colored = "2.0"
 serde_json.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = ["http", "bittorrent", "rpc"]
 http = ["aria2-protocol/http"]

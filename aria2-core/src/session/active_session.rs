@@ -193,7 +193,7 @@ impl ActiveSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::request::request_group::{DownloadOptions, GroupId};
     use tempfile::TempDir;
 
     /// 测试 1: 验证 new() 正确创建管理器
@@ -233,7 +233,7 @@ mod tests {
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
         // 创建测试用的 RequestGroup
-        let gid1 = crate::request::request_group::GroupId::new(0xd270c8a2);
+        let gid1 = GroupId::new(0xd270c8a2);
         let options1 = DownloadOptions {
             dir: Some("/downloads".to_string()),
             split: Some(4),
@@ -245,7 +245,7 @@ mod tests {
             options1,
         )));
 
-        let gid2 = crate::request::request_group::GroupId::new(0xabcdef01);
+        let gid2 = GroupId::new(0xabcdef01);
         let group2 = Arc::new(RwLock::new(RequestGroup::new(
             gid2,
             vec![
@@ -341,7 +341,7 @@ mod tests {
         );
 
         // 创建测试组
-        let gid = crate::request::request_group::GroupId::new(12345);
+        let gid = GroupId::new(12345);
         let group = Arc::new(RwLock::new(RequestGroup::new(
             gid,
             vec!["http://test.com/file.bin".to_string()],
@@ -378,7 +378,7 @@ mod tests {
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
         // 第一次保存
-        let gid1 = crate::request::request_group::GroupId::new(1);
+        let gid1 = GroupId::new(1);
         let group1 = Arc::new(RwLock::new(RequestGroup::new(
             gid1,
             vec!["http://first.com/a.txt".to_string()],
@@ -388,7 +388,7 @@ mod tests {
         assert!(result1.is_ok());
 
         // 第二次保存不同的内容
-        let gid2 = crate::request::request_group::GroupId::new(2);
+        let gid2 = GroupId::new(2);
         let group2 = Arc::new(RwLock::new(RequestGroup::new(
             gid2,
             vec!["http://second.com/b.txt".to_string()],
@@ -446,7 +446,7 @@ mod tests {
         ));
 
         // 创建测试组
-        let gid = crate::request::request_group::GroupId::new(99999);
+        let gid = GroupId::new(99999);
         let group = Arc::new(RwLock::new(RequestGroup::new(
             gid,
             vec!["http://auto-save-test.com/data.bin".to_string()],

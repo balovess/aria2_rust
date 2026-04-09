@@ -65,6 +65,7 @@ dependencies = [
  "aria2-rpc",
  "colored 2.2.0",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -143,6 +144,7 @@ name = "aria2-rpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aria2-core",
  "async-trait",
  "axum",
  "base64",

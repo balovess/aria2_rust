@@ -199,7 +199,7 @@ fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String> {
     map
 }
 
-async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
+pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
     let status = group.status().await;
     match status {
         DownloadStatus::Complete | DownloadStatus::Removed | DownloadStatus::Error(_) => None,
@@ -212,11 +212,11 @@ async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
             let options = download_options_to_map(group.options());
             let paused = matches!(status, DownloadStatus::Paused);
 
-            // Extract progress information
-            let total_length = group.total_length();
-            let completed_length = group.completed_length().await;
-            let upload_length = 0u64; // TODO: Track actual upload length if needed
-            let download_speed = group.download_speed().await;
+            // Extract progress information using new atomic fields (lock-free)
+            let total_length = group.get_total_length_atomic();
+            let completed_length = group.get_completed_length();
+            let upload_length = group.get_uploaded_length();
+            let download_speed = group.get_download_speed_cached();
 
             // Convert DownloadStatus to string
             let status_str = match status {
@@ -233,13 +233,16 @@ async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
                 _ => None,
             };
 
+            // Get BT bitfield if available
+            let bitfield = group.get_bt_bitfield().await;
+
             Some(SessionEntry {
                 gid,
                 uris,
                 options,
                 paused,
 
-                // Progress fields
+                // Progress fields (from atomic fields for performance)
                 total_length,
                 completed_length,
                 upload_length,
@@ -247,13 +250,13 @@ async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
                 status: status_str,
                 error_code,
 
-                // BT-specific fields (None for HTTP/FTP downloads)
-                bitfield: None,
-                num_pieces: None,
-                piece_length: None,
-                info_hash_hex: None,
+                // BT-specific fields (from RequestGroup if available)
+                bitfield,
+                num_pieces: None, // TODO: Could be stored in RequestGroup if needed
+                piece_length: None, // TODO: Could be stored in RequestGroup if needed
+                info_hash_hex: None, // TODO: Could be extracted from URI
 
-                // Resume offset (use completed_length for now as a reasonable default)
+                // Resume offset (use completed_length as a reasonable default)
                 resume_offset: if completed_length > 0 { Some(completed_length) } else { None },
             })
         }
@@ -637,6 +640,10 @@ ftp://server/big.iso
             retry_wait: 1,
             http_proxy: None,
             dht_file_path: None,
+            // Choking algorithm configuration
+            bt_max_upload_slots: Some(4),
+            bt_optimistic_unchoke_interval: Some(30),
+            bt_snubbed_timeout: Some(60),
         };
         let map = download_options_to_map(&opts);
         assert_eq!(map.get("split").unwrap(), "8");
