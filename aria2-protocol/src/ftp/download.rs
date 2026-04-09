@@ -23,6 +23,18 @@ impl Default for FtpDownloadOptions {
     }
 }
 
+fn is_transient_io_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(e.kind(),
+        ErrorKind::Interrupted
+        | ErrorKind::WouldBlock
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe
+        | ErrorKind::TimedOut
+    ) || e.to_string().to_lowercase().contains("temporary")
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadProgress {
     pub downloaded_bytes: u64,
@@ -83,28 +95,43 @@ impl<'a> FtpDownload<'a> {
         let mut buffer = vec![0u8; self.options.buffer_size];
         let mut total_downloaded = self.options.resume_offset.unwrap_or(0);
         let start_time = std::time::Instant::now();
+        let mut read_retry_count = 0u32;
+        const MAX_READ_RETRIES: u32 = 3;
 
         loop {
-            let bytes_read = data_stream.read(&mut buffer).await
-                .map_err(|e| format!("读取FTP数据流失败: {}", e))?;
+            let read_result = data_stream.read(&mut buffer).await;
 
-            if bytes_read == 0 {
-                break;
-            }
+            match read_result {
+                Ok(bytes_read) => {
+                    read_retry_count = 0;
 
-            file.write_all(&buffer[..bytes_read]).await
-                .map_err(|e| format!("写入本地文件失败: {}", e))?;
+                    if bytes_read == 0 {
+                        break;
+                    }
 
-            total_downloaded += bytes_read as u64;
+                    file.write_all(&buffer[..bytes_read]).await
+                        .map_err(|e| format!("写入本地文件失败: {}", e))?;
 
-            if let Some(cb) = progress_callback {
-                let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { total_downloaded as f64 / elapsed } else { 0.0 };
-                cb(DownloadProgress {
-                    downloaded_bytes: total_downloaded,
-                    total_bytes: file_size,
-                    speed_bytes_per_sec: speed,
-                });
+                    total_downloaded += bytes_read as u64;
+
+                    if let Some(cb) = progress_callback {
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let speed = if elapsed > 0.0 { total_downloaded as f64 / elapsed } else { 0.0 };
+                        cb(DownloadProgress {
+                            downloaded_bytes: total_downloaded,
+                            total_bytes: file_size,
+                            speed_bytes_per_sec: speed,
+                        });
+                    }
+                }
+                Err(ref e) if is_transient_io_error(e) && read_retry_count < MAX_READ_RETRIES => {
+                    read_retry_count += 1;
+                    let wait_ms = 1000u64 * (1 << (read_retry_count - 1));
+                    tracing::warn!("FTP读取错误 (#{})，{}ms 后重试...", read_retry_count, wait_ms);
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(format!("读取FTP数据流失败 (已重试{}次): {}", read_retry_count, e)),
             }
         }
 

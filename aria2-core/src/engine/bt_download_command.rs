@@ -12,6 +12,7 @@ use crate::engine::udp_tracker_manager::UdpTrackerManager;
 use crate::request::request_group::{RequestGroup, GroupId, DownloadOptions};
 use crate::filesystem::disk_writer::{DiskWriter, DefaultDiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
 
 enum BtPeerConn {
     Plain(aria2_protocol::bittorrent::peer::connection::PeerConnection),
@@ -128,6 +129,7 @@ pub struct BtDownloadCommand {
     udp_client: Option<SharedUdpClient>,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     public_trackers: Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
+    peer_tracker: Option<PeerBitfieldTracker>,
 }
 
 impl BtDownloadCommand {
@@ -170,6 +172,7 @@ impl BtDownloadCommand {
             udp_client: None,
             dht_engine: None,
             public_trackers: None,
+            peer_tracker: None,
         })
     }
 
@@ -515,16 +518,43 @@ impl Command for BtDownloadCommand {
 
         const BLOCK_SIZE: u32 = 16384;
         const MAX_RETRIES: u32 = 3;
+        const ENDGAME_THRESHOLD: u32 = 20;
+
+        let mut peer_tracker = PeerBitfieldTracker::new(num_pieces as u32);
+        for (i, _conn) in active_connections.iter().enumerate() {
+            peer_tracker.update_peer_bitfield(
+                &format!("peer_{}", i),
+                &vec![0xFFu8; ((num_pieces as usize) + 7) / 8],
+            );
+        }
+        piece_picker.set_frequencies_from_peers(&peer_tracker.piece_frequencies());
+
+        eprintln!("[BT] Piece selection strategy: RarestFirst, {} pieces total, {} peers tracked",
+                 num_pieces, peer_tracker.peer_count());
 
         loop {
             if piece_picker.is_complete() { break; }
 
-            let next_piece_idx = match piece_picker.pick_next() {
-                Some(idx) => idx as usize,
-                None => { 
+            let remaining = piece_picker.remaining_count();
+            let is_endgame = remaining > 0 && remaining <= ENDGAME_THRESHOLD;
+
+            if is_endgame && !piece_picker.endgame_candidates().is_empty() {
+                eprintln!("[BT] === ENDGAME MODE === ({} pieces remaining)", remaining);
+            }
+
+            let next_piece_idx: Option<usize> = if is_endgame {
+                piece_picker.pick_next()
+            } else {
+                let all_ones_bf = vec![0xFFu8; ((num_pieces as usize) + 7) / 8];
+                piece_picker.select(&all_ones_bf, num_pieces as usize)
+            }.map(|v| v as usize);
+
+            let next_piece_idx = match next_piece_idx {
+                Some(idx) => idx,
+                None => {
                     eprintln!("[BT] No piece available, waiting...");
-                    tokio::time::sleep(Duration::from_millis(100)).await; 
-                    continue; 
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
                 }
             };
 

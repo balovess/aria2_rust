@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SegmentStatus {
@@ -137,6 +138,10 @@ impl ConcurrentSegmentManager {
         None
     }
 
+    pub fn next_pending_segment(&mut self) -> Option<(u32, u64, u64)> {
+        self.next_pending_segment_for_mirror(0)
+    }
+
     pub fn complete_segment(&mut self, index: u32, data: Vec<u8>) -> bool {
         if let Some(seg) = self.segments.get_mut(index as usize) {
             seg.status = SegmentStatus::Done;
@@ -266,6 +271,35 @@ impl ConcurrentSegmentManager {
 
     pub fn set_max_retries(&mut self, retries: u32) {
         self.max_retries_per_segment = retries;
+    }
+
+    pub fn segment_retry_count(&self, seg_idx: u32) -> u32 {
+        self.segments.iter()
+            .find(|s| s.index == seg_idx)
+            .map(|s| s.retry_count)
+            .unwrap_or(0)
+    }
+
+    pub fn has_permanently_failed_segments(&self) -> bool {
+        self.segments.iter().any(|s| s.status == SegmentStatus::Failed && s.retry_count >= self.max_retries_per_segment)
+    }
+
+    pub fn mark_completed_up_to(&mut self, offset: u64, length: u64) {
+        let end_offset = offset + length;
+        for segment in &mut self.segments {
+            if segment.offset + segment.length <= offset {
+                if segment.status != SegmentStatus::Done {
+                    segment.status = SegmentStatus::Done;
+                    self.completed_bytes += segment.length;
+                }
+            } else if segment.offset < end_offset {
+                let overlap_start = std::cmp::max(segment.offset, offset);
+                let overlap_end = std::cmp::min(segment.offset + segment.length, end_offset);
+                if overlap_end > overlap_start {
+                    debug!("段 {} 部分已完成: {}/{} bytes", segment.index, overlap_end - segment.offset, segment.length);
+                }
+            }
+        }
     }
 
     pub fn segment_info(&self, index: usize) -> Option<(u64, u64, &SegmentStatus)> {

@@ -349,6 +349,11 @@ ftp://server/big.iso
             enable_dht: true,
             dht_listen_port: Some(6881),
             enable_public_trackers: true,
+            bt_piece_selection_strategy: "rarest-first".to_string(),
+            bt_endgame_threshold: 20,
+            max_retries: 3,
+            retry_wait: 1,
+            http_proxy: None,
         };
         let map = download_options_to_map(&opts);
         assert_eq!(map.get("split").unwrap(), "8");

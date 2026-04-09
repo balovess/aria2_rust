@@ -24,6 +24,11 @@ fn create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
         enable_dht: false,
         dht_listen_port: None,
         enable_public_trackers: false,
+        bt_piece_selection_strategy: "rarest-first".to_string(),
+        bt_endgame_threshold: 20,
+        max_retries: 3,
+        retry_wait: 1,
+        http_proxy: None,
     };
     let group = RequestGroup::new(GroupId::new(1), vec![uri.to_string()], options);
     Arc::new(RwLock::new(group))

@@ -60,6 +60,11 @@ pub struct DownloadOptions {
     pub enable_dht: bool,
     pub dht_listen_port: Option<u16>,
     pub enable_public_trackers: bool,
+    pub bt_piece_selection_strategy: String,
+    pub bt_endgame_threshold: u32,
+    pub max_retries: u32,
+    pub retry_wait: u64,
+    pub http_proxy: Option<String>,
 }
 
 pub struct RequestGroup {

@@ -252,6 +252,11 @@ impl App {
             enable_dht: self.get_opt_bool("enable-dht").await.unwrap_or(true),
             dht_listen_port: self.get_opt_i64("dht-listen-port").await.and_then(|v| if v > 0 { Some(v as u16) } else { None }),
             enable_public_trackers: self.get_opt_bool("enable-public-trackers").await.unwrap_or(true),
+            bt_piece_selection_strategy: self.get_opt_str("bt-piece-selection-strategy").await.unwrap_or("rarest-first".to_string()),
+            bt_endgame_threshold: self.get_opt_i64("bt-endgame-threshold").await.and_then(|v| if v > 0 { Some(v as u32) } else { Some(20) }).unwrap_or(20),
+            max_retries: self.get_opt_i64("max-retries").await.and_then(|v| if v >= 0 { Some(v as u32) } else { Some(3) }).unwrap_or(3),
+            retry_wait: self.get_opt_i64("retry-wait").await.and_then(|v| if v > 0 { Some(v as u64) } else { Some(1) }).unwrap_or(1),
+            http_proxy: self.get_opt_str("http-proxy").await,
         };
 
         let mut engine_lock = self.engine.lock().await;

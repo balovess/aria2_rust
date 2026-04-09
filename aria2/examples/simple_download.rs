@@ -56,6 +56,11 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         enable_dht: true,
         dht_listen_port: None,
         enable_public_trackers: true,
+        bt_piece_selection_strategy: "rarest-first".to_string(),
+        bt_endgame_threshold: 20,
+        max_retries: 3,
+        retry_wait: 1,
+        http_proxy: None,
     };
 
     match man.add_group(vec![uri.to_string()], download_opts).await {

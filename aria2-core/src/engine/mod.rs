@@ -1,6 +1,7 @@
 pub mod command;
 pub mod download_engine;
 pub mod download_command;
+pub mod retry_policy;
 pub mod ftp_download_command;
 pub mod sftp_download_command;
 pub mod bt_download_command;
