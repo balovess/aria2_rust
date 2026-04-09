@@ -65,6 +65,7 @@ pub struct DownloadOptions {
     pub max_retries: u32,
     pub retry_wait: u64,
     pub http_proxy: Option<String>,
+    pub dht_file_path: Option<String>,
 }
 
 pub struct RequestGroup {

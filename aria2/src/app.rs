@@ -257,6 +257,7 @@ impl App {
             max_retries: self.get_opt_i64("max-retries").await.and_then(|v| if v >= 0 { Some(v as u32) } else { Some(3) }).unwrap_or(3),
             retry_wait: self.get_opt_i64("retry-wait").await.and_then(|v| if v > 0 { Some(v as u64) } else { Some(1) }).unwrap_or(1),
             http_proxy: self.get_opt_str("http-proxy").await,
+            dht_file_path: self.get_opt_str("dht-file-path").await,
         };
 
         let mut engine_lock = self.engine.lock().await;

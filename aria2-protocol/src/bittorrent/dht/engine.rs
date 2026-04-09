@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use super::persistence::DhtPersistence;
 use super::socket::DhtSocket;
 use super::node::DhtNode;
 use super::routing_table::RoutingTable;
@@ -24,6 +25,7 @@ pub struct DhtEngineConfig {
     pub port: u16,
     pub max_concurrent_queries: usize,
     pub query_timeout: Duration,
+    pub dht_file_path: Option<String>,
 }
 
 impl Default for DhtEngineConfig {
@@ -33,6 +35,7 @@ impl Default for DhtEngineConfig {
             port: 0,
             max_concurrent_queries: 16,
             query_timeout: Duration::from_secs(5),
+            dht_file_path: None,
         }
     }
 }
@@ -67,13 +70,35 @@ impl DhtEngine {
         let socket = DhtSocket::bind(config.port).await?;
         info!("DHT 引擎启动于 {}", socket.local_addr());
 
+        let mut self_id = config.self_id;
+        let mut loaded_nodes: Vec<DhtNode> = Vec::new();
+
+        if let Some(ref path) = config.dht_file_path {
+            match DhtPersistence::load_from_file(std::path::Path::new(path)).await {
+                Ok(data) => {
+                    self_id = data.self_id;
+                    info!("DHT: 从 {} 加载了 {} 个节点 (self_id 已恢复)", path, data.nodes.len());
+                    for pn in &data.nodes {
+                        loaded_nodes.push(DhtNode::new(pn.id, pn.addr));
+                    }
+                }
+                Err(e) => {
+                    debug!("DHT: 无法加载路由表文件 {} (使用 bootstrap): {}", path, e);
+                }
+            }
+        }
+
         let engine = Arc::new(Self {
-            config,
+            config: DhtEngineConfig { self_id, ..config },
             socket,
-            routing_table: tokio::sync::RwLock::new(RoutingTable::new(generate_random_id())),
+            routing_table: tokio::sync::RwLock::new(RoutingTable::new(self_id)),
             running: AtomicBool::new(true),
             tx_counter: AtomicU32::new(0),
         });
+
+        for node in loaded_nodes {
+            engine.routing_table.write().await.insert(node);
+        }
 
         engine.bootstrap_routing_table().await;
         Ok(engine)
@@ -221,9 +246,11 @@ impl DhtEngine {
     pub fn start_maintenance_loop(self: &Arc<Self>) {
         let e = Arc::clone(self);
         tokio::spawn(async move {
+            let mut save_interval = tokio::time::interval(Duration::from_secs(900));
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(900)) => {
+                    _ = save_interval.tick() => {
+                        e.save_routing_table_if_configured().await;
                         e.refresh_closest_buckets().await;
                     }
                 }
@@ -231,6 +258,23 @@ impl DhtEngine {
             }
             info!("DHT 维护循环已退出");
         });
+    }
+
+    async fn save_routing_table_if_configured(&self) {
+        if let Some(ref path) = self.config.dht_file_path {
+            let rt = self.routing_table.read().await;
+            let nodes = DhtPersistence::collect_good_nodes(&rt);
+            drop(rt);
+
+            match DhtPersistence::save_to_file(
+                std::path::Path::new(path),
+                &self.config.self_id,
+                &nodes,
+            ).await {
+                Ok(n) => debug!("DHT 自动保存: {} 个 good 节点", n),
+                Err(e) => warn!("DHT 自动保存失败: {}", e),
+            }
+        }
     }
 
     async fn send_find_node_to_all(&self, targets: &[DhtNode]) {
@@ -246,6 +290,41 @@ impl DhtEngine {
 
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::Relaxed);
+
+        if let Some(ref path) = self.config.dht_file_path {
+            let rt = &self.routing_table;
+            let nodes = DhtPersistence::collect_good_nodes(&rt.blocking_read());
+            match DhtPersistence::save_to_file_sync(
+                std::path::Path::new(path),
+                &self.config.self_id,
+                &nodes,
+            ) {
+                Ok(n) => info!("DHT: 已保存 {} 个 good 节点到 {}", n, path),
+                Err(e) => warn!("DHT: 保存路由表失败: {}", e),
+            }
+        }
+
+        info!("DHT 引擎已关闭");
+    }
+
+    pub async fn shutdown_async(&self) {
+        self.running.store(false, Ordering::Relaxed);
+
+        if let Some(ref path) = self.config.dht_file_path {
+            let rt = self.routing_table.read().await;
+            let nodes = DhtPersistence::collect_good_nodes(&rt);
+            drop(rt);
+
+            match DhtPersistence::save_to_file(
+                std::path::Path::new(path),
+                &self.config.self_id,
+                &nodes,
+            ).await {
+                Ok(n) => info!("DHT: 已保存 {} 个 good 节点到 {}", n, path),
+                Err(e) => warn!("DHT: 保存路由表失败: {}", e),
+            }
+        }
+
         info!("DHT 引擎已关闭");
     }
 
@@ -336,5 +415,135 @@ mod tests {
         assert!(engine.running.load(Ordering::Relaxed), "maintenance should keep engine running");
         engine.shutdown();
         sleep(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn test_start_with_persisted_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_dht.dat");
+        let self_id = [0xBBu8; 20];
+        let addr: std::net::SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        let node = DhtNode::new([0xAAu8; 20], addr);
+        DhtPersistence::save_to_file(&path, &self_id, &[node]).await.unwrap();
+
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: Some(path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let engine = DhtEngine::start(config).await.expect("should start with persisted data");
+
+        assert_eq!(engine.config.self_id, self_id, "self_id should come from file");
+        let stats = engine.stats().await;
+        assert!(stats.total_nodes >= 5, "should have bootstrap + persisted nodes (got {})", stats.total_nodes);
+        engine.shutdown_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_start_fallback_when_no_file() {
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: Some("/nonexistent/path/dht.dat".to_string()),
+            ..Default::default()
+        };
+        let engine = DhtEngine::start(config).await.expect("should fallback to bootstrap when no file");
+        let stats = engine.stats().await;
+        assert!(stats.total_nodes >= 4, "should have bootstrap nodes despite missing file");
+        engine.shutdown_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_start_uses_persisted_self_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("self_id_test.dat");
+        let custom_id = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+        DhtPersistence::save_to_file(&path, &custom_id, &[]).await.unwrap();
+
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: Some(path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let engine = DhtEngine::start(config).await.unwrap();
+
+        assert_eq!(engine.config.self_id, custom_id, "engine should use persisted self_id");
+        engine.shutdown_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_saves_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shutdown_test.dat");
+
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: Some(path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let engine = DhtEngine::start(config).await.unwrap();
+
+        engine.bootstrap_routing_table().await;
+        engine.shutdown_async().await;
+
+        assert!(path.exists(), "dht.dat should exist after shutdown");
+        let loaded = DhtPersistence::load_from_file_sync(&path).unwrap();
+        assert_eq!(loaded.self_id, engine.config.self_id);
+    }
+
+    #[test]
+    fn test_shutdown_no_path_no_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("should_not_exist.dat");
+
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: None,
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let engine = DhtEngine::start(config).await.unwrap();
+            engine.shutdown_async().await;
+        });
+
+        assert!(!path.exists(), "no file should be created when dht_file_path is None");
+    }
+
+    #[tokio::test]
+    async fn test_auto_save_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auto_save_test.dat");
+
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: Some(path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let engine = DhtEngine::start(config).await.unwrap();
+
+        engine.start_maintenance_loop();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        engine.save_routing_table_if_configured().await;
+
+        assert!(path.exists(), "auto-save should create dht.dat");
+        engine.shutdown_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_auto_save_skips_without_path() {
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: None,
+            ..Default::default()
+        };
+        let engine = DhtEngine::start(config).await.unwrap();
+
+        engine.save_routing_table_if_configured().await;
+        let stats = engine.stats().await;
+        assert!(stats.total_nodes >= 4, "engine should still work after skipped save");
+        engine.shutdown();
     }
 }

@@ -26,6 +26,7 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         max_retries: 3,
         retry_wait: 1,
         http_proxy: None,
+        dht_file_path: None,
     };
     DownloadCommand::new(GroupId::new(1), uri, &options, options.dir.as_deref(), options.out.as_deref()).unwrap()
 }
@@ -137,6 +138,7 @@ fn test_download_options_with_values() {
         max_retries: 3,
         retry_wait: 1,
         http_proxy: None,
+        dht_file_path: None,
     };
     assert_eq!(opts.split, Some(16));
     assert_eq!(opts.max_connection_per_server, Some(8));

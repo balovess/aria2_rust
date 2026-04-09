@@ -29,6 +29,7 @@ fn create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
         max_retries: 3,
         retry_wait: 1,
         http_proxy: None,
+        dht_file_path: None,
     };
     let group = RequestGroup::new(GroupId::new(1), vec![uri.to_string()], options);
     Arc::new(RwLock::new(group))

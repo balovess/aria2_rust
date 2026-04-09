@@ -13,7 +13,7 @@
   <a href="#许可证">许可证</a>
 </p>
 
----
+***
 
 **aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的完整 Rust 重写版本。支持 HTTP/HTTPS、FTP/SFTP、BitTorrent、Metalink 协议，提供 JSON-RPC/XML-RPC/WebSocket 远程控制接口。
 
@@ -22,7 +22,7 @@
 - **多协议下载**: HTTP/HTTPS、FTP/SFTP、BitTorrent (DHT/PEX/MSE)、Metalink V3/V4
 - **多源镜像**: 自动从多个 URI 分段并行下载，最大化带宽利用率
 - **断点续传**: 支持所有协议的断点续传，网络中断后无缝恢复
-- **BitTorrent 完整支持**: 
+- **BitTorrent 完整支持**:
   - ✅ DHT 网络（KRPC + 路由表 + bootstrap 节点）
   - ✅ Tracker 通信（UDP/HTTP）
   - ✅ Peer 交换（PEX）
@@ -33,7 +33,7 @@
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
 - **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（25 个方法 + 7 种事件）
-- **配置系统**: ~95 个核心选项，支持命令行 / 配置文件 / 环境变量四源合并
+- **配置系统**: \~95 个核心选项，支持命令行 / 配置文件 / 环境变量四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
 - **公共 Tracker 列表**: 自动从 trackerslist.com 更新 BT Peer 发现
@@ -82,15 +82,15 @@ aria2c http://example.com/file.zip
 aria2c -o output.dat -d /downloads -s 4 -x 8 http://example.com/large.bin
 ```
 
-| 选项 | 说明 | 默认值 |
-|--------|-------------|---------|
-| `-d, --dir` | 保存目录 | `.` |
-| `-o, --out` | 输出文件名 | 自动 |
-| `-s, --split` | 每个服务器的连接数 | `1` |
-| `-x, --max-connection-per-server` | 每个服务器的最大连接数 | `1` |
-| `--max-download-limit` | 最大下载速度 | 无限制 |
-| `--timeout` | 超时时间（秒） | `60` |
-| `-q, --quiet` | 安静模式 | false |
+| 选项                                | 说明          | 默认值   |
+| --------------------------------- | ----------- | ----- |
+| `-d, --dir`                       | 保存目录        | `.`   |
+| `-o, --out`                       | 输出文件名       | 自动    |
+| `-s, --split`                     | 每个服务器的连接数   | `1`   |
+| `-x, --max-connection-per-server` | 每个服务器的最大连接数 | `1`   |
+| `--max-download-limit`            | 最大下载速度      | 无限制   |
+| `--timeout`                       | 超时时间（秒）     | `60`  |
+| `-q, --quiet`                     | 安静模式        | false |
 
 ### BitTorrent 下载
 
@@ -117,8 +117,8 @@ aria2c -i uris.txt
 
 ## 项目架构
 
-总代码量：~14,500+ 行 Rust/TS  
-测试套件：~300+ 测试通过
+总代码量：\~14,500+ 行 Rust/TS\
+测试套件：\~300+ 测试通过
 
 本项目组织为 Cargo workspace，包含 4 个子项目：
 
@@ -276,29 +276,30 @@ cargo run --example simple_download -- http://example.com/test.bin
 
 ## 与原版 aria2 的兼容性
 
-| 功能 | 状态 | 说明 |
-|---------|--------|-------|
-| CLI 参数 | ✅ 核心 | 已实现 ~50 个最常用选项 |
-| 配置文件 (`aria2.conf`) | ✅ | 相同语法格式 |
-| 环境变量 | ✅ | `ARIA2_*` 前缀映射 |
-| JSON-RPC API | ✅ | 25 个方法兼容 |
-| XML-RPC API | ✅ | 完整 methodCall/response/fault 支持 |
-| WebSocket 事件 | ✅ | 7 种事件类型 |
-| URI 列表文件 (`-i`) | ✅ | 镜像 + 内联选项 |
-| NetRC 认证 | ✅ | machine/default/macdef 解析 |
-| 会话保存/加载 | ✅ | 往返一致 |
-| Metalink V3/V4 | ✅ | 完整解析 |
-| BitTorrent DHT | ✅ | KRPC + 路由表 + bootstrap |
-| FTP/SFTP | ✅ | 被动模式 + 认证 |
-| 速率限制 | ✅ | 令牌桶算法 |
-| Cookie 管理 | ✅ | Netscape 格式持久化 |
-| MSE/PE 加密 | ✅ | BEP14 握手 |
-| Magnet 链接 | ✅ | ut_metadata 获取 |
-| RarestFirst Piece | ⚠️ 部分 | 基本实现 |
+| 功能                  | 状态    | 说明                              |
+| ------------------- | ----- | ------------------------------- |
+| CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
+| 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
+| 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
+| JSON-RPC API        | ✅     | 25 个方法兼容                        |
+| XML-RPC API         | ✅     | 完整 methodCall/response/fault 支持 |
+| WebSocket 事件        | ✅     | 7 种事件类型                         |
+| URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
+| NetRC 认证            | ✅     | machine/default/macdef 解析       |
+| 会话保存/加载             | ✅     | 往返一致                            |
+| Metalink V3/V4      | ✅     | 完整解析                            |
+| BitTorrent DHT      | ✅     | KRPC + 路由表 + bootstrap          |
+| FTP/SFTP            | ✅     | 被动模式 + 认证                       |
+| 速率限制                | ✅     | 令牌桶算法                           |
+| Cookie 管理           | ✅     | Netscape 格式持久化                  |
+| MSE/PE 加密           | ✅     | BEP14 握手                        |
+| Magnet 链接           | ✅     | ut\_metadata 获取                 |
+| RarestFirst Piece   | ⚠️ 部分 | 基本实现                            |
 
 **尚未实现**（计划中）：
+
 - 实时速度图表（TUI）
-- 完整 300+ 选项覆盖（目前 ~95 个核心选项）
+- 完整 300+ 选项覆盖（目前 \~95 个核心选项）
 - BitTorrent Endgame 模式
 - DHT 路由表持久化（dht.dat）
 
@@ -314,3 +315,4 @@ Copyright (C) 2024 aria2-rust contributors.
 - [Tokio](https://tokio.rs/) — Rust 异步运行时
 - [Reqwest](https://docs.rs/reqwest/) — HTTP 客户端基础
 - [Axum](https://docs.rs/axum/) — RPC 服务器的 Web 框架
+

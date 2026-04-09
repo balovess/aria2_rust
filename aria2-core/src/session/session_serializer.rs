@@ -354,6 +354,7 @@ ftp://server/big.iso
             max_retries: 3,
             retry_wait: 1,
             http_proxy: None,
+            dht_file_path: None,
         };
         let map = download_options_to_map(&opts);
         assert_eq!(map.get("split").unwrap(), "8");

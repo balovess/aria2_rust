@@ -61,6 +61,7 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         max_retries: 3,
         retry_wait: 1,
         http_proxy: None,
+        dht_file_path: None,
     };
 
     match man.add_group(vec![uri.to_string()], download_opts).await {

@@ -373,6 +373,7 @@ impl Command for BtDownloadCommand {
             let dht_port = { self.group.read().await.options().dht_listen_port };
             let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
                 port: dht_port.unwrap_or(0),
+                dht_file_path: self.group.read().await.options().dht_file_path.clone(),
                 ..Default::default()
             };
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
