@@ -72,7 +72,7 @@ impl ActiveSessionManager {
                 Ok(entries)
             }
             Err(e) => {
-                let err_msg = format!("加载会话文件失败: {}", e);
+                let err_msg = format!("Failed to load session file: {}", e);
                 tracing::error!("{}", err_msg);
                 Err(err_msg)
             }
@@ -116,7 +116,7 @@ impl ActiveSessionManager {
                 Ok(entries.len())
             }
             Err(e) => {
-                let err_msg = format!("保存会话文件失败: {}", e);
+                let err_msg = format!("Failed to save session file: {}", e);
                 tracing::error!("{}", err_msg);
                 Err(err_msg)
             }
@@ -181,7 +181,7 @@ impl ActiveSessionManager {
                         mgr.dirty_flag.store(false, Ordering::Relaxed);
                     }
                     Err(e) => {
-                        tracing::warn!("自动保存失败: {} (将保留脏标记以便下次重试)", e);
+                        tracing::warn!("Auto-save failed: {} (keeping dirty flag for retry)", e);
                         // 保存失败时保留脏标记，下次继续尝试
                     }
                 }

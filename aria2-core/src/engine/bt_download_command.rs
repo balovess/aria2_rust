@@ -26,6 +26,9 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::engine::multi_file_layout::MultiFileLayout;
 use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
 
+/// Command timeout (seconds)
+const COMMAND_TIMEOUT_SECS: u64 = 600;
+
 /// BitTorrent download command implementation.
 ///
 /// This is the main orchestrator for BitTorrent downloads, coordinating:
@@ -383,7 +386,7 @@ impl Command for BtDownloadCommand {
         }
 
         if peer_addrs.is_empty() {
-            eprintln!("[BT] ERROR: No peers from tracker");
+            tracing::error!("[BT] ERROR: No peers from tracker");
         }
 
         // DHT peer discovery
@@ -398,7 +401,7 @@ impl Command for BtDownloadCommand {
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
                     self.dht_engine = Some(engine);
-                    eprintln!("[BT] DHT engine started");
+                    tracing::info!("[BT] DHT engine started");
                     self.dht_engine.as_ref().unwrap().start_maintenance_loop();
                 }
                 Err(e) => {
@@ -424,7 +427,7 @@ impl Command for BtDownloadCommand {
                         peer_addrs.push(paddr);
                     }
                 }
-                eprintln!(
+                tracing::info!(
                     "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
                     peer_addrs.len() - before,
                     peer_addrs.len(),
@@ -437,7 +440,7 @@ impl Command for BtDownloadCommand {
 
         // Public tracker fallback
         let enable_public_trackers = { self.group.read().await.options().enable_public_trackers };
-        if enable_public_trackers && self.public_trackers.is_none() && peer_addrs.len() < 15 {
+        if enable_public_trackers && self.public_trackers.is_none() && peer_addrs.len() < PUBLIC_TRACKER_PEER_THRESHOLD {
             let ptl = std::sync::Arc::new(
                 aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
             );
@@ -453,7 +456,7 @@ impl Command for BtDownloadCommand {
             let mut extra_peers: Vec<(String, u16)> = Vec::new();
             let mut announced = 0usize;
 
-            for url in http_urls.iter().take(10) {
+            for url in http_urls.iter().take(MAX_PUBLIC_TRACKERS_TO_TRY) {
                 match announce_to_public_tracker(url, &info_hash_raw, &my_peer_id, total_size)
                     .await
                 {
@@ -479,7 +482,7 @@ impl Command for BtDownloadCommand {
                         peer_addrs.push(paddr);
                     }
                 }
-                eprintln!(
+                tracing::info!(
                     "[BT] Public trackers discovered {} extra peers (announced to {} of {})",
                     peer_addrs.len() - before,
                     announced,
@@ -502,14 +505,14 @@ impl Command for BtDownloadCommand {
         // Phase 2: Connect to Peers
         // ==================================================================
 
-        eprintln!("[BT] Connecting to {} peers...", peer_addrs.len());
+        tracing::info!("[BT] Connecting to {} peers...", peer_addrs.len());
         let mut active_connections: Vec<BtPeerConn> = Vec::new();
 
         let require_crypto = { self.group.read().await.options().bt_require_crypto };
         let force_encrypt = { self.group.read().await.options().bt_force_encrypt };
 
         for addr in &peer_addrs {
-            eprintln!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
+            tracing::debug!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
             let conn_result = if force_encrypt || require_crypto {
                 BtPeerConn::connect_mse(addr, &info_hash_raw, require_crypto).await
             } else {
@@ -521,7 +524,7 @@ impl Command for BtDownloadCommand {
 
             match conn_result {
                 Ok(mut conn) => {
-                    eprintln!(
+                    tracing::info!(
                         "[BT] Connected to peer {}:{} (encrypted={})",
                         addr.ip,
                         addr.port,
@@ -534,31 +537,31 @@ impl Command for BtDownloadCommand {
                     let empty_bf = vec![0u8; bf_len];
                     conn.send_bitfield(empty_bf.clone()).await.ok();
 
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
 
-                    eprintln!("[BT] Waiting for unchoke from {}:{}", addr.ip, addr.port);
-                    for _ in 0..50 {
-                        match tokio::time::timeout(Duration::from_secs(5), conn.read_message())
+                    tracing::debug!("[BT] Waiting for unchoke from {}:{}", addr.ip, addr.port);
+                    for _ in 0..MAX_UNCHOKE_WAIT_ATTEMPTS {
+                        match tokio::time::timeout(Duration::from_secs(PEER_MESSAGE_TIMEOUT_SECS), conn.read_message())
                             .await
                         {
                             Ok(Ok(Some(msg))) => {
                                 use aria2_protocol::bittorrent::message::types::BtMessage;
                                 if matches!(msg, BtMessage::Unchoke) {
-                                    eprintln!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
+                                    tracing::info!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
                                     break;
                                 }
-                                eprintln!("[BT] Got message: {:?}", msg);
+                                tracing::debug!("[BT] Got message: {:?}", msg);
                             }
                             Ok(Ok(None)) => {
-                                eprintln!("[BT] EOF from peer");
+                                tracing::warn!("[BT] EOF from peer");
                                 break;
                             }
                             Ok(Err(e)) => {
-                                eprintln!("[BT] Error reading from peer: {}", e);
+                                tracing::error!("[BT] Error reading from peer: {}", e);
                                 break;
                             }
                             Err(_) => {
-                                eprintln!("[BT] Timeout reading from peer");
+                                tracing::warn!("[BT] Timeout reading from peer");
                                 break;
                             }
                         }
@@ -567,13 +570,13 @@ impl Command for BtDownloadCommand {
                     active_connections.push(conn);
                 }
                 Err(e) => {
-                    eprintln!("[BT] Failed to connect peer {}: {}", addr.ip, e);
+                    tracing::error!("[BT] Failed to connect peer {}: {}", addr.ip, e);
                     continue;
                 }
             }
         }
 
-        eprintln!("[BT] Active connections: {}", active_connections.len());
+        tracing::info!("[BT] Active connections: {}", active_connections.len());
         if active_connections.is_empty() {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {
@@ -607,7 +610,7 @@ impl Command for BtDownloadCommand {
             }
 
             self.choking_algo = Some(algo);
-            eprintln!(
+            tracing::info!(
                 "[BT] Choking algorithm initialized with {} peers",
                 self.choking_algo.as_ref().unwrap().len()
             );
@@ -633,9 +636,29 @@ impl Command for BtDownloadCommand {
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
 
+        // BitTorrent protocol constants
+        /// Default size for each piece block request (16 KB)
         const BLOCK_SIZE: u32 = 16384;
+        /// Maximum number of retries for a failed piece download
         const MAX_RETRIES: u32 = 3;
+        /// Endgame mode threshold: enable when this many pieces remain
         const ENDGAME_THRESHOLD: u32 = 20;
+        /// Delay between peer connection setup and message reading (milliseconds)
+        const PEER_CONNECTION_DELAY_MS: u64 = 100;
+        /// Maximum attempts to wait for unchoke from a peer
+        const MAX_UNCHOKE_WAIT_ATTEMPTS: u32 = 50;
+        /// Timeout for each message read from peer (seconds)
+        const PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
+        /// Timeout for block request (seconds)
+        const BLOCK_REQUEST_TIMEOUT_SECS: u64 = 3;
+        /// Maximum messages to read while waiting for a specific block
+        const MAX_BLOCK_READ_MESSAGES: u32 = 10000;
+        /// Interval between speed updates (milliseconds)
+        const SPEED_UPDATE_INTERVAL_MS: u128 = 500;
+        /// Minimum peers threshold below which public trackers are used
+        const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
+        /// Maximum number of public trackers to attempt
+        const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
         let mut peer_tracker = PeerBitfieldTracker::new(num_pieces as u32);
         for (i, _conn) in active_connections.iter().enumerate() {
@@ -646,7 +669,7 @@ impl Command for BtDownloadCommand {
         }
         piece_picker.set_frequencies_from_peers(&peer_tracker.piece_frequencies());
 
-        eprintln!(
+        tracing::info!(
             "[BT] Piece selection strategy: RarestFirst, {} pieces total, {} peers tracked",
             num_pieces,
             peer_tracker.peer_count()
@@ -661,7 +684,7 @@ impl Command for BtDownloadCommand {
             let is_endgame = remaining > 0 && remaining <= ENDGAME_THRESHOLD;
 
             if is_endgame && !piece_picker.endgame_candidates().is_empty() {
-                eprintln!("[BT] === ENDGAME MODE === ({} pieces remaining)", remaining);
+                tracing::warn!("[BT] === ENDGAME MODE === ({} pieces remaining)", remaining);
             }
 
             let next_piece_idx: Option<usize> = if is_endgame {
@@ -675,13 +698,13 @@ impl Command for BtDownloadCommand {
             let next_piece_idx = match next_piece_idx {
                 Some(idx) => idx,
                 None => {
-                    eprintln!("[BT] No piece available, waiting...");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tracing::debug!("[BT] No piece available, waiting...");
+                    tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
                     continue;
                 }
             };
 
-            eprintln!("[BT] Downloading piece {}...", next_piece_idx);
+            tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
             let actual_piece_len =
                 if next_piece_idx == num_pieces - 1 && total_size % piece_length as u64 != 0 {
                     (total_size % piece_length as u64) as u32
@@ -690,14 +713,14 @@ impl Command for BtDownloadCommand {
                 };
 
             let num_blocks = (actual_piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            eprintln!(
+            tracing::debug!(
                 "[BT] Piece {} has {} blocks (size: {} bytes)",
                 next_piece_idx, num_blocks, actual_piece_len
             );
             let mut piece_ok = false;
 
             for _retry in 0..MAX_RETRIES {
-                eprintln!("[BT] Retry {} for piece {}", _retry, next_piece_idx);
+                tracing::info!("[BT] Retry {} for piece {}", _retry, next_piece_idx);
                 let mut piece_data = Vec::with_capacity(actual_piece_len as usize);
                 let mut blocks_received = 0u32;
 
@@ -715,7 +738,7 @@ impl Command for BtDownloadCommand {
                         length: len,
                     };
 
-                    eprintln!(
+                    tracing::debug!(
                         "[BT] Requesting block {} offset={} len={}",
                         block_idx, offset, len
                     );
@@ -725,8 +748,8 @@ impl Command for BtDownloadCommand {
                             continue;
                         }
 
-                        match tokio::time::timeout(Duration::from_secs(3), async {
-                            for _ in 0..10000 {
+                        match tokio::time::timeout(Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS), async {
+                            for _ in 0..MAX_BLOCK_READ_MESSAGES {
                                 match conn.read_message().await {
                                     Ok(Some(msg)) => {
                                         if let aria2_protocol::bittorrent::message::types::BtMessage::Piece { index, begin, ref data } = msg {
@@ -741,7 +764,7 @@ impl Command for BtDownloadCommand {
                             Err(())
                         }).await {
                             Ok(Ok(data)) => {
-                                eprintln!("[BT] Got block {} data len={}", block_idx, data.len());
+                                tracing::debug!("[BT] Got block {} data len={}", block_idx, data.len());
                                 piece_data.extend_from_slice(&data);
                                 blocks_received += 1;
                                 self.completed_bytes += data.len() as u64;
@@ -751,24 +774,24 @@ impl Command for BtDownloadCommand {
                                 got_block = true;
                                 break;
                             }
-                            Ok(Err(())) => { eprintln!("[BT] Block request timeout"); }
-                            Err(_) => { eprintln!("[BT] Block request timeout (outer)"); }
+                            Ok(Err(())) => { tracing::warn!("[BT] Block request timeout"); }
+                            Err(_) => { tracing::warn!("[BT] Block request timeout (outer)"); }
                         }
                     }
 
                     if !got_block {
-                        eprintln!("[BT] Failed to get block {}", block_idx);
+                        tracing::error!("[BT] Failed to get block {}", block_idx);
                         break;
                     }
                 }
 
                 if blocks_received == num_blocks {
-                    eprintln!(
+                    tracing::info!(
                         "[BT] All blocks received for piece {}, verifying...",
                         next_piece_idx
                     );
                     if piece_manager.verify_piece_hash(next_piece_idx as u32, &piece_data) {
-                        eprintln!("[BT] Piece {} verified OK", next_piece_idx);
+                        tracing::info!("[BT] Piece {} verified OK", next_piece_idx);
                         piece_manager.mark_piece_complete(next_piece_idx as u32);
                         piece_picker.mark_completed(next_piece_idx as u32);
 
@@ -809,13 +832,13 @@ impl Command for BtDownloadCommand {
                         piece_ok = true;
                         break;
                     } else {
-                        eprintln!(
+                        tracing::warn!(
                             "[BT] SHA1 mismatch on piece {}, retrying...",
                             next_piece_idx
                         );
                     }
                 } else {
-                    eprintln!(
+                    tracing::warn!(
                         "[BT] Incomplete piece {}, received {}/{}",
                         next_piece_idx, blocks_received, num_blocks
                     );
@@ -823,7 +846,7 @@ impl Command for BtDownloadCommand {
             }
 
             if !piece_ok {
-                eprintln!(
+                tracing::error!(
                     "[BT] Piece {} failed after {} retries",
                     next_piece_idx, MAX_RETRIES
                 );
@@ -840,7 +863,7 @@ impl Command for BtDownloadCommand {
                 g.set_completed_length(self.completed_bytes);
 
                 let elapsed = last_speed_update.elapsed();
-                if elapsed.as_millis() >= 500 {
+                if elapsed.as_millis() >= SPEED_UPDATE_INTERVAL_MS {
                     let delta = self.completed_bytes - last_completed;
                     let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
                     g.update_speed(speed, 0).await;
@@ -852,9 +875,9 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        eprintln!("[BT] Finalizing writer...");
+        tracing::info!("[BT] Finalizing writer...");
         writer.finalize().await.ok();
-        eprintln!("[BT] Writer finalized OK");
+        tracing::info!("[BT] Writer finalized OK");
         info!(
             "BT download done: {} ({} bytes)",
             self.output_path.display(),
@@ -866,7 +889,7 @@ impl Command for BtDownloadCommand {
         // ==================================================================
 
         if self.seed_enabled && !active_connections.is_empty() {
-            eprintln!(
+            tracing::info!(
                 "[BT] Starting seeding phase with {} peers...",
                 active_connections.len()
             );
@@ -877,7 +900,7 @@ impl Command for BtDownloadCommand {
             self.run_seeding_phase(active_connections, piece_length, num_pieces as u32)
                 .await?;
         } else {
-            eprintln!(
+            tracing::info!(
                 "[BT] Skipping seeding (enabled={}, connections={})",
                 self.seed_enabled,
                 active_connections.len()
@@ -939,7 +962,7 @@ impl Command for BtDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(600))
+        Some(Duration::from_secs(COMMAND_TIMEOUT_SECS))
     }
 }
 

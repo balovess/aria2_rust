@@ -85,7 +85,7 @@ impl MultiFileLayout {
             })
         } else if let Some(ref files) = info.files {
             if files.is_empty() {
-                return Err("files列表为空".to_string());
+                return Err("files list is empty".to_string());
             }
 
             let mut file_infos = Vec::with_capacity(files.len());
@@ -157,7 +157,7 @@ impl MultiFileLayout {
                 is_single_file: false,
             })
         } else {
-            Err("InfoDict既没有length也没有files字段".to_string())
+            Err("InfoDict has neither length nor files field".to_string())
         }
     }
 
@@ -166,11 +166,11 @@ impl MultiFileLayout {
             if let Some(parent) = file.absolute_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     format!(
-                        "无法创建目录 {:?} for file[{}] {:?}: {}",
+                        "Failed to create directory {:?} for file[{}] {:?}: {}",
                         parent, i, file.path, e
                     )
                 })?;
-                debug!("已创建目录: {:?}", parent);
+                debug!("Created directory: {:?}", parent);
             }
         }
         Ok(())

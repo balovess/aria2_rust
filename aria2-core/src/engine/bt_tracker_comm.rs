@@ -1,4 +1,8 @@
 use crate::error::{Aria2Error, RecoverableError, Result};
+use tracing::{debug, info};
+
+/// Tracker request timeout (seconds)
+const TRACKER_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 /// BitTorrent tracker communication module.
 ///
@@ -59,7 +63,7 @@ pub async fn announce_to_public_tracker(
     );
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(TRACKER_REQUEST_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("build client: {}", e))?;
 
@@ -130,20 +134,20 @@ pub async fn perform_http_tracker_announce(
         total_size,
     );
 
-    eprintln!("[BT] Announcing to tracker: {}", url);
+    info!("[BT] Announcing to tracker: {}", url);
     let resp = reqwest::get(&url)
         .await
         .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
             message: format!("Tracker HTTP failed: {}", e),
         }))?;
-    eprintln!("[BT] Tracker response status: {}", resp.status());
+    info!("[BT] Tracker response status: {}", resp.status());
     let body = resp
         .bytes()
         .await
         .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
             message: format!("Tracker body read failed: {}", e),
         }))?;
-    eprintln!("[BT] Tracker body: {:?}", String::from_utf8_lossy(&body));
+    debug!("[BT] Tracker body: {:?}", String::from_utf8_lossy(&body));
 
     let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(
         &body,
@@ -152,12 +156,12 @@ pub async fn perform_http_tracker_announce(
         message: format!("Tracker parse failed: {}", e),
     }))?;
 
-    eprintln!(
+    info!(
         "[BT] Tracker response: {} peers",
         tracker_resp.peer_count()
     );
     for peer in &tracker_resp.peers {
-        eprintln!("[BT]   Peer: {}:{}", peer.ip, peer.port);
+        debug!("[BT]   Peer: {}:{}", peer.ip, peer.port);
     }
 
     if tracker_resp.is_failure() {

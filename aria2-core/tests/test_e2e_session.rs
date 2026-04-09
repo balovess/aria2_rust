@@ -3,7 +3,7 @@ use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::auto_save_session::AutoSaveSession;
 use aria2_core::session::session_serializer::{
-    deserialize, load_from_file, save_to_file, serialize_entry, SessionEntry,
+    deserialize, load_from_file, save_to_file, SessionEntry,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 #[test]
 fn test_e2e_serialize_single_entry() {
     let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
-    let text = serialize_entry(&entry);
+    let text = entry.serialize();
     assert!(text.contains("http://example.com/file.zip"));
     assert!(text.contains("GID=d270c8a2"));
 
@@ -30,11 +30,11 @@ fn test_e2e_serialize_multiple_entries_roundtrip() {
         m.insert("dir".to_string(), "/tmp".to_string());
         m
     });
-    text.push_str(&serialize_entry(&e1));
+    text.push_str(&e1.serialize());
     text.push('\n');
 
     let e2 = SessionEntry::new(2, vec!["ftp://b.com/2.iso".to_string()]).paused();
-    text.push_str(&serialize_entry(&e2));
+    text.push_str(&e2.serialize());
     text.push('\n');
 
     let entries = deserialize(&text).unwrap();
@@ -53,7 +53,7 @@ fn test_e2e_serialize_special_chars_in_uri() {
             "http://example.com/file with spaces.zip".to_string(),
         ],
     );
-    let text = serialize_entry(&entry);
+    let text = entry.serialize();
 
     let entries = deserialize(&text).unwrap();
     assert_eq!(entries.len(), 1);
@@ -112,7 +112,7 @@ fn test_e2e_pause_flag_serialization() {
     let entries = deserialize(input).unwrap();
     assert!(entries[0].paused);
 
-    let text = serialize_entry(&entries[0]);
+    let text = entries[0].serialize();
     assert!(text.contains("PAUSE=true"));
 }
 
