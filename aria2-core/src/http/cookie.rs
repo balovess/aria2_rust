@@ -296,7 +296,7 @@ fn parse_http_date(s: &str) -> Option<i64> {
     if time_parts.len() < 3 {
         return None;
     }
-    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let _mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 11, 30, 31];
     let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
     let feb_days = if leap { 29 } else { 28 };
     let dim = [31, feb_days, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
