@@ -1,5 +1,6 @@
 use crate::error::Result;
 use async_trait::async_trait;
+use std::any::Any;
 use std::path::Path;
 
 #[async_trait]
@@ -11,6 +12,10 @@ pub trait DiskAdaptor: Send + Sync {
     async fn truncate(&mut self, length: u64) -> Result<()>;
     async fn flush(&mut self) -> Result<()>;
     async fn size(&self) -> Result<u64>;
+    fn as_any(&self) -> &dyn Any;
+
+    #[cfg(unix)]
+    fn unix_raw_fd(&self) -> Option<std::os::unix::io::RawFd>;
 }
 
 pub struct DirectDiskAdaptor {
@@ -131,5 +136,14 @@ impl DiskAdaptor for DirectDiskAdaptor {
                 "文件未打开".to_string(),
             ))
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    #[cfg(unix)]
+    fn unix_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        self.file.as_ref().map(|f| f.as_raw_fd())
     }
 }

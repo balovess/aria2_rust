@@ -70,9 +70,7 @@ async fn preallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()>
 async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::io::AsRawFd;
-        if let Some(file) = adaptor.as_any().downcast_ref::<std::fs::File>() {
-            let fd = file.as_raw_fd();
+        if let Some(fd) = adaptor.unix_raw_fd() {
             unsafe {
                 let ret = libc::posix_fallocate64(fd, 0, length as i64);
                 if ret != 0 {
