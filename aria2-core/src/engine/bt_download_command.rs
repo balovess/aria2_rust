@@ -1,15 +1,18 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 // Import extracted modules
 use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
     on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
 };
+use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::bt_piece_downloader::{write_piece_to_multi_files, FileBackedPieceProvider};
+use crate::engine::bt_piece_selector::{BtPieceSelector, build_bitfield_from_completed};
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use crate::engine::bt_tracker_comm::{
     announce_to_public_tracker, perform_http_tracker_announce,
@@ -26,8 +29,26 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::engine::multi_file_layout::MultiFileLayout;
 use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
 
+/// Re-export constants from submodules for backward compatibility
+pub use crate::engine::bt_message_handler::{
+    BLOCK_SIZE, MAX_RETRIES, BLOCK_REQUEST_TIMEOUT_SECS, MAX_BLOCK_READ_MESSAGES,
+};
+pub use crate::engine::bt_peer_interaction::{
+    PEER_CONNECTION_DELAY_MS, MAX_UNCHOKE_WAIT_ATTEMPTS, PEER_MESSAGE_TIMEOUT_SECS,
+};
+pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
+
 /// Command timeout (seconds)
 const COMMAND_TIMEOUT_SECS: u64 = 600;
+
+/// Interval between speed updates (milliseconds)
+const SPEED_UPDATE_INTERVAL_MS: u128 = 500;
+
+/// Minimum peers threshold below which public trackers are used
+const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
+
+/// Maximum number of public trackers to attempt
+const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
 /// BitTorrent download command implementation.
 ///
@@ -292,7 +313,7 @@ impl BtDownloadCommand {
 
 #[async_trait]
 impl Command for BtDownloadCommand {
-    async fn execute(&mut self) -> Result<()> {
+   async fn execute(&mut self) -> Result<()> {
         if !self.started {
             self.group.write().await.start().await?;
             self.started = true;
@@ -505,76 +526,18 @@ impl Command for BtDownloadCommand {
         // Phase 2: Connect to Peers
         // ==================================================================
 
-        tracing::info!("[BT] Connecting to {} peers...", peer_addrs.len());
-        let mut active_connections: Vec<BtPeerConn> = Vec::new();
-
         let require_crypto = { self.group.read().await.options().bt_require_crypto };
         let force_encrypt = { self.group.read().await.options().bt_force_encrypt };
 
-        for addr in &peer_addrs {
-            tracing::debug!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
-            let conn_result = if force_encrypt || require_crypto {
-                BtPeerConn::connect_mse(addr, &info_hash_raw, require_crypto).await
-            } else {
-                match BtPeerConn::connect_mse(addr, &info_hash_raw, false).await {
-                    Ok(conn) => Ok(conn),
-                    Err(_) => BtPeerConn::connect_plain(addr, &info_hash_raw).await,
-                }
-            };
+        let conn_result = BtPeerInteraction::connect_to_peers(
+            &peer_addrs,
+            &info_hash_raw,
+            num_pieces as u32,
+            require_crypto,
+            force_encrypt,
+        ).await?;
 
-            match conn_result {
-                Ok(mut conn) => {
-                    tracing::info!(
-                        "[BT] Connected to peer {}:{} (encrypted={})",
-                        addr.ip,
-                        addr.port,
-                        conn.is_encrypted()
-                    );
-                    conn.send_unchoke().await.ok();
-                    conn.send_interested().await.ok();
-
-                    let bf_len = (num_pieces + 7) / 8;
-                    let empty_bf = vec![0u8; bf_len];
-                    conn.send_bitfield(empty_bf.clone()).await.ok();
-
-                    tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
-
-                    tracing::debug!("[BT] Waiting for unchoke from {}:{}", addr.ip, addr.port);
-                    for _ in 0..MAX_UNCHOKE_WAIT_ATTEMPTS {
-                        match tokio::time::timeout(Duration::from_secs(PEER_MESSAGE_TIMEOUT_SECS), conn.read_message())
-                            .await
-                        {
-                            Ok(Ok(Some(msg))) => {
-                                use aria2_protocol::bittorrent::message::types::BtMessage;
-                                if matches!(msg, BtMessage::Unchoke) {
-                                    tracing::info!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
-                                    break;
-                                }
-                                tracing::debug!("[BT] Got message: {:?}", msg);
-                            }
-                            Ok(Ok(None)) => {
-                                tracing::warn!("[BT] EOF from peer");
-                                break;
-                            }
-                            Ok(Err(e)) => {
-                                tracing::error!("[BT] Error reading from peer: {}", e);
-                                break;
-                            }
-                            Err(_) => {
-                                tracing::warn!("[BT] Timeout reading from peer");
-                                break;
-                            }
-                        }
-                    }
-
-                    active_connections.push(conn);
-                }
-                Err(e) => {
-                    tracing::error!("[BT] Failed to connect peer {}: {}", addr.ip, e);
-                    continue;
-                }
-            }
-        }
+        let mut active_connections = conn_result.connections;
 
         tracing::info!("[BT] Active connections: {}", active_connections.len());
         if active_connections.is_empty() {
@@ -636,38 +599,19 @@ impl Command for BtDownloadCommand {
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
 
-        // BitTorrent protocol constants
-        /// Default size for each piece block request (16 KB)
-        const BLOCK_SIZE: u32 = 16384;
-        /// Maximum number of retries for a failed piece download
-        const MAX_RETRIES: u32 = 3;
-        /// Endgame mode threshold: enable when this many pieces remain
-        const ENDGAME_THRESHOLD: u32 = 20;
-        /// Delay between peer connection setup and message reading (milliseconds)
-        const PEER_CONNECTION_DELAY_MS: u64 = 100;
-        /// Maximum attempts to wait for unchoke from a peer
-        const MAX_UNCHOKE_WAIT_ATTEMPTS: u32 = 50;
-        /// Timeout for each message read from peer (seconds)
-        const PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
-        /// Timeout for block request (seconds)
-        const BLOCK_REQUEST_TIMEOUT_SECS: u64 = 3;
-        /// Maximum messages to read while waiting for a specific block
-        const MAX_BLOCK_READ_MESSAGES: u32 = 10000;
-        /// Interval between speed updates (milliseconds)
-        const SPEED_UPDATE_INTERVAL_MS: u128 = 500;
-        /// Minimum peers threshold below which public trackers are used
-        const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
-        /// Maximum number of public trackers to attempt
-        const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
+        // Initialize piece selector
+        let piece_selector = BtPieceSelector::new(num_pieces as u32);
 
+        // Initialize peer tracking
         let mut peer_tracker = PeerBitfieldTracker::new(num_pieces as u32);
-        for (i, _conn) in active_connections.iter().enumerate() {
-            peer_tracker.update_peer_bitfield(
-                &format!("peer_{}", i),
-                &vec![0xFFu8; ((num_pieces as usize) + 7) / 8],
-            );
-        }
-        piece_picker.set_frequencies_from_peers(&peer_tracker.piece_frequencies());
+        BtPeerInteraction::initialize_peer_tracking(
+            &active_connections,
+            num_pieces as u32,
+            &mut peer_tracker,
+        );
+
+        // Initialize piece picker with frequency data
+        piece_selector.initialize_frequencies(&mut piece_picker, &peer_tracker);
 
         tracing::info!(
             "[BT] Piece selection strategy: RarestFirst, {} pieces total, {} peers tracked",
@@ -676,26 +620,16 @@ impl Command for BtDownloadCommand {
         );
 
         loop {
-            if piece_picker.is_complete() {
+            if BtPieceSelector::is_complete(&piece_picker) {
                 break;
             }
 
             let remaining = piece_picker.remaining_count();
-            let is_endgame = remaining > 0 && remaining <= ENDGAME_THRESHOLD;
 
-            if is_endgame && !piece_picker.endgame_candidates().is_empty() {
-                tracing::warn!("[BT] === ENDGAME MODE === ({} pieces remaining)", remaining);
-            }
+            // Use piece selector to choose next piece
+            let selection = piece_selector.select_next_piece(&mut piece_picker, remaining as usize);
 
-            let next_piece_idx: Option<usize> = if is_endgame {
-                piece_picker.pick_next()
-            } else {
-                let all_ones_bf = vec![0xFFu8; ((num_pieces as usize) + 7) / 8];
-                piece_picker.select(&all_ones_bf, num_pieces as usize)
-            }
-            .map(|v| v as usize);
-
-            let next_piece_idx = match next_piece_idx {
+            let next_piece_idx = match selection.piece_index {
                 Some(idx) => idx,
                 None => {
                     tracing::debug!("[BT] No piece available, waiting...");
@@ -705,87 +639,33 @@ impl Command for BtDownloadCommand {
             };
 
             tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
-            let actual_piece_len =
-                if next_piece_idx == num_pieces - 1 && total_size % piece_length as u64 != 0 {
-                    (total_size % piece_length as u64) as u32
-                } else {
-                    piece_length
-                };
 
-            let num_blocks = (actual_piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            // Calculate actual piece length using helper
+            let actual_piece_len = piece_selector.calculate_piece_length(
+                next_piece_idx,
+                piece_length,
+                total_size,
+            );
+
+            // Calculate number of blocks
+            let num_blocks = BtPieceSelector::calculate_num_blocks(actual_piece_len, BLOCK_SIZE);
             tracing::debug!(
                 "[BT] Piece {} has {} blocks (size: {} bytes)",
                 next_piece_idx, num_blocks, actual_piece_len
             );
             let mut piece_ok = false;
 
-            for _retry in 0..MAX_RETRIES {
-                tracing::info!("[BT] Retry {} for piece {}", _retry, next_piece_idx);
-                let mut piece_data = Vec::with_capacity(actual_piece_len as usize);
-                let mut blocks_received = 0u32;
+            // Download all blocks for this piece using message handler
+            match BtMessageHandler::download_piece_blocks(
+                &mut active_connections,
+                next_piece_idx as u32,
+                actual_piece_len,
+                num_blocks,
+            ).await {
+                Ok(piece_data) => {
+                    // Update completed bytes with received data length
+                    self.completed_bytes += piece_data.len() as u64;
 
-                for block_idx in 0..num_blocks {
-                    let offset = block_idx * BLOCK_SIZE;
-                    let len = if offset + BLOCK_SIZE > actual_piece_len {
-                        actual_piece_len - offset
-                    } else {
-                        BLOCK_SIZE
-                    };
-
-                    let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
-                        index: next_piece_idx as u32,
-                        begin: offset,
-                        length: len,
-                    };
-
-                    tracing::debug!(
-                        "[BT] Requesting block {} offset={} len={}",
-                        block_idx, offset, len
-                    );
-                    let mut got_block = false;
-                    for (conn_idx, conn) in active_connections.iter_mut().enumerate() {
-                        if conn.send_request(req.clone()).await.is_err() {
-                            continue;
-                        }
-
-                        match tokio::time::timeout(Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS), async {
-                            for _ in 0..MAX_BLOCK_READ_MESSAGES {
-                                match conn.read_message().await {
-                                    Ok(Some(msg)) => {
-                                        if let aria2_protocol::bittorrent::message::types::BtMessage::Piece { index, begin, ref data } = msg {
-                                            if index == next_piece_idx as u32 && begin == offset {
-                                                return Ok(data.clone());
-                                            }
-                                        }
-                                    }
-                                    Ok(None) | Err(_) => continue,
-                                }
-                            }
-                            Err(())
-                        }).await {
-                            Ok(Ok(data)) => {
-                                tracing::debug!("[BT] Got block {} data len={}", block_idx, data.len());
-                                piece_data.extend_from_slice(&data);
-                                blocks_received += 1;
-                                self.completed_bytes += data.len() as u64;
-
-                                // Update peer statistics with received data
-                                on_piece_received(&mut self.choking_algo, conn_idx, data.len() as u64);
-                                got_block = true;
-                                break;
-                            }
-                            Ok(Err(())) => { tracing::warn!("[BT] Block request timeout"); }
-                            Err(_) => { tracing::warn!("[BT] Block request timeout (outer)"); }
-                        }
-                    }
-
-                    if !got_block {
-                        tracing::error!("[BT] Failed to get block {}", block_idx);
-                        break;
-                    }
-                }
-
-                if blocks_received == num_blocks {
                     tracing::info!(
                         "[BT] All blocks received for piece {}, verifying...",
                         next_piece_idx
@@ -809,26 +689,17 @@ impl Command for BtDownloadCommand {
 
                         // Export updated bitfield to RequestGroup for session persistence
                         {
-                            // Build bitfield from completed pieces
-                            let num_p = piece_manager.num_pieces();
-                            let bf_len = ((num_p as usize) + 7) / 8;
-                            let mut bitfield = vec![0u8; bf_len];
-                            for i in 0..num_p {
-                                if piece_manager.is_completed(i) {
-                                    let byte_idx = (i as usize) / 8;
-                                    let bit_idx = 7 - ((i as usize) % 8); // MSB first
-                                    if byte_idx < bitfield.len() {
-                                        bitfield[byte_idx] |= 1 << bit_idx;
-                                    }
-                                }
-                            }
+                            // Build bitfield from completed pieces using helper
+                            let bitfield = build_bitfield_from_completed(
+                                piece_manager.num_pieces(),
+                                |i| piece_manager.is_completed(i),
+                            );
                             let g = self.group.write().await;
                             g.set_bt_bitfield(Some(bitfield)).await;
                         }
 
-                        for conn in &mut active_connections {
-                            conn.send_have(next_piece_idx as u32).await.ok();
-                        }
+                        // Broadcast HAVE to all peers
+                        BtPeerInteraction::broadcast_have(&mut active_connections, next_piece_idx as u32).await;
                         piece_ok = true;
                         break;
                     } else {
@@ -837,10 +708,11 @@ impl Command for BtDownloadCommand {
                             next_piece_idx
                         );
                     }
-                } else {
+                }
+                Err(_) => {
                     tracing::warn!(
-                        "[BT] Incomplete piece {}, received {}/{}",
-                        next_piece_idx, blocks_received, num_blocks
+                        "[BT] Incomplete piece {}, needed {} blocks",
+                        next_piece_idx, num_blocks
                     );
                 }
             }
