@@ -12,10 +12,17 @@ pub fn available_space(path: &Path) -> Result<u64> {
 
     #[cfg(target_family = "unix")]
     {
-        use std::os::unix::fs::statvfs;
-        let stat = statvfs(path)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("statvfs失败: {}", e))))?;
-        Ok(stat.blocks_available().saturating_mul(stat.block_size()))
+        use std::os::unix::ffi::OsStrExt;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ret = unsafe {
+            libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat)
+        };
+        if ret != 0 {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                format!("statvfs failed: {}", std::io::Error::last_os_error())
+            )));
+        }
+        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
     }
 
     #[cfg(target_family = "windows")]
@@ -25,7 +32,13 @@ pub fn available_space(path: &Path) -> Result<u64> {
                 let _ = path;
                 u64::MAX / 2
             })
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("获取磁盘信息失败: {}", e))))
+            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Failed to get disk space: {}", e))))
+    }
+
+    #[cfg(all(not(target_family = "unix"), not(target_family = "windows")))]
+    {
+        let _ = path;
+        Ok(u64::MAX)
     }
 }
 
@@ -53,16 +66,29 @@ pub fn total_space(path: &Path) -> Result<u64> {
 
     #[cfg(target_family = "unix")]
     {
-        use std::os::unix::fs::statvfs;
-        let stat = statvfs(path)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("statvfs失败: {}", e))))?;
-        Ok(stat.blocks().saturating_mul(stat.block_size()))
+        use std::os::unix::ffi::OsStrExt;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ret = unsafe {
+            libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat)
+        };
+        if ret != 0 {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                format!("statvfs failed: {}", std::io::Error::last_os_error())
+            )));
+        }
+        Ok(stat.f_blocks as u64 * stat.f_frsize as u64)
     }
 
     #[cfg(target_family = "windows")]
     {
         std::fs::metadata(path)
             .map(|_| u64::MAX)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("获取磁盘信息失败: {}", e))))
+            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Failed to get disk space: {}", e))))
+    }
+
+    #[cfg(all(not(target_family = "unix"), not(target_family = "windows")))]
+    {
+        let _ = path;
+        Ok(u64::MAX)
     }
 }

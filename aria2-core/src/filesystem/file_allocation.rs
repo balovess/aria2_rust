@@ -118,7 +118,7 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
             let stat = statvfs_result.1;
             Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
         } else {
-            Err(Aria2Error::Io("无法获取磁盘空间".to_string()))
+            Err(Aria2Error::Io("Failed to get disk space".to_string()))
         }
     }
 
