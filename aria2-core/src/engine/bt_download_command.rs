@@ -701,7 +701,7 @@ impl Command for BtDownloadCommand {
                         // Broadcast HAVE to all peers
                         BtPeerInteraction::broadcast_have(&mut active_connections, next_piece_idx as u32).await;
                         piece_ok = true;
-                        break;
+                        // Don't break here - continue to download remaining pieces
                     } else {
                         tracing::warn!(
                             "[BT] SHA1 mismatch on piece {}, retrying...",
