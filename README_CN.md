@@ -292,16 +292,16 @@ cargo run --example simple_download -- http://example.com/test.bin
 | FTP/SFTP            | ✅     | 被动模式 + 认证                       |
 | 速率限制                | ✅     | 令牌桶算法                           |
 | Cookie 管理           | ✅     | Netscape 格式持久化                  |
-| MSE/PE 加密           | ✅     | BEP14 握手                        |
-| Magnet 链接           | ✅     | ut\_metadata 获取                 |
-| RarestFirst Piece   | ⚠️ 部分 | 基本实现                            |
+| MSE/PE 加密           | ✅ 完整 | BEP14 握手                        |
+| Magnet 链接           | ✅ 完整 | ut_metadata 获取                 |
+| RarestFirst Piece   | ✅ 完整 | 完整实现                            |
+| Endgame 模式         | ✅ 完整 | 最后 piece 优化                     |
+| DHT 持久化           | ✅ 完整 | dht.dat 序列化                     |
 
 **尚未实现**（计划中）：
 
-- 实时速度图表（TUI）
-- 完整 300+ 选项覆盖（目前 \~95 个核心选项）
-- BitTorrent Endgame 模式
-- DHT 路由表持久化（dht.dat）
+- 实时速度图表（TUI）- Phase 36
+- 完整 300+ 选项覆盖（目前 ~95 个核心选项）- Phase 37
 
 ## 许可证
 

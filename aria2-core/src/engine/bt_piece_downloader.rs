@@ -77,9 +77,42 @@ impl PieceDataProvider for FileBackedPieceProvider {
             };
 
         if let Some(ref layout) = self.multi_file_layout {
-            let (file_idx, file_offset) = layout.resolve_file_offset(piece_index, offset)?;
-            let file_path = layout.file_absolute_path(file_idx)?.to_path_buf();
-            read_op(file_path, file_offset, length)
+            let global_start = piece_index as u64 * layout.piece_length() as u64 + offset as u64;
+
+            if global_start >= layout.total_size() {
+                return None;
+            }
+
+            let actual_length = (length as u64).min(layout.total_size() - global_start) as u32;
+            let mut result = Vec::with_capacity(actual_length as usize);
+            let mut current_global = global_start;
+            let mut remaining = actual_length as u64;
+
+            while remaining > 0 {
+                let current_piece_idx = (current_global / layout.piece_length() as u64) as u32;
+                let current_offset_in_piece = (current_global % layout.piece_length() as u64) as u32;
+
+                let (file_idx, file_offset) = layout.resolve_file_offset(current_piece_idx, current_offset_in_piece)?;
+                let file_path = layout.file_absolute_path(file_idx)?.to_path_buf();
+
+                let file_info = layout.get_file_info(file_idx)?;
+                let file_end = file_info.start_piece as u64 * layout.piece_length() as u64
+                    + file_info.start_offset_in_piece as u64
+                    + file_info.length;
+
+                let bytes_available_in_file = file_end - current_global;
+                let bytes_to_read = remaining.min(bytes_available_in_file) as u32;
+
+                if let Some(data) = read_op(file_path.clone(), file_offset, bytes_to_read) {
+                    result.extend_from_slice(&data);
+                    current_global += data.len() as u64;
+                    remaining -= data.len() as u64;
+                } else {
+                    return None;
+                }
+            }
+
+            Some(result)
         } else {
             let file_pos = piece_index as u64 * self.piece_length as u64 + offset as u64;
             read_op(self.file_path.clone(), file_pos, length)

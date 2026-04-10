@@ -1,6 +1,10 @@
 pub mod bt_choke_manager;
 pub mod bt_connection_pool;
 pub mod bt_download_command;
+pub mod bt_download_execute;
+pub mod bt_download_seeding;
+#[cfg(test)]
+pub mod bt_download_command_tests;
 pub mod bt_message_handler;
 pub mod bt_peer_connection;
 pub mod bt_peer_interaction;

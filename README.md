@@ -49,8 +49,8 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/aria2/aria2-rust.git
-cd aria2-rust
+git clone https://github.com/balovess/aria2_rust.git
+cd aria2_rust
 
 # Build all crates
 cargo build --release
@@ -292,15 +292,15 @@ cargo run --example simple_download -- http://example.com/test.bin
 | FTP/SFTP | ✅ | Passive mode + auth |
 | Rate limiting | ✅ | Token bucket algorithm |
 | Cookie management | ✅ | Netscape format persistence |
-| MSE/PE encryption | ✅ | BEP14 handshake |
-| Magnet link support | ✅ | ut_metadata fetching |
-| RarestFirst piece | ⚠️ Partial | Basic implementation |
+| MSE/PE encryption | ✅ Complete | BEP14 handshake |
+| Magnet link support | ✅ Complete | ut_metadata fetching |
+| RarestFirst piece | ✅ Complete | Full implementation |
+| Endgame mode | ✅ Complete | Last-piece optimization |
+| DHT persistence | ✅ Complete | dht.dat serialization |
 
 **Not yet implemented** (planned for future):
-- Real-time speed graph (TUI)
-- Full 300+ option coverage (currently ~95 core options)
-- Endgame mode for BitTorrent
-- DHT routing table persistence (dht.dat)
+- Real-time speed graph (TUI) - Phase 36
+- Full 300+ option coverage (currently ~95 core options) - Phase 37
 
 ## License
 

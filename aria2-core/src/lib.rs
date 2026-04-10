@@ -55,6 +55,7 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod filesystem;
+pub mod ftp;
 pub mod http;
 pub mod log;
 pub mod rate_limiter;
