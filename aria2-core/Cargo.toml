@@ -38,7 +38,6 @@ aria2-protocol = { workspace = true, features = ["bittorrent", "metalink"] }
 reqwest = { version = "0.11", features = ["stream", "rustls-tls"], default-features = false }
 ssh2 = "0.9"
 rand = "0.8"
-libc = { version = "0.2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
