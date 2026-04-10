@@ -2,7 +2,6 @@
 //!
 //! This module provides the `SessionEntry` struct which represents a single download
 //! task's state that can be serialized to and deserialized from session files.
-//! It includes URI handling, option storage, progress tracking, and BT-specific fields.
 //!
 //! # Overview
 //!
@@ -14,17 +13,22 @@
 //! - **Status**: Active state of the download (active, waiting, paused, error)
 //! - **BT-specific**: Bitfield and piece information for BitTorrent downloads
 //!
-//! # Serialization Format
+//! # Architecture
 //!
-//! Each entry is serialized as a multi-line block:
-//! ```text
-//! uri1\turi2\turi3
-//!  GID=hex_value
-//!  [PAUSE=true]
-//!  key=value
-//!  TOTAL_LENGTH=...
-//!  COMPLETED_LENGTH=...
-//!  ...
+//! ```
+//! session_entry.rs (this file)
+//!   ├── SessionEntry struct definition
+//!   ├── Builder pattern methods (new, with_options, paused)
+//!   └── Re-exports for backward compatibility
+//!
+//! session_serialize_impl.rs
+//!   └── impl SessionEntry { serialize(), deserialize_line() }
+//!
+//! session_uri_utils.rs
+//!   └── escape_uri(), unescape_uri(), decode_hex()
+//!
+//! session_options.rs
+//!   └── download_options_to_map()
 //! ```
 //!
 //! # Examples
@@ -47,9 +51,12 @@
 //!     .paused();
 //! ```
 
+// Re-exports for backward compatibility (API unchanged for external users)
+pub use crate::session::session_options::download_options_to_map;
+pub use crate::session::session_uri_utils::{decode_hex, escape_uri, unescape_uri};
+
 use std::collections::HashMap;
 
-use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadOptions;
 
 /// Represents a single download task in a session file
@@ -60,7 +67,7 @@ use crate::request::request_group::DownloadOptions;
 /// # Fields
 ///
 /// * `gid` - Unique global identifier for this download task
-/// * `uris` - List of source URLs (primary + mirrors)
+/// * `uris` - List of source URLs (primary URL + mirrors)
 /// * `options` - Download configuration options as key-value pairs
 /// * `paused` - Whether this download is currently paused
 /// * `total_length` - Total size of the download in bytes
@@ -249,479 +256,9 @@ impl SessionEntry {
         self.options.get(key).map(|s| s.as_str())
     }
 
-    /// Serializes this entry to the session file format
-    ///
-    /// Produces a multi-line string representation suitable for writing
-    /// to a session file. The format is compatible with aria2's session format.
-    ///
-    /// # Returns
-    ///
-    /// String containing the serialized entry (including trailing newline)
-    ///
-    /// # Format
-    ///
-    /// ```text
-    /// uri1\turi2\turi3
-    ///  GID=hex_value
-    ///  [PAUSE=true]
-    ///  option_key=option_value
-    ///  TOTAL_LENGTH=...
-    ///  COMPLETED_LENGTH=...
-    ///  ...
-    /// ```
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use aria2_core::session::session_entry::SessionEntry;
-    ///
-    /// let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
-    /// let text = entry.serialize();
-    /// assert!(text.contains("http://example.com/file.zip"));
-    /// assert!(text.contains("GID=d270c8a2"));
-    /// ```
-    pub fn serialize(&self) -> String {
-        let mut lines = String::new();
-
-        // Serialize URIs (tab-separated, escaped)
-        let escaped_uris: Vec<String> = self.uris.iter().map(|u| escape_uri(u)).collect();
-        lines.push_str(&escaped_uris.join("\t"));
-        lines.push('\n');
-
-        // GID (always present, hex format)
-        lines.push_str(&format!(" GID={:x}\n", self.gid));
-
-        // PAUSE flag (only if true)
-        if self.paused {
-            lines.push_str(" PAUSE=true\n");
-        }
-
-        // User-defined options
-        for (key, value) in &self.options {
-            lines.push_str(&format!(" {}={}\n", key, value));
-        }
-
-        // Progress & status fields
-        lines.push_str(&format!(" TOTAL_LENGTH={}\n", self.total_length));
-        lines.push_str(&format!(" COMPLETED_LENGTH={}\n", self.completed_length));
-        lines.push_str(&format!(" UPLOAD_LENGTH={}\n", self.upload_length));
-        lines.push_str(&format!(" DOWNLOAD_SPEED={}\n", self.download_speed));
-        lines.push_str(&format!(" STATUS={}\n", self.status));
-
-        // ERROR_CODE (optional field)
-        match self.error_code {
-            Some(code) => lines.push_str(&format!(" ERROR_CODE={}\n", code)),
-            None => lines.push_str(" ERROR_CODE=\n"),
-        }
-
-        // BITFIELD (hex encoded or empty)
-        match &self.bitfield {
-            Some(bytes) => {
-                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                lines.push_str(&format!(" BITFIELD={}\n", hex));
-            }
-            None => lines.push_str(" BITFIELD=\n"),
-        }
-
-        // NUM_PIECES and PIECE_LENGTH (BT-specific)
-        lines.push_str(&format!(
-            " NUM_PIECES={}\n",
-            self.num_pieces.unwrap_or(0)
-        ));
-        lines.push_str(&format!(
-            " PIECE_LENGTH={}\n",
-            self.piece_length.unwrap_or(0)
-        ));
-
-        // INFO_HASH (optional, BT-specific)
-        match &self.info_hash_hex {
-            Some(hash) => lines.push_str(&format!(" INFO_HASH={}\n", hash)),
-            None => lines.push_str(" INFO_HASH=\n"),
-        }
-
-        // RESUME_OFFSET (optional, HTTP/FTP resume support)
-        lines.push_str(&format!(
-            " RESUME_OFFSET={}\n",
-            self.resume_offset.unwrap_or(0)
-        ));
-
-        lines
-    }
-
-    /// Deserializes a single line of text into a SessionEntry
-    ///
-    /// Parses a text block containing URI lines and property lines
-    /// (lines starting with space) into a complete SessionEntry.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - Multi-line string containing one entry's data
-    ///
-    /// # Returns
-    ///
-    /// Result containing the deserialized SessionEntry or an error
-    ///
-    /// # Note
-    ///
-    /// This is a lower-level parsing function. For parsing multiple entries
-    /// from a full session file, use [`crate::session::session_serializer::deserialize()`].
-    pub fn deserialize_line(text: &str) -> Result<SessionEntry> {
-        let mut entry = SessionEntry::new(0, Vec::new());
-
-        for raw_line in text.lines() {
-            let line = raw_line.trim_end();
-
-            // Skip empty lines and comments within an entry
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            // Check if this is a property line (starts with space)
-            if let Some(rest) = line.strip_prefix(' ') {
-                let rest_trimmed = rest.trim();
-                if let Some((key, value)) = rest_trimmed.split_once('=') {
-                    let key = key.to_string();
-                    let value = value.to_string();
-
-                    // Handle known keys
-                    match key.as_str() {
-                        "GID" => {
-                            if let Ok(gid) = u64::from_str_radix(&value, 16) {
-                                entry.gid = gid;
-                            }
-                        }
-                        "PAUSE" => {
-                            if value == "true" {
-                                entry.paused = true;
-                            }
-                        }
-                        // Progress & status fields
-                        "TOTAL_LENGTH" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.total_length = v;
-                            }
-                        }
-                        "COMPLETED_LENGTH" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.completed_length = v;
-                            }
-                        }
-                        "UPLOAD_LENGTH" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.upload_length = v;
-                            }
-                        }
-                        "DOWNLOAD_SPEED" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.download_speed = v;
-                            }
-                        }
-                        "STATUS" => {
-                            if !value.is_empty() {
-                                entry.status = value;
-                            }
-                        }
-                        "ERROR_CODE" => {
-                            if !value.is_empty() {
-                                if let Ok(code) = value.parse::<i32>() {
-                                    entry.error_code = Some(code);
-                                }
-                            } else {
-                                entry.error_code = None;
-                            }
-                        }
-                        "BITFIELD" => {
-                            if !value.is_empty() {
-                                // Decode hex string back to Vec<u8>
-                                if let Ok(bytes) = decode_hex(&value) {
-                                    entry.bitfield = Some(bytes);
-                                } else {
-                                    tracing::warn!("Invalid BITFIELD hex string, ignoring");
-                                    entry.bitfield = None;
-                                }
-                            } else {
-                                entry.bitfield = None;
-                            }
-                        }
-                        "NUM_PIECES" => {
-                            if let Ok(v) = value.parse::<u32>() {
-                                if v > 0 {
-                                    entry.num_pieces = Some(v);
-                                } else {
-                                    entry.num_pieces = None;
-                                }
-                            }
-                        }
-                        "PIECE_LENGTH" => {
-                            if let Ok(v) = value.parse::<u32>() {
-                                if v > 0 {
-                                    entry.piece_length = Some(v);
-                                } else {
-                                    entry.piece_length = None;
-                                }
-                            }
-                        }
-                        "INFO_HASH" => {
-                            if !value.is_empty() {
-                                entry.info_hash_hex = Some(value);
-                            } else {
-                                entry.info_hash_hex = None;
-                            }
-                        }
-                        "RESUME_OFFSET" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                if v > 0 {
-                                    entry.resume_offset = Some(v);
-                                } else {
-                                    entry.resume_offset = None;
-                                }
-                            }
-                        }
-                        _ => {
-                            // Unknown key - store in options map (forward compatibility)
-                            tracing::debug!("Unknown session key '{}', storing in options", key);
-                            entry.options.insert(key, value);
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // This must be the URI line (first line without leading space)
-            let unescaped = unescape_uri(line.trim());
-            let uris: Vec<String> = unescaped
-                .split('\t')
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !uris.is_empty() {
-                entry.uris = uris;
-            }
-        }
-
-        Ok(entry)
-    }
-}
-
-// ==================== Helper Functions ====================
-
-/// Escapes special characters in URIs for safe serialization
-///
-/// Replaces special characters with escape sequences:
-/// - `\` → `\\`
-/// - `\t` (tab) → `\t`
-/// - `\n` (newline) → `\n`
-///
-/// # Arguments
-///
-/// * `s` - Input string to escape
-///
-/// # Returns
-///
-/// Escaped string safe for inclusion in session file format
-///
-/// # Example
-///
-/// ```rust
-/// use aria2_core::session::session_entry::{escape_uri, unescape_uri};
-///
-/// let escaped = escape_uri("path\\to\tfile\nname");
-/// assert_eq!(escaped, "path\\\\to\\tfile\\nname");
-/// assert_eq!(unescape_uri(&escaped), "path\\to\tfile\nname");
-/// ```
-pub fn escape_uri(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\t', "\\t")
-        .replace('\n', "\\n")
-}
-
-/// Unescapes special characters previously escaped by [`escape_uri()`]
-///
-/// Processes escape sequences:
-/// - `\\` → `\`
-/// - `\t` → tab character
-/// - `\n` → newline character
-///
-/// # Arguments
-///
-/// * `s` - Escaped input string
-///
-/// # Returns
-///
-/// Unescaped original string
-///
-/// # Example
-///
-/// ```rust
-/// use aria2_core::session::session_entry::{escape_uri, unescape_uri};
-///
-/// assert_eq!(unescape_uri(&escape_uri("hello\tworld")), "hello\tworld");
-/// assert_eq!(unescape_uri(&escape_uri("line1\nline2")), "line1\nline2");
-/// assert_eq!(unescape_uri(&escape_uri("back\\slash")), "back\\slash");
-/// ```
-pub fn unescape_uri(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                match next {
-                    't' => {
-                        result.push('\t');
-                        chars.next();
-                    }
-                    'n' => {
-                        result.push('\n');
-                        chars.next();
-                    }
-                    '\\' => {
-                        result.push('\\');
-                        chars.next();
-                    }
-                    _ => {
-                        result.push(c);
-                    }
-                }
-            } else {
-                result.push(c);
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
-
-/// Decodes a hexadecimal string to a byte vector
-///
-/// Converts a string of hex characters (e.g., "ff00ff") into
-/// the corresponding bytes ([0xFF, 0x00, xFF]).
-///
-/// # Arguments
-///
-/// * `hex` - Hexadecimal string (must have even length)
-///
-/// # Returns
-///
-/// Result containing the decoded byte vector or an error if:
-/// - The hex string has odd length
-/// - Contains invalid hex characters
-///
-/// # Errors
-///
-/// Returns [`Aria2Error::Io`] if the hex string is malformed
-///
-/// # Example
-///
-/// ```rust
-/// use aria2_core::session::session_entry::decode_hex;
-///
-/// let bytes = decode_hex("fff00f").unwrap();
-/// assert_eq!(bytes, vec![0xFF, 0xF0, 0x0F]);
-/// ```
-pub fn decode_hex(hex: &str) -> Result<Vec<u8>> {
-    if hex.len() % 2 != 0 {
-        return Err(Aria2Error::Io(format!(
-            "Hex string has odd length: {}",
-            hex.len()
-        )));
-    }
-
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-
-    for i in (0..hex.len()).step_by(2) {
-        let byte_str = &hex[i..i + 2];
-        let byte = u8::from_str_radix(byte_str, 16).map_err(|e| {
-            Aria2Error::Io(format!("Invalid hex character at position {}: {}", i, e))
-        })?;
-        bytes.push(byte);
-    }
-
-    Ok(bytes)
-}
-
-// ==================== DownloadOptions Conversion ====================
-
-/// Converts DownloadOptions struct to a HashMap for serialization
-///
-/// Extracts relevant fields from [`DownloadOptions`] and converts them
-/// to key-value pairs suitable for session file format.
-///
-/// # Arguments
-///
-/// * `opts` - DownloadOptions struct from RequestGroup
-///
-/// # Returns
-///
-/// HashMap containing option key-value pairs
-///
-/// # Mapped Fields
-///
-/// | DownloadOptions Field | Session Key |
-/// |---------------------|-------------|
-/// | split | "split" |
-/// | max_connection_per_server | "max-connection-per-server" |
-/// | max_download_limit | "max-download-limit" |
-/// | max_upload_limit | "max-upload-limit" |
-/// | dir | "dir" |
-/// | out | "out" |
-/// | seed_time | "seed-time" |
-/// | seed_ratio | "seed-ratio" |
-///
-/// # Example
-///
-/// ```rust
-/// use aria2_core::session::session_entry::download_options_to_map;
-/// use aria2_core::request::request_group::DownloadOptions;
-///
-/// let opts = DownloadOptions {
-///     split: Some(8),
-///     max_connection_per_server: Some(4),
-///     ..Default::default()
-/// };
-///
-/// let map = download_options_to_map(&opts);
-/// assert_eq!(map.get("split").unwrap(), "8");
-/// assert_eq!(map.get("max-connection-per-server").unwrap(), "4");
-/// ```
-pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-
-    // Connection settings
-    if let Some(v) = opts.split {
-        map.insert("split".to_string(), v.to_string());
-    }
-    if let Some(v) = opts.max_connection_per_server {
-        map.insert("max-connection-per-server".to_string(), v.to_string());
-    }
-
-    // Bandwidth limits
-    if let Some(v) = opts.max_download_limit {
-        map.insert("max-download-limit".to_string(), v.to_string());
-    }
-    if let Some(v) = opts.max_upload_limit {
-        map.insert("max-upload-limit".to_string(), v.to_string());
-    }
-
-    // Output settings
-    if let Some(ref v) = opts.dir {
-        map.insert("dir".to_string(), v.clone());
-    }
-    if let Some(ref v) = opts.out {
-        map.insert("out".to_string(), v.clone());
-    }
-
-    // Seeding settings (BitTorrent)
-    if let Some(v) = opts.seed_time {
-        map.insert("seed-time".to_string(), v.to_string());
-    }
-    if let Some(v) = opts.seed_ratio {
-        map.insert("seed-ratio".to_string(), v.to_string());
-    }
-
-    map
+    // Note: serialize() and deserialize_line() are now implemented in
+    // session_serialize_impl.rs as part of impl SessionEntry
+    // They are available via the impl block there and accessible normally
 }
 
 // ==================== Unit Tests ====================
@@ -780,14 +317,6 @@ mod tests {
         let entry2 = SessionEntry::deserialize_line(parts[1]).unwrap();
         assert_eq!(entry2.uris.len(), 2);
         assert!(entry2.paused);
-    }
-
-    #[test]
-    fn test_escape_unescape_uri() {
-        assert_eq!(unescape_uri(&escape_uri("hello\tworld")), "hello\tworld");
-        assert_eq!(unescape_uri(&escape_uri("line1\nline2")), "line1\nline2");
-        assert_eq!(unescape_uri(&escape_uri("back\\slash")), "back\\slash");
-        assert_eq!(unescape_uri(&escape_uri("normal")), "normal");
     }
 
     #[test]
@@ -866,46 +395,6 @@ http://example.com/file
             2,
             "3 URIs should have 2 tab separators"
         );
-    }
-
-    #[tokio::test]
-    async fn test_download_options_to_map_coverage() {
-        let opts = DownloadOptions {
-            split: Some(8),
-            max_connection_per_server: Some(4),
-            max_download_limit: Some(102400),
-            max_upload_limit: Some(51200),
-            dir: Some("/data".to_string()),
-            out: Some("output.bin".to_string()),
-            seed_time: Some(300),
-            seed_ratio: Some(2.0),
-            checksum: None,
-            cookie_file: None,
-            cookies: None,
-            bt_force_encrypt: false,
-            bt_require_crypto: false,
-            enable_dht: true,
-            dht_listen_port: Some(6881),
-            enable_public_trackers: true,
-            bt_piece_selection_strategy: "rarest-first".to_string(),
-            bt_endgame_threshold: 20,
-            max_retries: 3,
-            retry_wait: 1,
-            http_proxy: None,
-            dht_file_path: None,
-            // Choking algorithm configuration
-            bt_max_upload_slots: Some(4),
-            bt_optimistic_unchoke_interval: Some(30),
-            bt_snubbed_timeout: Some(60),
-        };
-
-        let map = download_options_to_map(&opts);
-        assert_eq!(map.get("split").unwrap(), "8");
-        assert_eq!(map.get("seed-ratio").unwrap(), "2");
-
-        let empty_opts = DownloadOptions::default();
-        let empty_map = download_options_to_map(&empty_opts);
-        assert!(empty_map.is_empty());
     }
 
     // ==================== New Field Tests (Session Persistence Enhancement) ====================
@@ -1168,25 +657,5 @@ http://example.com/file
             restored_with_bt.info_hash_hex,
             Some("abc123def456".to_string())
         );
-    }
-
-    #[test]
-    fn test_decode_hex_valid() {
-        // Test valid hex strings
-        assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
-        assert_eq!(decode_hex("00").unwrap(), vec![0x00]);
-        assert_eq!(decode_hex("ff").unwrap(), vec![0xFF]);
-        assert_eq!(decode_hex("fff00f").unwrap(), vec![0xFF, 0xF0, 0x0F]);
-        assert_eq!(
-            decode_hex("deadbeef").unwrap(),
-            vec![0xDE, 0xAD, 0xBE, 0xEF]
-        );
-    }
-
-    #[test]
-    fn test_decode_hex_invalid() {
-        // Test invalid hex strings
-        assert!(decode_hex("abc").is_err()); // Odd length
-        assert!(decode_hex("ghij").is_err()); // Invalid characters
     }
 }

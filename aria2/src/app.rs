@@ -1,5 +1,5 @@
 use colored::Colorize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -17,7 +17,6 @@ use aria2_core::init_logging;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::active_session::ActiveSessionManager;
-use aria2_core::session::session_serializer::SessionEntry;
 use aria2_core::validation::protocol_detector::{detect, DetectedInput, InputType};
 use tracing::{debug, error, info, warn, Level};
 
@@ -330,7 +329,7 @@ impl App {
                         // 如果有 BT bitfield，将其存储到 RequestGroup 中供后续使用
                         if entry.bitfield.is_some() {
                             if let Some(group_lock) = man.get_group(gid).await {
-                                let mut group = group_lock.write().await;
+                                let group = group_lock.write().await;
                                 *group.bt_bitfield.write().await = entry.bitfield.clone();
                                 debug!(
                                     "已设置 BT bitfield for GID={}, bits={}",
