@@ -6,7 +6,8 @@
 mod e2e_helpers;
 
 mod tests {
-    use crate::e2e_helpers::{MockHttpServer, RequestLog};
+    use crate::e2e_helpers::MockHttpServer;
+    use crate::e2e_helpers::mock_http_server::RequestLog;
     use aria2_core::auth::digest_auth::DigestAlgorithm;
     use aria2_core::auth::*;
     use hyper::{Body, Request, Response};

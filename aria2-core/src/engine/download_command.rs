@@ -27,6 +27,7 @@ pub struct DownloadCommand {
     client: reqwest::Client,
     output_path: std::path::PathBuf,
     started: bool,
+    completed: bool,
     completed_bytes: u64,
     continue_enabled: bool,
     file_allocation: String,
@@ -118,6 +119,7 @@ impl DownloadCommand {
             client,
             output_path: path,
             started: false,
+            completed: false,
             completed_bytes: 0,
             continue_enabled: true,
             file_allocation: "prealloc".to_string(),
@@ -715,6 +717,7 @@ impl Command for DownloadCommand {
             g.set_total_length_atomic(self.completed_bytes);
             g.set_completed_length(self.completed_bytes);
             g.complete().await?;
+            self.completed = true;
             release_path(&self.output_path);
             return Ok(());
         }
@@ -746,6 +749,9 @@ impl Command for DownloadCommand {
                     max_retries,
                 )
                 .await;
+            if result.is_ok() {
+                self.completed = true;
+            }
             release_path(&self.output_path);
             return result;
         }
@@ -759,12 +765,17 @@ impl Command for DownloadCommand {
                 &retry_policy,
             )
             .await;
+        if result.is_ok() {
+            self.completed = true;
+        }
         release_path(&self.output_path);
         result
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 {
+        if self.completed {
+            CommandStatus::Completed
+        } else if self.completed_bytes > 0 {
             CommandStatus::Running
         } else {
             CommandStatus::Pending

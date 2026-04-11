@@ -3,8 +3,6 @@
 //! Tests the complete hook system including MoveHook, RenameHook,
 //! and hook chain execution order.
 
-mod e2e_helpers;
-
 mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;

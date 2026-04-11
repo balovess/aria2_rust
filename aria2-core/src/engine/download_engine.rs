@@ -15,6 +15,7 @@ use crate::session::save_session_command::SaveSessionCommand;
 
 pub struct DownloadEngine {
     command_tx: mpsc::UnboundedSender<Box<dyn Command>>,
+    command_rx: mpsc::UnboundedReceiver<Box<dyn Command>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
     tick_interval: Duration,
@@ -33,13 +34,14 @@ impl DownloadEngine {
     }
 
     pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let max_tries = policy.max_tries();
 
         let engine = DownloadEngine {
             command_tx,
+            command_rx,
             shutdown_tx: Some(shutdown_tx),
             shutdown_rx: Some(shutdown_rx),
             tick_interval: Duration::from_millis(tick_interval_ms),
@@ -187,12 +189,18 @@ impl DownloadEngine {
     }
 
     async fn dispatch_commands(
-        &self,
+        &mut self,
         pending: &mut Vec<Box<dyn Command>>,
         running: &mut Vec<Box<dyn Command>>,
     ) -> Result<()> {
+        while let Ok(cmd) = self.command_rx.try_recv() {
+            pending.push(cmd);
+        }
         while !pending.is_empty() {
-            let cmd = pending.remove(0);
+            let mut cmd = pending.remove(0);
+            if let Err(e) = cmd.execute().await {
+                error!("命令执行失败: {}", e);
+            }
             running.push(cmd);
             debug!("调度命令, 运行中: {}", running.len());
         }

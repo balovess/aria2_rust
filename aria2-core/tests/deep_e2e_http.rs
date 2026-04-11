@@ -10,7 +10,8 @@
 
 mod e2e_helpers;
 
-use crate::e2e_helpers::{MockHttpServer, RequestLog};
+use crate::e2e_helpers::MockHttpServer;
+use crate::e2e_helpers::mock_http_server::RequestLog;
 use base64::Engine;
 use hyper::{Body, Request, Response};
 

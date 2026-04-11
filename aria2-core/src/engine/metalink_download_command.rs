@@ -16,6 +16,7 @@ pub struct MetalinkDownloadCommand {
     client: reqwest::Client,
     output_path: std::path::PathBuf,
     started: bool,
+    completed: bool,
     completed_bytes: u64,
     metalink_data: Vec<u8>,
 }
@@ -84,6 +85,7 @@ impl MetalinkDownloadCommand {
             client,
             output_path: path,
             started: false,
+            completed: false,
             completed_bytes: 0,
             metalink_data: metalink_bytes.to_vec(),
         })
@@ -201,6 +203,7 @@ impl Command for MetalinkDownloadCommand {
                         self.completed_bytes,
                         url_entry.url
                     );
+                    self.completed = true;
                     release_path(&resolved_output_path);
                     return Ok(());
                 }
@@ -217,7 +220,9 @@ impl Command for MetalinkDownloadCommand {
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 {
+        if self.completed {
+            CommandStatus::Completed
+        } else if self.completed_bytes > 0 {
             CommandStatus::Running
         } else {
             CommandStatus::Pending
