@@ -187,12 +187,27 @@ pub fn extract_compact_peers_from_response(response: &DhtMessage) -> Vec<SocketA
 
     let mut peers = Vec::new();
     for item in values {
-        if let BencodeValue::Bytes(bytes) = item
-            && bytes.len() >= 6
-        {
-            let ip_bytes: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
-            let port = u16::from_be_bytes([bytes[4], bytes[5]]);
-            peers.push(SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)));
+        if let BencodeValue::Bytes(bytes) = item {
+            if bytes.len() == 6 {
+                // IPv4 compact peer
+                let ip_bytes: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
+                let port = u16::from_be_bytes([bytes[4], bytes[5]]);
+                peers.push(SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)));
+            } else if bytes.len() == 18 {
+                // IPv6 compact peer
+                let octets: [u8; 16] = match bytes[..16].try_into() {
+                    Ok(o) => o,
+                    Err(_) => continue,
+                };
+                let port = u16::from_be_bytes([bytes[16], bytes[17]]);
+                peers.push(SocketAddr::V6(std::net::SocketAddrV6::new(
+                    std::net::Ipv6Addr::from(octets),
+                    port,
+                    0,
+                    0,
+                )));
+            }
+            // else: ignore unknown format
         }
     }
     peers
@@ -210,23 +225,53 @@ pub fn extract_compact_nodes_from_response(response: &DhtMessage) -> Vec<(Socket
     };
 
     let mut nodes = Vec::new();
-    let chunk_size = 26;
-    for chunk in nodes_data.chunks(chunk_size) {
-        if chunk.len() < chunk_size {
-            continue;
-        }
 
-        let mut node_id = [0u8; 20];
-        node_id.copy_from_slice(&chunk[0..20]);
-
-        let ip_bytes: [u8; 4] = [chunk[20], chunk[21], chunk[22], chunk[23]];
-        let port = u16::from_be_bytes([chunk[24], chunk[25]]);
-
-        nodes.push((
-            SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)),
-            node_id,
-        ));
+    if nodes_data.is_empty() {
+        return nodes;
     }
+
+    // Detect format: if total length is multiple of 38 -> likely all IPv6 nodes
+    if nodes_data.len() % 38 == 0 && nodes_data.len() >= 38 {
+        // All IPv6 nodes (20 ID + 16 IP + 2 port)
+        for chunk in nodes_data.chunks(38) {
+            if chunk.len() < 38 {
+                continue;
+            }
+            let mut node_id = [0u8; 20];
+            node_id.copy_from_slice(&chunk[0..20]);
+            let octets: [u8; 16] = match chunk[20..36].try_into() {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            let port = u16::from_be_bytes([chunk[36], chunk[37]]);
+            nodes.push((
+                SocketAddr::V6(std::net::SocketAddrV6::new(
+                    std::net::Ipv6Addr::from(octets),
+                    port,
+                    0,
+                    0,
+                )),
+                node_id,
+            ));
+        }
+    } else {
+        // Default: try IPv4 (26 bytes per entry) with fallback
+        let chunk_size = 26;
+        for chunk in nodes_data.chunks(chunk_size) {
+            if chunk.len() < chunk_size {
+                continue;
+            }
+            let mut node_id = [0u8; 20];
+            node_id.copy_from_slice(&chunk[0..20]);
+            let ip_bytes: [u8; 4] = [chunk[20], chunk[21], chunk[22], chunk[23]];
+            let port = u16::from_be_bytes([chunk[24], chunk[25]]);
+            nodes.push((
+                SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)),
+                node_id,
+            ));
+        }
+    }
+
     nodes
 }
 

@@ -12,6 +12,7 @@ use super::node::DhtNode;
 use super::persistence::DhtPersistence;
 use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
+use super::token_tracker::TokenTracker;
 
 fn generate_random_id() -> [u8; 20] {
     let mut id = [0u8; 20];
@@ -63,6 +64,7 @@ pub struct DhtEngine {
     routing_table: tokio::sync::RwLock<RoutingTable>,
     running: AtomicBool,
     tx_counter: AtomicU32,
+    token_tracker: TokenTracker,
 }
 
 impl DhtEngine {
@@ -98,6 +100,7 @@ impl DhtEngine {
             routing_table: tokio::sync::RwLock::new(RoutingTable::new(self_id)),
             running: AtomicBool::new(true),
             tx_counter: AtomicU32::new(0),
+            token_tracker: TokenTracker::new(),
         });
 
         for node in loaded_nodes {
@@ -185,23 +188,35 @@ impl DhtEngine {
             rt.find_closest(info_hash, 8).into_iter().cloned().collect()
         };
 
-        let mut announced = 0usize;
+        use futures::future::join_all;
+
+        let mut handles = Vec::new();
         for node in &closest {
-            if let Some(ref token) = node.token {
-                let msg = DhtMessageBuilder::announce_peer(
-                    self.next_tx_id(),
-                    &self.config.self_id,
-                    info_hash,
-                    port,
-                    token.as_str(),
-                );
-                if let Ok(data) = msg.encode()
-                    && self.socket.send_to(node.addr, &data).await.is_ok()
-                {
-                    announced += 1;
-                }
+            // Validate existing token or generate new one for announce
+            let _announce_token = self.token_tracker.generate_token(info_hash, &node.addr);
+            let token = self.token_tracker.generate_token(info_hash, &node.addr);
+            let msg = DhtMessageBuilder::announce_peer(
+                self.next_tx_id(),
+                &self.config.self_id,
+                info_hash,
+                port,
+                &token,
+            );
+            if let Ok(data) = msg.encode() {
+                let sock = self.socket.clone();
+                let addr = node.addr;
+                handles.push(tokio::spawn(async move {
+                    sock.send_to(addr, &data).await.is_ok()
+                }));
             }
         }
+
+        let results = join_all(handles).await;
+        let announced = results
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .filter(|&ok| ok)
+            .count();
 
         info!(
             "DHT announce_peer: 向 {} 个节点宣告 (port={})",
@@ -220,8 +235,8 @@ impl DhtEngine {
             new_nodes: vec![],
             nodes_queried: 0,
         };
-        let mut buf = [0u8; 8192];
 
+        let mut handles = Vec::new();
         for target in targets {
             let msg =
                 DhtMessageBuilder::get_peers(self.next_tx_id(), &self.config.self_id, info_hash);
@@ -234,24 +249,36 @@ impl DhtEngine {
                 continue;
             }
 
-            result.nodes_queried += 1;
+            // Generate DHT security token for announce_peer
+            let token = self.token_tracker.generate_token(info_hash, &target.addr);
+            // Note: token stored via routing_table update below
 
-            if let Ok((n, _)) = self
-                .socket
-                .recv_with_timeout(&mut buf, self.config.query_timeout)
-                .await
-            {
-                if n == 0 {
-                    continue;
+            let sock = self.socket.clone();
+            let timeout = self.config.query_timeout;
+
+            handles.push(tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                match sock.recv_with_timeout(&mut buf, timeout).await {
+                    Ok((n, _)) if n > 0 => match DhtMessage::decode(&buf[..n]) {
+                        Ok(resp) => (
+                            extract_compact_peers_from_response(&resp),
+                            extract_compact_nodes_from_response(&resp),
+                            true,
+                        ),
+                        Err(_) => (vec![], vec![], false),
+                    },
+                    _ => (vec![], vec![], false),
                 }
-                if let Ok(response) = DhtMessage::decode(&buf[..n]) {
-                    result
-                        .peers
-                        .extend(extract_compact_peers_from_response(&response));
-                    result
-                        .new_nodes
-                        .extend(extract_compact_nodes_from_response(&response));
+            }));
+        }
+
+        for handle in handles {
+            if let Ok((peers, nodes, success)) = handle.await {
+                if success {
+                    result.nodes_queried += 1;
                 }
+                result.peers.extend(peers);
+                result.new_nodes.extend(nodes);
             }
         }
 

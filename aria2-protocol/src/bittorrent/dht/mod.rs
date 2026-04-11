@@ -7,4 +7,5 @@ pub mod node;
 pub mod persistence;
 pub mod routing_table;
 pub mod socket;
+pub mod token_tracker;
 pub mod transaction;
