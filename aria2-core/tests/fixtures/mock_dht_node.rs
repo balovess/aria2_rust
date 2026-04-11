@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 
 pub struct MockDhtNode {

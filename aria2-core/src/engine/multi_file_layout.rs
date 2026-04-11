@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
+use aria2_protocol::bittorrent::torrent::parser::InfoDict;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TorrentFileEntry {
@@ -26,6 +26,7 @@ pub struct FileInfo {
 
 #[derive(Clone)]
 pub struct MultiFileLayout {
+    #[allow(dead_code)] // Base directory for multi-file torrent layouts
     base_dir: PathBuf,
     files: Vec<FileInfo>,
     piece_length: u32,
@@ -176,7 +177,11 @@ impl MultiFileLayout {
         Ok(())
     }
 
-    pub fn resolve_file_offset(&self, piece_idx: u32, offset_in_piece: u32) -> Option<(usize, u64)> {
+    pub fn resolve_file_offset(
+        &self,
+        piece_idx: u32,
+        offset_in_piece: u32,
+    ) -> Option<(usize, u64)> {
         let global_byte = piece_idx as u64 * self.piece_length as u64 + offset_in_piece as u64;
 
         if global_byte >= self.total_size {
@@ -197,7 +202,9 @@ impl MultiFileLayout {
     }
 
     pub fn file_absolute_path(&self, file_index: usize) -> Option<&Path> {
-        self.files.get(file_index).map(|f| f.absolute_path.as_path())
+        self.files
+            .get(file_index)
+            .map(|f| f.absolute_path.as_path())
     }
 
     pub fn file_completed_bytes(&self, file_idx: usize, bitfield: &[u8]) -> u64 {
@@ -283,6 +290,7 @@ impl MultiFileLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aria2_protocol::bittorrent::torrent::parser::FileEntry;
 
     fn make_single_file_info_dict() -> InfoDict {
         InfoDict {

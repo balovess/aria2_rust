@@ -372,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_all_peers_dedup() {
         let shared = UdpTrackerClient::create_shared(0).await.unwrap();
-        let mgr = UdpTrackerManager::new(shared).await;
+        let _mgr = UdpTrackerManager::new(shared).await;
 
         let resp1 = AnnounceResponse {
             transaction_id: 1,

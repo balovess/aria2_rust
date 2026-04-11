@@ -203,15 +203,15 @@ impl NetRcFile {
     }
 
     pub fn get_credentials(&self, host: &str) -> Option<(String, String)> {
-        if let Some(entry) = self.find(host) {
-            if let (Some(login), Some(pass)) = (&entry.login, &entry.password) {
-                return Some((login.clone(), pass.clone()));
-            }
+        if let Some(entry) = self.find(host)
+            && let (Some(login), Some(pass)) = (&entry.login, &entry.password)
+        {
+            return Some((login.clone(), pass.clone()));
         }
-        if let Some(def) = self.find_default() {
-            if let (Some(login), Some(pass)) = (&def.login, &def.password) {
-                return Some((login.clone(), pass.clone()));
-            }
+        if let Some(def) = self.find_default()
+            && let (Some(login), Some(pass)) = (&def.login, &def.password)
+        {
+            return Some((login.clone(), pass.clone()));
         }
         None
     }

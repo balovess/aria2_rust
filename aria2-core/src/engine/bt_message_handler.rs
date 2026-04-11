@@ -12,8 +12,8 @@
 //! - `src/BtMessageDispatcher.h` - Message dispatching
 //! - `src/PeerInteractionCommand.h` - Peer interaction
 
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use tracing::{debug, info, warn};
 
 /// Block size for each piece block request (16 KB)
@@ -85,10 +85,7 @@ impl BtMessageHandler {
 
         // Try each peer in order until we get the block
         for (conn_idx, conn) in connections.iter_mut().enumerate() {
-            debug!(
-                "[BT] Trying peer {} for block request",
-                conn_idx
-            );
+            debug!("[BT] Trying peer {} for block request", conn_idx);
 
             // Send request to this peer
             if conn.send_request(req.clone()).await.is_err() {
@@ -157,7 +154,11 @@ impl BtMessageHandler {
                     use aria2_protocol::bittorrent::message::types::BtMessage;
 
                     match msg {
-                        BtMessage::Piece { index, begin, ref data } => {
+                        BtMessage::Piece {
+                            index,
+                            begin,
+                            ref data,
+                        } => {
                             if index == expected_index && begin == expected_begin {
                                 return Ok(data.clone());
                             }
@@ -191,12 +192,14 @@ impl BtMessageHandler {
             }
         }
 
-        Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-            message: format!(
-                "Exceeded max messages ({}) without receiving expected block",
-                MAX_BLOCK_READ_MESSAGES
-            ),
-        }))
+        Err(Aria2Error::Recoverable(
+            RecoverableError::TemporaryNetworkFailure {
+                message: format!(
+                    "Exceeded max messages ({}) without receiving expected block",
+                    MAX_BLOCK_READ_MESSAGES
+                ),
+            },
+        ))
     }
 
     /// Download all blocks for a piece with retry logic
@@ -296,8 +299,7 @@ impl BtMessageHandler {
 
         Err(Aria2Error::Fatal(FatalError::Config(format!(
             "Failed to download piece {} after {} attempts",
-            piece_index,
-            MAX_RETRIES
+            piece_index, MAX_RETRIES
         ))))
     }
 }

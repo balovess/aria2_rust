@@ -4,7 +4,7 @@ mod fixtures {
 use aria2_core::engine::command::Command;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
-use fixtures::mock_ftp_server::{medium_pattern, small_content, MockFtpServer};
+use fixtures::mock_ftp_server::{MockFtpServer, medium_pattern, small_content};
 use std::path::Path;
 
 async fn start_server() -> MockFtpServer {

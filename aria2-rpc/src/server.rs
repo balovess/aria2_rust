@@ -436,20 +436,24 @@ mod tests {
         assert!(auth.has_basic());
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"admin:pass123");
         assert!(auth.verify_basic(&encoded));
-        assert!(!auth.verify_basic(
-            base64::engine::general_purpose::STANDARD
-                .encode(b"admin:wrong")
-                .as_str()
-        ));
+        assert!(
+            !auth.verify_basic(
+                base64::engine::general_purpose::STANDARD
+                    .encode(b"admin:wrong")
+                    .as_str()
+            )
+        );
     }
 
     #[test]
     fn test_cors_config_default() {
         let cors = CorsConfig::default();
         let headers = cors.to_headers();
-        assert!(headers
-            .iter()
-            .any(|(k, _)| k == &"Access-Control-Allow-Origin"));
+        assert!(
+            headers
+                .iter()
+                .any(|(k, _)| k == &"Access-Control-Allow-Origin")
+        );
     }
 
     #[test]
@@ -537,8 +541,18 @@ mod tests {
     #[test]
     fn test_status_info_holds_torrent_file_entries() {
         let entries = vec![
-            TorrentFileEntry { index: 0, path: "dir/file1.txt".to_string(), length: 500, completed_length: 500 },
-            TorrentFileEntry { index: 1, path: "dir/file2.dat".to_string(), length: 524, completed_length: 200 },
+            TorrentFileEntry {
+                index: 0,
+                path: "dir/file1.txt".to_string(),
+                length: 500,
+                completed_length: 500,
+            },
+            TorrentFileEntry {
+                index: 1,
+                path: "dir/file2.dat".to_string(),
+                length: 524,
+                completed_length: 200,
+            },
         ];
 
         let info = StatusInfo::new("gid-torrent-001")
@@ -546,7 +560,10 @@ mod tests {
             .with_completed_length(700)
             .with_torrent_files(entries.clone());
 
-        assert!(info.torrent_files.is_some(), "torrent_files should be Some after with_torrent_files");
+        assert!(
+            info.torrent_files.is_some(),
+            "torrent_files should be Some after with_torrent_files"
+        );
         let files = info.torrent_files.as_ref().unwrap();
         assert_eq!(files.len(), 2, "Should hold 2 file entries");
         assert_eq!(files[0].index, 0);
@@ -557,10 +574,16 @@ mod tests {
         assert_eq!(files[1].length, 524);
 
         let default_info = StatusInfo::default();
-        assert!(default_info.torrent_files.is_none(), "Default StatusInfo should have None torrent_files");
+        assert!(
+            default_info.torrent_files.is_none(),
+            "Default StatusInfo should have None torrent_files"
+        );
 
         let serialized = serde_json::to_value(&info).unwrap();
-        assert!(serialized.get("torrent_files").is_some(), "torrent_files should appear in JSON output");
+        assert!(
+            serialized.get("torrent_files").is_some(),
+            "torrent_files should appear in JSON output"
+        );
         let tf_arr = serialized.get("torrent_files").unwrap().as_array().unwrap();
         assert_eq!(tf_arr.len(), 2);
     }

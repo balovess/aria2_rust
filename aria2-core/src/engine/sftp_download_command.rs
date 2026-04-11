@@ -151,12 +151,12 @@ impl Command for SftpDownloadCommand {
             self.output_path.display()
         );
 
-        if let Some(parent) = self.output_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("创建目录失败: {}", e)))
-                })?;
-            }
+        if let Some(parent) = self.output_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("创建目录失败: {}", e)))
+            })?;
         }
 
         let host = self.host.clone();

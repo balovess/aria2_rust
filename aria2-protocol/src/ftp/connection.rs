@@ -1,6 +1,6 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
@@ -256,7 +256,7 @@ impl FtpConnection {
             line.clear();
             let bytes_read = timeout(self.options.read_timeout, self.stream.read_line(&mut line))
                 .await
-                .map_err(|_| format!("FTP读取超时"))?
+                .map_err(|_| "FTP读取超时".to_string())?
                 .map_err(|e| format!("读取FTP响应失败: {}", e))?;
 
             if bytes_read == 0 {
@@ -281,11 +281,7 @@ impl FtpConnection {
                 message.push('\n');
             } else if separator == b' ' {
                 message.push_str(&trimmed[4..]);
-                if is_multiline {
-                    break;
-                } else {
-                    break;
-                }
+                break;
             } else if is_multiline && trimmed.starts_with(&format!("{:3} ", code.unwrap_or(0))) {
                 message.push_str(&trimmed[4..]);
                 break;

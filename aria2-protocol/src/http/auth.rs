@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -78,9 +78,7 @@ impl HttpAuth {
 
             if let Some((key, _)) = part.split_once('=') {
                 let key = key.trim().to_lowercase();
-                if !params.contains_key(&key) {
-                    params.insert(key, String::new());
-                }
+                params.entry(key).or_insert_with(String::new);
             }
         }
 

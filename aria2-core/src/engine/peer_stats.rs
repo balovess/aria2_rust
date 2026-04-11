@@ -27,7 +27,6 @@ pub struct PeerStats {
     // ------------------------------------------------------------------
     // Cumulative byte counts
     // ------------------------------------------------------------------
-
     /// Total bytes uploaded to this peer (cumulative).
     pub uploaded_bytes: u64,
 
@@ -37,7 +36,6 @@ pub struct PeerStats {
     // ------------------------------------------------------------------
     // Speed estimates (bytes/sec), updated via EMA
     // ------------------------------------------------------------------
-
     /// Current upload speed estimate in bytes/second.
     pub upload_speed: f64,
 
@@ -47,7 +45,6 @@ pub struct PeerStats {
     // ------------------------------------------------------------------
     // Choke / Interested state (per BEP-0003)
     // ------------------------------------------------------------------
-
     /// Whether *we* are choking this peer.
     ///
     /// Starts as `true` (we choke all peers by default).
@@ -68,7 +65,6 @@ pub struct PeerStats {
     // ------------------------------------------------------------------
     // Timestamps for speed calculation & snubbed detection
     // ------------------------------------------------------------------
-
     /// Instant of the most recent message received from this peer.
     pub last_message_received_at: Instant,
 
@@ -196,7 +192,8 @@ impl PeerStats {
             self.download_speed = instant_rate;
         } else {
             // EMA update
-            self.download_speed = EMA_ALPHA * instant_rate + (1.0 - EMA_ALPHA) * self.download_speed;
+            self.download_speed =
+                EMA_ALPHA * instant_rate + (1.0 - EMA_ALPHA) * self.download_speed;
         }
     }
 
@@ -211,11 +208,9 @@ impl PeerStats {
     ///
     /// Returns `false` if the peer is still active or was already snubbed.
     pub fn check_snubbed(&mut self, timeout_secs: u64) -> bool {
-        if self.last_message_received_at.elapsed().as_secs() >= timeout_secs {
-            if !self.is_snubbed {
-                self.is_snubbed = true;
-                return true;
-            }
+        if self.last_message_received_at.elapsed().as_secs() >= timeout_secs && !self.is_snubbed {
+            self.is_snubbed = true;
+            return true;
         }
         false
     }
@@ -312,7 +307,7 @@ mod tests {
         assert!(!stats.am_interested);
 
         // Peer default states
-        assert!(stats.peer_choking);   // peer chokes us initially
+        assert!(stats.peer_choking); // peer chokes us initially
         assert!(!stats.peer_interested);
 
         // Not snubbed initially
@@ -332,7 +327,10 @@ mod tests {
         stats.on_data_sent(1024);
 
         assert_eq!(stats.uploaded_bytes, 1024);
-        assert!(stats.upload_speed > 0.0, "upload_speed should be positive after sending data");
+        assert!(
+            stats.upload_speed > 0.0,
+            "upload_speed should be positive after sending data"
+        );
 
         // Send more data
         thread::sleep(Duration::from_millis(10));
@@ -354,7 +352,10 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         stats.on_data_received(512);
 
-        assert!(!stats.is_snubbed, "receiving data should reset snubbed status");
+        assert!(
+            !stats.is_snubbed,
+            "receiving data should reset snubbed status"
+        );
         assert_eq!(stats.downloaded_bytes, 512);
         assert!(stats.download_speed > 0.0);
     }
@@ -370,12 +371,18 @@ mod tests {
 
         // Use timeout=0 to guarantee it triggers (elapsed >= 0 always true)
         let result = stats.check_snubbed(0);
-        assert!(result, "with timeout=0, any elapsed time should trigger snubbed");
+        assert!(
+            result,
+            "with timeout=0, any elapsed time should trigger snubbed"
+        );
         assert!(stats.is_snubbed);
 
         // Calling again should return false (already snubbed)
         let result2 = stats.check_snubbed(0);
-        assert!(!result2, "second call should return false (already snubbed)");
+        assert!(
+            !result2,
+            "second call should return false (already snubbed)"
+        );
     }
 
     #[test]

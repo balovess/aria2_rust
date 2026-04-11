@@ -176,10 +176,10 @@ impl SeekableDiskWriter for CachedDiskWriter {
                     }
                 }
                 adaptor.open(&self.path).await?;
-                if let Some(size) = self.total_size {
-                    if size > 0 {
-                        adaptor.truncate(size).await?;
-                    }
+                if let Some(size) = self.total_size
+                    && size > 0
+                {
+                    adaptor.truncate(size).await?;
                 }
             }
         }

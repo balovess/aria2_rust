@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -71,7 +71,6 @@ pub struct DownloadOptions {
     // ------------------------------------------------------------------
     // Choking algorithm configuration (BT tit-for-tat)
     // ------------------------------------------------------------------
-
     /// Maximum number of peers to unchoke simultaneously during seeding.
     /// Default: 4. Set to enable the choking algorithm.
     pub bt_max_upload_slots: Option<u32>,
@@ -348,10 +347,26 @@ mod tests {
         );
 
         // Verify all atomic fields default to 0
-        assert_eq!(group.get_completed_length(), 0, "completed_length_atomic should default to 0");
-        assert_eq!(group.get_total_length_atomic(), 0, "total_length_atomic should default to 0");
-        assert_eq!(group.get_uploaded_length(), 0, "uploaded_length should default to 0");
-        assert_eq!(group.get_download_speed_cached(), 0, "download_speed_cached should default to 0");
+        assert_eq!(
+            group.get_completed_length(),
+            0,
+            "completed_length_atomic should default to 0"
+        );
+        assert_eq!(
+            group.get_total_length_atomic(),
+            0,
+            "total_length_atomic should default to 0"
+        );
+        assert_eq!(
+            group.get_uploaded_length(),
+            0,
+            "uploaded_length should default to 0"
+        );
+        assert_eq!(
+            group.get_download_speed_cached(),
+            0,
+            "download_speed_cached should default to 0"
+        );
     }
 
     #[test]
@@ -364,15 +379,27 @@ mod tests {
 
         // Test set/get roundtrip
         group.set_completed_length(1024);
-        assert_eq!(group.get_completed_length(), 1024, "Should return 1024 after setting");
+        assert_eq!(
+            group.get_completed_length(),
+            1024,
+            "Should return 1024 after setting"
+        );
 
         // Test update to different value
         group.set_completed_length(2048);
-        assert_eq!(group.get_completed_length(), 2048, "Should return 2048 after update");
+        assert_eq!(
+            group.get_completed_length(),
+            2048,
+            "Should return 2048 after update"
+        );
 
         // Test large value
         group.set_completed_length(u64::MAX);
-        assert_eq!(group.get_completed_length(), u64::MAX, "Should handle u64::MAX");
+        assert_eq!(
+            group.get_completed_length(),
+            u64::MAX,
+            "Should handle u64::MAX"
+        );
 
         // Test zero
         group.set_completed_length(0);
@@ -389,11 +416,19 @@ mod tests {
 
         // Test set/get roundtrip
         group.set_total_length_atomic(1048576); // 1MB
-        assert_eq!(group.get_total_length_atomic(), 1048576, "Should return 1MB after setting");
+        assert_eq!(
+            group.get_total_length_atomic(),
+            1048576,
+            "Should return 1MB after setting"
+        );
 
         // Test update
         group.set_total_length_atomic(1073741824); // 1GB
-        assert_eq!(group.get_total_length_atomic(), 1073741824, "Should return 1GB after update");
+        assert_eq!(
+            group.get_total_length_atomic(),
+            1073741824,
+            "Should return 1GB after update"
+        );
     }
 
     #[tokio::test]
@@ -412,13 +447,23 @@ mod tests {
         let test_bitfield = vec![0xFF, 0xF0, 0x0F];
         group.set_bt_bitfield(Some(test_bitfield.clone())).await;
         let retrieved = group.get_bt_bitfield().await;
-        assert!(retrieved.is_some(), "bt_bitfield should be Some after setting");
-        assert_eq!(retrieved.unwrap(), test_bitfield, "bitfield should match what was set");
+        assert!(
+            retrieved.is_some(),
+            "bt_bitfield should be Some after setting"
+        );
+        assert_eq!(
+            retrieved.unwrap(),
+            test_bitfield,
+            "bitfield should match what was set"
+        );
 
         // Set back to None
         group.set_bt_bitfield(None).await;
         let bf_none = group.get_bt_bitfield().await;
-        assert!(bf_none.is_none(), "bt_bitfield should be None after clearing");
+        assert!(
+            bf_none.is_none(),
+            "bt_bitfield should be None after clearing"
+        );
 
         // Test with empty bitfield
         group.set_bt_bitfield(Some(vec![])).await;

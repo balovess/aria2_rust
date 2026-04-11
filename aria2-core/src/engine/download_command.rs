@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
+use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_segment_downloader::HttpSegmentDownloader;
@@ -62,12 +63,11 @@ impl DownloadCommand {
             .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
             .tcp_keepalive(Some(std::time::Duration::from_secs(60)));
 
-        if let Some(ref proxy) = options.http_proxy {
-            if let Ok(proxy_url) = proxy.parse::<reqwest::Url>() {
-                if let Ok(p) = reqwest::Proxy::all(&proxy_url.to_string()) {
-                    builder = builder.proxy(p);
-                }
-            }
+        if let Some(ref proxy) = options.http_proxy
+            && let Ok(proxy_url) = proxy.parse::<reqwest::Url>()
+            && let Ok(p) = reqwest::Proxy::all(proxy_url.to_string())
+        {
+            builder = builder.proxy(p);
         }
 
         let client = builder.build().map_err(|e| {
@@ -174,7 +174,7 @@ impl DownloadCommand {
         &mut self,
         uri: &str,
         resume_state: &crate::filesystem::resume_helper::ResumeState,
-        total_length: u64,
+        _total_length: u64,
     ) -> Result<()> {
         let url_parsed = reqwest::Url::parse(uri).ok();
         let mut request = if let Some(range_header) = ResumeHelper::build_range_header(resume_state)
@@ -205,11 +205,11 @@ impl DownloadCommand {
             let domain = url.host_str().unwrap_or("");
             let path = url.path();
             for sc_val in response.headers().get_all("set-cookie").iter() {
-                if let Ok(sc_str) = sc_val.to_str() {
-                    if let Some(c) = Cookie::from_set_cookie_header(sc_str, domain, path) {
-                        self.cookie_storage.add(c);
-                        debug!("收到 Set-Cookie: {}", sc_str);
-                    }
+                if let Ok(sc_str) = sc_val.to_str()
+                    && let Some(c) = Cookie::from_set_cookie_header(sc_str, domain, path)
+                {
+                    self.cookie_storage.add(c);
+                    debug!("收到 Set-Cookie: {}", sc_str);
                 }
             }
         }
@@ -321,6 +321,7 @@ impl DownloadCommand {
         Ok(())
     }
 
+    #[allow(dead_code)] // Reserved for future concurrent download execution strategy
     async fn execute_concurrent_download(&mut self, uri: &str, total_length: u64) -> Result<()> {
         let options = self.group.read().await.options().clone();
         let split = options.split.unwrap_or(1) as usize;
@@ -412,7 +413,7 @@ impl DownloadCommand {
                                 manager.complete_segment(seg_idx, data.clone());
                                 self.completed_bytes += data.len() as u64;
 
-                                let mut g = self.group.write().await;
+                                let g = self.group.write().await;
                                 g.update_progress(self.completed_bytes).await;
                                 // Export to atomic fields for session persistence
                                 g.set_completed_length(self.completed_bytes);
@@ -493,11 +494,11 @@ impl DownloadCommand {
         let mut last_err = None;
 
         for attempt in 0..=retry_policy.max_retries {
-            if attempt > 0 {
-                if let Some(wait) = retry_policy.compute_wait(attempt - 1) {
-                    info!("顺序下载重试 #{} (等待 {:?})...", attempt, wait);
-                    tokio::time::sleep(wait).await;
-                }
+            if attempt > 0
+                && let Some(wait) = retry_policy.compute_wait(attempt - 1)
+            {
+                info!("顺序下载重试 #{} (等待 {:?})...", attempt, wait);
+                tokio::time::sleep(wait).await;
             }
 
             match self
@@ -539,7 +540,7 @@ impl DownloadCommand {
         );
 
         let split = self.group.read().await.options().split.unwrap_or(1) as u64;
-        let segment_size = (total_length + split - 1) / split;
+        let segment_size = total_length.div_ceil(split);
         let mut manager =
             ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(segment_size));
         manager.set_max_retries(max_retries_per_segment);
@@ -552,7 +553,7 @@ impl DownloadCommand {
 
         while manager.has_pending_segments() || !manager.is_complete() {
             while let Some((seg_idx, offset, length)) = manager.next_pending_segment() {
-                let seg_idx_u32 = seg_idx as u32;
+                let seg_idx_u32 = seg_idx;
                 info!(
                     "启动段 {} 下载: offset={}, size={}",
                     seg_idx, offset, length
@@ -638,16 +639,37 @@ impl Command for DownloadCommand {
 
         debug!("开始下载: {} -> {}", uri, self.output_path.display());
 
-        if let Some(parent) = self.output_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "创建目录失败: {}",
-                        e
-                    )))
-                })?;
-            }
+        if let Some(parent) = self.output_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                    "创建目录失败: {}",
+                    e
+                )))
+            })?;
         }
+
+        // Resolve filename collision: if another active download is already
+        // writing to self.output_path, replace it with a unique name such as
+        // "file (1).ext" so that concurrent downloads do not silently overwrite.
+        let original_path = self.output_path.clone();
+        self.output_path = global_registry().resolve(&original_path).await;
+        if self.output_path != original_path {
+            info!(
+                "Filename collision resolved: '{}' -> '{}'",
+                original_path.display(),
+                self.output_path.display()
+            );
+        }
+
+        // Ensure the resolved path is released when execute() returns (success or failure).
+        let release_path = |path: &std::path::Path| {
+            let p = path.to_path_buf();
+            let _ = tokio::spawn(async move {
+                global_registry().release(&p).await;
+            });
+        };
 
         let url_for_head = reqwest::Url::parse(&uri).ok();
         let cookie_hdr_head = if let Some(ref url) = url_for_head {
@@ -670,7 +692,7 @@ impl Command for DownloadCommand {
                 .headers()
                 .get("Accept-Ranges")
                 .and_then(|v| v.to_str().ok())
-                .map_or(false, |v| v.to_lowercase().contains("bytes"));
+                .is_some_and(|v| v.to_lowercase().contains("bytes"));
             (tl, sr)
         } else {
             (0, false)
@@ -693,6 +715,7 @@ impl Command for DownloadCommand {
             g.set_total_length_atomic(self.completed_bytes);
             g.set_completed_length(self.completed_bytes);
             g.complete().await?;
+            release_path(&self.output_path);
             return Ok(());
         }
 
@@ -715,7 +738,7 @@ impl Command for DownloadCommand {
                 );
             }
             let max_retries = options.max_retries;
-            return self
+            let result = self
                 .execute_concurrent_download_with_retry(
                     &uri,
                     total_length,
@@ -723,16 +746,21 @@ impl Command for DownloadCommand {
                     max_retries,
                 )
                 .await;
+            release_path(&self.output_path);
+            return result;
         }
 
         let retry_policy = RetryPolicy::new(options.max_retries, options.retry_wait * 1000);
-        self.execute_sequential_download_with_retry(
-            &uri,
-            &resume_state,
-            total_length,
-            &retry_policy,
-        )
-        .await
+        let result = self
+            .execute_sequential_download_with_retry(
+                &uri,
+                &resume_state,
+                total_length,
+                &retry_policy,
+            )
+            .await;
+        release_path(&self.output_path);
+        result
     }
 
     fn status(&self) -> CommandStatus {

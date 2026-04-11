@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use sha1::{Digest, Sha1};
 
 pub fn build_test_torrent(

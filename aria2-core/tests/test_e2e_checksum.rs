@@ -1,4 +1,4 @@
-use aria2_core::checksum::checksum::{Checksum, ChecksumValidator};
+use aria2_core::checksum::checksum::Checksum;
 use aria2_core::checksum::chunk_checksum::ChunkChecksum;
 use aria2_core::checksum::message_digest::{HashType, MessageDigest};
 

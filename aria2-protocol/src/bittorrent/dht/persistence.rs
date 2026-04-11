@@ -139,9 +139,9 @@ impl DhtPersistence {
             DHT_VERSION_2,
         ];
 
-        let version = if &data[..8] == &header_v3[..] {
+        let version = if data[..8] == header_v3[..] {
             3
-        } else if &data[..8] == &header_v2[..] {
+        } else if data[..8] == header_v2[..] {
             2
         } else {
             return Err(format!("dht.dat 无效的 magic/version: {:02x?}", &data[..8]));
@@ -468,7 +468,7 @@ mod tests {
         let mut rt = RoutingTable::new([0x80u8; 20]);
 
         let good_addr = "127.0.0.1:6881".parse().unwrap();
-        let mut good_node = DhtNode::new([1u8; 20], good_addr);
+        let good_node = DhtNode::new([1u8; 20], good_addr);
 
         let bad_addr = "127.0.0.1:6882".parse().unwrap();
         let mut bad_node = DhtNode::new([2u8; 20], bad_addr);

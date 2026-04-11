@@ -1,4 +1,4 @@
-use aria2_core::validation::protocol_detector::{detect, DetectedInput, InputType};
+use aria2_core::validation::protocol_detector::{InputType, detect};
 
 #[test]
 fn test_detect_http_url() {

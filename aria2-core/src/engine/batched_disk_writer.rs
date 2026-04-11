@@ -60,8 +60,9 @@ impl BatchedDiskWriter {
             return Ok(());
         }
 
-        self.buffer.entry(offset)
-            .or_insert_with(Vec::new)
+        self.buffer
+            .entry(offset)
+            .or_default()
             .extend_from_slice(data);
         self.total_buffered += data.len();
 
@@ -85,16 +86,24 @@ impl BatchedDiskWriter {
         self.ensure_open().await?;
         let file = self.file.as_mut().ok_or("File not open")?;
 
-        debug!("[BatchedDiskWriter] Flushing {} writes ({} bytes)", self.buffer.len(), self.total_buffered);
+        debug!(
+            "[BatchedDiskWriter] Flushing {} writes ({} bytes)",
+            self.buffer.len(),
+            self.total_buffered
+        );
 
         for (&offset, data) in self.buffer.iter() {
-            file.seek(std::io::SeekFrom::Start(offset)).await
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
                 .map_err(|e| format!("seek failed at offset {}: {}", offset, e))?;
-            file.write_all(data).await
+            file.write_all(data)
+                .await
                 .map_err(|e| format!("write failed at offset {}: {}", offset, e))?;
         }
 
-        file.flush().await.map_err(|e| format!("flush failed: {}", e))?;
+        file.flush()
+            .await
+            .map_err(|e| format!("flush failed: {}", e))?;
 
         self.buffer.clear();
         self.total_buffered = 0;
@@ -104,15 +113,23 @@ impl BatchedDiskWriter {
     pub async fn close(&mut self) -> Result<(), String> {
         self.flush().await?;
         if let Some(f) = self.file.take() {
-            f.sync_all().await.map_err(|e| format!("sync failed: {}", e))?;
+            f.sync_all()
+                .await
+                .map_err(|e| format!("sync failed: {}", e))?;
         }
         self.opened = false;
         Ok(())
     }
 
-    pub fn buffered_count(&self) -> usize { self.buffer.len() }
-    pub fn buffered_bytes(&self) -> usize { self.total_buffered }
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn buffered_count(&self) -> usize {
+        self.buffer.len()
+    }
+    pub fn buffered_bytes(&self) -> usize {
+        self.total_buffered
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[cfg(test)]

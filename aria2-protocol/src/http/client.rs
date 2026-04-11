@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{redirect, Certificate, Client, ClientBuilder};
+use reqwest::{Certificate, Client, ClientBuilder, redirect};
 use tracing::{debug, info};
 
 use crate::http::request::HttpRequest;

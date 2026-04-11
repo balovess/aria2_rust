@@ -240,7 +240,7 @@ mod tests {
             .expect("Responder receive step2");
         assert_eq!(method_r, MseCryptoMethod::Rc4);
 
-        let method_i = initiator
+        let _method_i = initiator
             .receive_step2(&step2_r)
             .expect("Initiator receive step2");
 

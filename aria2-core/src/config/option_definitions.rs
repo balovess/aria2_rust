@@ -11,6 +11,7 @@ use crate::config::{OptionCategory, OptionDef, OptionType, OptionValue};
 /// This trait is implemented for [`super::OptionRegistry`] and provides one method
 /// per option category, making it easy to register options in logical groups or
 /// to selectively enable/disable categories.
+#[allow(dead_code)] // Trait methods are called dynamically via impl blocks
 pub(super) trait RegisterOptions {
     /// Register all General category options (directory, logging, UI, session).
     fn register_general_options(&mut self);
@@ -43,7 +44,6 @@ pub(super) trait RegisterOptions {
 /// ---------------------------------------------------------------------------
 /// General Options
 /// ---------------------------------------------------------------------------
-
 impl super::OptionRegistry {
     /// Register general-purpose options: directory, output, logging, UI, session management.
     pub fn register_general_options(&mut self) {
@@ -150,7 +150,6 @@ impl super::OptionRegistry {
 /// ---------------------------------------------------------------------------
 /// HTTP/FTP Options
 /// ---------------------------------------------------------------------------
-
 impl super::OptionRegistry {
     /// Register HTTP/FTP download options: proxies, headers, timeouts, connection management.
     pub fn register_http_ftp_options(&mut self) {

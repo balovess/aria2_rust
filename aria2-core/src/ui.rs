@@ -26,7 +26,7 @@ pub struct ProgressBar {
 
 impl ProgressBar {
     pub fn new(total: u64) -> Self {
-        let width = terminal_width().min(60).max(20);
+        let width = terminal_width().clamp(20, 60);
         Self {
             total,
             current: 0,

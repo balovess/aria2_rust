@@ -166,12 +166,12 @@ mod tests {
         assert_eq!(reqs.len(), expected_count as usize);
 
         let last_req = reqs.last().unwrap();
-        if let BtMessage::Request { ref request } = last_req {
+        if let BtMessage::Request { request } = last_req {
             assert_eq!(request.index, 0);
             let total_requested: u32 = reqs
                 .iter()
                 .map(|r| {
-                    if let BtMessage::Request { ref request } = r {
+                    if let BtMessage::Request { request } = r {
                         request.length
                     } else {
                         0

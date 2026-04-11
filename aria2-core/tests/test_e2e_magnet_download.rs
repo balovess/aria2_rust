@@ -8,15 +8,13 @@ use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
 use aria2_core::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::bittorrent::dht::client::{
-    generate_random_node_id, DhtClient, DhtClientConfig,
+    DhtClient, DhtClientConfig, generate_random_node_id,
 };
 use aria2_protocol::bittorrent::extension::ut_metadata::{
     ExtensionHandshake, MetadataCollector, UtMetadataMsg,
 };
 use aria2_protocol::bittorrent::magnet::MagnetLink;
-use fixtures::mock_bt_peer::MockBtPeerServer;
 use fixtures::mock_dht_node::MockDhtNode;
-use fixtures::test_torrent_builder::{build_test_torrent, expected_piece_data};
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()

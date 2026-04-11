@@ -2,11 +2,11 @@ mod fixtures {
     pub mod test_metalink_builder;
     pub mod test_server;
 }
-use aria2_core::engine::command::{Command, CommandStatus};
+use aria2_core::engine::command::Command;
 use aria2_core::engine::concurrent_download_command::ConcurrentDownloadCommand;
 use aria2_core::engine::concurrent_segment_manager::{ConcurrentSegmentManager, SegmentStatus};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
-use fixtures::test_metalink_builder::{build_metalink_v3, compute_sha256, SMALL_CONTENT};
+use fixtures::test_metalink_builder::{SMALL_CONTENT, build_metalink_v3, compute_sha256};
 use fixtures::test_server::TestServer;
 use std::path::Path;
 
@@ -118,7 +118,7 @@ async fn test_e2e_concurrent_hash_verify() {
     let dir = tmp_dir();
     let url = format!("{}/files/small.bin", server.base_url());
     let correct_sha = compute_sha256(SMALL_CONTENT);
-    let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000000";
+    let _wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000000";
 
     let metalink_xml = build_metalink_v3("hash_test.bin", 4, &[(url, 1)], &correct_sha);
 

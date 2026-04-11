@@ -56,10 +56,10 @@ impl HttpEncoding {
     }
 
     pub fn is_compressed(content_encoding: Option<&str>) -> bool {
-        match content_encoding.map(|e| e.to_lowercase()).as_deref() {
-            Some("gzip" | "deflate" | "br" | "compress") => true,
-            _ => false,
-        }
+        matches!(
+            content_encoding.map(|e| e.to_lowercase()).as_deref(),
+            Some("gzip" | "deflate" | "br" | "compress")
+        )
     }
 }
 
@@ -127,8 +127,8 @@ mod tests {
 
     #[test]
     fn test_gzip_roundtrip() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use std::io::Write;
 
         let original = b"Hello, this is a test string that should compress well!";

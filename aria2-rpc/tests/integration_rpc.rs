@@ -135,7 +135,9 @@ async fn test_engine_multiple_adds() {
         id: Some(serde_json::Value::String("active".into())),
     };
     let active_resp = engine.handle_request(&tell_active).await;
-    assert!(!serde_json::to_string(&active_resp)
-        .unwrap_or_default()
-        .is_empty());
+    assert!(
+        !serde_json::to_string(&active_resp)
+            .unwrap_or_default()
+            .is_empty()
+    );
 }

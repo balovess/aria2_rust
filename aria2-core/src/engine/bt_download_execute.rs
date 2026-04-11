@@ -1,25 +1,27 @@
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::engine::bt_download_command::{
-    BtDownloadCommand, BLOCK_SIZE, MAX_RETRIES, PEER_CONNECTION_DELAY_MS, PUBLIC_TRACKER_PEER_THRESHOLD,
-    MAX_PUBLIC_TRACKERS_TO_TRY,
+    BLOCK_SIZE, BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY, MAX_RETRIES,
+    PEER_CONNECTION_DELAY_MS, PUBLIC_TRACKER_PEER_THRESHOLD,
 };
 use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::bt_piece_downloader::write_piece_to_multi_files;
 use crate::engine::bt_piece_selector::{BtPieceSelector, build_bitfield_from_completed};
+use crate::engine::bt_post_download_handler::{DownloadStatus, HookContext};
+use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
 use crate::engine::bt_tracker_comm::{announce_to_public_tracker, perform_http_tracker_announce};
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::command::{Command, CommandStatus};
+use crate::engine::peer_stats::PeerStats;
 use crate::engine::udp_tracker_client::UdpTrackerClient;
 use crate::engine::udp_tracker_manager::UdpTrackerManager;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::engine::peer_stats::PeerStats;
 use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
 
 #[async_trait]
@@ -32,7 +34,28 @@ impl Command for BtDownloadCommand {
 
         let (meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
 
-        let mut peer_addrs = self.discover_peers(&meta, total_size, &meta.info_hash.bytes).await?;
+        // P1 集成: 尝试从 .aria2 文件恢复已保存的进度
+        if let Some(ref mgr) = self.progress_manager {
+            match mgr.load_progress(&meta.info_hash.bytes) {
+                Ok(saved) => {
+                    info!(
+                        pieces_done = saved.num_pieces,
+                        ratio = saved.completion_ratio(),
+                        "Resuming from saved progress"
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        error = %e,
+                        "No saved progress found, starting fresh download"
+                    );
+                }
+            }
+        }
+
+        let peer_addrs = self
+            .discover_peers(&meta, total_size, &meta.info_hash.bytes)
+            .await?;
 
         if peer_addrs.is_empty() {
             return Err(Aria2Error::Recoverable(
@@ -42,7 +65,9 @@ impl Command for BtDownloadCommand {
             ));
         }
 
-        let mut active_connections = self.connect_to_peers(&peer_addrs, &meta.info_hash.bytes, num_pieces).await?;
+        let mut active_connections = self
+            .connect_to_peers(&peer_addrs, &meta.info_hash.bytes, num_pieces)
+            .await?;
 
         self.download_pieces_loop(
             &mut active_connections,
@@ -50,7 +75,8 @@ impl Command for BtDownloadCommand {
             piece_length,
             total_size,
             num_pieces,
-        ).await?;
+        )
+        .await?;
 
         if self.seed_enabled && !active_connections.is_empty() {
             info!(
@@ -66,7 +92,7 @@ impl Command for BtDownloadCommand {
                 active_connections.len()
             );
             for conn in &mut active_connections {
-                drop(conn);
+                let _ = conn;
             }
         }
 
@@ -97,19 +123,26 @@ impl BtDownloadCommand {
         u64,
         u32,
     )> {
-        if let Some(parent) = self.output_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
-                })?;
-            }
+        if let Some(parent) = self.output_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
+            })?;
         }
 
         if let Some(ref layout) = self.multi_file_layout {
             layout.create_directories().map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("create_directories failed: {}", e)))
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "create_directories failed: {}",
+                    e
+                )))
             })?;
-            info!("[BT] Multi-file mode: {} files under {}", layout.num_files(), self.output_path.display());
+            info!(
+                "[BT] Multi-file mode: {} files under {}",
+                layout.num_files(),
+                self.output_path.display()
+            );
         }
 
         let meta =
@@ -224,7 +257,10 @@ impl BtDownloadCommand {
         }
 
         let enable_public_trackers = { self.group.read().await.options().enable_public_trackers };
-        if enable_public_trackers && self.public_trackers.is_none() && peer_addrs.len() < PUBLIC_TRACKER_PEER_THRESHOLD {
+        if enable_public_trackers
+            && self.public_trackers.is_none()
+            && peer_addrs.len() < PUBLIC_TRACKER_PEER_THRESHOLD
+        {
             let ptl = std::sync::Arc::new(
                 aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
             );
@@ -241,8 +277,7 @@ impl BtDownloadCommand {
             let mut announced = 0usize;
 
             for url in http_urls.iter().take(MAX_PUBLIC_TRACKERS_TO_TRY) {
-                match announce_to_public_tracker(url, info_hash_raw, &my_peer_id, total_size)
-                    .await
+                match announce_to_public_tracker(url, info_hash_raw, &my_peer_id, total_size).await
                 {
                     Ok(peers) => {
                         announced += 1;
@@ -277,6 +312,39 @@ impl BtDownloadCommand {
             }
         }
 
+        // P2 集成: 注入 LPD 发现的局域网 peers
+        if let Some(ref lpd) = self.lpd_manager {
+            let lpd_peers = lpd.get_discovered_peers(*info_hash_raw).await;
+            if !lpd_peers.is_empty() {
+                let before = peer_addrs.len();
+                for lpd_peer in &lpd_peers {
+                    // 将 SocketAddrV4 转换为 PeerAddr
+                    let ip_str = lpd_peer.addr.ip().to_string();
+                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                        &ip_str,
+                        lpd_peer.addr.port(),
+                    );
+                    if !peer_addrs
+                        .iter()
+                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                    {
+                        peer_addrs.push(paddr);
+                    }
+                }
+
+                info!(
+                    lpd_count = lpd_peers.len(),
+                    total_added = peer_addrs.len() - before,
+                    "LPD discovered local peers"
+                );
+
+                // 注册当前下载到 LPD 广播
+                lpd.register_download(*info_hash_raw);
+            } else {
+                debug!("LPD no local peers found for this torrent");
+            }
+        }
+
         Ok(peer_addrs)
     }
 
@@ -295,9 +363,10 @@ impl BtDownloadCommand {
             num_pieces,
             require_crypto,
             force_encrypt,
-        ).await?;
+        )
+        .await?;
 
-        let mut active_connections = conn_result.connections;
+        let active_connections = conn_result.connections;
 
         tracing::info!("[BT] Active connections: {}", active_connections.len());
         if active_connections.is_empty() {
@@ -322,10 +391,12 @@ impl BtDownloadCommand {
             let mut algo = ChokingAlgorithm::new(config);
 
             for addr in peer_addrs {
-                let socket_addr =
-                    std::net::SocketAddr::new(addr.ip.parse().unwrap_or_else(|_| {
+                let socket_addr = std::net::SocketAddr::new(
+                    addr.ip.parse().unwrap_or_else(|_| {
                         std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-                    }), addr.port);
+                    }),
+                    addr.port,
+                );
                 let peer_stats = PeerStats::new([0u8; 20], socket_addr);
                 algo.add_peer(peer_stats);
             }
@@ -363,6 +434,9 @@ impl BtDownloadCommand {
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
+
+        // P1 集成: 进度保存时间追踪
+        let mut last_progress_save = Instant::now();
 
         let piece_selector = BtPieceSelector::new(num_pieces);
 
@@ -414,16 +488,15 @@ impl BtDownloadCommand {
 
             tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
 
-            let actual_piece_len = piece_selector.calculate_piece_length(
-                next_piece_idx,
-                piece_length,
-                total_size,
-            );
+            let actual_piece_len =
+                piece_selector.calculate_piece_length(next_piece_idx, piece_length, total_size);
 
             let num_blocks = BtPieceSelector::calculate_num_blocks(actual_piece_len, BLOCK_SIZE);
             tracing::debug!(
                 "[BT] Piece {} has {} blocks (size: {} bytes)",
-                next_piece_idx, num_blocks, actual_piece_len
+                next_piece_idx,
+                num_blocks,
+                actual_piece_len
             );
             let mut piece_ok = false;
 
@@ -432,7 +505,9 @@ impl BtDownloadCommand {
                 next_piece_idx as u32,
                 actual_piece_len,
                 num_blocks,
-            ).await {
+            )
+            .await
+            {
                 Ok(piece_data) => {
                     self.completed_bytes += piece_data.len() as u64;
 
@@ -451,22 +526,65 @@ impl BtDownloadCommand {
                                 next_piece_idx as u32,
                                 &piece_data,
                                 layout.piece_length(),
-                            ).await?;
+                            )
+                            .await?;
                         } else {
                             writer.write(&piece_data).await.ok();
                         }
 
                         {
-                            let bitfield = build_bitfield_from_completed(
-                                piece_manager.num_pieces(),
-                                |i| piece_manager.is_completed(i),
-                            );
+                            let bitfield =
+                                build_bitfield_from_completed(piece_manager.num_pieces(), |i| {
+                                    piece_manager.is_completed(i)
+                                });
                             let g = self.group.write().await;
                             g.set_bt_bitfield(Some(bitfield)).await;
                         }
 
-                        BtPeerInteraction::broadcast_have(active_connections, next_piece_idx as u32).await;
+                        BtPeerInteraction::broadcast_have(
+                            active_connections,
+                            next_piece_idx as u32,
+                        )
+                        .await;
                         piece_ok = true;
+
+                        // P1 集成: 定期保存下载进度到 .aria2 文件
+                        if let Some(ref mgr) = self.progress_manager
+                            && last_progress_save.elapsed() >= self.progress_save_interval
+                        {
+                            // 构造当前进度快照
+                            let progress = BtProgress {
+                                info_hash: meta.info_hash.bytes,
+                                bitfield: vec![], // 将在后续完善
+                                peers: vec![],
+                                stats: ProgressDownloadStats {
+                                    downloaded_bytes: self.completed_bytes,
+                                    uploaded_bytes: self.total_uploaded,
+                                    upload_speed: 0.0,
+                                    download_speed: 0.0,
+                                    elapsed_seconds: start_time.elapsed().as_secs(),
+                                },
+                                piece_length,
+                                total_size,
+                                num_pieces,
+                                save_time: std::time::SystemTime::now(),
+                                version: 1,
+                            };
+
+                            if let Err(e) = mgr.save_progress(&meta.info_hash.bytes, &progress) {
+                                warn!(
+                                    error = %e,
+                                    "Failed to save BT progress"
+                                );
+                            } else {
+                                debug!(
+                                    pieces_completed = next_piece_idx + 1,
+                                    total_pieces = num_pieces,
+                                    "BT progress saved successfully"
+                                );
+                            }
+                            last_progress_save = Instant::now();
+                        }
                     } else {
                         tracing::warn!(
                             "[BT] SHA1 mismatch on piece {}, retrying...",
@@ -477,7 +595,8 @@ impl BtDownloadCommand {
                 Err(_) => {
                     tracing::warn!(
                         "[BT] Incomplete piece {}, needed {} blocks",
-                        next_piece_idx, num_blocks
+                        next_piece_idx,
+                        num_blocks
                     );
                 }
             }
@@ -485,7 +604,8 @@ impl BtDownloadCommand {
             if !piece_ok {
                 tracing::error!(
                     "[BT] Piece {} failed after {} retries",
-                    next_piece_idx, MAX_RETRIES
+                    next_piece_idx,
+                    MAX_RETRIES
                 );
                 return Err(Aria2Error::Fatal(FatalError::Config(format!(
                     "Piece {} download failed after {} retries",
@@ -560,6 +680,59 @@ impl BtDownloadCommand {
                 );
             }
             engine.shutdown();
+        }
+
+        // P1 集成: 清理已完成的下载进度文件
+        if let Some(ref mgr) = self.progress_manager {
+            if let Err(e) = mgr.remove_progress(&meta.info_hash.bytes) {
+                warn!(
+                    error = %e,
+                    "Failed to remove progress file after completion"
+                );
+            } else {
+                info!("BT progress file removed after successful download");
+            }
+        }
+
+        // P2 集成: 触发下载完成后处理钩子
+        if let Some(ref hm) = self.hook_manager {
+            // 获取 gid（从 group 中提取）
+            let gid = {
+                let g = self.group.read().await;
+                g.gid()
+            };
+
+            let ctx = HookContext {
+                gid,
+                file_path: self.output_path.clone(),
+                status: DownloadStatus::Complete,
+                stats: crate::engine::bt_post_download_handler::DownloadStats {
+                    uploaded_bytes: self.total_uploaded,
+                    downloaded_bytes: self.completed_bytes,
+                    upload_speed: 0.0,
+                    download_speed: final_speed as f64,
+                    elapsed_seconds: start_time.elapsed().as_secs(),
+                },
+                error: None,
+            };
+
+            match hm.fire_complete(&ctx).await {
+                Ok(results) => {
+                    info!(
+                        hook_count = results.len(),
+                        "All post-download hooks executed successfully"
+                    );
+                    for result in &results {
+                        debug!(result = %result, "Hook execution result");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "Post-download hook execution failed (non-fatal)"
+                    );
+                }
+            }
         }
 
         Ok(())

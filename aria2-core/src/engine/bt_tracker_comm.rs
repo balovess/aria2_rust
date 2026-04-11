@@ -82,9 +82,8 @@ pub async fn announce_to_public_tracker(
         .await
         .map_err(|e| format!("read body: {}", e))?;
 
-    let tracker_resp =
-        aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
-            .map_err(|e| format!("parse response: {}", e))?;
+    let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
+        .map_err(|e| format!("parse response: {}", e))?;
 
     if tracker_resp.is_failure() {
         return Err(tracker_resp
@@ -135,39 +134,37 @@ pub async fn perform_http_tracker_announce(
     );
 
     info!("[BT] Announcing to tracker: {}", url);
-    let resp = reqwest::get(&url)
-        .await
-        .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+    let resp = reqwest::get(&url).await.map_err(|e| {
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
             message: format!("Tracker HTTP failed: {}", e),
-        }))?;
+        })
+    })?;
     info!("[BT] Tracker response status: {}", resp.status());
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+    let body = resp.bytes().await.map_err(|e| {
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
             message: format!("Tracker body read failed: {}", e),
-        }))?;
+        })
+    })?;
     debug!("[BT] Tracker body: {:?}", String::from_utf8_lossy(&body));
 
-    let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(
-        &body,
-    )
-    .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-        message: format!("Tracker parse failed: {}", e),
-    }))?;
+    let tracker_resp = aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body)
+        .map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Tracker parse failed: {}", e),
+            })
+        })?;
 
-    info!(
-        "[BT] Tracker response: {} peers",
-        tracker_resp.peer_count()
-    );
+    info!("[BT] Tracker response: {} peers", tracker_resp.peer_count());
     for peer in &tracker_resp.peers {
         debug!("[BT]   Peer: {}:{}", peer.ip, peer.port);
     }
 
     if tracker_resp.is_failure() {
-        return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-            message: tracker_resp.failure_reason.unwrap_or_default(),
-        }));
+        return Err(Aria2Error::Recoverable(
+            RecoverableError::TemporaryNetworkFailure {
+                message: tracker_resp.failure_reason.unwrap_or_default(),
+            },
+        ));
     }
 
     Ok(tracker_resp

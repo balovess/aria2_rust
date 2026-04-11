@@ -6,7 +6,7 @@ use aria2_core::engine::command::Command;
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use fixtures::test_metalink_builder::{
-    build_metalink_v3, build_metalink_v4, compute_sha256, MEDIUM_PATTERN, SMALL_CONTENT,
+    MEDIUM_PATTERN, SMALL_CONTENT, build_metalink_v3, build_metalink_v4, compute_sha256,
 };
 use fixtures::test_server::TestServer;
 use std::path::Path;

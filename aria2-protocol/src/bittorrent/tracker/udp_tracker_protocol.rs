@@ -160,7 +160,7 @@ impl fmt::Debug for AnnounceResponse {
 }
 
 fn parse_compact_peers(data: &[u8]) -> Vec<(String, u16)> {
-    if data.is_empty() || data.len() % 6 != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(6) {
         return Vec::new();
     }
     let mut peers = Vec::with_capacity(data.len() / 6);
@@ -213,6 +213,7 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
     })
 }
 
+#[cfg(test)]
 fn random_txn_id() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let dur = SystemTime::now()

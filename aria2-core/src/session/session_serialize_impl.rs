@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! ```
+//! ```text
 //! session_serialize_impl.rs (this file)
 //!   ├── impl SessionEntry { serialize(), deserialize_line() }
 //!   └── delegates to session_uri_utils for URI/hex handling
@@ -28,7 +28,7 @@
 //!  ...
 //! ```
 
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 use crate::session::session_entry::SessionEntry;
 use crate::session::session_uri_utils::{decode_hex, escape_uri, unescape_uri};
 
@@ -108,10 +108,7 @@ impl SessionEntry {
         }
 
         // NUM_PIECES and PIECE_LENGTH (BT-specific)
-        lines.push_str(&format!(
-            " NUM_PIECES={}\n",
-            self.num_pieces.unwrap_or(0)
-        ));
+        lines.push_str(&format!(" NUM_PIECES={}\n", self.num_pieces.unwrap_or(0)));
         lines.push_str(&format!(
             " PIECE_LENGTH={}\n",
             self.piece_length.unwrap_or(0)

@@ -101,13 +101,13 @@ impl JsonRpcRequest {
                 "method is required".to_string(),
             ));
         }
-        if let Some(ref v) = self.version {
-            if v != "2.0" {
-                return Err(JsonRpcError::InvalidRequest(format!(
-                    "unsupported jsonrpc version: {}",
-                    v
-                )));
-            }
+        if let Some(ref v) = self.version
+            && v != "2.0"
+        {
+            return Err(JsonRpcError::InvalidRequest(format!(
+                "unsupported jsonrpc version: {}",
+                v
+            )));
         }
         Ok(())
     }

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio::time::{interval, timeout as tokio_timeout};
 use tracing::{debug, error, info, warn};
 
@@ -102,10 +102,10 @@ impl DownloadEngine {
     }
 
     pub fn mark_session_dirty(&self) {
-        if let Some(ref auto_save) = self.auto_save {
-            if let Ok(auto) = auto_save.try_lock() {
-                auto.mark_dirty();
-            }
+        if let Some(ref auto_save) = self.auto_save
+            && let Ok(auto) = auto_save.try_lock()
+        {
+            auto.mark_dirty();
         }
     }
 
@@ -208,18 +208,15 @@ impl DownloadEngine {
     ) -> Result<()> {
         let mut still_running = Vec::new();
         for cmd in running.drain(..) {
-            if let Some(timeout_dur) = cmd.timeout() {
-                match tokio_timeout(timeout_dur, async {}).await {
-                    Err(_) => {
-                        let status = cmd.status();
-                        if matches!(status, CommandStatus::Running | CommandStatus::Pending) {
-                            error!("命令执行超时, 将加入重试队列");
-                            stats.record_retry(&Aria2Error::Recoverable(RecoverableError::Timeout));
-                            failed.push((cmd, 0));
-                            continue;
-                        }
-                    }
-                    Ok(_) => {}
+            if let Some(timeout_dur) = cmd.timeout()
+                && let Err(_) = tokio_timeout(timeout_dur, async {}).await
+            {
+                let status = cmd.status();
+                if matches!(status, CommandStatus::Running | CommandStatus::Pending) {
+                    error!("命令执行超时, 将加入重试队列");
+                    stats.record_retry(&Aria2Error::Recoverable(RecoverableError::Timeout));
+                    failed.push((cmd, 0));
+                    continue;
                 }
             }
             still_running.push(cmd);
@@ -240,8 +237,7 @@ impl DownloadEngine {
 
     async fn shutdown(&self, running: &mut Vec<Box<dyn Command>>) {
         info!("正在关闭运行中的命令...");
-        if let (Some(ref path), Some(ref man)) = (&self.save_session_path, &self.request_group_man)
-        {
+        if let (Some(path), Some(man)) = (&self.save_session_path, &self.request_group_man) {
             let mut cmd = SaveSessionCommand::new(path.clone(), man.clone());
             match cmd.execute().await {
                 Ok(_) => info!("关闭时已保存 session 到 {}", path.display()),

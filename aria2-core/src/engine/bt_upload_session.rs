@@ -1,5 +1,4 @@
-use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
@@ -256,7 +255,7 @@ impl PieceDataProvider for InMemoryPieceProvider {
     fn has_piece(&self, piece_index: u32) -> bool {
         self.pieces
             .get(piece_index as usize)
-            .map_or(false, |p| p.is_some())
+            .is_some_and(|p| p.is_some())
     }
 
     fn num_pieces(&self) -> u32 {

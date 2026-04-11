@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::time::sleep;
@@ -120,6 +120,12 @@ pub struct PublicTrackerList {
     entries: tokio::sync::RwLock<Vec<TrackerEntry>>,
     last_updated: tokio::sync::RwLock<Option<Instant>>,
     running: AtomicBool,
+}
+
+impl Default for PublicTrackerList {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PublicTrackerList {

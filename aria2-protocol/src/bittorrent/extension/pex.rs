@@ -21,9 +21,7 @@ impl PexHandler {
     }
 
     pub fn is_supported_by_peer(extension_ids: &[Option<u8>]) -> bool {
-        extension_ids
-            .iter()
-            .any(|id| *id == Some(Self::EXTENSION_ID))
+        extension_ids.contains(&Some(Self::EXTENSION_ID))
     }
 }
 

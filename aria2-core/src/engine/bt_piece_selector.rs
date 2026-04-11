@@ -98,10 +98,7 @@ impl BtPieceSelector {
         let is_endgame = remaining > 0 && remaining <= self.config.endgame_threshold as usize;
 
         if is_endgame && !piece_picker.endgame_candidates().is_empty() {
-            warn!(
-                "[BT] === ENDGAME MODE === ({} pieces remaining)",
-                remaining
-            );
+            warn!("[BT] === ENDGAME MODE === ({} pieces remaining)", remaining);
         }
 
         let next_piece_idx = if is_endgame {
@@ -109,15 +106,14 @@ impl BtPieceSelector {
             piece_picker.pick_next()
         } else {
             // Normal mode: use configured strategy
-            let all_ones_bf = vec![0xFFu8; ((self.num_pieces as usize) + 7) / 8];
+            let all_ones_bf = vec![0xFFu8; (self.num_pieces as usize).div_ceil(8)];
             piece_picker.select(&all_ones_bf, self.num_pieces as usize)
-        }.map(|v| v as usize);
+        }
+        .map(|v| v as usize);
 
         debug!(
             "[BT] Selected piece: {:?} (endgame={}, remaining={})",
-            next_piece_idx,
-            is_endgame,
-            remaining
+            next_piece_idx, is_endgame, remaining
         );
 
         PieceSelectionResult {
@@ -145,7 +141,7 @@ impl BtPieceSelector {
         total_size: u64,
     ) -> u32 {
         if piece_index == self.num_pieces as usize - 1
-            && total_size % piece_length as u64 != 0
+            && !total_size.is_multiple_of(piece_length as u64)
         {
             (total_size % piece_length as u64) as u32
         } else {
@@ -162,7 +158,7 @@ impl BtPieceSelector {
     /// # Returns
     /// * Number of blocks needed to transfer this piece
     pub fn calculate_num_blocks(piece_length: u32, block_size: u32) -> u32 {
-        (piece_length + block_size - 1) / block_size
+        piece_length.div_ceil(block_size)
     }
 
     /// Initialize peer frequency tracking for rarest-first strategy
@@ -194,7 +190,9 @@ impl BtPieceSelector {
     ///
     /// # Returns
     /// * `true` if all pieces are marked complete
-    pub fn is_complete(piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker) -> bool {
+    pub fn is_complete(
+        piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
+    ) -> bool {
         piece_picker.is_complete()
     }
 
@@ -221,7 +219,7 @@ pub fn build_bitfield_from_completed<F>(num_pieces: u32, is_completed: F) -> Vec
 where
     F: Fn(u32) -> bool,
 {
-    let bf_len = ((num_pieces as usize) + 7) / 8;
+    let bf_len = (num_pieces as usize).div_ceil(8);
     let mut bitfield = vec![0u8; bf_len];
 
     for i in 0..num_pieces {

@@ -3,7 +3,7 @@ use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use aria2_rpc::server::AuthConfig;
 use aria2_rpc::xml_rpc::{XmlRpcRequest, XmlRpcResponse};
 use base64::Engine;
-use criterion::{black_box, BenchmarkId, criterion_group, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {
     JsonRpcRequest {

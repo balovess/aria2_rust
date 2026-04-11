@@ -164,7 +164,7 @@ impl UriListFile {
     pub fn filter_by_option(&self, key: &str, value: &str) -> Vec<&UriListEntry> {
         self.entries
             .iter()
-            .filter(|e| e.option(key).map_or(false, |v| v == value))
+            .filter(|e| e.option(key).is_some_and(|v| v == value))
             .collect()
     }
 }
@@ -191,11 +191,7 @@ pub fn parse_single_line(line: &str) -> Option<Vec<String>> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if uris.is_empty() {
-        None
-    } else {
-        Some(uris)
-    }
+    if uris.is_empty() { None } else { Some(uris) }
 }
 
 #[cfg(test)]

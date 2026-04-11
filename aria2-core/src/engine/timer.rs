@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::{sleep_until, Instant as TokioInstant};
+use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::{debug, info};
 
 use crate::error::Result;
@@ -105,10 +105,10 @@ impl TimerA2 {
                 if is_periodic {
                     let _ = self.event_tx.send(TimerEvent::Periodic(id));
 
-                    if let Some(timer) = self.timers.get_mut(&id) {
-                        if let Some(interval) = timer.interval {
-                            timer.next_fire = TokioInstant::now() + interval;
-                        }
+                    if let Some(timer) = self.timers.get_mut(&id)
+                        && let Some(interval) = timer.interval
+                    {
+                        timer.next_fire = TokioInstant::now() + interval;
                     }
                 } else {
                     let _ = self.event_tx.send(TimerEvent::OneShot(id));

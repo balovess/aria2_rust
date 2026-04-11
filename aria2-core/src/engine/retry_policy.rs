@@ -275,6 +275,7 @@ mod tests {
 
         let finished = rec.finish(Some("timeout".to_string()));
         assert_eq!(finished.error.as_deref().unwrap(), "timeout");
-        assert!(finished.duration.as_millis() >= 0);
+        // Just verify duration field exists (u128 is always >= 0)
+        let _ = finished.duration;
     }
 }

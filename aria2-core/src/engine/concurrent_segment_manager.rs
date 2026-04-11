@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +66,7 @@ impl MirrorState {
 
 pub struct ConcurrentSegmentManager {
     total_size: u64,
+    #[allow(dead_code)] // Reserved for segment size queries in future optimizations
     segment_size: u64,
     segments: Vec<Segment>,
     mirrors: Vec<MirrorState>,
@@ -81,7 +81,7 @@ impl ConcurrentSegmentManager {
         let num_segments = if total_size == 0 {
             0
         } else {
-            ((total_size + seg_size - 1) / seg_size) as usize
+            total_size.div_ceil(seg_size) as usize
         };
 
         let mut segments = Vec::with_capacity(num_segments);
@@ -132,7 +132,7 @@ impl ConcurrentSegmentManager {
         if !self
             .mirrors
             .get(mirror_idx)
-            .map_or(false, |m| m.can_accept_more())
+            .is_some_and(|m| m.can_accept_more())
         {
             return None;
         }
@@ -159,11 +159,11 @@ impl ConcurrentSegmentManager {
             seg.status = SegmentStatus::Done;
             seg.data = Some(data);
 
-            if let Some(mi) = seg.assigned_mirror {
-                if let Some(m) = self.mirrors.get_mut(mi) {
-                    m.active_segments = m.active_segments.saturating_sub(1);
-                    m.consecutive_failures = 0;
-                }
+            if let Some(mi) = seg.assigned_mirror
+                && let Some(m) = self.mirrors.get_mut(mi)
+            {
+                m.active_segments = m.active_segments.saturating_sub(1);
+                m.consecutive_failures = 0;
             }
 
             self.completed_bytes += seg.length;
@@ -182,13 +182,13 @@ impl ConcurrentSegmentManager {
             }
         };
 
-        if let Some(mi) = prev_mirror {
-            if let Some(m) = self.mirrors.get_mut(mi) {
-                m.active_segments = m.active_segments.saturating_sub(1);
-                m.consecutive_failures += 1;
-                if m.consecutive_failures >= self.max_mirror_failures {
-                    m.disabled = true;
-                }
+        if let Some(mi) = prev_mirror
+            && let Some(m) = self.mirrors.get_mut(mi)
+        {
+            m.active_segments = m.active_segments.saturating_sub(1);
+            m.consecutive_failures += 1;
+            if m.consecutive_failures >= self.max_mirror_failures {
+                m.disabled = true;
             }
         }
 

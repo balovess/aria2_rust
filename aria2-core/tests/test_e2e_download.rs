@@ -4,7 +4,7 @@ mod fixtures {
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
-use fixtures::test_server::{medium_pattern, small_content, TestServer};
+use fixtures::test_server::{TestServer, medium_pattern, small_content};
 use std::path::Path;
 
 async fn start_server() -> TestServer {

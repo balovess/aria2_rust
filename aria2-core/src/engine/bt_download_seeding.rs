@@ -1,12 +1,11 @@
-use tracing::{info};
+use tracing::info;
 
+use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use crate::engine::bt_upload_session::BtSeedingConfig;
-use crate::error::{Result};
-use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::multi_file_layout::MultiFileLayout;
+use crate::error::Result;
 
 impl BtDownloadCommand {
     pub async fn run_seeding_phase(

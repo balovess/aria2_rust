@@ -1,28 +1,29 @@
 use std::sync::Arc;
-use tracing::{info};
+use std::time::Duration;
+use tracing::info;
 
 use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
     on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
 };
 use crate::engine::bt_piece_downloader::write_piece_to_multi_files;
+use crate::engine::bt_post_download_handler::HookManager;
+use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::bt_tracker_comm::announce_to_public_tracker;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
-use crate::engine::command::Command;
+use crate::engine::lpd_manager::LpdManager;
+use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
-use crate::engine::multi_file_layout::MultiFileLayout;
 
 pub use crate::engine::bt_message_handler::{
-    BLOCK_SIZE, MAX_RETRIES, BLOCK_REQUEST_TIMEOUT_SECS, MAX_BLOCK_READ_MESSAGES,
+    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, MAX_BLOCK_READ_MESSAGES, MAX_RETRIES,
 };
 pub use crate::engine::bt_peer_interaction::{
-    PEER_CONNECTION_DELAY_MS, MAX_UNCHOKE_WAIT_ATTEMPTS, PEER_MESSAGE_TIMEOUT_SECS,
+    MAX_UNCHOKE_WAIT_ATTEMPTS, PEER_CONNECTION_DELAY_MS, PEER_MESSAGE_TIMEOUT_SECS,
 };
 pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
 
-const COMMAND_TIMEOUT_SECS: u64 = 600;
-const SPEED_UPDATE_INTERVAL_MS: u128 = 500;
 pub(crate) const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
@@ -37,12 +38,24 @@ pub struct BtDownloadCommand {
     pub(crate) seed_ratio: Option<f64>,
     pub(crate) total_uploaded: u64,
     pub(crate) udp_client: Option<crate::engine::udp_tracker_client::SharedUdpClient>,
-    pub(crate) dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    pub(crate) dht_engine:
+        Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
+    #[allow(dead_code)] // Reserved for peer bitfield tracking in future optimizations
     peer_tracker: Option<aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker>,
     pub choking_algo: Option<ChokingAlgorithm>,
     pub multi_file_layout: Option<MultiFileLayout>,
+
+    // P1/P2 集成字段（全部使用 Option 保持向后兼容）
+    /// BT进度持久化管理器
+    pub(crate) progress_manager: Option<BtProgressManager>,
+    /// 进度保存间隔（默认60秒）
+    pub(crate) progress_save_interval: Duration,
+    /// LPD局域网peer发现管理器
+    pub(crate) lpd_manager: Option<Arc<LpdManager>>,
+    /// 下载后处理钩子管理器
+    pub(crate) hook_manager: Option<Arc<HookManager>>,
 }
 
 impl BtDownloadCommand {
@@ -71,16 +84,13 @@ impl BtDownloadCommand {
             options.clone(),
         );
 
-        let seed_time = options
-            .seed_time
-            .map(|t| {
-                if t == 0 {
-                    None
-                } else {
-                    Some(std::time::Duration::from_secs(t))
-                }
-            })
-            .flatten();
+        let seed_time = options.seed_time.and_then(|t| {
+            if t == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(t))
+            }
+        });
         let seed_ratio = options.seed_ratio.filter(|&r| r > 0.0);
 
         info!(
@@ -99,7 +109,9 @@ impl BtDownloadCommand {
         {
             let config = ChokingConfig {
                 max_upload_slots: options.bt_max_upload_slots.unwrap_or(4) as usize,
-                optimistic_unchoke_interval_secs: options.bt_optimistic_unchoke_interval.unwrap_or(30),
+                optimistic_unchoke_interval_secs: options
+                    .bt_optimistic_unchoke_interval
+                    .unwrap_or(30),
                 snubbed_timeout_secs: options.bt_snubbed_timeout.unwrap_or(60),
                 choke_rotation_interval_secs: 10,
             };
@@ -114,7 +126,8 @@ impl BtDownloadCommand {
                 Ok(layout) => Some(layout),
                 Err(e) => {
                     return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                        "MultiFileLayout creation failed: {}", e
+                        "MultiFileLayout creation failed: {}",
+                        e
                     ))));
                 }
             }
@@ -156,6 +169,12 @@ impl BtDownloadCommand {
             peer_tracker: None,
             choking_algo,
             multi_file_layout,
+
+            // P1/P2 集成字段默认值（全部为 None，保持向后兼容）
+            progress_manager: None,
+            progress_save_interval: Duration::from_secs(60),
+            lpd_manager: None,
+            hook_manager: None,
         })
     }
 
@@ -179,11 +198,7 @@ impl BtDownloadCommand {
         check_snubbed_peers(&mut self.choking_algo)
     }
 
-    pub fn add_peer_to_tracking(
-        &mut self,
-        peer_id: [u8; 8],
-        addr: std::net::SocketAddr,
-    ) -> usize {
+    pub fn add_peer_to_tracking(&mut self, peer_id: [u8; 8], addr: std::net::SocketAddr) -> usize {
         add_peer_to_tracking(&mut self.choking_algo, peer_id, addr)
     }
 
@@ -194,9 +209,12 @@ impl BtDownloadCommand {
     pub async fn handle_snubbed_peer(&mut self, peer_idx: usize) -> Result<()> {
         handle_snubbed_peer(&mut self.choking_algo, peer_idx)
             .await
-            .map_err(|_| Aria2Error::Fatal(FatalError::Config(format!(
-                "Failed to handle snubbed peer {}", peer_idx
-            ))))
+            .map_err(|_| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "Failed to handle snubbed peer {}",
+                    peer_idx
+                )))
+            })
     }
 
     pub fn on_piece_received(&mut self, peer_idx: usize, bytes: u64) {
@@ -222,10 +240,113 @@ impl BtDownloadCommand {
     }
 
     pub fn is_multi_file(&self) -> bool {
-        self.multi_file_layout.as_ref().map_or(false, |l| l.is_multi_file())
+        self.multi_file_layout
+            .as_ref()
+            .is_some_and(|l| l.is_multi_file())
     }
 
     pub fn get_multi_file_layout(&self) -> Option<&MultiFileLayout> {
         self.multi_file_layout.as_ref()
+    }
+
+    // ==================== P1/P2 集成 API ====================
+
+    /// 设置 BT 进度管理器
+    ///
+    /// Enable BT download progress persistence for resume support.
+    ///
+    /// When enabled, the engine periodically saves piece completion bitfield,
+    /// peer list, and download statistics to a `.aria2` file in INI format.
+    /// On restart, the progress is loaded to skip already-completed pieces.
+    ///
+    /// # Arguments
+    ///
+    /// * `manager` - An initialized [`BtProgressManager`](super::bt_progress_info_file::BtProgressManager) instance
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use aria2_core::engine::bt_progress_info_file::BtProgressManager;
+    /// use std::path::PathBuf;
+    ///
+    /// let save_dir = PathBuf::from("/tmp/aria2");
+    /// let progress_mgr = BtProgressManager::new(&save_dir).expect("failed to create progress manager");
+    /// // Pass progress_mgr to BtDownloadCommand::set_progress_manager()
+    /// let _mgr = progress_mgr;
+    /// ```
+    pub fn set_progress_manager(&mut self, manager: BtProgressManager) {
+        info!("BT progress manager enabled");
+        self.progress_manager = Some(manager);
+    }
+
+    /// Set the interval (in seconds) between progress save operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `interval_secs` - Save interval in seconds (default: 60)
+    pub fn set_progress_save_interval(&mut self, interval_secs: u64) {
+        self.progress_save_interval = Duration::from_secs(interval_secs);
+        info!(interval_secs, "Progress save interval updated");
+    }
+
+    /// Enable Local Peer Discovery (LPD, BEP 14) for LAN peer finding.
+    ///
+    /// When enabled, the engine announces its active downloads via UDP multicast
+    /// to `239.192.152.143:6771` and listens for peers on the same network.
+    ///
+    /// # Arguments
+    ///
+    /// * `manager` - An initialized [`LpdManager`](super::lpd_manager::LpdManager), wrapped in `Arc`
+    pub fn set_lpd_manager(&mut self, manager: Arc<LpdManager>) {
+        info!("LPD manager enabled for local peer discovery");
+        self.lpd_manager = Some(manager);
+    }
+
+    /// Register a post-download hook chain for completion/error callbacks.
+    ///
+    /// Hooks execute sequentially after download completes or fails.
+    /// Built-in hook types: Move, Rename, Touch, Exec (shell command).
+    /// A single hook failure does not block subsequent hooks.
+    ///
+    /// # Arguments
+    ///
+    /// * `manager` - A configured [`HookManager`](super::bt_post_download_handler::HookManager) with registered hooks, wrapped in `Arc`
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::collections::HashMap;
+    /// use std::sync::Arc;
+    /// use aria2_core::engine::bt_post_download_handler::{HookManager, HookConfig, MoveHook, ExecHook};
+    ///
+    /// let config = HookConfig::default();
+    /// let mut hooks = HookManager::new(config);
+    /// hooks.add_hook(Box::new(MoveHook::new("/completed".into(), true)));
+    /// hooks.add_hook(Box::new(ExecHook::new("notify.sh".into(), HashMap::new())));
+    /// // Pass Arc::new(hooks) to BtDownloadCommand::set_hook_manager()
+    /// let _hooks = Arc::new(hooks);
+    /// ```
+    pub fn set_hook_manager(&mut self, manager: Arc<HookManager>) {
+        info!(
+            hook_count = manager.hook_count(),
+            "Hook manager enabled with {} hooks",
+            manager.hook_count()
+        );
+        self.hook_manager = Some(manager);
+    }
+
+    /// 获取进度管理器引用（用于测试和外部访问）
+    pub fn get_progress_manager(&self) -> Option<&BtProgressManager> {
+        self.progress_manager.as_ref()
+    }
+
+    /// 获取 LPD 管理器引用（用于测试和外部访问）
+    pub fn get_lpd_manager(&self) -> Option<&Arc<LpdManager>> {
+        self.lpd_manager.as_ref()
+    }
+
+    /// 获取钩子管理器引用（用于测试和外部访问）
+    pub fn get_hook_manager(&self) -> Option<&Arc<HookManager>> {
+        self.hook_manager.as_ref()
     }
 }

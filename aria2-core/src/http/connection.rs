@@ -5,7 +5,7 @@
 //! # 示例
 //!
 //! ```rust,no_run
-//! use aria2_core::http::connection::HttpConnectionManager;
+//! use aria2_core::http::connection::{HttpConnectionManager, HttpConfig};
 //! use std::time::Duration;
 //!
 //! #[tokio::main]
@@ -129,12 +129,12 @@ pub enum ConnectionState {
 ///         ..Default::default()
 ///     };
 ///
-///     let manager = HttpConnectionManager::new(&config);
+///     let mut manager = HttpConnectionManager::new(&config);
 ///     let url = Url::parse("https://example.com/file")?;
 ///
 ///     let conn = manager.acquire(&url).await?;
 ///     // 使用连接进行 HTTP 请求...
-///     manager.release(conn.id).await?;
+///     manager.release(conn.id).await;
 ///
 ///     Ok(())
 /// }
@@ -242,7 +242,7 @@ impl HttpConnectionManager {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let manager = HttpConnectionManager::new(&Default::default());
+    ///     let mut manager = HttpConnectionManager::new(&Default::default());
     ///     let url = Url::parse("https://example.com/resource").unwrap();
     ///
     ///     match manager.acquire(&url).await {
@@ -363,8 +363,7 @@ impl HttpConnectionManager {
     /// # 示例
     ///
     /// ```rust,no_run
-    /// use aria2_core::http::connection::HttpConnectionManager;
-    /// use aria2_protocol::http::HttpResponse;
+    /// use aria2_core::http::connection::{HttpConnectionManager, HttpResponse};
     /// use std::collections::HashSet;
     /// use url::Url;
     ///
@@ -411,14 +410,14 @@ impl HttpConnectionManager {
         }
 
         // 获取 Location 头部
-        let location = response.location().ok_or_else(|| {
-            Aria2Error::Parse("缺少 Location 头部".to_string())
-        })?;
+        let location = response
+            .location()
+            .ok_or_else(|| Aria2Error::Parse("缺少 Location 头部".to_string()))?;
 
         // 解析新的 URL（支持相对路径）
-        let new_url = current_url.join(location).map_err(|e| {
-            Aria2Error::Parse(format!("解析重定向 URL 失败: {}", e))
-        })?;
+        let new_url = current_url
+            .join(location)
+            .map_err(|e| Aria2Error::Parse(format!("解析重定向 URL 失败: {}", e)))?;
 
         // 循环重定向检测
         if redirect_chain.contains(&new_url) {
@@ -437,6 +436,84 @@ impl HttpConnectionManager {
         );
 
         Ok(new_url)
+    }
+
+    /// Iteratively follow HTTP redirects with loop detection
+    ///
+    /// This method replaces recursive redirect following with an iterative approach,
+    /// eliminating stack overflow risk for deep redirect chains.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_url` - The starting URL for the request
+    /// * `get_response` - Async closure that fetches the HTTP response for a given URL
+    ///
+    /// # Returns
+    ///
+    /// The final non-redirect HttpResponse, or an error if:
+    /// - Too many redirects (exceeds MAX_REDIRECTS limit)
+    /// - Redirect loop detected (same URL visited twice)
+    /// - Missing Location header in redirect response
+    /// - Invalid URL in Location header
+    ///
+    /// # Performance characteristics
+    ///
+    /// - Uses HashSet<String> for O(1) loop detection instead of linear scan
+    /// - Iterative loop with bounded iterations prevents stack growth
+    /// - Maximum 5 redirects as per RFC 7231 recommendation
+    pub async fn follow_redirects_iterative<F, Fut>(
+        &self,
+        initial_url: &Url,
+        mut get_response: F,
+    ) -> Result<HttpResponse>
+    where
+        F: FnMut(&Url) -> Fut,
+        Fut: std::future::Future<Output = Result<HttpResponse>>,
+    {
+        const MAX_REDIRECTS: u8 = 5;
+
+        let mut current_url = initial_url.clone();
+        let mut seen_urls = std::collections::HashSet::<String>::new();
+
+        for iteration in 0..MAX_REDIRECTS {
+            // Detect redirect loops using HashSet for O(1) lookup
+            let url_str = current_url.to_string();
+            if !seen_urls.insert(url_str.clone()) {
+                return Err(Aria2Error::Network(format!(
+                    "Redirect loop detected: {}",
+                    url_str
+                )));
+            }
+
+            // Fetch response for current URL
+            let resp = get_response(&current_url).await?;
+
+            // If not a redirect, return the final response
+            if !resp.is_redirect() {
+                return Ok(resp);
+            }
+
+            // Extract Location header from redirect response
+            let location = resp.location().ok_or_else(|| {
+                Aria2Error::Network("Missing Location header in redirect response".into())
+            })?;
+
+            // Resolve relative URLs against current URL
+            current_url = current_url
+                .join(location)
+                .map_err(|e| Aria2Error::Parse(format!("Failed to parse redirect URL: {}", e)))?;
+
+            tracing::info!(
+                "Following redirect: iteration {}/{}",
+                iteration + 1,
+                MAX_REDIRECTS
+            );
+        }
+
+        Err(Aria2Error::Network(format!(
+            "Too many redirects (>{}), last URL: {}",
+            MAX_REDIRECTS, current_url
+        )))
     }
 
     /// 构建 Range 请求头
@@ -631,9 +708,13 @@ impl HttpConnectionManager {
                         return Ok(Some(conn));
                     } else {
                         // 连接过期，关闭并继续查找
-                        tracing::debug!("连接已过期: id={}, idle={:.2}s", conn_id, idle_time.as_secs_f64());
+                        tracing::debug!(
+                            "连接已过期: id={}, idle={:.2}s",
+                            conn_id,
+                            idle_time.as_secs_f64()
+                        );
                         self.active_count = self.active_count.saturating_sub(1);
-                        let _ = conn.shutdown(); // 忽略关闭错误
+                        std::mem::drop(conn.shutdown()); // 忽略关闭错误
                     }
                 } else {
                     // 连接已失效
@@ -656,9 +737,7 @@ impl HttpConnectionManager {
         // 应用连接超时
         let stream = timeout(self.config.connect_timeout, TcpStream::connect(&addr))
             .await
-            .map_err(|_| {
-                Aria2Error::Recoverable(RecoverableError::Timeout)
-            })?
+            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                     message: format!("TCP 连接失败 ({}): {}", addr, e),
@@ -685,7 +764,7 @@ impl HttpConnectionManager {
         self.active_count += 1;
         self.host_connections
             .entry(host.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(conn_id);
 
         tracing::info!(
@@ -731,22 +810,15 @@ impl HttpConnectionManager {
         let evict_count = evicted.len();
         for (conn_id, host) in evicted {
             if let Some(mut conn) = self.pool.remove(&conn_id) {
-                let _ = conn.shutdown();
+                std::mem::drop(conn.shutdown());
                 self.active_count = self.active_count.saturating_sub(1);
                 self.remove_from_host_map(&host, conn_id);
-                tracing::debug!(
-                    "LRU 淘汰过期连接: id={}, host={}",
-                    conn_id,
-                    host
-                );
+                tracing::debug!("LRU 淘汰过期连接: id={}, host={}", conn_id, host);
             }
         }
 
         if evict_count > 0 {
-            tracing::info!(
-                "LRU 淘汰了 {} 个过期连接",
-                evict_count
-            );
+            tracing::info!("LRU 淘汰了 {} 个过期连接", evict_count);
         }
     }
 
@@ -883,8 +955,7 @@ pub use aria2_protocol::http::response::HttpResponse;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::io::AsyncWriteExt;
     use tokio::time::{sleep, timeout};
 
     fn create_test_config() -> HttpConfig {
@@ -922,22 +993,13 @@ mod tests {
         let manager = HttpConnectionManager::new(&Default::default());
 
         // 完整范围
-        assert_eq!(
-            manager.build_range_header(0, Some(999)),
-            "bytes=0-999"
-        );
+        assert_eq!(manager.build_range_header(0, Some(999)), "bytes=0-999");
 
         // 开放结束范围
-        assert_eq!(
-            manager.build_range_header(500, None),
-            "bytes=500-"
-        );
+        assert_eq!(manager.build_range_header(500, None), "bytes=500-");
 
         // 单字节
-        assert_eq!(
-            manager.build_range_header(42, Some(42)),
-            "bytes=42-42"
-        );
+        assert_eq!(manager.build_range_header(42, Some(42)), "bytes=42-42");
 
         // 大数值
         assert_eq!(
@@ -963,10 +1025,7 @@ mod tests {
         );
 
         // 边界值
-        assert_eq!(
-            manager.parse_content_range("bytes 0-0/1"),
-            Some((0, 0, 1))
-        );
+        assert_eq!(manager.parse_content_range("bytes 0-0/1"), Some((0, 0, 1)));
 
         // 无效格式
         assert_eq!(manager.parse_content_range(""), None);
@@ -984,10 +1043,9 @@ mod tests {
         chain.insert(current_url.clone());
 
         let mut response = HttpResponse::new(301, "Moved Permanently".to_string());
-        response.headers.push((
-            "Location".to_string(),
-            "http://example.com/new".to_string(),
-        ));
+        response
+            .headers
+            .push(("Location".to_string(), "http://example.com/new".to_string()));
 
         let result = manager.follow_redirects(&response, &current_url, &chain, 1);
         assert!(result.is_ok());
@@ -1002,7 +1060,9 @@ mod tests {
         let chain = HashSet::new();
 
         let mut response = HttpResponse::new(302, "Found".to_string());
-        response.headers.push(("Location".to_string(), "../other".to_string()));
+        response
+            .headers
+            .push(("Location".to_string(), "../other".to_string()));
 
         let result = manager.follow_redirects(&response, &current_url, &chain, 1);
         assert!(result.is_ok());
@@ -1020,7 +1080,9 @@ mod tests {
         chain.insert(url_b.clone());
 
         let mut response = HttpResponse::new(301, "Moved".to_string());
-        response.headers.push(("Location".to_string(), "http://example.com/a".to_string()));
+        response
+            .headers
+            .push(("Location".to_string(), "http://example.com/a".to_string()));
 
         // 尝试重定向回已访问的 URL（循环）
         let result = manager.follow_redirects(&response, &url_b, &chain, 2);
@@ -1035,7 +1097,10 @@ mod tests {
         let chain = HashSet::new();
 
         let mut response = HttpResponse::new(302, "Found".to_string());
-        response.headers.push(("Location".to_string(), "http://example.com/next".to_string()));
+        response.headers.push((
+            "Location".to_string(),
+            "http://example.com/next".to_string(),
+        ));
 
         // 超过最大重定向次数
         let result = manager.follow_redirects(&response, &current_url, &chain, 6);
@@ -1081,7 +1146,10 @@ mod tests {
 
         // 自定义端口
         let url = Url::parse("http://example.com:8080/path").unwrap();
-        assert_eq!(HttpConnectionManager::extract_host(&url), "example.com:8080");
+        assert_eq!(
+            HttpConnectionManager::extract_host(&url),
+            "example.com:8080"
+        );
     }
 
     #[test]
@@ -1178,12 +1246,19 @@ mod tests {
         let mut current = current_url;
         for (i, target) in urls.iter().enumerate() {
             let mut response = HttpResponse::new(302, "Found".to_string());
-            response.headers.push(("Location".to_string(), target.to_string()));
+            response
+                .headers
+                .push(("Location".to_string(), target.to_string()));
 
             redirect_chain.insert(current.clone());
 
             let result = manager.follow_redirects(&response, &current, &redirect_chain, i as u32);
-            assert!(result.is_ok(), "第 {} 次重定向应成功: {:?}", i + 1, result.err());
+            assert!(
+                result.is_ok(),
+                "第 {} 次重定向应成功: {:?}",
+                i + 1,
+                result.err()
+            );
 
             current = result.unwrap();
         }
@@ -1205,7 +1280,9 @@ mod tests {
         chain.insert(url_c.clone());
 
         let mut response = HttpResponse::new(301, "Moved".to_string());
-        response.headers.push(("Location".to_string(), "http://example.com/a".to_string()));
+        response
+            .headers
+            .push(("Location".to_string(), "http://example.com/a".to_string()));
 
         let result = manager.follow_redirects(&response, &url_c, &chain, 3);
 
@@ -1221,8 +1298,14 @@ mod tests {
         assert_eq!(manager.build_range_header(500, None), "bytes=500-");
         assert_eq!(manager.build_range_header(42, Some(42)), "bytes=42-42");
 
-        assert_eq!(manager.parse_content_range("bytes 0-499/1000"), Some((0, 499, 1000)));
-        assert_eq!(manager.parse_content_range("bytes 500-999/*"), Some((500, 999, u64::MAX)));
+        assert_eq!(
+            manager.parse_content_range("bytes 0-499/1000"),
+            Some((0, 499, 1000))
+        );
+        assert_eq!(
+            manager.parse_content_range("bytes 500-999/*"),
+            Some((500, 999, u64::MAX))
+        );
         assert_eq!(manager.parse_content_range("invalid"), None);
     }
 
@@ -1251,7 +1334,11 @@ mod tests {
         let url = Url::parse(&format!("http://{}", addr)).unwrap();
         let start = Instant::now();
 
-        let _result = timeout(config.connect_timeout + Duration::from_millis(50), manager.acquire(&url)).await;
+        let _result = timeout(
+            config.connect_timeout + Duration::from_millis(50),
+            manager.acquire(&url),
+        )
+        .await;
         let elapsed = start.elapsed();
 
         assert!(

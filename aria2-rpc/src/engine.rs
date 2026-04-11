@@ -4,8 +4,8 @@ use tokio::sync::RwLock;
 
 use super::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use super::server::{
-    create_gid, AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalOptions, GlobalStat,
-    PeerInfo, StatusInfo, TaskOptions,
+    AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalOptions, GlobalStat, PeerInfo,
+    StatusInfo, TaskOptions, create_gid,
 };
 use super::websocket::{DownloadEvent, EventPublisher, EventType};
 use aria2_core::engine::multi_file_layout::TorrentFileEntry;
@@ -105,8 +105,15 @@ impl TaskState {
     }
 
     /// Update progress fields (typically called by download engine).
-    pub fn update_progress(&mut self, total: u64, completed: u64, uploaded: u64,
-                           dl_speed: u64, ul_speed: u64, connections: u16) {
+    pub fn update_progress(
+        &mut self,
+        total: u64,
+        completed: u64,
+        uploaded: u64,
+        dl_speed: u64,
+        ul_speed: u64,
+        connections: u16,
+    ) {
         self.total_length = total;
         self.completed_length = completed;
         self.upload_length = uploaded;
@@ -153,9 +160,16 @@ impl RpcEngine {
     /// Update progress for a specific task (called by download engine).
     ///
     /// Returns `true` if the task was found and updated, `false` otherwise.
-    pub async fn update_task_progress(&self, gid: &str, total: u64, completed: u64,
-                                      uploaded: u64, dl_speed: u64, ul_speed: u64,
-                                      connections: u16) -> bool {
+    pub async fn update_task_progress(
+        &self,
+        gid: &str,
+        total: u64,
+        completed: u64,
+        uploaded: u64,
+        dl_speed: u64,
+        ul_speed: u64,
+        connections: u16,
+    ) -> bool {
         let mut tasks = self.tasks.write().await;
         if let Some(state) = tasks.get_mut(gid) {
             state.update_progress(total, completed, uploaded, dl_speed, ul_speed, connections);
@@ -258,8 +272,8 @@ impl RpcEngine {
                 .handle_get_peers(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.pauseAll" => self.handle_pause_all().await.into(),
-            "aria2.unpauseAll" => self.handle_unpause_all().await.into(),
+            "aria2.pauseAll" => self.handle_pause_all().await,
+            "aria2.unpauseAll" => self.handle_unpause_all().await,
             "aria2.changeUri" => self
                 .handle_change_uri(req)
                 .await

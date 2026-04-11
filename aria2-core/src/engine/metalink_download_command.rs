@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
@@ -117,13 +118,27 @@ impl Command for MetalinkDownloadCommand {
             )));
         }
 
-        if let Some(parent) = self.output_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
-                })?;
-            }
+        if let Some(parent) = self.output_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
+            })?;
         }
+
+        // Resolve filename collision against other active downloads.
+        // If another task is already writing to self.output_path, a unique
+        // name such as "file (1).ext" will be generated automatically.
+        let resolved_output_path = global_registry().resolve(&self.output_path).await;
+
+        // Helper closure to release the resolved path on every exit path.
+        let release_path = |path: &std::path::Path| {
+            let p = path.to_path_buf();
+            // Best-effort async release; safe to drop the spawned future.
+            let _ = tokio::spawn(async move {
+                global_registry().release(&p).await;
+            });
+        };
 
         let expected_size = file.size;
         let hash_entry = file.hashes.first().cloned();
@@ -138,25 +153,25 @@ impl Command for MetalinkDownloadCommand {
 
             match self.try_download_url(&url_entry.url, expected_size).await {
                 Ok(data) => {
-                    if let Some(ref hash) = hash_entry {
-                        if !self.verify_hash(&data, hash)? {
-                            warn!(
-                                "Hash verification failed [{}]: trying next mirror",
-                                hash.algo.as_standard_name()
-                            );
-                            last_error = Some(Aria2Error::Recoverable(
-                                RecoverableError::TemporaryNetworkFailure {
-                                    message: format!(
-                                        "Hash verification failed: {}",
-                                        hash.algo.as_standard_name()
-                                    ),
-                                },
-                            ));
-                            continue;
-                        }
+                    if let Some(ref hash) = hash_entry
+                        && !self.verify_hash(&data, hash)?
+                    {
+                        warn!(
+                            "Hash verification failed [{}]: trying next mirror",
+                            hash.algo.as_standard_name()
+                        );
+                        last_error = Some(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: format!(
+                                    "Hash verification failed: {}",
+                                    hash.algo.as_standard_name()
+                                ),
+                            },
+                        ));
+                        continue;
                     }
 
-                    let raw_writer = DefaultDiskWriter::new(&self.output_path);
+                    let raw_writer = DefaultDiskWriter::new(&resolved_output_path);
                     let rate_limit = {
                         let g = self.group.read().await;
                         g.options().max_download_limit
@@ -182,10 +197,11 @@ impl Command for MetalinkDownloadCommand {
 
                     info!(
                         "Metalink download done: {} ({} bytes from {})",
-                        self.output_path.display(),
+                        resolved_output_path.display(),
                         self.completed_bytes,
                         url_entry.url
                     );
+                    release_path(&resolved_output_path);
                     return Ok(());
                 }
                 Err(e) => {
@@ -195,6 +211,7 @@ impl Command for MetalinkDownloadCommand {
             }
         }
 
+        release_path(&resolved_output_path);
         Err(last_error
             .unwrap_or_else(|| Aria2Error::Fatal(FatalError::Config("All mirrors failed".into()))))
     }

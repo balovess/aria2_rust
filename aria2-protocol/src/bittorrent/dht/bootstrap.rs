@@ -19,7 +19,7 @@ impl DhtBootstrap {
             .map(|(host, port)| {
                 let mut id = [0u8; 20];
                 for byte in id.iter_mut() {
-                    *byte = rng.gen();
+                    *byte = rng.r#gen();
                 }
                 if let Ok(addr) = format!("{}:{}", host, port).parse::<std::net::SocketAddr>() {
                     DhtNode::new(id, addr)

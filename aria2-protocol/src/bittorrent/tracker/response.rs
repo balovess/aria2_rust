@@ -96,7 +96,7 @@ impl TrackerResponse {
     }
 
     fn parse_compact_peers(data: &[u8]) -> Result<Vec<PeerInfo>, String> {
-        if data.len() % 6 != 0 {
+        if !data.len().is_multiple_of(6) {
             return Err(format!("compact peers数据长度({})不是6的倍数", data.len()));
         }
 

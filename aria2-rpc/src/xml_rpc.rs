@@ -317,7 +317,8 @@ impl XmlRpcResponse {
             Self::Fault(code, msg) => {
                 format!(
                     "<?xml version=\"1.0\"?>\n<methodResponse>\n  <fault>\n    <value>\n      <struct>\n        <member><name>faultCode</name><value><int>{}</int></value></member>\n        <member><name>faultString</name><value><string>{}</string></value></member>\n      </struct>\n    </value>\n  </fault>\n</methodResponse>",
-                    code, escape_xml(msg)
+                    code,
+                    escape_xml(msg)
                 )
             }
         }
@@ -378,7 +379,7 @@ fn parse_value(e: &quick_xml::events::BytesStart) -> Result<XmlRpcValue, XmlRpcE
 }
 
 pub fn parse_request(data: &[u8]) -> Result<XmlRpcRequest, XmlRpcError> {
-    use quick_xml::{events::Event, Reader};
+    use quick_xml::{Reader, events::Event};
     let mut reader = Reader::from_reader(data);
     let mut method_name = String::new();
     let mut params = Vec::new();

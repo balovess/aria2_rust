@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::net::SocketAddr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -168,7 +169,7 @@ impl MockFtpServer {
 
             let content = Self::get_file_content(args);
             let rest = sess.rest_offset;
-            let actual_content: Vec<u8> = if rest > 0 && rest < content.len() as u64 {
+            let _actual_content: Vec<u8> = if rest > 0 && rest < content.len() as u64 {
                 content[rest as usize..].to_vec()
             } else {
                 content

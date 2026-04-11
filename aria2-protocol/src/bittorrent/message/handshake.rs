@@ -65,7 +65,7 @@ impl Handshake {
             arr
         };
 
-        if &protocol != PROTOCOL_STRING {
+        if protocol != PROTOCOL_STRING {
             return Err(format!(
                 "不支持的协议: {}",
                 std::str::from_utf8(&protocol).unwrap_or("invalid")

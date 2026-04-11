@@ -1,12 +1,12 @@
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use crate::request::request_group::RequestGroup;
 use super::session_serializer::{self, SessionEntry};
+use crate::request::request_group::RequestGroup;
 
 /// 活跃会话管理器 - 负责会话的加载、保存和自动保存
 pub struct ActiveSessionManager {
@@ -90,7 +90,10 @@ impl ActiveSessionManager {
     /// # 返回值
     /// - `Ok(usize)`: 成功保存的条目数量
     /// - `Err(String)`: 保存失败时的错误信息
-    pub async fn save_session(&self, groups: &[Arc<RwLock<RequestGroup>>]) -> Result<usize, String> {
+    pub async fn save_session(
+        &self,
+        groups: &[Arc<RwLock<RequestGroup>>],
+    ) -> Result<usize, String> {
         // 序列化所有组为 SessionEntry 列表
         let mut entries = Vec::new();
         for group_lock in groups {
@@ -147,16 +150,10 @@ impl ActiveSessionManager {
     /// - 此方法会启动一个无限循环的后台任务
     /// - 只有当 dirty flag 为 true 时才会执行保存操作
     /// - 保存成功后会清除 dirty flag
-    pub fn start_auto_save(
-        self: &Arc<Self>,
-        groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>>,
-    ) {
+    pub fn start_auto_save(self: &Arc<Self>, groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>>) {
         let mgr = Arc::clone(self);
 
-        tracing::info!(
-            "启动自动保存任务, 间隔: {:?}",
-            mgr.auto_save_interval
-        );
+        tracing::info!("启动自动保存任务, 间隔: {:?}", mgr.auto_save_interval);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(mgr.auto_save_interval);
@@ -271,10 +268,18 @@ mod tests {
         assert_eq!(entries.len(), saved_count, "加载的条目数应与保存的一致");
 
         // 验证数据完整性
-        assert!(entries.iter().any(|e| e.uris.contains(&"http://example.com/file1.zip".to_string())),
-            "应包含第一个 URI");
-        assert!(entries.iter().any(|e| e.uris.contains(&"http://mirror.com/file2.iso".to_string())),
-            "应包含第二个 URI");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.uris.contains(&"http://example.com/file1.zip".to_string())),
+            "应包含第一个 URI"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.uris.contains(&"http://mirror.com/file2.iso".to_string())),
+            "应包含第二个 URI"
+        );
     }
 
     /// 测试 4: mark_dirty 和 is_dirty 功能验证
@@ -310,8 +315,7 @@ mod tests {
             Duration::from_millis(50), // 短间隔以加速测试
         ));
 
-        let groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>> =
-            Arc::new(RwLock::new(Vec::new()));
+        let groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>> = Arc::new(RwLock::new(Vec::new()));
 
         // 启动自动保存（此时 dirty=false）
         manager.start_auto_save(Arc::clone(&groups));
@@ -320,10 +324,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 验证文件未被创建（因为没有脏标记）
-        assert!(
-            !session_path.exists(),
-            "dirty=false 时不应创建会话文件"
-        );
+        assert!(!session_path.exists(), "dirty=false 时不应创建会话文件");
     }
 
     /// 测试 6: 保存后文件应存在于指定路径
@@ -335,10 +336,7 @@ mod tests {
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
         // 验证初始状态文件不存在
-        assert!(
-            !session_path.exists(),
-            "保存前文件不应存在"
-        );
+        assert!(!session_path.exists(), "保存前文件不应存在");
 
         // 创建测试组
         let gid = GroupId::new(12345);
@@ -353,10 +351,7 @@ mod tests {
         assert!(result.is_ok(), "保存应成功");
 
         // 验证文件已创建
-        assert!(
-            session_path.exists(),
-            "保存后文件应存在于指定路径"
-        );
+        assert!(session_path.exists(), "保存后文件应存在于指定路径");
 
         // 验证文件内容非空
         let content = tokio::fs::read_to_string(&session_path)
@@ -401,11 +396,15 @@ mod tests {
         let entries = manager.load_session().await.expect("加载失败");
         assert_eq!(entries.len(), 1, "应只有 1 个条目（最新的）");
         assert!(
-            entries[0].uris.contains(&"http://second.com/b.txt".to_string()),
+            entries[0]
+                .uris
+                .contains(&"http://second.com/b.txt".to_string()),
             "应包含最新保存的 URI"
         );
         assert!(
-            !entries[0].uris.contains(&"http://first.com/a.txt".to_string()),
+            !entries[0]
+                .uris
+                .contains(&"http://first.com/a.txt".to_string()),
             "不应包含旧的 URI"
         );
     }
@@ -497,7 +496,11 @@ mod tests {
         for (i, interval) in intervals.iter().enumerate() {
             let path = temp_dir.path().join(format!("interval_test_{}.txt", i));
             let manager = ActiveSessionManager::new(path, *interval);
-            assert_eq!(manager.auto_save_interval, *interval, "间隔 {} 应正确设置", i);
+            assert_eq!(
+                manager.auto_save_interval, *interval,
+                "间隔 {} 应正确设置",
+                i
+            );
         }
     }
 }

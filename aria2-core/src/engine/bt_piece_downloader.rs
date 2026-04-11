@@ -90,9 +90,11 @@ impl PieceDataProvider for FileBackedPieceProvider {
 
             while remaining > 0 {
                 let current_piece_idx = (current_global / layout.piece_length() as u64) as u32;
-                let current_offset_in_piece = (current_global % layout.piece_length() as u64) as u32;
+                let current_offset_in_piece =
+                    (current_global % layout.piece_length() as u64) as u32;
 
-                let (file_idx, file_offset) = layout.resolve_file_offset(current_piece_idx, current_offset_in_piece)?;
+                let (file_idx, file_offset) =
+                    layout.resolve_file_offset(current_piece_idx, current_offset_in_piece)?;
                 let file_path = layout.file_absolute_path(file_idx)?.to_path_buf();
 
                 let file_info = layout.get_file_info(file_idx)?;
@@ -162,22 +164,26 @@ pub async fn write_piece_to_multi_files(
         if let Some((file_idx, file_offset)) = layout.resolve_file_offset(piece_idx, piece_offset) {
             let file_path = layout
                 .file_absolute_path(file_idx)
-                .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("invalid file index".to_string())))?
+                .ok_or_else(|| {
+                    Aria2Error::Fatal(FatalError::Config("invalid file index".to_string()))
+                })?
                 .to_path_buf();
 
-            if !file_writers.contains_key(&file_idx) {
+            if let std::collections::hash_map::Entry::Vacant(e) = file_writers.entry(file_idx) {
                 let f = tokio::fs::OpenOptions::new()
                     .create(true)
                     .write(true)
                     .open(&file_path)
                     .await
-                    .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("open failed: {}", e))))?;
-                file_writers.insert(file_idx, f);
+                    .map_err(|e| {
+                        Aria2Error::Fatal(FatalError::Config(format!("open failed: {}", e)))
+                    })?;
+                e.insert(f);
             }
 
-            let file_info = layout
-                .get_file_info(file_idx)
-                .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("invalid file index".to_string())))?;
+            let file_info = layout.get_file_info(file_idx).ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config("invalid file index".to_string()))
+            })?;
 
             let bytes_available_in_file = file_info.length.saturating_sub(file_offset);
             let bytes_remaining_in_piece = (piece_data.len() - data_offset) as u64;
@@ -193,11 +199,12 @@ pub async fn write_piece_to_multi_files(
             writer
                 .seek(std::io::SeekFrom::Start(file_offset))
                 .await
-                .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("seek failed: {}", e))))?;
-            writer
-                .write_all(chunk)
-                .await
-                .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("write failed: {}", e))))?;
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("seek failed: {}", e)))
+                })?;
+            writer.write_all(chunk).await.map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("write failed: {}", e)))
+            })?;
 
             data_offset += write_len;
         } else {

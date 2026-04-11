@@ -22,11 +22,8 @@ impl RoutingTable {
             return;
         }
 
-        match self.buckets[bucket_idx].insert(node) {
-            Some(evicted) => {
-                tracing::debug!("DHT节点被替换: {}", evicted.id_hex());
-            }
-            None => {}
+        if let Some(evicted) = self.buckets[bucket_idx].insert(node) {
+            tracing::debug!("DHT节点被替换: {}", evicted.id_hex());
         }
     }
 

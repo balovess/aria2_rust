@@ -7,7 +7,7 @@ pub struct Bitfield {
 
 impl Bitfield {
     pub fn new(num_bits: usize) -> Self {
-        let num_bytes = (num_bits + 7) / 8;
+        let num_bytes = num_bits.div_ceil(8);
         Bitfield {
             bits: vec![0u8; num_bytes],
             num_bits,

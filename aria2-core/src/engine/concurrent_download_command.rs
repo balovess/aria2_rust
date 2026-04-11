@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -131,13 +132,32 @@ impl Command for ConcurrentDownloadCommand {
         let expected_size = file.size;
         let hash_entry = file.hashes.first().cloned();
 
-        if let Some(parent) = self.output_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
-                })?;
-            }
+        if let Some(parent) = self.output_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
+            })?;
         }
+
+        // Resolve filename collision against other active downloads.
+        let original_path = self.output_path.clone();
+        self.output_path = global_registry().resolve(&original_path).await;
+        if self.output_path != original_path {
+            info!(
+                "ConcurrentDownloadCommand collision resolved: '{}' -> '{}'",
+                original_path.display(),
+                self.output_path.display()
+            );
+        }
+
+        // Ensure the resolved path is released when execute() returns.
+        let release_path = |path: &std::path::Path| {
+            let p = path.to_path_buf();
+            let _ = tokio::spawn(async move {
+                global_registry().release(&p).await;
+            });
+        };
 
         let mut manager = ConcurrentSegmentManager::new(expected_size.unwrap_or(0), urls, None);
         manager.set_max_connections_per_mirror(self.max_connections_per_server as usize);
@@ -200,6 +220,7 @@ impl Command for ConcurrentDownloadCommand {
                 .await
                 .map_err(|e| Aria2Error::Io(e.to_string()))?;
             if !Self::verify_hash(&file_data, hash)? {
+                release_path(&self.output_path);
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
                         message: "Hash verification failed after concurrent download".into(),
@@ -228,6 +249,7 @@ impl Command for ConcurrentDownloadCommand {
             self.completed_bytes,
             manager.num_mirrors()
         );
+        release_path(&self.output_path);
         Ok(())
     }
 

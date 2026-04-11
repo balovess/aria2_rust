@@ -26,10 +26,10 @@ impl HttpSegmentDownloader {
             })
         })?;
 
-        if let Some(accept_ranges) = resp.headers().get("Accept-Ranges") {
-            if let Ok(value) = accept_ranges.to_str() {
-                return Ok(value.to_lowercase().contains("bytes"));
-            }
+        if let Some(accept_ranges) = resp.headers().get("Accept-Ranges")
+            && let Ok(value) = accept_ranges.to_str()
+        {
+            return Ok(value.to_lowercase().contains("bytes"));
         }
 
         let status = resp.status();
@@ -74,7 +74,10 @@ impl HttpSegmentDownloader {
         match status.as_u16() {
             206 => {}
             200 => {
-                warn!("Server returned 200 instead of 206 for Range request (offset={}, len={}), reading full body", offset, length);
+                warn!(
+                    "Server returned 200 instead of 206 for Range request (offset={}, len={}), reading full body",
+                    offset, length
+                );
             }
             416 => {
                 return Err(Aria2Error::Recoverable(
@@ -87,7 +90,7 @@ impl HttpSegmentDownloader {
                     },
                 ));
             }
-            code if code >= 400 && code < 500 => {
+            code if (400..500).contains(&code) => {
                 return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                     format!("HTTP client error {}: {}", code, url),
                 )));
@@ -111,7 +114,7 @@ impl HttpSegmentDownloader {
                         RecoverableError::TemporaryNetworkFailure {
                             message: format!("Stream read error: {}", e),
                         },
-                    ))
+                    ));
                 }
             }
         }
@@ -197,19 +200,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_supports_range_header_parsing() {
-        use reqwest::{header, Response, StatusCode};
-        use std::collections::HashMap;
-
         let client = reqwest::Client::new();
         let dl = HttpSegmentDownloader::new(&client);
 
-        assert!(dl
-            .supports_range(
+        assert!(
+            dl.supports_range(
                 "http://invalid-host-name-that-does-not-exist-12345.com/",
                 None
             )
             .await
-            .is_err());
+            .is_err()
+        );
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod standalone_option_validator_tests {
     use aria2_core::config::option_validator::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
 
     #[test]
@@ -81,12 +81,16 @@ mod standalone_option_validator_tests {
         let validator = UrlValidator::new();
 
         // Valid URLs
-        assert!(validator
-            .validate("tracker", &json!("http://example.com:6969/announce"))
-            .is_ok());
-        assert!(validator
-            .validate("tracker", &json!("https://tracker.example.com/announce"))
-            .is_ok());
+        assert!(
+            validator
+                .validate("tracker", &json!("http://example.com:6969/announce"))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("tracker", &json!("https://tracker.example.com/announce"))
+                .is_ok()
+        );
 
         // Malformed URLs
         let result = validator.validate("url", &json!("not-a-url"));
@@ -139,10 +143,7 @@ mod standalone_option_validator_tests {
         let mut checker = DependencyChecker::new();
 
         // bt-enable-lpd requires enable-dht
-        checker.add_requirement(
-            "bt-enable-lpd".to_string(),
-            "enable-dht".to_string(),
-        );
+        checker.add_requirement("bt-enable-lpd".to_string(), "enable-dht".to_string());
 
         // Case 1: Both set - satisfied
         let mut opts1 = HashMap::new();
@@ -157,10 +158,7 @@ mod standalone_option_validator_tests {
         let errors2 = checker.check(&opts2);
         assert_eq!(errors2.len(), 1);
         match &errors2[0] {
-            OptionError::MissingDependency {
-                option,
-                requires,
-            } => {
+            OptionError::MissingDependency { option, requires } => {
                 assert_eq!(option, "bt-enable-lpd");
                 assert_eq!(requires, "enable-dht");
             }
@@ -301,10 +299,16 @@ mod standalone_option_validator_tests {
         // Host:port pattern
         let validator = RegexValidator::new(r"^[a-zA-Z0-9.-]+:\d+$");
 
-        assert!(validator
-            .validate("proxy", &json!("proxy.example.com:8080"))
-            .is_ok());
-        assert!(validator.validate("proxy", &json!("localhost:3128")).is_ok());
+        assert!(
+            validator
+                .validate("proxy", &json!("proxy.example.com:8080"))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("proxy", &json!("localhost:3128"))
+                .is_ok()
+        );
 
         // Should fail for invalid input
         assert!(validator.validate("proxy", &json!("not-valid")).is_err());

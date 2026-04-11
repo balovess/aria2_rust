@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use crate::engine::bt_peer_connection::BtPeerConn;
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, RecoverableError, Result};
 use tracing::{debug, error, info, warn};
 
 /// Delay between peer connection setup and message reading (milliseconds)
@@ -78,13 +78,8 @@ impl BtPeerInteraction {
         for addr in peer_addrs {
             debug!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
 
-            let conn_result = Self::connect_single_peer(
-                addr,
-                info_hash_raw,
-                require_crypto,
-                force_encrypt,
-            )
-            .await;
+            let conn_result =
+                Self::connect_single_peer(addr, info_hash_raw, require_crypto, force_encrypt).await;
 
             match conn_result {
                 Ok(mut conn) => {
@@ -96,10 +91,7 @@ impl BtPeerInteraction {
                     );
 
                     // Initialize the connection
-                    if let Err(e) = Self::initialize_connection(
-                        &mut conn,
-                        num_pieces,
-                    ).await {
+                    if let Err(e) = Self::initialize_connection(&mut conn, num_pieces).await {
                         warn!("[BT] Failed to initialize peer {}: {}", addr.ip, e);
                         failed_count += 1;
                         continue;
@@ -170,17 +162,14 @@ impl BtPeerInteraction {
     /// - Unchoke (we allow them to request from us)
     /// - Interested (we want to download from them)
     /// - Bitfield (our current piece possession status)
-    async fn initialize_connection(
-        conn: &mut BtPeerConn,
-        num_pieces: u32,
-    ) -> Result<()> {
+    async fn initialize_connection(conn: &mut BtPeerConn, num_pieces: u32) -> Result<()> {
         // Send initial messages
         conn.send_unchoke().await?;
         conn.send_interested().await?;
 
         // Send empty bitfield (we have nothing yet)
-        let bf_len = ((num_pieces as usize) + 7) / 8;
-        let empty_bf = vec![0u8; bf_len as usize];
+        let bf_len = (num_pieces as usize).div_ceil(8);
+        let empty_bf = vec![0u8; bf_len];
         conn.send_bitfield(empty_bf).await?;
 
         // Small delay to allow processing
@@ -238,9 +227,7 @@ impl BtPeerInteraction {
 
         warn!(
             "[BT] Did not receive unchoke from {}:{} after {} attempts",
-            addr.ip,
-            addr.port,
-            MAX_UNCHOKE_WAIT_ATTEMPTS
+            addr.ip, addr.port, MAX_UNCHOKE_WAIT_ATTEMPTS
         );
         Ok(()) // Continue anyway, might get unchoke later
     }
@@ -274,11 +261,8 @@ impl BtPeerInteraction {
         peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
     ) {
         for (i, _conn) in connections.iter().enumerate() {
-            let empty_bf = vec![0xFFu8; ((num_pieces as usize) + 7) / 8];
-            peer_tracker.update_peer_bitfield(
-                &format!("peer_{}", i),
-                &empty_bf,
-            );
+            let empty_bf = vec![0xFFu8; (num_pieces as usize).div_ceil(8)];
+            peer_tracker.update_peer_bitfield(&format!("peer_{}", i), &empty_bf);
         }
 
         debug!(
@@ -295,7 +279,7 @@ impl BtPeerInteraction {
     /// * `connections` - Mutable slice of peer connections to close
     pub fn cleanup_connections(connections: &mut [BtPeerConn]) {
         for conn in connections.iter_mut() {
-            drop(conn);
+            let _ = conn;
         }
         debug!("[BT] Cleaned up {} connections", connections.len());
     }

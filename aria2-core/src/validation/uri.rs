@@ -35,7 +35,7 @@ pub fn validate(uri: &str) -> Result<ValidatedUri> {
         None => {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                 "URI缺少协议前缀".into(),
-            )))
+            )));
         }
     };
 
@@ -43,13 +43,13 @@ pub fn validate(uri: &str) -> Result<ValidatedUri> {
     for dangerous in DANGEROUS_SCHEMES {
         if lower_scheme == *dangerous {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                format!("不安全的协议: {}", scheme).into(),
+                format!("不安全的协议: {}", scheme),
             )));
         }
     }
     if !SUPPORTED_SCHEMES.contains(&lower_scheme.as_str()) && lower_scheme != "magnet" {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            format!("不支持的协议: {}", scheme).into(),
+            format!("不支持的协议: {}", scheme),
         )));
     }
     if rest.is_empty() {
@@ -96,11 +96,11 @@ fn urlencoding_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
+                result.push(byte as char);
+                continue;
             }
             result.push(c);
         } else {

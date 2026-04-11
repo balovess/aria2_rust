@@ -70,10 +70,10 @@ impl ExtensionHandshake {
         let m_val = find_dict_entry(dict, b"m")?.as_dict()?;
         let mut m = std::collections::BTreeMap::new();
         for (k, v) in m_val {
-            if let Ok(s) = std::str::from_utf8(k) {
-                if let Some(id) = v.as_int() {
-                    m.insert(s.to_string(), id);
-                }
+            if let Ok(s) = std::str::from_utf8(k)
+                && let Some(id) = v.as_int()
+            {
+                m.insert(s.to_string(), id);
             }
         }
 
@@ -159,12 +159,13 @@ impl UtMetadataMsg {
 pub struct MetadataCollector {
     total_size: u64,
     collected: Vec<Option<Vec<u8>>>,
+    #[allow(dead_code)] // Stored for potential future use in piece validation
     piece_size: u32,
 }
 
 impl MetadataCollector {
     pub fn new(total_size: u64, piece_size: u32) -> Self {
-        let num_pieces = ((total_size + piece_size as u64 - 1) / piece_size as u64) as usize;
+        let num_pieces = total_size.div_ceil(piece_size as u64) as usize;
         Self {
             total_size,
             collected: vec![None; num_pieces],

@@ -98,20 +98,15 @@ impl fmt::Display for OptionCategory {
 /// assert_eq!(val.as_i64(), Some(42));
 /// assert_eq!(val.to_string(), "42");
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum OptionValue {
     Str(String),
     Int(i64),
     Float(f64),
     Bool(bool),
     List(Vec<String>),
+    #[default]
     None,
-}
-
-impl Default for OptionValue {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl fmt::Display for OptionValue {
@@ -383,15 +378,15 @@ impl OptionDef {
             OptionType::Integer => s
                 .parse::<i64>()
                 .map(|n| {
-                    if let Some(min) = self.min {
-                        if n < min {
-                            return Err(format!("value {} < minimum {}", n, min));
-                        }
+                    if let Some(min) = self.min
+                        && n < min
+                    {
+                        return Err(format!("value {} < minimum {}", n, min));
                     }
-                    if let Some(max) = self.max {
-                        if n < 0 || n as u64 > max {
-                            return Err(format!("value {} exceeds maximum {}", n, max));
-                        }
+                    if let Some(max) = self.max
+                        && (n < 0 || n as u64 > max)
+                    {
+                        return Err(format!("value {} exceeds maximum {}", n, max));
                     }
                     Ok(OptionValue::Int(n))
                 })

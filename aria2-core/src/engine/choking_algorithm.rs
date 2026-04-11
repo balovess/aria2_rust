@@ -1,5 +1,4 @@
 use rand::Rng;
-use std::net::SocketAddr;
 
 use super::peer_stats::PeerStats;
 
@@ -101,9 +100,10 @@ impl ChokingAlgorithm {
         }
 
         let max_slots = self.config.max_upload_slots;
-        
+
         // Step 2: Calculate scores and sort indices by score descending
-        let mut scored_peers: Vec<(usize, f64)> = self.peers
+        let mut scored_peers: Vec<(usize, f64)> = self
+            .peers
             .iter()
             .enumerate()
             .map(|(i, peer)| (i, Self::calculate_peer_score(peer)))
@@ -153,14 +153,16 @@ impl ChokingAlgorithm {
         //   - Interested in us (peer_interested == true)
         //   - Not snubbed
         //   - Not recently optimistically unchoked (>interval ago)
-        let mut candidates: Vec<usize> = self.peers
+        let candidates: Vec<usize> = self
+            .peers
             .iter()
             .enumerate()
             .filter(|(_, peer)| {
                 peer.am_choking
                     && peer.peer_interested
                     && !peer.is_snubbed
-                    && peer.time_since_last_optimistic_unchoke().as_secs() >= self.config.optimistic_unchoke_interval_secs
+                    && peer.time_since_last_optimistic_unchoke().as_secs()
+                        >= self.config.optimistic_unchoke_interval_secs
             })
             .map(|(i, _)| i)
             .collect();
@@ -264,9 +266,15 @@ impl ChokingAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     /// Helper to create a test peer with specific characteristics
-    fn create_test_peer(download_speed: f64, upload_speed: f64, am_choking: bool, peer_interested: bool) -> PeerStats {
+    fn create_test_peer(
+        download_speed: f64,
+        upload_speed: f64,
+        am_choking: bool,
+        peer_interested: bool,
+    ) -> PeerStats {
         let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
         let mut peer = PeerStats::new([0u8; 20], addr);
         peer.download_speed = download_speed;
@@ -280,7 +288,7 @@ mod tests {
     fn test_new_algorithm_empty() {
         let config = ChokingConfig::default();
         let algo = ChokingAlgorithm::new(config);
-        
+
         assert!(algo.is_empty());
         assert_eq!(algo.len(), 0);
     }
@@ -338,7 +346,8 @@ mod tests {
         let actions = algo.rotate_choke();
 
         // Count unchoke actions
-        let unchoke_count = actions.iter()
+        let unchoke_count = actions
+            .iter()
             .filter(|a| matches!(a, ChokeAction::Unchoke(_)))
             .count();
 
@@ -359,24 +368,30 @@ mod tests {
 
         // Add 4 peers
         algo.add_peer(create_test_peer(100000.0, 1000.0, false, true)); // Already unchoked, high speed
-        algo.add_peer(create_test_peer(80000.0, 800.0, false, true));   // Already unchoked, med-high speed
-        algo.add_peer(create_test_peer(60000.0, 600.0, true, true));    // Choked, medium speed
-        algo.add_peer(create_test_peer(40000.0, 400.0, true, true));    // Choked, lower speed
+        algo.add_peer(create_test_peer(80000.0, 800.0, false, true)); // Already unchoked, med-high speed
+        algo.add_peer(create_test_peer(60000.0, 600.0, true, true)); // Choked, medium speed
+        algo.add_peer(create_test_peer(40000.0, 400.0, true, true)); // Choked, lower speed
 
         // First rotation: top 2 should stay unchoked (they're already there)
         let actions = algo.rotate_choke();
 
         // Count NoChange actions for the already-unchoked peers
-        let no_change_count = actions.iter()
+        let no_change_count = actions
+            .iter()
             .filter(|a| matches!(a, ChokeAction::NoChange(_)))
             .count();
 
         // At least the top 2 should have NoChange (they were already unchoked and remain so)
-        assert!(no_change_count >= 2, "Expected at least 2 NoChange actions, got {}", no_change_count);
+        assert!(
+            no_change_count >= 2,
+            "Expected at least 2 NoChange actions, got {}",
+            no_change_count
+        );
 
         // Second rotation without changes: should produce mostly NoChange
         let actions2 = algo.rotate_choke();
-        let no_change_count2 = actions2.iter()
+        let no_change_count2 = actions2
+            .iter()
             .filter(|a| matches!(a, ChokeAction::NoChange(_)))
             .count();
 
@@ -393,14 +408,17 @@ mod tests {
         let mut algo = ChokingAlgorithm::new(config);
 
         // Add peers
-        algo.add_peer(create_test_peer(1000.0, 100.0, true, true));   // Choked + interested ✓
-        algo.add_peer(create_test_peer(2000.0, 200.0, false, true));  // Unchoked ✗
-        algo.add_peer(create_test_peer(3000.0, 300.0, true, false));  // Not interested ✗
+        algo.add_peer(create_test_peer(1000.0, 100.0, true, true)); // Choked + interested ✓
+        algo.add_peer(create_test_peer(2000.0, 200.0, false, true)); // Unchoked ✗
+        algo.add_peer(create_test_peer(3000.0, 300.0, true, false)); // Not interested ✗
 
         let result = algo.optimistically_unchoke();
 
         // Should select peer 0 (only one that meets criteria)
-        assert!(result.is_some(), "Expected to select a peer for optimistic unchoke");
+        assert!(
+            result.is_some(),
+            "Expected to select a peer for optimistic unchoke"
+        );
         assert_eq!(result.unwrap(), 0);
     }
 
@@ -435,8 +453,10 @@ mod tests {
 
         // Snubbed peer should have much lower score (penalty of -1000)
         assert!(snubbed_score < normal_score);
-        assert!((normal_score - snubbed_score) > 900.0, 
-            "Expected large score difference due to snubbed penalty");
+        assert!(
+            (normal_score - snubbed_score) > 900.0,
+            "Expected large score difference due to snubbed penalty"
+        );
     }
 
     #[test]
@@ -448,7 +468,7 @@ mod tests {
         let mut algo = ChokingAlgorithm::new(config);
 
         // Create a peer that hasn't received data
-        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        let _addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
         let peer = PeerStats::new([0u8; 20], "127.0.0.1:6882".parse().unwrap());
         algo.add_peer(peer);
 
@@ -515,7 +535,7 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = ChokingConfig::default();
-        
+
         assert_eq!(config.max_upload_slots, 4);
         assert_eq!(config.optimistic_unchoke_interval_secs, 30);
         assert_eq!(config.snubbed_timeout_secs, 60);

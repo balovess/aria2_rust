@@ -14,9 +14,9 @@
 //! use aria2_core::config::option_validator::*;
 //! use serde_json::json;
 //!
-//! let validator = RangeValidator::new(1, 16);
-//! assert!(validator.validate("split", &json!(8)).is_ok());
-//! assert!(validator.validate("split", &json!(0)).is_err());
+//! let validator = RangeValidator::new(1i64, 16i64);
+//! assert!(validator.validate("split", &json!(8i64)).is_ok());
+//! assert!(validator.validate("split", &json!(0i64)).is_err());
 //! ```
 
 use std::collections::HashMap;
@@ -32,10 +32,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub enum OptionError {
     /// The value's type does not match what was expected.
-    TypeMismatch {
-        expected: String,
-        got: String,
-    },
+    TypeMismatch { expected: String, got: String },
     /// A numeric value is outside the allowed range.
     OutOfRange {
         value: String,
@@ -43,35 +40,20 @@ pub enum OptionError {
         max: String,
     },
     /// A string value is not in the list of allowed choices.
-    InvalidChoice {
-        value: String,
-        allowed: Vec<String>,
-    },
+    InvalidChoice { value: String, allowed: Vec<String> },
     /// A URL string is malformed or uses an unsupported scheme.
-    InvalidUrl {
-        url: String,
-        reason: String,
-    },
+    InvalidUrl { url: String, reason: String },
     /// A file path is invalid or doesn't meet requirements.
-    InvalidPath {
-        path: String,
-        reason: String,
-    },
+    InvalidPath { path: String, reason: String },
     /// A value fails to match the required regex pattern.
-    PatternMismatch {
-        value: String,
-        pattern: String,
-    },
+    PatternMismatch { value: String, pattern: String },
     /// Two options are mutually exclusive but both are set.
     DependencyConflict {
         option: String,
         conflicts_with: String,
     },
     /// An option requires another option that is not set.
-    MissingDependency {
-        option: String,
-        requires: String,
-    },
+    MissingDependency { option: String, requires: String },
 }
 
 impl fmt::Display for OptionError {
@@ -85,11 +67,7 @@ impl fmt::Display for OptionError {
                 )
             }
             Self::OutOfRange { value, min, max } => {
-                write!(
-                    f,
-                    "value '{}' is out of range [{}..{}]",
-                    value, min, max
-                )
+                write!(f, "value '{}' is out of range [{}..{}]", value, min, max)
             }
             Self::InvalidChoice { value, allowed } => {
                 write!(
@@ -106,28 +84,16 @@ impl fmt::Display for OptionError {
                 write!(f, "invalid path '{}': {}", path, reason)
             }
             Self::PatternMismatch { value, pattern } => {
-                write!(
-                    f,
-                    "value '{}' does not match pattern '{}'",
-                    value, pattern
-                )
+                write!(f, "value '{}' does not match pattern '{}'", value, pattern)
             }
             Self::DependencyConflict {
                 option,
                 conflicts_with,
             } => {
-                write!(
-                    f,
-                    "option '{}' conflicts with '{}'",
-                    option, conflicts_with
-                )
+                write!(f, "option '{}' conflicts with '{}'", option, conflicts_with)
             }
             Self::MissingDependency { option, requires } => {
-                write!(
-                    f,
-                    "option '{}' requires '{}' to be set",
-                    option, requires
-                )
+                write!(f, "option '{}' requires '{}' to be set", option, requires)
             }
         }
     }
@@ -387,7 +353,7 @@ impl UrlValidator {
         }
 
         // Check rest of URL has some content after ://
-        let after_scheme = url.splitn(2, "://").nth(1).unwrap_or("");
+        let after_scheme = url.split_once("://").map(|x| x.1).unwrap_or("");
         if after_scheme.is_empty() {
             return Err("no host/path after scheme".to_string());
         }
@@ -575,8 +541,7 @@ impl RegexValidator {
     ///
     /// Panics if the pattern is not a valid regular expression.
     pub fn new(pattern: &str) -> Self {
-        let compiled =
-            regex::Regex::new(pattern).expect("Invalid regex pattern in RegexValidator");
+        let compiled = regex::Regex::new(pattern).expect("Invalid regex pattern in RegexValidator");
         Self {
             pattern: pattern.to_string(),
             compiled,
@@ -706,7 +671,8 @@ impl OptionDefinition {
 ///
 /// ```rust
 /// use aria2_core::config::option_validator::*;
-/// use serde_json::{json, Map};
+/// use serde_json::json;
+/// use std::collections::HashMap;
 ///
 /// let mut checker = DependencyChecker::new();
 ///
@@ -716,7 +682,7 @@ impl OptionDefinition {
 /// // Add requirement: --bt-enable-lpd requires --enable-dht
 /// checker.add_requirement("bt-enable-lpd".to_string(), "enable-dht".to_string());
 ///
-/// let mut opts = Map::new();
+/// let mut opts = HashMap::new();
 /// opts.insert("ftp-pasv".to_string(), json!(true));
 /// opts.insert("ftp-port".to_string(), json!(8021));
 ///
@@ -770,8 +736,8 @@ impl DependencyChecker {
 
         // Check mutual exclusions
         for (opt_a, opt_b) in &self.mutual_exclusions {
-            let a_set = options.get(opt_a).map_or(false, |v| !v.is_null());
-            let b_set = options.get(opt_b).map_or(false, |v| !v.is_null());
+            let a_set = options.get(opt_a).is_some_and(|v| !v.is_null());
+            let b_set = options.get(opt_b).is_some_and(|v| !v.is_null());
 
             if a_set && b_set {
                 errors.push(OptionError::DependencyConflict {
@@ -783,8 +749,8 @@ impl DependencyChecker {
 
         // Check requirements
         for (option, requires) in &self.requirements {
-            let option_set = options.get(option).map_or(false, |v| !v.is_null());
-            let required_set = options.get(requires).map_or(false, |v| !v.is_null());
+            let option_set = options.get(option).is_some_and(|v| !v.is_null());
+            let required_set = options.get(requires).is_some_and(|v| !v.is_null());
 
             if option_set && !required_set {
                 errors.push(OptionError::MissingDependency {
@@ -837,7 +803,11 @@ mod tests {
 
         // Unsigned range validator
         let u64_validator = RangeValidator::<u64>::new(1024, 1024 * 1024);
-        assert!(u64_validator.validate("size", &Value::from(4096u64)).is_ok());
+        assert!(
+            u64_validator
+                .validate("size", &Value::from(4096u64))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -889,10 +859,26 @@ mod tests {
         ]);
 
         // Valid choices
-        assert!(validator.validate("log-level", &Value::String("debug".into())).is_ok());
-        assert!(validator.validate("log-level", &Value::String("info".into())).is_ok());
-        assert!(validator.validate("log-level", &Value::String("warn".into())).is_ok());
-        assert!(validator.validate("log-level", &Value::String("error".into())).is_ok());
+        assert!(
+            validator
+                .validate("log-level", &Value::String("debug".into()))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("log-level", &Value::String("info".into()))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("log-level", &Value::String("warn".into()))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("log-level", &Value::String("error".into()))
+                .is_ok()
+        );
 
         // Invalid choice
         let result = validator.validate("log-level", &Value::String("verbose".into()));
@@ -924,15 +910,30 @@ mod tests {
         let validator = UrlValidator::new();
 
         // Valid URLs
-        assert!(validator
-            .validate("tracker", &Value::String("http://example.com:6969/announce".into()))
-            .is_ok());
-        assert!(validator
-            .validate("tracker", &Value::String("https://tracker.example.com/announce".into()))
-            .is_ok());
-        assert!(validator
-            .validate("proxy", &Value::String("ftp://user:pass@ftp.example.com".into()))
-            .is_ok());
+        assert!(
+            validator
+                .validate(
+                    "tracker",
+                    &Value::String("http://example.com:6969/announce".into())
+                )
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate(
+                    "tracker",
+                    &Value::String("https://tracker.example.com/announce".into())
+                )
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate(
+                    "proxy",
+                    &Value::String("ftp://user:pass@ftp.example.com".into())
+                )
+                .is_ok()
+        );
 
         // Malformed URLs
         let result = validator.validate("url", &Value::String("not-a-url".into()));
@@ -988,7 +989,11 @@ mod tests {
         {
             let tmp_dir = std::env::temp_dir();
             let tmp_str = tmp_dir.to_string_lossy().to_string();
-            assert!(validator.validate("dir", &Value::String(tmp_str.into())).is_ok());
+            assert!(
+                validator
+                    .validate("dir", &Value::String(tmp_str.into()))
+                    .is_ok()
+            );
         }
     }
 
@@ -1018,12 +1023,16 @@ mod tests {
         // Host:port pattern
         let validator = RegexValidator::new(r"^[a-zA-Z0-9.-]+:\d+$");
 
-        assert!(validator
-            .validate("proxy", &Value::String("proxy.example.com:8080".into()))
-            .is_ok());
-        assert!(validator
-            .validate("proxy", &Value::String("localhost:3128".into()))
-            .is_ok());
+        assert!(
+            validator
+                .validate("proxy", &Value::String("proxy.example.com:8080".into()))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("proxy", &Value::String("localhost:3128".into()))
+                .is_ok()
+        );
 
         // Should fail
         let result = validator.validate("proxy", &Value::String("not-valid".into()));
@@ -1037,7 +1046,11 @@ mod tests {
         }
 
         // Empty string should fail (no host:port)
-        assert!(validator.validate("proxy", &Value::String("".into())).is_err());
+        assert!(
+            validator
+                .validate("proxy", &Value::String("".into()))
+                .is_err()
+        );
 
         // Wrong type
         let result = validator.validate("proxy", &Value::from(42));
@@ -1093,10 +1106,7 @@ mod tests {
         let mut checker = DependencyChecker::new();
 
         // bt-enable-lpd requires enable-dht
-        checker.add_requirement(
-            "bt-enable-lpd".to_string(),
-            "enable-dht".to_string(),
-        );
+        checker.add_requirement("bt-enable-lpd".to_string(), "enable-dht".to_string());
 
         // Case 1: Both set - satisfied
         let mut opts1 = HashMap::new();
@@ -1112,10 +1122,7 @@ mod tests {
         let errors2 = checker.check(&opts2);
         assert_eq!(errors2.len(), 1);
         match &errors2[0] {
-            OptionError::MissingDependency {
-                option,
-                requires,
-            } => {
+            OptionError::MissingDependency { option, requires } => {
                 assert_eq!(option, "bt-enable-lpd");
                 assert_eq!(requires, "enable-dht");
             }
@@ -1192,7 +1199,11 @@ mod tests {
 
         // Should always pass validation
         assert!(def_no_validator.validate(&Value::from(42)).is_ok());
-        assert!(def_no_validator.validate(&Value::String("anything".into())).is_ok());
+        assert!(
+            def_no_validator
+                .validate(&Value::String("anything".into()))
+                .is_ok()
+        );
     }
 
     // ==================== OptionError Display Tests ====================

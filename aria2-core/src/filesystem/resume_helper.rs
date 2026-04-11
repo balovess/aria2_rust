@@ -1,4 +1,4 @@
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 use std::path::{Path, PathBuf};
 
 use super::control_file::ControlFile;

@@ -38,13 +38,13 @@ pub fn validate_out_filename(name: &str) -> Result<String> {
     let upper = stem.to_uppercase();
     if WINDOWS_RESERVED_NAMES.contains(&upper.as_str()) {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            format!("保留名称: {}", stem).into(),
+            format!("保留名称: {}", stem),
         )));
     }
     for c in ILLEGAL_FILENAME_CHARS {
         if name.contains(*c) {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                format!("非法字符: {}", c).into(),
+                format!("非法字符: {}", c),
             )));
         }
     }

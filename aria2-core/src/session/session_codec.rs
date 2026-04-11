@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! ```
+//! ```text
 //! session_codec.rs (this file)
 //!   ├── encode()      → delegates to SessionEntry::serialize()
 //!   ├── decode()      → delegates to SessionEntry::deserialize_line()
@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use crate::error::{Aria2Error, Result};
-use crate::session::session_entry::{self, SessionEntry};
+use crate::session::session_entry::SessionEntry;
 
 /// Session Codec for encoding/decoding SessionEntry objects
 ///
@@ -91,11 +91,12 @@ impl SessionCodec {
     /// * `Err(Aria2Error)` - If parsing fails
     pub fn decode_gid(value: &str) -> Result<u64> {
         let cleaned = value.trim_start_matches("0x").trim_start_matches("0X");
-        u64::from_str_radix(cleaned, 16)
-            .map_err(|e| Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+        u64::from_str_radix(cleaned, 16).map_err(|e| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                 "Invalid GID format: {} ({})",
                 value, e
-            ))))
+            )))
+        })
     }
 
     /// Validate that an encoded entry is well-formed
@@ -112,29 +113,25 @@ impl SessionCodec {
         let lines: Vec<&str> = text.lines().collect();
 
         if lines.is_empty() {
-            return Err(Aria2Error::Fatal(
-                crate::error::FatalError::Config("Empty entry".to_string()),
-            ));
+            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                "Empty entry".to_string(),
+            )));
         }
 
         // First line must contain URIs (not starting with space)
         let first_line = lines[0].trim();
         if first_line.is_empty() {
-            return Err(Aria2Error::Fatal(
-                crate::error::FatalError::Config(
-                    "First line must contain URIs".to_string(),
-                ),
-            ));
+            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                "First line must contain URIs".to_string(),
+            )));
         }
 
         // Should have at least a GID line
         let has_gid = lines.iter().any(|l| l.trim().starts_with("GID="));
         if !has_gid {
-            return Err(Aria2Error::Fatal(
-                crate::error::FatalError::Config(
-                    "Missing GID field".to_string(),
-                ),
-            ));
+            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                "Missing GID field".to_string(),
+            )));
         }
 
         Ok(())
@@ -188,10 +185,7 @@ mod tests {
 
     #[test]
     fn test_encode_delegates_to_serialize() {
-        let entry = SessionEntry::new(
-            0x12345678,
-            vec!["http://example.com/file.zip".to_string()],
-        );
+        let entry = SessionEntry::new(0x12345678, vec!["http://example.com/file.zip".to_string()]);
         let encoded = SessionCodec::encode(&entry);
 
         // Should produce same output as serialize()
@@ -224,7 +218,9 @@ mod tests {
         original.paused = true;
         original.total_length = 999999;
         original.completed_length = 500000;
-        original.options.insert("split".to_string(), "8".to_string());
+        original
+            .options
+            .insert("split".to_string(), "8".to_string());
 
         let encoded = SessionCodec::encode(&original);
         let decoded = SessionCodec::decode(&encoded).unwrap();

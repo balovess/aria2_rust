@@ -32,7 +32,6 @@
 /// assert_eq!(map.get("split").unwrap(), "8");
 /// assert_eq!(map.get("max-connection-per-server").unwrap(), "4");
 /// ```
-
 use std::collections::HashMap;
 
 use crate::request::request_group::DownloadOptions;

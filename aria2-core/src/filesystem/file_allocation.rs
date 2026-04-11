@@ -2,21 +2,19 @@ use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use crate::error::{Aria2Error, Result};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AllocationStrategy {
+    #[default]
     None,
     Prealloc,
     Falloc,
     Trunc,
 }
 
-impl Default for AllocationStrategy {
-    fn default() -> Self {
-        AllocationStrategy::None
-    }
-}
-
 impl AllocationStrategy {
+    /// Parse allocation strategy from string
+    /// This is intentionally not implementing FromStr to avoid confusion with the standard trait
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "prealloc" => AllocationStrategy::Prealloc,
@@ -129,11 +127,7 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
         let free = metadata.len();
-        if free > 0 {
-            Ok(free)
-        } else {
-            Ok(u64::MAX / 2)
-        }
+        if free > 0 { Ok(free) } else { Ok(u64::MAX / 2) }
     }
 
     #[cfg(all(not(unix), not(windows)))]

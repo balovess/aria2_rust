@@ -1,6 +1,6 @@
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use aria2_protocol::bittorrent::message::handshake::Handshake;
-use criterion::{black_box, criterion_group, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
 use sha1::{Digest, Sha1};
 
 fn bench_bencode_encode_dict(c: &mut Criterion) {

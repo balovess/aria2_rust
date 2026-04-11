@@ -43,6 +43,7 @@ impl MockTrackerServer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
@@ -51,7 +52,6 @@ impl MockTrackerServer {
     }
 
     async fn handle_connection(mut stream: tokio::net::TcpStream, peer_port: u16) {
-        use tokio::io::AsyncReadExt;
         let mut reader = tokio::io::BufReader::new(&mut stream);
 
         let mut request_line = String::new();

@@ -3,7 +3,7 @@
 //! 提供了完整的 HTTP/1.1 请求构建、响应解析、Cookie 管理和认证功能。
 //! 支持流式 API 构建 HTTP 请求，自动添加标准 headers，以及 RFC 6265 合规的 Cookie 管理。
 
-use base64::{engine::general_purpose, Engine};
+use base64::{Engine, engine::general_purpose};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -215,10 +215,7 @@ impl HttpRequestBuilder {
 
         // User-Agent header
         if !final_headers.contains_key("User-Agent") {
-            final_headers.insert(
-                "User-Agent".to_string(),
-                "aria2-rust/1.0".to_string(),
-            );
+            final_headers.insert("User-Agent".to_string(), "aria2-rust/1.0".to_string());
         }
 
         // Accept header
@@ -282,11 +279,8 @@ impl HttpResponse {
     ///
     /// 返回错误如果响应格式无效或无法解析
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let response_str =
-            String::from_utf8(data.to_vec()).map_err(|e| Aria2Error::Parse(format!(
-                "Invalid UTF-8 in HTTP response: {}",
-                e
-            )))?;
+        let response_str = String::from_utf8(data.to_vec())
+            .map_err(|e| Aria2Error::Parse(format!("Invalid UTF-8 in HTTP response: {}", e)))?;
 
         // 分离 headers 和 body
         let (header_part, body_part) = match response_str.find("\r\n\r\n") {
@@ -327,10 +321,7 @@ impl HttpResponse {
             if let Some((key, value)) = line.split_once(':') {
                 let key = key.trim().to_string();
                 let value = value.trim().to_string();
-                headers
-                    .entry(key)
-                    .or_insert_with(Vec::new)
-                    .push(value);
+                headers.entry(key).or_default().push(value);
             }
         }
 
@@ -419,6 +410,43 @@ impl HttpResponse {
     pub fn location(&self) -> Option<Url> {
         self.header("Location").and_then(|loc| Url::parse(loc).ok())
     }
+
+    /// 使用流式解码器获取解码后的 body
+    ///
+    /// 根据 HTTP 响应的 Content-Encoding 和 Transfer-Encoding headers 自动选择合适的解码器，
+    /// 对响应体进行解码。支持 GZip、Chunked、BZip2 等编码格式。
+    ///
+    /// 遵循 RFC 7230 Section 3.3.1 规范：Transfer-Encoding 优先于 Content-Encoding。
+    ///
+    /// # Returns
+    ///
+    /// 解码后的原始数据，或错误信息。如果没有 body 则返回空向量。
+    ///
+    /// # Errors
+    ///
+    /// - 如果编码格式无效或数据损坏
+    /// - 如果解码过程中发生 I/O 错误
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let response = /* HTTP response with Content-Encoding: gzip */;
+    /// let decoded = response.decoded_body()?;
+    /// // decoded 包含解压后的原始数据
+    /// ```
+    pub fn decoded_body(&self) -> Result<Vec<u8>> {
+        use crate::http::stream_filter::AutoFilterSelector;
+
+        let encoding = self.header("Content-Encoding").map(|s| s.as_str());
+        let transfer_enc = self.header("Transfer-Encoding").map(|s| s.as_str());
+
+        let mut chain = AutoFilterSelector::select_filters(encoding, transfer_enc);
+
+        match &self.body {
+            Some(raw_data) => chain.process(raw_data),
+            None => Ok(Vec::new()),
+        }
+    }
 }
 
 /// Cookie 结构体 (RFC 6265 合规)
@@ -504,7 +532,7 @@ impl Cookie {
         // 子域匹配 (cookie domain 以 . 开头)
         if cookie_domain.starts_with('.') {
             // .example.com 匹配 example.com 和 sub.example.com
-            host == &cookie_domain[1..] || host.ends_with(&cookie_domain)
+            host == cookie_domain[1..] || host.ends_with(&cookie_domain)
         } else {
             // 不以 . 开头的 domain，需要 host 以 .domain 结尾
             host.ends_with(&format!(".{}", cookie_domain))
@@ -666,8 +694,8 @@ impl CookieJar {
                     }
                     "max-age" => {
                         if let Ok(seconds) = attr_value.trim().parse::<u64>() {
-                            let expiry = SystemTime::now()
-                                + std::time::Duration::from_secs(seconds);
+                            let expiry =
+                                SystemTime::now() + std::time::Duration::from_secs(seconds);
                             cookie.expiry = Some(expiry);
                         }
                     }
@@ -675,7 +703,8 @@ impl CookieJar {
                         // 简单实现: 尝试解析常见日期格式
                         // 完整实现需要更复杂的日期解析
                         if let Ok(timestamp) = attr_value.trim().parse::<i64>() {
-                            let expiry = UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
+                            let expiry =
+                                UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
                             cookie.expiry = Some(expiry);
                         }
                     }
@@ -827,7 +856,10 @@ mod tests {
 
         assert_eq!(request.method, HttpMethod::Post);
         assert_eq!(request.url, url);
-        assert_eq!(request.headers.get("Content-Type").unwrap(), "application/json");
+        assert_eq!(
+            request.headers.get("Content-Type").unwrap(),
+            "application/json"
+        );
         assert_eq!(request.headers.get("Accept").unwrap(), "application/json");
         assert!(request.body.is_some());
         assert_eq!(request.body.unwrap(), b"{\"key\":\"value\"}");
@@ -983,20 +1015,24 @@ mod tests {
         .unwrap();
         assert!(redirect_resp.is_redirect());
 
-        let redirect_302 = HttpResponse::from_bytes("HTTP/1.1 302 Found\r\n\r\n".as_bytes()).unwrap();
+        let redirect_302 =
+            HttpResponse::from_bytes("HTTP/1.1 302 Found\r\n\r\n".as_bytes()).unwrap();
         assert!(redirect_302.is_redirect());
 
         // 非重定向状态码
         let ok_resp = HttpResponse::from_bytes("HTTP/1.1 200 OK\r\n\r\n".as_bytes()).unwrap();
         assert!(!ok_resp.is_redirect());
 
-        let error_resp = HttpResponse::from_bytes("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes()).unwrap();
+        let error_resp =
+            HttpResponse::from_bytes("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes())
+                .unwrap();
         assert!(!error_resp.is_redirect());
     }
 
     #[test]
     fn test_response_location() {
-        let response = "HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/new-page\r\n\r\n";
+        let response =
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/new-page\r\n\r\n";
         let resp = HttpResponse::from_bytes(response.as_bytes()).unwrap();
 
         let location = resp.location().unwrap();
@@ -1005,7 +1041,8 @@ mod tests {
 
     #[test]
     fn test_response_body_parsing() {
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"success\"}";
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"success\"}";
         let resp = HttpResponse::from_bytes(response.as_bytes()).unwrap();
 
         assert!(resp.body.is_some());
@@ -1019,7 +1056,7 @@ mod tests {
 
     #[test]
     fn test_cookie_jar_basic_operations() {
-        let mut jar = CookieJar::new();
+        let jar = CookieJar::new();
         assert!(jar.is_empty());
         assert_eq!(jar.len(), 0);
     }
@@ -1265,9 +1302,6 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(
-            next_request.headers.get("Cookie").unwrap(),
-            "session=xyz"
-        );
+        assert_eq!(next_request.headers.get("Cookie").unwrap(), "session=xyz");
     }
 }

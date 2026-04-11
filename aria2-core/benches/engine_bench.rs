@@ -1,9 +1,9 @@
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::request::request_group::GroupId;
-use aria2_core::segment::bitfield::Bitfield;
 use aria2_core::segment::Segment;
+use aria2_core::segment::bitfield::Bitfield;
 use aria2_core::ui::{MultiProgress, ProgressBar};
-use criterion::{black_box, criterion_group, Criterion};
+use criterion::{Criterion, black_box, criterion_group};
 
 fn bench_engine_creation(c: &mut Criterion) {
     c.bench_function("engine_create_destroy", |b| {

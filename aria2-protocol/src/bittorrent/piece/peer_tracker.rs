@@ -125,7 +125,7 @@ impl PeerBitfieldTracker {
         };
         let rarest = self.piece_peer_count.iter().filter(|&&c| c == 1).count();
 
-        let is_endgame = completed.map_or(false, |c| self.should_enter_endgame(20, c));
+        let is_endgame = completed.is_some_and(|c| self.should_enter_endgame(20, c));
 
         PeerTrackerStats {
             peer_count: self.peers.len(),

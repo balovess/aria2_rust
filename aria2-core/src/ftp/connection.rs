@@ -5,22 +5,17 @@
 use crate::error::{Aria2Error, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
 /// FTP 数据连接模式
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FtpMode {
     /// 被动模式（客户端连接服务器数据端口）
+    #[default]
     Passive,
     /// 主动模式（服务器连接客户端数据端口）
     Active,
-}
-
-impl Default for FtpMode {
-    fn default() -> Self {
-        FtpMode::Passive
-    }
 }
 
 /// FTP 响应结构体
@@ -103,6 +98,7 @@ pub struct FtpClient {
     /// 服务器主机地址
     pub(crate) host: String,
     /// 服务器端口
+    #[allow(dead_code)] // Port field retained for FTP connection configuration
     pub(crate) port: u16,
     /// 连接超时时间
     pub(crate) connect_timeout: Duration,
@@ -194,9 +190,9 @@ impl FtpClient {
                     info!("FTP 登录成功");
                     Ok(())
                 } else if pass_resp.code == 530 {
-                    Err(Aria2Error::Recoverable(crate::error::RecoverableError::ServerError {
-                        code: 530,
-                    }))
+                    Err(Aria2Error::Recoverable(
+                        crate::error::RecoverableError::ServerError { code: 530 },
+                    ))
                 } else {
                     Err(Aria2Error::DownloadFailed(format!(
                         "FTP 登录失败: {} {}",
@@ -204,9 +200,9 @@ impl FtpClient {
                     )))
                 }
             }
-            530 => Err(Aria2Error::Recoverable(crate::error::RecoverableError::ServerError {
-                code: 530,
-            })),
+            530 => Err(Aria2Error::Recoverable(
+                crate::error::RecoverableError::ServerError { code: 530 },
+            )),
             _ => {
                 if resp.is_positive_completion() {
                     info!("FTP 登录成功");
@@ -238,7 +234,10 @@ impl FtpClient {
 
         if resp.is_positive_completion() {
             self.binary_mode = enabled;
-            debug!("传输模式设置为: {}", if enabled { "Binary" } else { "ASCII" });
+            debug!(
+                "传输模式设置为: {}",
+                if enabled { "Binary" } else { "ASCII" }
+            );
             Ok(())
         } else if resp.code == 504 {
             Err(Aria2Error::DownloadFailed(format!(
@@ -281,9 +280,7 @@ impl FtpClient {
                     TcpStream::connect((self.host.as_str(), port)),
                 )
                 .await
-                .map_err(|_| {
-                    Aria2Error::Recoverable(crate::error::RecoverableError::Timeout)
-                })?
+                .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
                 .map_err(|e| Aria2Error::Network(format!("EPSV 数据连接失败: {}", e)))?;
 
                 return Ok(data_stream);
@@ -296,9 +293,9 @@ impl FtpClient {
         let pasv_resp = self.read_response().await?;
 
         if pasv_resp.code != 227 {
-            return Err(Aria2Error::Recoverable(crate::error::RecoverableError::ServerError {
-                code: 425,
-            }));
+            return Err(Aria2Error::Recoverable(
+                crate::error::RecoverableError::ServerError { code: 425 },
+            ));
         }
 
         // 解析 PASV 响应
@@ -309,9 +306,7 @@ impl FtpClient {
             TcpStream::connect((data_host.as_str(), data_port)),
         )
         .await
-        .map_err(|_| {
-            Aria2Error::Recoverable(crate::error::RecoverableError::Timeout)
-        })?
+        .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
         .map_err(|e| Aria2Error::Network(format!("PASV 数据连接失败: {}", e)))?;
         Ok(data_stream)
     }
@@ -333,14 +328,18 @@ impl FtpClient {
         debug!("请求主动模式数据连接");
 
         // 获取本地地址
-        let local_addr = self.control_stream.get_ref().local_addr()
+        let local_addr = self
+            .control_stream
+            .get_ref()
+            .local_addr()
             .map_err(|e| Aria2Error::Network(format!("获取本地地址失败: {}", e)))?;
 
         // 在端口 0 上监听（系统自动分配可用端口）
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
             .await
             .map_err(|e| Aria2Error::Network(format!("绑定数据端口失败: {}", e)))?;
-        let data_port = listener.local_addr()
+        let data_port = listener
+            .local_addr()
             .map_err(|e| Aria2Error::Network(format!("获取监听端口失败: {}", e)))?
             .port();
 
@@ -365,7 +364,7 @@ impl FtpClient {
 
             // 将 IP 地址转换为 PORT 命令格式 (h1,h2,h3,h4,p1,p2)
             // 只支持 IPv4（PORT 命令不支持 IPv6）
-            use std::net::Ipv4Addr;
+
             let ipv4_addr = match local_ip {
                 std::net::IpAddr::V4(v4) => v4,
                 std::net::IpAddr::V6(_) => {
@@ -523,36 +522,38 @@ impl FtpClient {
     ///
     /// - 550 文件不存在
     /// - 425/426 数据连接错误
-    pub async fn download_file(&mut self, remote_path: &str, offset: Option<u64>) -> Result<TcpStream> {
+    pub async fn download_file(
+        &mut self,
+        remote_path: &str,
+        offset: Option<u64>,
+    ) -> Result<TcpStream> {
         debug!("准备下载文件: {} (offset: {:?})", remote_path, offset);
 
         // 如果有偏移量，先发送 REST 命令
-        if let Some(off) = offset {
-            if off > 0 {
-                debug!("设置恢复偏移: {}", off);
-                self.send_command(&format!("REST {}", off)).await?;
-                let rest_resp = self.read_response().await?;
+        if let Some(off) = offset
+            && off > 0
+        {
+            debug!("设置恢复偏移: {}", off);
+            self.send_command(&format!("REST {}", off)).await?;
+            let rest_resp = self.read_response().await?;
 
-                if rest_resp.code != 350 {
-                    return Err(Aria2Error::DownloadFailed(format!(
-                        "REST 命令失败（服务器可能不支持断点续传）: {} {}",
-                        rest_resp.code, rest_resp.message
-                    )));
-                }
+            if rest_resp.code != 350 {
+                return Err(Aria2Error::DownloadFailed(format!(
+                    "REST 命令失败（服务器可能不支持断点续传）: {} {}",
+                    rest_resp.code, rest_resp.message
+                )));
             }
         }
 
         // 建立数据连接
         let _data_stream = match self.mode {
-            FtpMode::Passive => {
-                match self.passive_mode().await {
-                    Ok(stream) => stream,
-                    Err(e) => {
-                        warn!("被动模式失败，尝试主动模式: {}", e);
-                        self.active_mode().await?
-                    }
+            FtpMode::Passive => match self.passive_mode().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!("被动模式失败，尝试主动模式: {}", e);
+                    self.active_mode().await?
                 }
-            }
+            },
             FtpMode::Active => self.active_mode().await?,
         };
 
@@ -598,9 +599,9 @@ impl FtpClient {
         if resp.is_positive_completion() {
             Ok(())
         } else if resp.code == 550 {
-            Err(Aria2Error::Recoverable(crate::error::RecoverableError::ServerError {
-                code: 550,
-            }))
+            Err(Aria2Error::Recoverable(
+                crate::error::RecoverableError::ServerError { code: 550 },
+            ))
         } else {
             Err(Aria2Error::DownloadFailed(format!(
                 "CWD 命令失败: {} {}",
@@ -628,14 +629,13 @@ impl FtpClient {
             // 通常格式为: 257 "/path" is current directory
             let msg = resp.message.trim();
             // 提取引号内的路径
-            if let Some(start) = msg.find('"') {
-                if let Some(end) = msg.rfind('"') {
-                    if end > start {
-                        let dir = &msg[start + 1..end];
-                        debug!("当前目录: {}", dir);
-                        return Ok(dir.to_string());
-                    }
-                }
+            if let Some(start) = msg.find('"')
+                && let Some(end) = msg.rfind('"')
+                && end > start
+            {
+                let dir = &msg[start + 1..end];
+                debug!("当前目录: {}", dir);
+                return Ok(dir.to_string());
             }
             Ok(msg.to_string())
         } else {
@@ -656,27 +656,32 @@ impl FtpClient {
     /// - 网络错误（如果控制连接已断开）
     pub async fn abort(&mut self) -> Result<()> {
         debug!("发送 ABOR 命令中止传输");
-        
+
         // ABOR 命令比较特殊，需要特殊处理
         // 某些实现需要先发送 Telnet IP (Interrupt Process) + SYNCH
         // 这里简化处理，直接发送命令
         self.send_command("ABOR").await?;
-        
+
         // 读取响应（可能有多个响应：426 + 226 或 225 + 226 等）
         match self.read_response().await {
             Ok(resp) => {
                 debug!("ABOR 响应: {} {}", resp.code, resp.message);
-                
+
                 // 可能还有第二个响应
                 // 尝试读取但不强制要求
                 let mut buf = String::new();
-                match timeout(Duration::from_secs(2), self.control_stream.read_line(&mut buf)).await {
+                match timeout(
+                    Duration::from_secs(2),
+                    self.control_stream.read_line(&mut buf),
+                )
+                .await
+                {
                     Ok(Ok(n)) if n > 0 => {
                         debug!("ABOR 第二个响应: {}", buf.trim());
                     }
                     _ => {}
                 }
-                
+
                 Ok(())
             }
             Err(e) => {
@@ -692,7 +697,7 @@ impl FtpClient {
     /// 发送 QUIT 命令并优雅地关闭控制连接。
     pub async fn quit(mut self) -> Result<()> {
         debug!("发送 QUIT 命令");
-        
+
         if let Err(e) = self.send_command("QUIT").await {
             warn!("发送 QUIT 命令失败（连接可能已关闭）: {}", e);
             return Ok(());
@@ -750,13 +755,10 @@ impl FtpClient {
         loop {
             line.clear();
 
-            let bytes_read = timeout(
-                self.read_timeout,
-                self.control_stream.read_line(&mut line),
-            )
-            .await
-            .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
-            .map_err(|e| Aria2Error::Network(format!("读取 FTP 响应失败: {}", e)))?;
+            let bytes_read = timeout(self.read_timeout, self.control_stream.read_line(&mut line))
+                .await
+                .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
+                .map_err(|e| Aria2Error::Network(format!("读取 FTP 响应失败: {}", e)))?;
 
             if bytes_read == 0 {
                 break; // 连接关闭
@@ -818,13 +820,13 @@ impl FtpClient {
     ///
     /// 返回 `(host, port)` 元组
     fn parse_pasv_response(text: &str) -> Result<(String, u16)> {
-        let start = text.find('(').ok_or_else(|| {
-            Aria2Error::Parse("PASV 响应缺少左括号".to_string())
-        })?;
+        let start = text
+            .find('(')
+            .ok_or_else(|| Aria2Error::Parse("PASV 响应缺少左括号".to_string()))?;
 
-        let end = text.find(')').ok_or_else(|| {
-            Aria2Error::Parse("PASV 响应缺少右括号".to_string())
-        })?;
+        let end = text
+            .find(')')
+            .ok_or_else(|| Aria2Error::Parse("PASV 响应缺少右括号".to_string()))?;
 
         let inner = &text[start + 1..end];
         let parts: Vec<&str> = inner.split(',').collect();
@@ -836,24 +838,30 @@ impl FtpClient {
             )));
         }
 
-        let h1: u8 = parts[0].trim().parse().map_err(|_| {
-            Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h1".to_string())
-        })?;
-        let h2: u8 = parts[1].trim().parse().map_err(|_| {
-            Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h2".to_string())
-        })?;
-        let h3: u8 = parts[2].trim().parse().map_err(|_| {
-            Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h3".to_string())
-        })?;
-        let h4: u8 = parts[3].trim().parse().map_err(|_| {
-            Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h4".to_string())
-        })?;
-        let p1: u16 = parts[4].trim().parse().map_err(|_| {
-            Aria2Error::Parse("PASV 响应: 无效的端口字节 p1".to_string())
-        })?;
-        let p2: u16 = parts[5].trim().parse().map_err(|_| {
-            Aria2Error::Parse("PASV 响应: 无效的端口字节 p2".to_string())
-        })?;
+        let h1: u8 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h1".to_string()))?;
+        let h2: u8 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h2".to_string()))?;
+        let h3: u8 = parts[2]
+            .trim()
+            .parse()
+            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h3".to_string()))?;
+        let h4: u8 = parts[3]
+            .trim()
+            .parse()
+            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h4".to_string()))?;
+        let p1: u16 = parts[4]
+            .trim()
+            .parse()
+            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的端口字节 p1".to_string()))?;
+        let p2: u16 = parts[5]
+            .trim()
+            .parse()
+            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的端口字节 p2".to_string()))?;
 
         let host = format!("{}.{}.{}.{}", h1, h2, h3, h4);
         let port = p1 * 256 + p2;
@@ -915,38 +923,148 @@ impl FtpClient {
         None
     }
 
-    /// 解析 Unix 格式的 LIST 行
+    /// Parse Unix ls -l format using fast path (zero-dependency string parsing)
     ///
-    /// Unix 格式示例:
+    /// This fast path handles ~90% of real-world FTP LIST responses which use
+    /// standard Unix ls -l format, avoiding regex compilation and matching overhead.
+    ///
+    /// Format: `[type][perms] [links] [owner] [group] [size] [mon] [day] [time/year] [name]`
+    /// Example: `-rw-r--r--  1 user staff  12345 Jan 15 10:30 document.pdf`
+    ///
+    /// # Returns
+    ///
+    /// `Some(FtpFileInfo)` if parsing succeeds, `None` if line doesn't match expected format
+    fn parse_list_line_fast(line: &str) -> Option<FtpFileInfo> {
+        // Minimum viable line length check:
+        // type(1) + perms(9) + spaces(3+) + links(1+) + owner(1+) + spaces + group(1+)
+        // + spaces + size(1+) + spaces + month(3) + spaces + day(1+) + spaces + time(4-5/year)
+        // + space + name(1+) >= ~40 chars for realistic entries
+        if line.len() < 35 {
+            return None;
+        }
+
+        // Determine entry type from first character
+        let entry_type = match line.as_bytes().first()? {
+            b'd' => true,  // Directory
+            b'-' => false, // Regular file
+            b'l' => {
+                // Symlink - handle specially below
+                // For symlinks, we'll parse but mark as non-directory
+                false
+            }
+            _ => return None, // Unknown type, fallback to regex
+        };
+
+        let is_dir = entry_type;
+
+        // Validate permission field (chars 1-9 should be [rwxst-])
+        let perms = &line[1..10];
+        if !perms.chars().all(|c| "rwxst-".contains(c)) {
+            return None;
+        }
+
+        // Skip permission field and split rest by whitespace
+        let after_perms = line[10..].trim_start();
+
+        // Find positions of each field by scanning for whitespace
+        // Expected fields: links owner group size month day time/year name
+        // We need to skip 7 fields and capture the rest as filename
+        let mut pos = 0;
+        for _ in 0..7 {
+            // Skip current field (non-whitespace)
+            let end = after_perms[pos..]
+                .find(' ')
+                .unwrap_or(after_perms.len() - pos);
+            pos += end + 1;
+            // Skip whitespace between fields
+            while pos < after_perms.len() && after_perms.as_bytes()[pos] == b' ' {
+                pos += 1;
+            }
+            if pos >= after_perms.len() {
+                return None;
+            }
+        }
+
+        // Remaining part is the filename (may contain spaces)
+        let name_raw = after_perms[pos..].trim();
+        if name_raw.is_empty() {
+            return None;
+        }
+
+        // Handle symlink format: "linkname -> target"
+        let actual_name = if line.as_bytes()[0] == b'l' {
+            if let Some(arrow_pos) = name_raw.find(" -> ") {
+                &name_raw[..arrow_pos]
+            } else {
+                name_raw
+            }
+        } else {
+            name_raw
+        };
+
+        // Filter out special entries
+        if actual_name == "." || actual_name == ".." {
+            return None;
+        }
+
+        // Parse size from the line (field index 3, 0-based)
+        // Fields after permissions: links(0) owner(1) group(2) size(3) month(4) ...
+        let size_field = after_perms.split_whitespace().nth(3)?;
+        let size: u64 = size_field.parse().ok()?;
+
+        Some(FtpFileInfo {
+            name: actual_name.to_string(),
+            size,
+            is_dir,
+        })
+    }
+
+    /// Parse Unix-format LIST line with fast path optimization
+    ///
+    /// Tries zero-allocation string parsing first (~90% of cases),
+    /// falls back to regex for exotic formats.
+    fn parse_unix_list_line(line: &str) -> Option<FtpFileInfo> {
+        // Fast path for standard Unix ls -l format (avoids regex overhead)
+        if let Some(info) = Self::parse_list_line_fast(line) {
+            return Some(info);
+        }
+
+        // Fallback to regex for exotic/non-standard formats
+        Self::parse_unix_list_line_regex(line)
+    }
+
+    /// Parse Unix ls -l format using regex (fallback for non-standard formats)
+    ///
+    /// Unix format example:
     /// ```text
     /// -rw-r--r--  1 user group  12345 Jan 15 10:30 filename.txt
     /// drwxr-xr-x  2 user group   4096 Feb  3 14:20 directory
     /// lrwxrwxrwx  1 user group     8 Mar 10 09:00 link -> target
     /// ```
-    fn parse_unix_list_line(line: &str) -> Option<FtpFileInfo> {
-        // 使用正则表达式来匹配 Unix ls -l 格式
-        // 格式: [type][perms]  [links] [user] [group] [size] [mon] [day] [time/year] [name]
-        // 示例: -rw-r--r--  1 user staff  12345 Jan 15 10:30 document.pdf
+    fn parse_unix_list_line_regex(line: &str) -> Option<FtpFileInfo> {
+        // Use regex to match Unix ls -l format
+        // Format: [type][perms]  [links] [user] [group] [size] [mon] [day] [time/year] [name]
+        // Example: -rw-r--r--  1 user staff  12345 Jan 15 10:30 document.pdf
 
-        // 正则表达式说明:
-        // ^([bcdlsp-])           # 文件类型 (1 字符)
-        // ([rwxst-]{9})          # 权限位 (9 字符)
-        // \s+                     # 一个或多个空格
-        // (\d+)                   # 硬链接数
-        // \s+                     # 空格
-        // (\S+)                   # 用户名
-        // \s+                     # 空格
-        // (\S+)                   # 组名
-        // \s+                     # 空格
-        // (\d+)                   # 文件大小
-        // \s+                     # 空格
-        // (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)  # 月份
-        // \s+                     # 空格
-        // (\d{1,2})              # 日 (1-2 位数字)
-        // \s+                     # 空格
-        // (\d{4}|\d{1,2}:\d{2})  # 年份 (4 位) 或时间 (HH:MM)
-        // \s+                     # 空格
-        // (.+)$                  # 文件名（可能包含空格）
+        // Regex pattern explanation:
+        // ^([bcdlsp-])           # File type (1 char)
+        // ([rwxst-]{9})          # Permission bits (9 chars)
+        // \s+                     # One or more spaces
+        // (\d+)                   # Hard link count
+        // \s+                     # Space
+        // (\S+)                   # Username
+        // \s+                     # Space
+        // (\S+)                   # Group name
+        // \s+                     # Space
+        // (\d+)                   # File size
+        // \s+                     # Space
+        // (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)  # Month
+        // \s+                     # Space
+        // (\d{1,2})              # Day (1-2 digits)
+        // \s+                     # Space
+        // (\d{4}|\d{1,2}:\d{2})  # Year (4 digits) or time (HH:MM)
+        // \s+                     # Space
+        // (.+)$                  # Filename (may contain spaces)
 
         use regex::Regex;
 
@@ -967,7 +1085,7 @@ impl FtpClient {
             return None;
         }
 
-        // 处理符号链接: "link -> target"
+        // Handle symlink: "link -> target"
         let actual_name = if is_link {
             if let Some(arrow_pos) = name.find(" -> ") {
                 &name[..arrow_pos]
@@ -978,7 +1096,7 @@ impl FtpClient {
             name
         };
 
-        // 特殊条目: "." 和 ".."
+        // Special entries: "." and ".."
         if actual_name == "." || actual_name == ".." {
             return None;
         }
@@ -1006,7 +1124,10 @@ impl FtpClient {
 
         // 日期部分: MM-DD-YY (8 字符)
         let date_part = &line[..8];
-        if date_part.len() != 8 || date_part.chars().nth(2)? != '-' || date_part.chars().nth(5)? != '-' {
+        if date_part.len() != 8
+            || date_part.chars().nth(2)? != '-'
+            || date_part.chars().nth(5)? != '-'
+        {
             return None;
         }
 
@@ -1026,11 +1147,7 @@ impl FtpClient {
         let size_or_dir = after_time[..space_pos].trim();
 
         let is_dir = size_or_dir.eq_ignore_ascii_case("<DIR>");
-        let size: u64 = if is_dir {
-            0
-        } else {
-            size_or_dir.parse().ok()?
-        };
+        let size: u64 = if is_dir { 0 } else { size_or_dir.parse().ok()? };
 
         // 文件名
         let name = after_time[space_pos + 1..].trim().to_string();
@@ -1039,11 +1156,7 @@ impl FtpClient {
             return None;
         }
 
-        Some(FtpFileInfo {
-            name,
-            size,
-            is_dir,
-        })
+        Some(FtpFileInfo { name, size, is_dir })
     }
 
     /// 解析 MLSD (Machine Listing) 格式的行

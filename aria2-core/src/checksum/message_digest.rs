@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn test_digest_length_matches() {
         for ht in HashType::all_supported() {
-            let mut md = MessageDigest::new(ht);
+            let md = MessageDigest::new(ht);
             assert_eq!(md.digest_length(), ht.digest_length());
         }
     }

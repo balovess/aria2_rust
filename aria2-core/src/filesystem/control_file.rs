@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 const CONTROL_MAGIC: &[u8; 4] = b"A2CF";
 const CONTROL_VERSION: u16 = 1;
 const FLAG_HAS_CHECKSUM: u8 = 0x01;
+#[allow(dead_code)] // Reserved for future transaction ID tracking in control files
 const FLAG_HAS_TID: u8 = 0x02;
 
 #[derive(Debug, Clone)]
@@ -49,7 +50,7 @@ impl ControlFile {
                 .await?
                 .ok_or_else(|| Aria2Error::Io(format!("无法加载控制文件: {}", ctrl_path.display())))
         } else {
-            let bitfield_len = (num_pieces + 7) / 8;
+            let bitfield_len = num_pieces.div_ceil(8);
             Ok(Self {
                 path: ctrl_path.to_path_buf(),
                 total_length,

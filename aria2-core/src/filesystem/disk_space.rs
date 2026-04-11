@@ -14,13 +14,13 @@ pub fn available_space(path: &Path) -> Result<u64> {
     {
         use std::os::unix::ffi::OsStrExt;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ret = unsafe {
-            libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat)
-        };
+        let ret =
+            unsafe { libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat) };
         if ret != 0 {
-            return Err(Aria2Error::Fatal(FatalError::Config(
-                format!("statvfs failed: {}", std::io::Error::last_os_error())
-            )));
+            return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                "statvfs failed: {}",
+                std::io::Error::last_os_error()
+            ))));
         }
         Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
     }
@@ -32,7 +32,12 @@ pub fn available_space(path: &Path) -> Result<u64> {
                 let _ = path;
                 u64::MAX / 2
             })
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Failed to get disk space: {}", e))))
+            .map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "Failed to get disk space: {}",
+                    e
+                )))
+            })
     }
 
     #[cfg(all(not(target_family = "unix"), not(target_family = "windows")))]
@@ -43,7 +48,7 @@ pub fn available_space(path: &Path) -> Result<u64> {
 }
 
 pub fn has_enough_space(path: &Path, required: u64) -> bool {
-    available_space(path).map_or(false, |avail| avail >= required)
+    available_space(path).is_ok_and(|avail| avail >= required)
 }
 
 pub fn check_with_margin(path: &Path, required: u64, margin_mb: Option<u64>) -> Result<()> {
@@ -68,22 +73,25 @@ pub fn total_space(path: &Path) -> Result<u64> {
     {
         use std::os::unix::ffi::OsStrExt;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ret = unsafe {
-            libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat)
-        };
+        let ret =
+            unsafe { libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat) };
         if ret != 0 {
-            return Err(Aria2Error::Fatal(FatalError::Config(
-                format!("statvfs failed: {}", std::io::Error::last_os_error())
-            )));
+            return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                "statvfs failed: {}",
+                std::io::Error::last_os_error()
+            ))));
         }
         Ok(stat.f_blocks as u64 * stat.f_frsize as u64)
     }
 
     #[cfg(target_family = "windows")]
     {
-        std::fs::metadata(path)
-            .map(|_| u64::MAX)
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("Failed to get disk space: {}", e))))
+        std::fs::metadata(path).map(|_| u64::MAX).map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "Failed to get disk space: {}",
+                e
+            )))
+        })
     }
 
     #[cfg(all(not(target_family = "unix"), not(target_family = "windows")))]

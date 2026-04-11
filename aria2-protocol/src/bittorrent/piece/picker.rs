@@ -1,16 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PieceSelectionStrategy {
+    #[default]
     RarestFirst,
     Sequential,
     Random,
-}
-
-impl Default for PieceSelectionStrategy {
-    fn default() -> Self {
-        PieceSelectionStrategy::RarestFirst
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +76,7 @@ impl PiecePicker {
     pub fn add_peer_piece(&mut self, peer_id: u32, piece_index: u32) {
         self.peer_availability
             .entry(peer_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(piece_index);
         self.update_frequencies();
     }
@@ -95,7 +90,7 @@ impl PiecePicker {
         for piece in &mut self.pieces {
             piece.frequency = 0;
         }
-        for (_, piece_set) in &self.peer_availability {
+        for piece_set in self.peer_availability.values() {
             for &idx in piece_set {
                 if (idx as usize) < self.pieces.len() {
                     self.pieces[idx as usize].frequency += 1;

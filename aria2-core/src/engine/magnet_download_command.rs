@@ -84,12 +84,12 @@ impl Command for MagnetDownloadCommand {
             ml.display_name
         );
 
-        if let Some(parent) = self.output_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
-                })?;
-            }
+        if let Some(parent) = self.output_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("mkdir failed: {}", e)))
+            })?;
         }
 
         let enable_dht = { self.group.read().await.options().enable_dht };

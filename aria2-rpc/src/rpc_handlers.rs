@@ -32,6 +32,7 @@ use base64::Engine;
 ///     })
 /// }
 /// ```
+#[allow(unused_macros)]
 macro_rules! handle_gid_operation {
     ($self:expr, $req:expr, $operation:block) => {
         {
@@ -49,10 +50,6 @@ macro_rules! handle_gid_operation {
         }
     };
 }
-
-// Make the macro available to tests but prevent it from leaking outside this module
-#[cfg(test)]
-pub(crate) use handle_gid_operation;
 
 impl RpcEngine {
     // =========================================================================

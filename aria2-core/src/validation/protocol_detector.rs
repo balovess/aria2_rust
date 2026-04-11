@@ -162,9 +162,10 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
         });
     }
 
-    Err(Aria2Error::Fatal(FatalError::Config(
-        format!("Cannot detect input type for: {}", trimmed).into(),
-    )))
+    Err(Aria2Error::Fatal(FatalError::Config(format!(
+        "Cannot detect input type for: {}",
+        trimmed
+    ))))
 }
 
 #[cfg(test)]

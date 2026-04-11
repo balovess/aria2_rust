@@ -171,7 +171,7 @@ impl PieceInfo {
         if self.length == 0 || file_size == 0 {
             return 0;
         }
-        ((file_size + self.length as u64 - 1) / self.length as u64) as usize
+        file_size.div_ceil(self.length as u64) as usize
     }
 
     pub fn piece_count(&self) -> usize {
@@ -256,7 +256,7 @@ fn find_attr(attrs: &[(String, String)], key: &str) -> String {
 
 impl MetalinkDocument {
     pub fn parse(data: &[u8]) -> Result<Self, String> {
-        use quick_xml::{events::Event, Reader};
+        use quick_xml::{Reader, events::Event};
 
         let mut reader = Reader::from_reader(data);
 
@@ -330,12 +330,11 @@ impl MetalinkDocument {
                             }
                         }
                         "hash" => {
-                            if let Some(ref mut f) = current_file {
-                                if let Some(algo) =
+                            if let Some(ref mut f) = current_file
+                                && let Some(algo) =
                                     HashAlgorithm::from_str(&find_attr(&pending_attrs, "type"))
-                                {
-                                    f.hashes.push(HashEntry::new(algo, &text_buf));
-                                }
+                            {
+                                f.hashes.push(HashEntry::new(algo, &text_buf));
                             }
                         }
                         "url" => {

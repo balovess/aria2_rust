@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
@@ -61,7 +61,7 @@ impl AdaptiveUriSelector {
         hosts.iter().find(|(_, host)| {
             self.stat_man
                 .find_stat(host)
-                .map_or(true, |s| s.get_counter() == 0)
+                .is_none_or(|s| s.get_counter() == 0)
         })
     }
 
@@ -141,7 +141,7 @@ impl AdaptiveUriSelector {
             .filter(|(_, host)| {
                 self.stat_man
                     .find_stat(host)
-                    .map_or(false, |s| s.get_counter() > 0)
+                    .is_some_and(|s| s.get_counter() > 0)
             })
             .count()
     }
@@ -319,7 +319,7 @@ mod tests {
         let sb = sel.stat_man.find_stat("b.com").unwrap();
         sb.increment_counter();
 
-        let r2 = sel.select(&uris, &[]).unwrap();
+        let _r2 = sel.select(&uris, &[]).unwrap();
 
         assert!(
             sel.stat_man.find_stat("a.com").is_some() || sel.stat_man.find_stat("b.com").is_some(),

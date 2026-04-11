@@ -246,7 +246,7 @@ fn format_http_date(epoch: i64) -> String {
     let mut y = 1970u32;
     let mut remaining = days_since_epoch as u32;
     loop {
-        let leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+        let leap = y.is_multiple_of(4) && !y.is_multiple_of(100) || y.is_multiple_of(400);
         let days_in_year = if leap { 366 } else { 365 };
         if remaining < days_in_year {
             break;
@@ -257,11 +257,12 @@ fn format_http_date(epoch: i64) -> String {
     let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut m = 0u32;
     while m < 12 {
-        let dim = if m == 1 && ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
-            29
-        } else {
-            mdays[m as usize]
-        };
+        let dim =
+            if m == 1 && (y.is_multiple_of(4) && !y.is_multiple_of(100) || y.is_multiple_of(400)) {
+                29
+            } else {
+                mdays[m as usize]
+            };
         if remaining < dim {
             break;
         }
@@ -297,7 +298,7 @@ fn parse_http_date(s: &str) -> Option<i64> {
         return None;
     }
     let _mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 11, 30, 31];
-    let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let leap = year.is_multiple_of(4) && !year.is_multiple_of(100) || year.is_multiple_of(400);
     let feb_days = if leap { 29 } else { 28 };
     let dim = [31, feb_days, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let total_days = (0..year)

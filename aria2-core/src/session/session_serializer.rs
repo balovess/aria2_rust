@@ -36,16 +36,12 @@
 //! ```rust,no_run
 //! use aria2_core::session::session_serializer::{load_from_file, save_to_file};
 //! use std::path::Path;
-//! use std::sync::Arc;
-//! use tokio::sync::RwLock;
 //!
-//! // Load sessions from file
-//! let path = Path::new("aria2.session");
-//! let entries = load_from_file(path).await.unwrap();
-//!
-//! // Save sessions (requires RequestGroup list)
-//! // let groups: Vec<Arc<RwLock<RequestGroup>>> = ...;
-//! // save_to_file(path, &groups).await.unwrap();
+//! #[tokio::main]
+//! async fn main() {
+//!     let path = Path::new("aria2.session");
+//!     let _entries = load_from_file(path).await.unwrap();
+//! }
 //! ```
 
 use std::path::Path;
@@ -57,7 +53,7 @@ use crate::request::request_group::{DownloadStatus, RequestGroup};
 
 // Re-export core types from session_entry module for backward compatibility
 pub use super::session_entry::{
-    decode_hex, download_options_to_map, escape_uri, unescape_uri, SessionEntry,
+    SessionEntry, decode_hex, download_options_to_map, escape_uri, unescape_uri,
 };
 
 /// Converts a RequestGroup to a SessionEntry for serialization
@@ -177,9 +173,11 @@ pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
 /// use std::sync::Arc;
 /// use tokio::sync::RwLock;
 ///
-/// // let groups: Vec<Arc<RwLock<RequestGroup>>> = ...;
-/// let content = serialize_groups(&groups).await.unwrap();
-/// println!("Serialized {} groups", content.matches('\n').count());
+/// #[tokio::main]
+/// async fn main() {
+///     let groups: Vec<Arc<RwLock<aria2_core::request::request_group::RequestGroup>>> = vec![];
+///     let _content = serialize_groups(&groups).await.unwrap();
+/// }
 /// ```
 pub async fn serialize_groups(groups: &[Arc<RwLock<RequestGroup>>]) -> Result<String> {
     let mut output = String::new();
@@ -312,18 +310,20 @@ pub fn deserialize(text: &str) -> Result<Vec<SessionEntry>> {
 /// use aria2_core::session::session_serializer::load_from_file;
 /// use std::path::Path;
 ///
-/// let path = Path::new("aria2.session");
-/// let entries = load_from_file(path).await.unwrap();
-/// println!("Loaded {} session entries", entries.len());
+/// #[tokio::main]
+/// async fn main() {
+///     let path = Path::new("aria2.session");
+///     let _entries = load_from_file(path).await.unwrap();
+/// }
 /// ```
 pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| Aria2Error::Io(format!(
+    let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+        Aria2Error::Io(format!(
             "Failed to read session file {}: {}",
             path.display(),
             e
-        )))?;
+        ))
+    })?;
 
     deserialize(&content)
 }
@@ -363,33 +363,32 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 /// use std::sync::Arc;
 /// use tokio::sync::RwLock;
 ///
-/// let path = Path::new("aria2.session");
-/// // let groups: Vec<Arc<RwLock<RequestGroup>>> = ...;
-/// save_to_file(path, &groups).await.unwrap();
+/// #[tokio::main]
+/// async fn main() {
+///     let path = Path::new("aria2.session");
+///     let groups: Vec<Arc<RwLock<aria2_core::request::request_group::RequestGroup>>> = vec![];
+///     save_to_file(path, &groups).await.unwrap();
+/// }
 /// ```
 pub async fn save_to_file(path: &Path, groups: &[Arc<RwLock<RequestGroup>>]) -> Result<()> {
     let content = serialize_groups(groups).await?;
     let tmp_path = path.with_extension("sess.tmp");
 
-    tokio::fs::write(&tmp_path, &content)
-        .await
-        .map_err(|e| {
-            Aria2Error::Io(format!(
-                "Failed to write session temp file {}: {}",
-                tmp_path.display(),
-                e
-            ))
-        })?;
+    tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
+        Aria2Error::Io(format!(
+            "Failed to write session temp file {}: {}",
+            tmp_path.display(),
+            e
+        ))
+    })?;
 
-    tokio::fs::rename(&tmp_path, path)
-        .await
-        .map_err(|e| {
-            Aria2Error::Io(format!(
-                "Failed to rename session file {}: {}",
-                path.display(),
-                e
-            ))
-        })
+    tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
+        Aria2Error::Io(format!(
+            "Failed to rename session file {}: {}",
+            path.display(),
+            e
+        ))
+    })
 }
 
 /// Saves pre-serialized SessionEntry list directly to file (bypasses RequestGroup conversion)
@@ -423,16 +422,16 @@ pub async fn save_to_file(path: &Path, groups: &[Arc<RwLock<RequestGroup>>]) -> 
 /// use aria2_core::session::session_serializer::save_to_file_with_entries;
 /// use std::path::Path;
 ///
-/// let path = Path::new("custom.session");
-/// let entries = vec![
-///     SessionEntry::new(1, vec!["http://example.com/f".to_string()]),
-/// ];
-/// save_to_file_with_entries(path, &entries).await.unwrap();
+/// #[tokio::main]
+/// async fn main() {
+///     let path = Path::new("custom.session");
+///     let entries = vec![
+///         SessionEntry::new(1, vec!["http://example.com/f".to_string()]),
+///     ];
+///     save_to_file_with_entries(path, &entries).await.unwrap();
+/// }
 /// ```
-pub async fn save_to_file_with_entries(
-    path: &Path,
-    entries: &[SessionEntry],
-) -> Result<()> {
+pub async fn save_to_file_with_entries(path: &Path, entries: &[SessionEntry]) -> Result<()> {
     let mut content = String::new();
     for entry in entries {
         content.push_str(&entry.serialize());
@@ -441,25 +440,21 @@ pub async fn save_to_file_with_entries(
 
     let tmp_path = path.with_extension("sess.tmp");
 
-    tokio::fs::write(&tmp_path, &content)
-        .await
-        .map_err(|e| {
-            Aria2Error::Io(format!(
-                "Failed to write session temp file {}: {}",
-                tmp_path.display(),
-                e
-            ))
-        })?;
+    tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
+        Aria2Error::Io(format!(
+            "Failed to write session temp file {}: {}",
+            tmp_path.display(),
+            e
+        ))
+    })?;
 
-    tokio::fs::rename(&tmp_path, path)
-        .await
-        .map_err(|e| {
-            Aria2Error::Io(format!(
-                "Failed to rename session file {}: {}",
-                path.display(),
-                e
-            ))
-        })
+    tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
+        Aria2Error::Io(format!(
+            "Failed to rename session file {}: {}",
+            path.display(),
+            e
+        ))
+    })
 }
 
 // ==================== Unit Tests ====================
@@ -522,7 +517,11 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
 "#;
 
         let entries = deserialize(input).unwrap();
-        assert_eq!(entries.len(), 3, "Should parse 3 entries from mixed content");
+        assert_eq!(
+            entries.len(),
+            3,
+            "Should parse 3 entries from mixed content"
+        );
 
         // Verify first entry
         assert_eq!(entries[0].gid, 0xabc123def456);
@@ -536,7 +535,11 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
         assert_eq!(entries[1].options.get("out").unwrap(), "distro.iso");
 
         // Verify third entry (multiple mirrors)
-        assert_eq!(entries[2].uris.len(), 3, "Third entry should have 3 mirror URIs");
+        assert_eq!(
+            entries[2].uris.len(),
+            3,
+            "Third entry should have 3 mirror URIs"
+        );
         assert_eq!(
             entries[2].options.get("max-connection-per-server").unwrap(),
             "4"
@@ -546,11 +549,22 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
     #[test]
     fn test_deserialize_empty_and_whitespace_only() {
         // Test edge cases: completely empty or whitespace-only input
-        assert!(deserialize("").unwrap().is_empty(), "Empty string should yield no entries");
-        assert!(deserialize("\n\n\n").unwrap().is_empty(), "Only newlines should yield no entries");
-        assert!(deserialize("   \n  \n   ").unwrap().is_empty(), "Whitespace-only should yield no entries");
         assert!(
-            deserialize("# Just a comment\n# Another comment\n").unwrap().is_empty(),
+            deserialize("").unwrap().is_empty(),
+            "Empty string should yield no entries"
+        );
+        assert!(
+            deserialize("\n\n\n").unwrap().is_empty(),
+            "Only newlines should yield no entries"
+        );
+        assert!(
+            deserialize("   \n  \n   ").unwrap().is_empty(),
+            "Whitespace-only should yield no entries"
+        );
+        assert!(
+            deserialize("# Just a comment\n# Another comment\n")
+                .unwrap()
+                .is_empty(),
             "Comments-only should yield no entries"
         );
     }
@@ -572,14 +586,8 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
         assert_eq!(entries[0].total_length, 1000);
 
         // Unknown keys stored in options
-        assert_eq!(
-            entries[0].options.get("CUSTOM_OPTION").unwrap(),
-            "value123"
-        );
-        assert_eq!(
-            entries[0].options.get("FUTURE_FEATURE").unwrap(),
-            "enabled"
-        );
+        assert_eq!(entries[0].options.get("CUSTOM_OPTION").unwrap(), "value123");
+        assert_eq!(entries[0].options.get("FUTURE_FEATURE").unwrap(), "enabled");
     }
 
     #[test]
@@ -634,7 +642,10 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
         // Verify first entry details
         assert_eq!(restored_entries[0].gid, 0xABCDEF01);
         assert_eq!(restored_entries[0].uris.len(), 3);
-        assert_eq!(restored_entries[0].uris[0], "http://primary.example.com/large-file.bin");
+        assert_eq!(
+            restored_entries[0].uris[0],
+            "http://primary.example.com/large-file.bin"
+        );
         assert_eq!(restored_entries[0].options.get("split").unwrap(), "16");
         assert!(!restored_entries[0].paused);
 

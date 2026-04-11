@@ -61,7 +61,7 @@ impl ConfigParser {
 
     pub fn set(&mut self, name: impl Into<String>, value: OptionValue) {
         let key = name.into();
-        if let Some(def) = self.registry.get(&key.as_str()) {
+        if let Some(def) = self.registry.get(key.as_str()) {
             match def.parse_value(&value.to_string()) {
                 Ok(v) => {
                     self.options.insert(key, v);
@@ -79,7 +79,7 @@ impl ConfigParser {
 
     pub fn set_raw(&mut self, name: impl Into<String>, value: impl Into<String>) {
         let key = name.into();
-        if let Some(def) = self.registry.get(&key.as_str()) {
+        if let Some(def) = self.registry.get(key.as_str()) {
             match def.parse_value(&value.into()) {
                 Ok(v) => {
                     self.options.insert(key, v);
@@ -116,8 +116,7 @@ impl ConfigParser {
         let mut i = 0;
         while i < args.len() {
             let arg = &args[i];
-            if arg.starts_with("--") {
-                let opt_name = &arg[2..];
+            if let Some(opt_name) = arg.strip_prefix("--") {
                 if opt_name.starts_with("no-") && opt_name.len() > 3 {
                     let real_name = &opt_name[3..];
                     self.set(real_name, OptionValue::Bool(false));
@@ -215,7 +214,7 @@ impl ConfigParser {
         let conf_path = self
             .get_str("conf-path")
             .map(|s| s.to_string())
-            .unwrap_or_else(|| String::new());
+            .unwrap_or_default();
         if !conf_path.is_empty() && std::path::Path::new(&conf_path).exists() {
             self.parse_file(&conf_path);
         }

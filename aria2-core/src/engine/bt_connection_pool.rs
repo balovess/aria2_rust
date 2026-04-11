@@ -14,11 +14,19 @@ pub struct ReadyConnection {
 
 impl ReadyConnection {
     pub fn new(stream: TcpStream, addr: SocketAddr) -> Self {
-        Self { stream, addr, ready_at: Instant::now() }
+        Self {
+            stream,
+            addr,
+            ready_at: Instant::now(),
+        }
     }
 
-    pub fn age(&self) -> Duration { self.ready_at.elapsed() }
-    pub fn is_stale(&self, max_age: Duration) -> bool { self.age() > max_age }
+    pub fn age(&self) -> Duration {
+        self.ready_at.elapsed()
+    }
+    pub fn is_stale(&self, max_age: Duration) -> bool {
+        self.age() > max_age
+    }
 }
 
 pub struct BtConnectionPool {
@@ -38,31 +46,53 @@ impl BtConnectionPool {
         }
     }
 
-    pub fn with_max_idle(mut self, n: usize) -> Self { self.max_idle = n; self }
-    pub fn with_connect_timeout(mut self, d: Duration) -> Self { self.connect_timeout = d; self }
-    pub fn with_stale_threshold(mut self, d: Duration) -> Self { self.stale_threshold = d; self }
+    pub fn with_max_idle(mut self, n: usize) -> Self {
+        self.max_idle = n;
+        self
+    }
+    pub fn with_connect_timeout(mut self, d: Duration) -> Self {
+        self.connect_timeout = d;
+        self
+    }
+    pub fn with_stale_threshold(mut self, d: Duration) -> Self {
+        self.stale_threshold = d;
+        self
+    }
 
     pub async fn prewarm(&mut self, addr: SocketAddr) -> Result<bool, String> {
         if self.contains_addr(&addr) {
             return Ok(false);
         }
-        
+
         match tokio::time::timeout(self.connect_timeout, TcpStream::connect(addr)).await {
             Ok(Ok(stream)) => {
                 self.evict_if_full();
-                self.connections.push_back(ReadyConnection::new(stream, addr));
-                debug!("[ConnPool] Prewarmed connection to {} (pool={}/{})", addr, self.connections.len(), self.max_idle);
+                self.connections
+                    .push_back(ReadyConnection::new(stream, addr));
+                debug!(
+                    "[ConnPool] Prewarmed connection to {} (pool={}/{})",
+                    addr,
+                    self.connections.len(),
+                    self.max_idle
+                );
                 Ok(true)
             }
             Ok(Err(e)) => Err(format!("Connect to {} failed: {}", addr, e)),
-            Err(_) => Err(format!("Connect to {} timed out after {:?}", addr, self.connect_timeout)),
+            Err(_) => Err(format!(
+                "Connect to {} timed out after {:?}",
+                addr, self.connect_timeout
+            )),
         }
     }
 
     pub fn try_take(&mut self, addr: &SocketAddr) -> Option<ReadyConnection> {
         let pos = self.connections.iter().position(|c| &c.addr == addr)?;
         let conn = self.connections.remove(pos).unwrap();
-        debug!("[ConnPool] Took connection to {} (pool={})", addr, self.connections.len());
+        debug!(
+            "[ConnPool] Took connection to {} (pool={})",
+            addr,
+            self.connections.len()
+        );
         Some(conn)
     }
 
@@ -79,19 +109,28 @@ impl BtConnectionPool {
         self.connections.iter().any(|c| &c.addr == addr)
     }
 
-    pub fn len(&self) -> usize { self.connections.len() }
-    pub fn is_empty(&self) -> bool { self.connections.is_empty() }
+    pub fn len(&self) -> usize {
+        self.connections.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.connections.is_empty()
+    }
 
     pub async fn evict_stale(&mut self) -> usize {
         let before = self.connections.len();
-        self.connections.retain(|c| !c.is_stale(self.stale_threshold));
+        self.connections
+            .retain(|c| !c.is_stale(self.stale_threshold));
         before - self.connections.len()
     }
 
     fn evict_if_full(&mut self) {
         while self.connections.len() >= self.max_idle {
             if let Some(old) = self.connections.pop_front() {
-                debug!("[ConnPool] Evicting oldest connection to {} (age={:?})", old.addr, old.age());
+                debug!(
+                    "[ConnPool] Evicting oldest connection to {} (age={:?})",
+                    old.addr,
+                    old.age()
+                );
             } else {
                 break;
             }
@@ -100,7 +139,9 @@ impl BtConnectionPool {
 }
 
 impl Default for BtConnectionPool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -165,7 +206,7 @@ mod tests {
     async fn test_eviction_on_max_idle() {
         let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr1 = listener1.local_addr().unwrap();
-        
+
         let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr2 = listener2.local_addr().unwrap();
 

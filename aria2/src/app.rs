@@ -17,8 +17,8 @@ use aria2_core::init_logging;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::active_session::ActiveSessionManager;
-use aria2_core::validation::protocol_detector::{detect, DetectedInput, InputType};
-use tracing::{debug, error, info, warn, Level};
+use aria2_core::validation::protocol_detector::{DetectedInput, InputType, detect};
+use tracing::{Level, debug, error, info, warn};
 
 /// Top-level application runtime for aria2-rust CLI.
 ///
@@ -312,10 +312,7 @@ impl App {
 
             info!(
                 "恢复下载任务: GID={:x}, URIs={:?}, 进度={}/{}",
-                entry.gid,
-                entry.uris,
-                entry.completed_length,
-                entry.total_length
+                entry.gid, entry.uris, entry.completed_length, entry.total_length
             );
 
             // 通过 RequestGroupMan 添加组
@@ -346,7 +343,11 @@ impl App {
             }
         }
 
-        info!("会话恢复完成: 共 {} 个条目, 恢复 {} 个任务", entries.len(), restored_count);
+        info!(
+            "会话恢复完成: 共 {} 个条目, 恢复 {} 个任务",
+            entries.len(),
+            restored_count
+        );
         Ok(restored_count)
     }
 
@@ -375,10 +376,7 @@ impl App {
             .unwrap_or(60)
             .max(1); // 至少 1 秒
 
-        let mgr = ActiveSessionManager::new(
-            session_path,
-            Duration::from_secs(interval as u64),
-        );
+        let mgr = ActiveSessionManager::new(session_path, Duration::from_secs(interval as u64));
 
         // 获取所有活动组
         let man = self.request_man.read().await;
@@ -402,7 +400,9 @@ impl App {
     }
 
     /// 将 SessionEntry 的 options HashMap 映射回 DownloadOptions
-    fn map_entry_to_download_options(options: &std::collections::HashMap<String, String>) -> DownloadOptions {
+    fn map_entry_to_download_options(
+        options: &std::collections::HashMap<String, String>,
+    ) -> DownloadOptions {
         DownloadOptions {
             split: options.get("split").and_then(|v| v.parse::<u16>().ok()),
             max_connection_per_server: options
@@ -417,7 +417,9 @@ impl App {
             dir: options.get("dir").cloned(),
             out: options.get("out").cloned(),
             seed_time: options.get("seed-time").and_then(|v| v.parse::<u64>().ok()),
-            seed_ratio: options.get("seed-ratio").and_then(|v| v.parse::<f64>().ok()),
+            seed_ratio: options
+                .get("seed-ratio")
+                .and_then(|v| v.parse::<f64>().ok()),
             checksum: options.get("checksum").and_then(|v| {
                 if let Some((algo, val)) = v.split_once('=') {
                     Some((algo.trim().to_string(), val.trim().to_string()))
@@ -483,33 +485,27 @@ impl App {
 
         let dir = self.get_opt_str("dir").await;
         let out = self.get_opt_str("out").await;
-        let dl_limit = self.get_opt_i64("max-download-limit").await.and_then(|v| {
-            if v > 0 {
-                Some(v as u64)
-            } else {
-                None
-            }
-        });
-        let ul_limit = self.get_opt_i64("max-upload-limit").await.and_then(|v| {
-            if v > 0 {
-                Some(v as u64)
-            } else {
-                None
-            }
-        });
+        let dl_limit = self
+            .get_opt_i64("max-download-limit")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let ul_limit = self
+            .get_opt_i64("max-upload-limit")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
 
-        let split =
-            self.get_opt_i64("split")
-                .await
-                .and_then(|v| if v > 0 { Some(v as u16) } else { None });
+        let split = self
+            .get_opt_i64("split")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u16) } else { None });
         let max_conn = self
             .get_opt_i64("max-connection-per-server")
             .await
             .and_then(|v| if v > 0 { Some(v as u16) } else { None });
-        let seed_time =
-            self.get_opt_i64("seed-time")
-                .await
-                .and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let seed_time = self
+            .get_opt_i64("seed-time")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
         let seed_ratio = self
             .get_opt_str("seed-ratio")
             .await
@@ -541,13 +537,10 @@ impl App {
                 .await
                 .unwrap_or(false),
             enable_dht: self.get_opt_bool("enable-dht").await.unwrap_or(true),
-            dht_listen_port: self.get_opt_i64("dht-listen-port").await.and_then(|v| {
-                if v > 0 {
-                    Some(v as u16)
-                } else {
-                    None
-                }
-            }),
+            dht_listen_port: self
+                .get_opt_i64("dht-listen-port")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u16) } else { None }),
             enable_public_trackers: self
                 .get_opt_bool("enable-public-trackers")
                 .await
@@ -743,7 +736,10 @@ impl App {
         let has_restored_tasks = man.count().await > 0;
 
         if !has_restored_tasks && self.detected_inputs.is_empty() {
-            eprintln!("{}", "错误: 请提供下载URI或torrent文件路径，或使用 --input-file 恢复之前的下载".red());
+            eprintln!(
+                "{}",
+                "错误: 请提供下载URI或torrent文件路径，或使用 --input-file 恢复之前的下载".red()
+            );
             return 1;
         }
 
@@ -1104,12 +1100,9 @@ http://example.com/paused4.iso
             )
             .await
             .expect("设置 save-session 失败");
-            conf.set_global_option(
-                "save-session-interval",
-                OptionValue::Str("60".to_string()),
-            )
-            .await
-            .expect("设置 save-session-interval 失败");
+            conf.set_global_option("save-session-interval", OptionValue::Str("60".to_string()))
+                .await
+                .expect("设置 save-session-interval 失败");
         }
 
         // 添加一些下载任务到 RequestGroupMan
@@ -1127,12 +1120,9 @@ http://example.com/paused4.iso
             .await
             .expect("添加组 1 失败");
 
-            man.add_group(
-                vec!["http://mirror.com/file2.iso".to_string()],
-                opts,
-            )
-            .await
-            .expect("添加组 2 失败");
+            man.add_group(vec!["http://mirror.com/file2.iso".to_string()], opts)
+                .await
+                .expect("添加组 2 失败");
         }
 
         // 调用关闭保存
@@ -1141,21 +1131,11 @@ http://example.com/paused4.iso
         // 验证结果
         assert!(result.is_ok(), "保存应成功");
         let saved_count = result.expect("应有返回值");
-        assert!(
-            saved_count.is_some(),
-            "配置了 save-session 时应返回 Some"
-        );
-        assert_eq!(
-            saved_count.unwrap(),
-            2,
-            "应保存 2 个活动任务"
-        );
+        assert!(saved_count.is_some(), "配置了 save-session 时应返回 Some");
+        assert_eq!(saved_count.unwrap(), 2, "应保存 2 个活动任务");
 
         // 验证文件已创建且包含正确的 URI
-        assert!(
-            save_file.exists(),
-            "保存后会话文件应存在"
-        );
+        assert!(save_file.exists(), "保存后会话文件应存在");
 
         let content = tokio::fs::read_to_string(&save_file)
             .await
@@ -1202,10 +1182,21 @@ http://example.com/paused4.iso
         let opts = App::map_entry_to_download_options(&options);
 
         assert_eq!(opts.split, Some(8), "split 应正确映射");
-        assert_eq!(opts.dir, Some("/tmp/downloads".to_string()), "dir 应正确映射");
+        assert_eq!(
+            opts.dir,
+            Some("/tmp/downloads".to_string()),
+            "dir 应正确映射"
+        );
         assert_eq!(opts.out, Some("output.bin".to_string()), "out 应正确映射");
-        assert_eq!(opts.max_download_limit, Some(102400), "max-download-limit 应正确映射");
-        assert_eq!(opts.bt_force_encrypt, true, "bt-force-encrypt=true 应正确映射");
+        assert_eq!(
+            opts.max_download_limit,
+            Some(102400),
+            "max-download-limit 应正确映射"
+        );
+        assert_eq!(
+            opts.bt_force_encrypt, true,
+            "bt-force-encrypt=true 应正确映射"
+        );
         assert_eq!(opts.enable_dht, false, "enable-dht=false 应正确映射");
     }
 
@@ -1291,10 +1282,7 @@ http://example.com/paused4.iso
 
         let group = groups[0].read().await;
         let bitfield = group.bt_bitfield.read().await;
-        assert!(
-            bitfield.is_some(),
-            "BT bitfield 应被保留"
-        );
+        assert!(bitfield.is_some(), "BT bitfield 应被保留");
         assert_eq!(
             bitfield.as_ref().unwrap(),
             &vec![0xFF, 0xAA, 0xBB],

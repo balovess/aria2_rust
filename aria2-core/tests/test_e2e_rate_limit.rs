@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-fn create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
+fn _create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
     let options = DownloadOptions {
         split: None,
         max_connection_per_server: None,

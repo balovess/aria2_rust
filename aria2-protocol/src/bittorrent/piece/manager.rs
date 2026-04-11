@@ -24,7 +24,7 @@ impl PieceManager {
 
     pub fn piece_size(&self, index: u32) -> u32 {
         if index >= self.num_pieces - 1 {
-            let remainder = (self.total_size % self.piece_length as u64) as u64;
+            let remainder = self.total_size % self.piece_length as u64;
             if remainder > 0 {
                 remainder as u32
             } else {
@@ -57,7 +57,7 @@ impl PieceManager {
             return false;
         }
         let hash = Sha1::digest(data);
-        hash.as_slice() == &self.piece_hashes[index as usize]
+        hash.as_slice() == self.piece_hashes[index as usize]
     }
 
     pub fn completed_pieces(&self) -> u32 {

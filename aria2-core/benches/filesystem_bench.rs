@@ -1,5 +1,5 @@
 use base64::Engine;
-use criterion::{black_box, criterion_group, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
 use std::io::Write;
 use tempfile::TempDir;
 

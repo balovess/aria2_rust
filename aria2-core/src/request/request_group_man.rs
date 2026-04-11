@@ -177,3 +177,9 @@ impl RequestGroupMan {
         Ok(to_remove.len())
     }
 }
+
+impl Default for RequestGroupMan {
+    fn default() -> Self {
+        Self::new()
+    }
+}

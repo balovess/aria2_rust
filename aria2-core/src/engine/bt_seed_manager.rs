@@ -5,21 +5,12 @@ use tracing::{debug, info, warn};
 use crate::error::Result;
 
 use super::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
-use super::choking_algorithm::{ChokingAlgorithm, ChokeAction};
+use super::choking_algorithm::{ChokeAction, ChokingAlgorithm};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SeedExitCondition {
     pub seed_time: Option<Duration>,
     pub seed_ratio: Option<f64>,
-}
-
-impl Default for SeedExitCondition {
-    fn default() -> Self {
-        Self {
-            seed_time: None,
-            seed_ratio: None,
-        }
-    }
 }
 
 impl SeedExitCondition {
@@ -89,7 +80,14 @@ impl BtSeedManager {
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
     ) -> Self {
-        Self::new_with_choking_algo(connections, piece_data, config, exit_condition, total_downloaded, None)
+        Self::new_with_choking_algo(
+            connections,
+            piece_data,
+            config,
+            exit_condition,
+            total_downloaded,
+            None,
+        )
     }
 
     /// Create a new BtSeedManager with an optional ChokingAlgorithm.
@@ -154,19 +152,21 @@ impl BtSeedManager {
                 for action in actions {
                     match action {
                         ChokeAction::Unchoke(idx) => {
-                            if let Some(session) = self.sessions.get_mut(idx) {
-                                if !session.is_dead() && session.is_peer_choked() {
-                                    debug!("ChokingAlgo: Unchoke peer #{}", idx);
-                                    session.unchoke_peer().await.ok();
-                                }
+                            if let Some(session) = self.sessions.get_mut(idx)
+                                && !session.is_dead()
+                                && session.is_peer_choked()
+                            {
+                                debug!("ChokingAlgo: Unchoke peer #{}", idx);
+                                session.unchoke_peer().await.ok();
                             }
                         }
                         ChokeAction::Choke(idx) => {
-                            if let Some(session) = self.sessions.get_mut(idx) {
-                                if !session.is_dead() && !session.is_peer_choked() {
-                                    debug!("ChokingAlgo: Choke peer #{}", idx);
-                                    session.choke_peer().await.ok();
-                                }
+                            if let Some(session) = self.sessions.get_mut(idx)
+                                && !session.is_dead()
+                                && !session.is_peer_choked()
+                            {
+                                debug!("ChokingAlgo: Choke peer #{}", idx);
+                                session.choke_peer().await.ok();
                             }
                         }
                         ChokeAction::NoChange(_) => {}
@@ -229,18 +229,18 @@ impl BtSeedManager {
     pub fn should_exit(&self) -> bool {
         let elapsed = self.seeding_start_time.elapsed();
 
-        if let Some(max_time) = self.exit_condition.seed_time {
-            if elapsed >= max_time {
-                return true;
-            }
+        if let Some(max_time) = self.exit_condition.seed_time
+            && elapsed >= max_time
+        {
+            return true;
         }
 
-        if let Some(ratio) = self.exit_condition.seed_ratio {
-            if self.total_downloaded > 0 {
-                let actual_ratio = self.total_uploaded as f64 / self.total_downloaded as f64;
-                if actual_ratio >= ratio {
-                    return true;
-                }
+        if let Some(ratio) = self.exit_condition.seed_ratio
+            && self.total_downloaded > 0
+        {
+            let actual_ratio = self.total_uploaded as f64 / self.total_downloaded as f64;
+            if actual_ratio >= ratio {
+                return true;
             }
         }
 
@@ -328,9 +328,8 @@ impl BtSeedManager {
 mod tests {
     use super::*;
     use crate::engine::bt_upload_session::InMemoryPieceProvider;
-    use crate::engine::choking_algorithm::{ChokingConfig, ChokeAction};
+    use crate::engine::choking_algorithm::{ChokeAction, ChokingConfig};
     use crate::engine::peer_stats::PeerStats;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_exit_condition_default_infinite() {
@@ -445,7 +444,12 @@ mod tests {
         algo.add_peer(PeerStats::new([0u8; 20], addr));
 
         let mut mgr = BtSeedManager::new_with_choking_algo(
-            conns, provider, config, exit_cond, downloaded, Some(algo),
+            conns,
+            provider,
+            config,
+            exit_cond,
+            downloaded,
+            Some(algo),
         );
         mgr.total_uploaded = uploaded;
         mgr
@@ -499,7 +503,8 @@ mod tests {
 
             // With max_upload_slots=2 and 1 peer, we expect:
             // - The peer should be unchoked (it's in top K)
-            let unchoke_count = actions.iter()
+            let unchoke_count = actions
+                .iter()
                 .filter(|a| matches!(a, ChokeAction::Unchoke(_)))
                 .count();
 
@@ -513,7 +518,6 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_new_with_none_algo() {
         // new() should produce None for choking_algo (backward compat)
-        use std::net::SocketAddr;
         let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
         let config = BtSeedingConfig::default();
         let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
@@ -525,7 +529,6 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_new_with_some_algo() {
         // new_with_choking_algo(Some(...)) should preserve it
-        use std::net::SocketAddr;
         let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
         let config = BtSeedingConfig::default();
         let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
@@ -534,7 +537,12 @@ mod tests {
         let algo = ChokingAlgorithm::new(choking_config);
 
         let mgr = BtSeedManager::new_with_choking_algo(
-            conns, provider, config, SeedExitCondition::infinite(), 0, Some(algo),
+            conns,
+            provider,
+            config,
+            SeedExitCondition::infinite(),
+            0,
+            Some(algo),
         );
         assert!(mgr.choking_algo.is_some());
         assert_eq!(mgr.choking_algo.unwrap().len(), 0); // No peers added yet

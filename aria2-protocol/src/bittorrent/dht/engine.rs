@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::time::sleep;
@@ -195,10 +195,10 @@ impl DhtEngine {
                     port,
                     token.as_str(),
                 );
-                if let Ok(data) = msg.encode() {
-                    if self.socket.send_to(node.addr, &data).await.is_ok() {
-                        announced += 1;
-                    }
+                if let Ok(data) = msg.encode()
+                    && self.socket.send_to(node.addr, &data).await.is_ok()
+                {
+                    announced += 1;
                 }
             }
         }
@@ -236,28 +236,22 @@ impl DhtEngine {
 
             result.nodes_queried += 1;
 
-            match self
+            if let Ok((n, _)) = self
                 .socket
                 .recv_with_timeout(&mut buf, self.config.query_timeout)
                 .await
             {
-                Ok((n, _)) => {
-                    if n == 0 {
-                        continue;
-                    }
-                    match DhtMessage::decode(&buf[..n]) {
-                        Ok(response) => {
-                            result
-                                .peers
-                                .extend(extract_compact_peers_from_response(&response));
-                            result
-                                .new_nodes
-                                .extend(extract_compact_nodes_from_response(&response));
-                        }
-                        Err(_) => {}
-                    }
+                if n == 0 {
+                    continue;
                 }
-                Err(_) => {}
+                if let Ok(response) = DhtMessage::decode(&buf[..n]) {
+                    result
+                        .peers
+                        .extend(extract_compact_peers_from_response(&response));
+                    result
+                        .new_nodes
+                        .extend(extract_compact_nodes_from_response(&response));
+                }
             }
         }
 

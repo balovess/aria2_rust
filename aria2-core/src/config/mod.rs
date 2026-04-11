@@ -186,7 +186,7 @@ impl ConfigManager {
             return Err(format!("unknown option '{}'", name));
         }
         let def = self.registry.get(name).unwrap();
-        let parsed = def.parse_value(&value.to_string()).map_err(|e| e)?;
+        let parsed = def.parse_value(&value.to_string())?;
         let old = self.global_opts.read().await.get(name).cloned();
         {
             let mut opts = self.global_opts.write().await;

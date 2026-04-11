@@ -6,18 +6,20 @@
 //! - 目录列表解析（Unix/Windows/MLSD 格式）
 //! - 断点续传 REST 命令
 //! - FTP 错误码处理
+#![allow(unused_imports)]
 
 use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
-use crate::ftp::connection::{FtpClient, FtpFileInfo, FtpMode, FtpResponse};
+use crate::ftp::connection::{FtpClient, FtpMode, FtpResponse};
 
 /// 创建模拟 FTP 服务器并在指定端口上监听
 ///
 /// 返回服务器的 SocketAddr 和一个 server handle
-async fn start_mock_ftp_server() -> std::result::Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
+async fn start_mock_ftp_server()
+-> std::result::Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
 
@@ -25,7 +27,10 @@ async fn start_mock_ftp_server() -> std::result::Result<(SocketAddr, tokio::task
         if let Ok((stream, _)) = listener.accept().await {
             let mut stream = BufReader::new(stream);
 
-            stream.write_all(b"220 Mock FTP Server Ready\r\n").await.ok();
+            stream
+                .write_all(b"220 Mock FTP Server Ready\r\n")
+                .await
+                .ok();
             stream.flush().await.ok();
 
             let mut line = String::new();
@@ -44,7 +49,10 @@ async fn start_mock_ftp_server() -> std::result::Result<(SocketAddr, tokio::task
                 } else if cmd.to_uppercase().starts_with("PASS ") {
                     "230 Login successful\r\n".to_string()
                 } else if cmd.to_uppercase() == "EPSV" {
-                    format!("229 Entering Extended Passive Mode (|||{}|)\r\n", addr.port() + 1)
+                    format!(
+                        "229 Entering Extended Passive Mode (|||{}|)\r\n",
+                        addr.port() + 1
+                    )
                 } else if cmd.to_uppercase() == "PASV" {
                     "227 Entering Passive Mode (127,0,0,1,195,123)\r\n".to_string()
                 } else if cmd.to_uppercase() == "TYPE I" {
@@ -65,7 +73,9 @@ async fn start_mock_ftp_server() -> std::result::Result<(SocketAddr, tokio::task
                     "150 Here comes the directory listing\r\n".to_string()
                 } else if cmd.to_uppercase() == "ABOR" {
                     "226 Abort successful\r\n".to_string()
-                } else if cmd.to_uppercase().starts_with("EPRT ") || cmd.to_uppercase().starts_with("PORT ") {
+                } else if cmd.to_uppercase().starts_with("EPRT ")
+                    || cmd.to_uppercase().starts_with("PORT ")
+                {
                     "200 Command successful\r\n".to_string()
                 } else {
                     format!("502 Command not implemented: {}\r\n", cmd)
@@ -93,7 +103,12 @@ async fn test_passive_mode_connection() -> Result<(), Box<dyn std::error::Error>
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
 
     // 测试连接和被动模式
-    let mut client = FtpClient::connect(server_addr.ip().to_string().as_str(), server_addr.port(), FtpMode::Passive).await?;
+    let mut client = FtpClient::connect(
+        server_addr.ip().to_string().as_str(),
+        server_addr.port(),
+        FtpMode::Passive,
+    )
+    .await?;
 
     // 测试登录
     client.login("anonymous", "test@test.com").await?;
@@ -121,7 +136,12 @@ async fn test_active_mode_connection() -> Result<(), Box<dyn std::error::Error>>
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
 
     // 使用主动模式连接
-    let mut client = FtpClient::connect(server_addr.ip().to_string().as_str(), server_addr.port(), FtpMode::Active).await?;
+    let mut client = FtpClient::connect(
+        server_addr.ip().to_string().as_str(),
+        server_addr.port(),
+        FtpMode::Active,
+    )
+    .await?;
 
     // 测试登录
     client.login("admin", "password123").await?;
@@ -144,7 +164,12 @@ async fn test_active_mode_connection() -> Result<(), Box<dyn std::error::Error>>
 async fn test_binary_type_setting() -> Result<(), Box<dyn std::error::Error>> {
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
 
-    let mut client = FtpClient::connect(server_addr.ip().to_string().as_str(), server_addr.port(), FtpMode::Passive).await?;
+    let mut client = FtpClient::connect(
+        server_addr.ip().to_string().as_str(),
+        server_addr.port(),
+        FtpMode::Passive,
+    )
+    .await?;
     client.login("user", "pass").await?;
 
     // 初始状态应该是 ASCII 模式（默认）
@@ -199,7 +224,10 @@ fn test_directory_listing_parse() {
     let link_info = FtpClient::parse_list_line(unix_link);
     assert!(link_info.is_some(), "应该能解析符号链接");
     let link = link_info.unwrap();
-    assert_eq!(link.name, "link.txt", "符号链接名应该是 'link.txt' 而不是目标");
+    assert_eq!(
+        link.name, "link.txt",
+        "符号链接名应该是 'link.txt' 而不是目标"
+    );
     assert!(!link.is_dir, "符号链接本身不应是目录");
     println!("✓ Unix 符号链接解析: {} -> (target stripped)", link.name);
 
@@ -291,7 +319,12 @@ async fn test_resume_download_rest_command() -> Result<(), Box<dyn std::error::E
 
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
 
-    let mut client = FtpClient::connect(server_addr.ip().to_string().as_str(), server_addr.port(), FtpMode::Passive).await?;
+    let mut client = FtpClient::connect(
+        server_addr.ip().to_string().as_str(),
+        server_addr.port(),
+        FtpMode::Passive,
+    )
+    .await?;
     client.login("user", "pass").await?;
     client.set_binary_mode(true).await?;
 

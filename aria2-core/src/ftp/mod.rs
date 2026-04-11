@@ -12,9 +12,4 @@ pub mod connection;
 #[cfg(test)]
 mod connection_tests;
 
-pub use connection::{
-    FtpClient,
-    FtpFileInfo,
-    FtpMode,
-    FtpResponse,
-};
+pub use connection::{FtpClient, FtpFileInfo, FtpMode, FtpResponse};

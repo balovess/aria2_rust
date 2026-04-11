@@ -15,7 +15,7 @@
 //!
 //! # Architecture
 //!
-//! ```
+//! ```text
 //! session_entry.rs (this file)
 //!   ├── SessionEntry struct definition
 //!   ├── Builder pattern methods (new, with_options, paused)
@@ -57,8 +57,6 @@ pub use crate::session::session_uri_utils::{decode_hex, escape_uri, unescape_uri
 
 use std::collections::HashMap;
 
-use crate::request::request_group::DownloadOptions;
-
 /// Represents a single download task in a session file
 ///
 /// This struct contains all information needed to resume a download task,
@@ -96,7 +94,6 @@ pub struct SessionEntry {
     pub paused: bool,
 
     // ==================== Progress & Status Fields ====================
-
     /// Total size of the download in bytes (0 if unknown)
     pub total_length: u64,
 
@@ -117,7 +114,6 @@ pub struct SessionEntry {
 
     // ==================== BitTorrent-Specific Fields ====================
     // These fields are only populated for BitTorrent downloads
-
     /// Completed piece bitmap encoded as hex string in file format
     /// None for non-BT downloads
     pub bitfield: Option<Vec<u8>>,
@@ -135,7 +131,6 @@ pub struct SessionEntry {
     pub info_hash_hex: Option<String>,
 
     // ==================== HTTP/FTP Resume Support ====================
-
     /// File offset where download should resume (for HTTP/FTP range requests)
     /// None if resumption is not applicable
     pub resume_offset: Option<u64>,
@@ -252,6 +247,7 @@ impl SessionEntry {
     /// # Returns
     ///
     /// Some(&str) if the key exists, None otherwise
+    #[allow(dead_code)] // Utility method for option retrieval, available for future use
     fn get_option(&self, key: &str) -> Option<&str> {
         self.options.get(key).map(|s| s.as_str())
     }
@@ -269,21 +265,19 @@ mod tests {
 
     #[test]
     fn test_serialize_single_entry() {
-        let entry =
-            SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
+        let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
         let text = entry.serialize();
-        assert!(text.contains("http://example.com/file.zip"), "Should contain URI");
+        assert!(
+            text.contains("http://example.com/file.zip"),
+            "Should contain URI"
+        );
         assert!(text.contains("GID=d270c8a2"), "Should contain GID");
     }
 
     #[test]
     fn test_serialize_multiple_entries_roundtrip() {
         let entries = vec![
-            SessionEntry::new(
-                1,
-                vec!["http://a.com/1.bin".to_string()],
-            )
-            .with_options({
+            SessionEntry::new(1, vec!["http://a.com/1.bin".to_string()]).with_options({
                 let mut m = HashMap::new();
                 m.insert("split".to_string(), "4".to_string());
                 m.insert("dir".to_string(), "/tmp".to_string());
@@ -354,10 +348,7 @@ http://example.com/file
 "#;
         let entry = SessionEntry::deserialize_line(input).unwrap();
         assert_eq!(entry.options.get("split").unwrap(), "4");
-        assert_eq!(
-            entry.options.get("max-connection-per-server").unwrap(),
-            "2"
-        );
+        assert_eq!(entry.options.get("max-connection-per-server").unwrap(), "2");
         assert_eq!(
             entry.options.get("dir").unwrap(),
             "C:\\Users\\test\\Downloads"
@@ -401,8 +392,7 @@ http://example.com/file
 
     #[test]
     fn test_serialize_new_fields() {
-        let mut entry =
-            SessionEntry::new(1, vec!["http://example.com/file.bin".to_string()]);
+        let mut entry = SessionEntry::new(1, vec!["http://example.com/file.bin".to_string()]);
         entry.total_length = 1024 * 1024; // 1MB
         entry.completed_length = 512 * 1024; // 512KB
         entry.upload_length = 1024;
@@ -413,12 +403,18 @@ http://example.com/file
         let text = entry.serialize();
 
         // Verify new fields appear in output
-        assert!(text.contains("TOTAL_LENGTH=1048576"), "Should contain TOTAL_LENGTH");
+        assert!(
+            text.contains("TOTAL_LENGTH=1048576"),
+            "Should contain TOTAL_LENGTH"
+        );
         assert!(
             text.contains("COMPLETED_LENGTH=524288"),
             "Should contain COMPLETED_LENGTH"
         );
-        assert!(text.contains("UPLOAD_LENGTH=1024"), "Should contain UPLOAD_LENGTH");
+        assert!(
+            text.contains("UPLOAD_LENGTH=1024"),
+            "Should contain UPLOAD_LENGTH"
+        );
         assert!(
             text.contains("DOWNLOAD_SPEED=2048"),
             "Should contain DOWNLOAD_SPEED"
@@ -470,10 +466,19 @@ http://example.com/file
         assert_eq!(entry.completed_length, 0, "Old format should use default 0");
         assert_eq!(entry.upload_length, 0, "Old format should use default 0");
         assert_eq!(entry.download_speed, 0, "Old format should use default 0");
-        assert_eq!(entry.status, "active", "Old format should default to 'active'");
-        assert_eq!(entry.error_code, None, "Old format should have no error code");
+        assert_eq!(
+            entry.status, "active",
+            "Old format should default to 'active'"
+        );
+        assert_eq!(
+            entry.error_code, None,
+            "Old format should have no error code"
+        );
         assert_eq!(entry.bitfield, None, "Old format should have no bitfield");
-        assert_eq!(entry.resume_offset, None, "Old format should have no resume_offset");
+        assert_eq!(
+            entry.resume_offset, None,
+            "Old format should have no resume_offset"
+        );
 
         // Original fields still correct
         assert_eq!(entry.options.get("split").unwrap(), "4");
@@ -503,10 +508,8 @@ http://example.com/file
 
     #[test]
     fn test_bitfield_roundtrip() {
-        let mut entry = SessionEntry::new(
-            1,
-            vec!["http://example.com/torrent.torrent".to_string()],
-        );
+        let mut entry =
+            SessionEntry::new(1, vec!["http://example.com/torrent.torrent".to_string()]);
 
         // Set bitfield: [0xFF, 0xF0, 0x0F] - indicates some pieces completed
         entry.bitfield = Some(vec![0xFF, 0xF0, 0x0F]);
@@ -534,8 +537,7 @@ http://example.com/file
 
     #[test]
     fn test_empty_bitfield_serialized_as_empty() {
-        let entry =
-            SessionEntry::new(1, vec!["http://example.com/file.zip".to_string()]);
+        let entry = SessionEntry::new(1, vec!["http://example.com/file.zip".to_string()]);
         // bitfield defaults to None
 
         let text = entry.serialize();
@@ -548,7 +550,10 @@ http://example.com/file
 
         // Deserialize verification
         let restored = SessionEntry::deserialize_line(&text).unwrap();
-        assert_eq!(restored.bitfield, None, "Empty bitfield should restore to None");
+        assert_eq!(
+            restored.bitfield, None,
+            "Empty bitfield should restore to None"
+        );
     }
 
     #[test]
@@ -574,8 +579,7 @@ http://example.com/file
         let statuses = ["active", "waiting", "paused", "error"];
 
         for status in statuses {
-            let mut entry =
-                SessionEntry::new(1, vec!["http://example.com/f".to_string()]);
+            let mut entry = SessionEntry::new(1, vec!["http://example.com/f".to_string()]);
             entry.status = status.to_string();
 
             let text = entry.serialize();
@@ -597,10 +601,7 @@ http://example.com/file
 
     #[test]
     fn test_resume_offset_for_http_ftp() {
-        let mut entry = SessionEntry::new(
-            1,
-            vec!["http://example.com/large-file.iso".to_string()],
-        );
+        let mut entry = SessionEntry::new(1, vec!["http://example.com/large-file.iso".to_string()]);
 
         // Simulate HTTP download with partial data written
         entry.total_length = 1073741824; // 1GB
@@ -629,8 +630,7 @@ http://example.com/file
     #[test]
     fn test_bt_specific_fields_only_when_present() {
         // Test that BT-specific fields are truly optional
-        let mut entry =
-            SessionEntry::new(1, vec!["magnet:?xt=urn:btih:abc123".to_string()]);
+        let mut entry = SessionEntry::new(1, vec!["magnet:?xt=urn:btih:abc123".to_string()]);
 
         // Don't set any BT fields (keep them as None)
         let text_without_bt = entry.serialize();

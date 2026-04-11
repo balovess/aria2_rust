@@ -60,10 +60,10 @@ pub mod websocket;
 pub mod xml_rpc;
 
 pub use engine::RpcEngine;
-pub use json_rpc::{parse_request, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION};
+pub use json_rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse, parse_request};
 pub use server::{
-    create_gid, AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalStat, ServerConfig,
-    StatusInfo, UriEntry,
+    AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalStat, ServerConfig, StatusInfo,
+    UriEntry, create_gid,
 };
 pub use websocket::{DownloadEvent, EventPublisher, EventType, WsSession};
 pub use xml_rpc::{XmlRpcMember, XmlRpcRequest, XmlRpcResponse, XmlRpcValue};

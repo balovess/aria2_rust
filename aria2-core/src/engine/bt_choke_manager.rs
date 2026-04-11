@@ -28,11 +28,11 @@ use crate::engine::peer_stats::PeerStats;
 /// * `algo` - The choking algorithm instance (mutable reference)
 /// * `peer_idx` - Index of the peer that sent the choke message
 pub fn on_peer_choke(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize) {
-    if let Some(ref mut a) = algo {
-        if let Some(peer) = a.get_peer_mut(peer_idx) {
-            peer.peer_choking = true;
-            debug!("Peer #{} is now choking us", peer_idx);
-        }
+    if let Some(a) = algo
+        && let Some(peer) = a.get_peer_mut(peer_idx)
+    {
+        peer.peer_choking = true;
+        debug!("Peer #{} is now choking us", peer_idx);
     }
 }
 
@@ -42,11 +42,11 @@ pub fn on_peer_choke(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize) {
 /// * `algo` - The choking algorithm instance (mutable reference)
 /// * `peer_idx` - Index of the peer that sent the unchoke message
 pub fn on_peer_unchoke(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize) {
-    if let Some(ref mut a) = algo {
-        if let Some(peer) = a.get_peer_mut(peer_idx) {
-            peer.peer_choking = false;
-            debug!("Peer #{} has unchoked us", peer_idx);
-        }
+    if let Some(a) = algo
+        && let Some(peer) = a.get_peer_mut(peer_idx)
+    {
+        peer.peer_choking = false;
+        debug!("Peer #{} has unchoked us", peer_idx);
     }
 }
 
@@ -58,8 +58,12 @@ pub fn on_peer_unchoke(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize) {
 /// * `algo` - The choking algorithm instance (mutable reference)
 /// * `peer_idx` - Index of the peer we received data from
 /// * `bytes` - Number of bytes received
-pub fn on_data_received_from_peer(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize, bytes: u64) {
-    if let Some(ref mut a) = algo {
+pub fn on_data_received_from_peer(
+    algo: &mut Option<ChokingAlgorithm>,
+    peer_idx: usize,
+    bytes: u64,
+) {
+    if let Some(a) = algo {
         a.on_data_received(peer_idx, bytes);
     }
 }
@@ -75,7 +79,7 @@ pub fn on_data_received_from_peer(algo: &mut Option<ChokingAlgorithm>, peer_idx:
 /// # Returns
 /// Vector of peer indices that are newly snubbed
 pub fn check_snubbed_peers(algo: &mut Option<ChokingAlgorithm>) -> Vec<usize> {
-    if let Some(ref mut a) = algo {
+    if let Some(a) = algo {
         a.check_snubbed_peers()
     } else {
         vec![]
@@ -99,7 +103,7 @@ pub fn add_peer_to_tracking(
     peer_id: [u8; 8],
     addr: std::net::SocketAddr,
 ) -> usize {
-    if let Some(ref mut a) = algo {
+    if let Some(a) = algo {
         let full_peer_id = {
             let mut id = [0u8; 20];
             id[..8].copy_from_slice(&peer_id);
@@ -135,7 +139,7 @@ pub fn add_peer_to_tracking(
 /// # Returns
 /// Index of the best peer for making requests, or None if no suitable peer found
 pub fn select_best_peer_for_request(algo: &Option<ChokingAlgorithm>) -> Option<usize> {
-    if let Some(ref a) = algo {
+    if let Some(a) = algo {
         // Find best peer: unchoked + high download speed + not snubbed
         let best_idx = a
             .peers()
@@ -194,16 +198,16 @@ pub async fn handle_snubbed_peer(
     algo: &mut Option<ChokingAlgorithm>,
     peer_idx: usize,
 ) -> std::result::Result<(), ()> {
-    if let Some(ref mut a) = algo {
-        if let Some(peer) = a.get_peer_mut(peer_idx) {
-            warn!(
-                "[BT] Peer {} at {} marked as snubbed, reducing request priority",
-                peer_idx, peer.addr
-            );
+    if let Some(a) = algo
+        && let Some(peer) = a.get_peer_mut(peer_idx)
+    {
+        warn!(
+            "[BT] Peer {} at {} marked as snubbed, reducing request priority",
+            peer_idx, peer.addr
+        );
 
-            // Additional action: we could optionally force a choke message
-            // For now, just log and let the algorithm handle it naturally
-        }
+        // Additional action: we could optionally force a choke message
+        // For now, just log and let the algorithm handle it naturally
     }
 
     Ok(())
@@ -223,7 +227,7 @@ pub async fn handle_snubbed_peer(
 /// * `peer_idx` - Index of the peer we received data from
 /// * `bytes` - Number of bytes received in this block
 pub fn on_piece_received(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize, bytes: u64) {
-    if let Some(ref mut a) = algo {
+    if let Some(a) = algo {
         a.on_data_received(peer_idx, bytes);
         debug!(
             "[BT] Updated peer {} stats: received {} bytes",

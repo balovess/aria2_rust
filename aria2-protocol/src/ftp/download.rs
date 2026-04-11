@@ -1,6 +1,6 @@
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use super::connection::FtpConnection;
 
@@ -148,7 +148,7 @@ impl<'a> FtpDownload<'a> {
                     return Err(format!(
                         "读取FTP数据流失败 (已重试{}次): {}",
                         read_retry_count, e
-                    ))
+                    ));
                 }
             }
         }

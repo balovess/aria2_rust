@@ -37,6 +37,7 @@ pub struct DiscoveredPeers {
 pub struct DhtClient {
     config: DhtClientConfig,
     routing_table: RoutingTable,
+    #[allow(dead_code)] // Reserved for future DHT transaction management
     tx_manager: TransactionManager,
 }
 
@@ -100,7 +101,7 @@ impl DhtClient {
                     continue;
                 }
 
-                let tx_id = (round * 1000 + i as usize) as u32;
+                let tx_id = (round * 1000 + i) as u32;
 
                 let query_msg =
                     DhtMessageBuilder::get_peers(tx_id, &self.config.self_id, target_info_hash);
@@ -186,12 +187,12 @@ pub fn extract_compact_peers_from_response(response: &DhtMessage) -> Vec<SocketA
 
     let mut peers = Vec::new();
     for item in values {
-        if let BencodeValue::Bytes(bytes) = item {
-            if bytes.len() >= 6 {
-                let ip_bytes: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
-                let port = u16::from_be_bytes([bytes[4], bytes[5]]);
-                peers.push(SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)));
-            }
+        if let BencodeValue::Bytes(bytes) = item
+            && bytes.len() >= 6
+        {
+            let ip_bytes: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            let port = u16::from_be_bytes([bytes[4], bytes[5]]);
+            peers.push(SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)));
         }
     }
     peers

@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
-    build_announce_request, build_connect_request, parse_announce_response, parse_connect_response,
-    AnnounceResponse, ConnectResponse, UdpAction, UdpError, UdpEvent, UdpState,
-    CONNECTION_TIMEOUT_SECS,
+    AnnounceResponse, CONNECTION_TIMEOUT_SECS, ConnectResponse, UdpAction, UdpError, UdpEvent,
+    UdpState, build_announce_request, build_connect_request, parse_announce_response,
+    parse_connect_response,
 };
 
 const REQUEST_TIMEOUT_SECS: u64 = 15;
@@ -357,7 +357,7 @@ impl UdpTrackerClient {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                r.dispatched_at.map_or(false, |t| {
+                r.dispatched_at.is_some_and(|t| {
                     t.duration_since(now) > Duration::from_secs(REQUEST_TIMEOUT_SECS)
                 })
             })

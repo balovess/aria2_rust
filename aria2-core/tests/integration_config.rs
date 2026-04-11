@@ -21,7 +21,7 @@ fn test_config_loading_priority() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let mut mgr = ConfigManager::new();
-        std::env::set_var("ARIA2_SPLIT", "5");
+        unsafe { std::env::set_var("ARIA2_SPLIT", "5") };
 
         mgr.load_file(&conf_path).await;
         mgr.load_env().await;
@@ -32,7 +32,7 @@ fn test_config_loading_priority() {
         let val = mgr.get_global_i64("split").await;
         assert_eq!(val, Some(10));
 
-        std::env::remove_var("ARIA2_SPLIT");
+        unsafe { std::env::remove_var("ARIA2_SPLIT") };
     });
 }
 

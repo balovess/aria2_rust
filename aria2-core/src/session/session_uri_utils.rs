@@ -138,7 +138,7 @@ pub fn unescape_uri(s: &str) -> String {
 /// assert_eq!(bytes, vec![0xFF, 0xF0, 0x0F]);
 /// ```
 pub fn decode_hex(hex: &str) -> Result<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(Aria2Error::Io(format!(
             "Hex string has odd length: {}",
             hex.len()

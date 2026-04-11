@@ -114,8 +114,7 @@ impl MetadataExchangeSession {
 
         debug!("Remote reports metadata_size={} bytes", metadata_size);
 
-        let num_pieces = ((metadata_size + self.config.piece_size as u64 - 1)
-            / self.config.piece_size as u64) as u32;
+        let num_pieces = metadata_size.div_ceil(self.config.piece_size as u64) as u32;
         let mut collector = MetadataCollector::new(metadata_size, self.config.piece_size);
 
         for piece_idx in 0..num_pieces {

@@ -7,23 +7,12 @@ use crate::error::Result;
 
 const DEFAULT_BURST_BYTES: u64 = 256 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct RateLimiterConfig {
     pub max_download_bytes_per_sec: Option<u64>,
     pub max_upload_bytes_per_sec: Option<u64>,
     pub download_burst_bytes: Option<u64>,
     pub upload_burst_bytes: Option<u64>,
-}
-
-impl Default for RateLimiterConfig {
-    fn default() -> Self {
-        Self {
-            max_download_bytes_per_sec: None,
-            max_upload_bytes_per_sec: None,
-            download_burst_bytes: None,
-            upload_burst_bytes: None,
-        }
-    }
 }
 
 impl RateLimiterConfig {
@@ -181,8 +170,8 @@ impl RateLimiter {
 
         Self {
             inner: Arc::new(Mutex::new(RateLimiterInner { download, upload })),
-            download_limited: dl_rate.map_or(false, |r| r > 0),
-            upload_limited: ul_rate.map_or(false, |r| r > 0),
+            download_limited: dl_rate.is_some_and(|r| r > 0),
+            upload_limited: ul_rate.is_some_and(|r| r > 0),
         }
     }
 
@@ -228,6 +217,7 @@ impl RateLimiter {
 pub struct ThrottledWriter<W> {
     inner: W,
     limiter: RateLimiter,
+    #[allow(dead_code)] // Buffer for future write batching optimization
     buffer: Vec<u8>,
     chunk_size: usize,
 }

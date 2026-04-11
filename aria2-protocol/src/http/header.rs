@@ -139,12 +139,12 @@ impl HttpHeaderProcessor {
         content_disposition: Option<&str>,
         default_name: &str,
     ) -> String {
-        if let Some(cd) = content_disposition {
-            if let Some(name) = Self::extract_filename(cd) {
-                let sanitized = Self::sanitize_filename(&name);
-                debug!("从Content-Disposition解析文件名: {}", sanitized);
-                return sanitized;
-            }
+        if let Some(cd) = content_disposition
+            && let Some(name) = Self::extract_filename(cd)
+        {
+            let sanitized = Self::sanitize_filename(&name);
+            debug!("从Content-Disposition解析文件名: {}", sanitized);
+            return sanitized;
         }
 
         if let Some(name) = Self::guess_filename_from_url(url) {

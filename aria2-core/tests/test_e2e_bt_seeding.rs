@@ -1,6 +1,6 @@
 use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use aria2_core::engine::bt_upload_session::{
-    BtSeedingConfig, BtUploadSession, InMemoryPieceProvider, PieceDataProvider,
+    BtSeedingConfig, InMemoryPieceProvider, PieceDataProvider,
 };
 
 #[test]
@@ -58,7 +58,7 @@ fn test_seed_manager_no_exit_infinite() {
 
 #[test]
 fn test_choke_blocks_upload_concept() {
-    let config = BtSeedingConfig::default();
+    let _config = BtSeedingConfig::default();
     let session_state = (false, false);
 
     let should_upload = !session_state.0 && session_state.1;

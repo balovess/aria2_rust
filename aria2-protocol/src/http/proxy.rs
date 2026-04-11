@@ -192,11 +192,11 @@ impl ProxyManager {
 
     pub fn get_proxy_for_url(&self, url: &str) -> Option<String> {
         let config = self.config.as_ref()?;
-        if let Some(hostname) = Self::extract_hostname(url) {
-            if config.should_bypass(&hostname) {
-                debug!("跳过代理 (NO_PROXY规则匹配): {}", hostname);
-                return None;
-            }
+        if let Some(hostname) = Self::extract_hostname(url)
+            && config.should_bypass(&hostname)
+        {
+            debug!("跳过代理 (NO_PROXY规则匹配): {}", hostname);
+            return None;
         }
         Some(config.to_url())
     }
