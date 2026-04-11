@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Job 1: Pre-release validation
+  validate:
+    name: Validate & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+      - name: Clippy check
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+  # Job 2: Build binaries for multiple platforms (matrix)
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: aria2-x86_64-linux
+            ext: ''
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: aria2-x86_64-windows
+            ext: .exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: aria2-aarch64-macos
+            ext: ''
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: aria2-x86_64-macos
+            ext: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --package aria2 --target ${{ matrix.target }}
+      - name: Prepare artifacts (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          strip aria2${{ matrix.ext }} || true
+          tar czf ../../../../${{ matrix.artifact }}.tar.gz aria2${{ matrix.ext }}
+          cd -
+      - name: Prepare artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.artifact }}.zip aria2${{ matrix.ext }}
+          cd -
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.*.*
+
+  # Job 3: Generate changelog and create GitHub Release
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges -20)
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ## Changes
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## Downloads
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | Linux | x86_64 | `aria2-x86_64-linux.tar.gz` |
+            | Windows | x86_64 | `aria2-x86_64-windows.zip` |
+            | macOS | ARM64 (Apple Silicon) | `aria2-aarch64-macos.tar.gz` |
+            | macOS | x86_64 | `aria2-x86_64-macos.tar.gz` |
+          files: artifacts/*/*
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+
+  # Job 4: Publish Python SDK to PyPI
+  publish-python:
+    name: Publish Python SDK
+    runs-on: ubuntu-latest
+    needs: github-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Install build tools
+        run: |
+          cd bindings/python
+          pip install build twine
+      - name: Build package
+        run: |
+          cd bindings/python
+          python -m build
+      - name: Publish to PyPI
+        run: |
+          cd bindings/python
+          twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+  # Job 5: Publish Node.js SDK to NPM
+  publish-nodejs:
+    name: Publish Node.js SDK
+    runs-on: ubuntu-latest
+    needs: github-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Install dependencies
+        run: |
+          cd bindings/nodejs
+          npm install
+      - name: Build package
+        run: |
+          cd bindings/nodejs
+          npm run build
+      - name: Publish to NPM
+        run: |
+          cd bindings/nodejs
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

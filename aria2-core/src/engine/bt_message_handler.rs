@@ -169,7 +169,38 @@ impl BtMessageHandler {
                             );
                         }
                         other => {
-                            debug!("[BT] Received non-PIECE message while waiting: {:?}", other);
+                            use aria2_protocol::bittorrent::message::types::BtMessage;
+                            match &other {
+                                BtMessage::AllowedFast { index } => {
+                                    debug!("[BT] Received AllowedFast for piece {}", index);
+                                    conn.add_allowed_fast(*index);
+                                }
+                                BtMessage::Reject {
+                                    index,
+                                    offset,
+                                    length,
+                                } => {
+                                    debug!(
+                                        "[BT] Received Reject for piece {} offset {} len {}",
+                                        index, offset, length
+                                    );
+                                }
+                                BtMessage::Suggest { index } => {
+                                    debug!("[BT] Received Suggest for piece {}", index);
+                                }
+                                BtMessage::HaveAll => {
+                                    debug!("[BT] Received HaveAll");
+                                }
+                                BtMessage::HaveNone => {
+                                    debug!("[BT] Received HaveNone");
+                                }
+                                _ => {
+                                    debug!(
+                                        "[BT] Received non-PIECE message while waiting: {:?}",
+                                        other
+                                    );
+                                }
+                            }
                         }
                     }
                 }

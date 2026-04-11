@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
-use aria2_core::config::{ConfigManager, OptionValue};
+use aria2_core::config::{ConfigManager, OptionCategory, OptionRegistry, OptionValue};
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
@@ -465,6 +465,10 @@ impl App {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(1),
             http_proxy: options.get("http-proxy").cloned(),
+            all_proxy: options.get("all-proxy").cloned(),
+            https_proxy: options.get("https-proxy").cloned(),
+            ftp_proxy: options.get("ftp-proxy").cloned(),
+            no_proxy: options.get("no-proxy").cloned(),
             dht_file_path: options.get("dht-file-path").cloned(),
             bt_max_upload_slots: options
                 .get("bt-max-upload-slots")
@@ -565,6 +569,10 @@ impl App {
                 .and_then(|v| if v > 0 { Some(v as u64) } else { Some(1) })
                 .unwrap_or(1),
             http_proxy: self.get_opt_str("http-proxy").await,
+            all_proxy: self.get_opt_str("all-proxy").await,
+            https_proxy: self.get_opt_str("https-proxy").await,
+            ftp_proxy: self.get_opt_str("ftp-proxy").await,
+            no_proxy: self.get_opt_str("no-proxy").await,
             dht_file_path: self.get_opt_str("dht-file-path").await,
             // Choking algorithm configuration (opt-in)
             bt_max_upload_slots: self
@@ -809,6 +817,8 @@ impl App {
     }
 
     fn print_help(&self) {
+        let reg = OptionRegistry::new();
+
         println!(
             "{}",
             "aria2-rust - The ultra fast download utility"
@@ -816,55 +826,78 @@ impl App {
                 .bold()
         );
         println!();
-        println!("{}", "用法:".yellow());
-        println!("  aria2c [选项] <URI> [URI]...");
-        println!("  aria2c [选项] -T <torrent文件>");
+        println!("{}", "Usage:".yellow());
+        println!("  aria2c [options] <URL> [URL]...");
+        println!("  aria2c [options] -T <torrent_file>");
         println!();
-        println!("{}", "主要选项:".yellow());
-        println!("  -d, --dir=<DIR>              保存目录 (默认: 当前目录)");
-        println!("  -o, --out=<FILE>             输出文件名");
-        println!("  -s, --split=<N>               每服务器连接数 (默认: 1)");
-        println!("  -x, --max-connection-per-server=<N>  最大连接数 (默认: 1)");
-        println!("  --max-download-limit=<SPEED>   最大下载速度限制");
-        println!("  --timeout=<SEC>               超时时间 (默认: 60)");
-        println!("  --max-tries=<N>               最大重试次数 (默认: 5)");
+
+        let categories = [
+            (OptionCategory::General, "General Options"),
+            (OptionCategory::HttpFtp, "HTTP/FTP Options"),
+            (OptionCategory::BitTorrent, "BitTorrent Options"),
+            (OptionCategory::Rpc, "RPC Options"),
+            (OptionCategory::Advanced, "Advanced Options"),
+        ];
+
+        for (cat, title) in &categories {
+            let opts = reg.by_category(*cat);
+            if opts.is_empty() {
+                continue;
+            }
+            println!("{}", title.yellow());
+            for def in &opts {
+                let short = match def.short_name() {
+                    Some(c) => format!("-{}, ", c),
+                    None => String::from("    "),
+                };
+                let type_hint = self.type_hint_for(def.opt_type());
+                let default = self.default_str_for(def.default_value());
+                print!("  {}--{}{}", short, def.name(), type_hint);
+                if !default.is_empty() {
+                    print!("  (default: {})", default);
+                }
+                println!();
+                println!("      {}", def.description());
+            }
+            println!();
+        }
+
+        println!("  -h, --help                    Show this help message");
+        println!("  -V, --version                 Show version information");
         println!();
-        println!("{}", "HTTP/FTP选项:".yellow());
-        println!("  --user=<USER>                 HTTP/FTP用户名");
-        println!("  --password=<PASS>             HTTP/FTP密码");
-        println!("  --header=[HEADER]             自定义HTTP头");
-        println!("  --proxy=<PROXY>               代理服务器");
-        println!();
-        println!("{}", "BitTorrent选项:".yellow());
-        println!("  --seed-time=<MIN>             做种时间 (默认: 0=不做种)");
-        println!("  --bt-tracker=<URL>[,...]      Tracker URL列表");
-        println!();
-        println!("{}", "RPC选项:".yellow());
-        println!("  --enable-rpc[=true]           启用RPC服务");
-        println!("  --rpc-listen-port=<PORT>      RPC监听端口 (default: 6800)");
-        println!();
-        println!("{}", "通用选项:".yellow());
-        println!("  -i, --input-file=<FILE>       URI列表输入文件/会话文件");
-        println!("  --save-session=<FILE>         退出时保存会话到指定文件");
-        println!("  --save-session-interval=<SEC> 自动保存间隔（默认: 60秒）");
-        println!("  --conf-path=<PATH>            配置文件路径");
-        println!("  --log=<PATH>                  日志文件路径");
-        println!("  -q, --quiet                   安静模式");
-        println!("  -v, --verbose                 详细输出");
-        println!("  --version                     显示版本号");
-        println!("  -h, --help                    显示帮助信息");
-        println!();
-        println!("示例:");
+        println!("Examples:");
         println!("  aria2c http://example.com/file.zip");
         println!("  aria2c -o output.iso http://example.com/image.iso");
         println!("  aria2c -d /downloads -s 4 http://example.com/large.bin");
     }
 
+    fn type_hint_for(&self, opt_type: aria2_core::config::OptionType) -> &'static str {
+        use aria2_core::config::OptionType;
+        match opt_type {
+            OptionType::String | OptionType::Path => "=STR",
+            OptionType::Integer | OptionType::Size => "=N",
+            OptionType::Float => "=F",
+            OptionType::Boolean => "",
+            OptionType::List => "=LIST",
+            OptionType::Enum => "=ENUM",
+        }
+    }
+
+    fn default_str_for(&self, val: &aria2_core::config::OptionValue) -> String {
+        use aria2_core::config::OptionValue;
+        match val {
+            OptionValue::None => String::new(),
+            other => other.to_string(),
+        }
+    }
+
     fn print_version(&self) {
-        println!("aria2-rust v{}", env!("CARGO_PKG_VERSION"));
-        println!("基于Rust实现的aria2下载工具");
+        println!("aria2-rust {} (Rust)", env!("CARGO_PKG_VERSION"));
+        println!("Built with Rust {}", env!("CARGO_PKG_RUST_VERSION"));
         println!();
-        println!("支持的协议:");
+        println!("Features: default,bittorrent,rpc,http");
+        println!();
+        println!("Supported protocols:");
         println!("  HTTP/HTTPS  ✅");
         println!("  FTP/SFTP    ✅");
         println!("  BitTorrent  ✅");
@@ -886,15 +919,66 @@ impl App {
 
     fn map_short_option(&self, c: char) -> Option<&'static str> {
         match c {
-            'd' | 'D' => Some("dir"),
-            'o' | 'O' => Some("out"),
-            's' | 'S' => Some("split"),
-            'x' | 'X' => Some("max-connection-per-server"),
-            'i' | 'I' => Some("input-file"),
-            'l' | 'L' => Some("log"),
-            'j' | 'J' => Some("max-concurrent-downloads"),
-            'v' | 'V' => Some("verbose"),
-            'q' | 'Q' => Some("quiet"),
+            // General
+            'd' => Some("dir"),
+            'o' => Some("out"),
+            'i' => Some("input-file"),
+            'q' => Some("quiet"),
+            'l' => Some("log"),
+            'L' => Some("log-level"),
+            'n' => Some("dry-run"),
+            'S' => Some("summary-interval"),
+            // HttpFtp — timeouts & retries
+            't' => Some("timeout"),
+            'T' => Some("connect-timeout"),
+            'm' => Some("max-tries"),
+            'w' => Some("retry-wait"),
+            // HttpFtp — connections
+            's' => Some("split"),
+            'x' => Some("max-connection-per-server"),
+            'k' => Some("min-split-size"),
+            'c' => Some("continue"),
+            // HttpFtp — proxies
+            'p' => Some("all-proxy"),
+            'P' => Some("http-proxy"),
+            'y' => Some("https-proxy"),
+            'F' => Some("ftp-proxy"),
+            'N' => Some("no-proxy"),
+            // HttpFtp — headers & identity
+            'U' => Some("user-agent"),
+            'R' => Some("referer"),
+            'H' => Some("header"),
+            // HttpFtp — cookies
+            'C' => Some("load-cookies"),
+            'V' => Some("save-cookies"),
+            // HttpFtp — SSL & file handling
+            'b' => Some("check-certificate"),
+            'E' => Some("ca-certificate"),
+            'O' => Some("allow-overwrite"),
+            // BitTorrent
+            'g' => Some("seed-ratio"),
+            'G' => Some("seed-time"),
+            'B' => Some("bt-max-peers"),
+            'h' => Some("listen-port"),
+            'D' => Some("enable-dht"),
+            'X' => Some("bt-force-encryption"),
+            'M' => Some("follow-torrent"),
+            // RPC
+            'e' => Some("enable-rpc"),
+            'r' => Some("rpc-listen-port"),
+            'I' => Some("rpc-secret"),
+            // Advanced
+            'j' => Some("max-concurrent-downloads"),
+            'f' => Some("file-allocation"),
+            'z' => Some("stop"),
+            'A' => Some("max-overall-download-limit"),
+            'Q' => Some("max-download-limit"),
+            'W' => Some("max-overall-upload-limit"),
+            'K' => Some("max-upload-limit"),
+            'Z' => Some("disk-cache"),
+            'Y' => Some("piece-length"),
+            // Legacy / aliases (preserve existing case-insensitive fallbacks)
+            'v' => Some("verbose"),
             _ => None,
         }
     }

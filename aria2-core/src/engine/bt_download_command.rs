@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::info;
+use std::time::{Duration, Instant};
+use tracing::{debug, info};
 
 use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
@@ -56,6 +56,14 @@ pub struct BtDownloadCommand {
     pub(crate) lpd_manager: Option<Arc<LpdManager>>,
     /// 下载后处理钩子管理器
     pub(crate) hook_manager: Option<Arc<HookManager>>,
+
+    // PEX (Peer Exchange, BEP 11) integration fields
+    /// Track known peers for PEX exchange
+    pub(crate) pex_known_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    /// Timestamp of last PEX message sent (for rate limiting)
+    pub(crate) pex_last_send_time: Option<Instant>,
+    /// Interval between PEX messages (default 60 seconds)
+    pub(crate) pex_send_interval: Duration,
 }
 
 impl BtDownloadCommand {
@@ -175,6 +183,11 @@ impl BtDownloadCommand {
             progress_save_interval: Duration::from_secs(60),
             lpd_manager: None,
             hook_manager: None,
+
+            // PEX integration fields default values
+            pex_known_peers: Vec::new(),
+            pex_last_send_time: None,
+            pex_send_interval: Duration::from_secs(60),
         })
     }
 
@@ -348,5 +361,54 @@ impl BtDownloadCommand {
     /// 获取钩子管理器引用（用于测试和外部访问）
     pub fn get_hook_manager(&self) -> Option<&Arc<HookManager>> {
         self.hook_manager.as_ref()
+    }
+
+    // ==================== PEX (BEP 11) Integration API ====================
+
+    /// Add a peer address to the known peers list for PEX exchange
+    pub fn add_pex_peer(
+        &mut self,
+        peer_addr: aria2_protocol::bittorrent::peer::connection::PeerAddr,
+    ) {
+        if !self.pex_known_peers.iter().any(|p| *p == peer_addr) {
+            debug!(addr = %format!("{}:{}", peer_addr.ip, peer_addr.port), "Adding peer to PEX known list");
+            self.pex_known_peers.push(peer_addr);
+        }
+    }
+
+    /// Set the list of known peers for PEX exchange
+    pub fn set_pex_known_peers(
+        &mut self,
+        peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    ) {
+        self.pex_known_peers = peers;
+        info!(
+            count = self.pex_known_peers.len(),
+            "PEX known peers updated"
+        );
+    }
+
+    /// Get reference to PEX known peers list
+    pub fn get_pex_known_peers(&self) -> &[aria2_protocol::bittorrent::peer::connection::PeerAddr] {
+        &self.pex_known_peers
+    }
+
+    /// Set custom PEX send interval (default 60 seconds)
+    pub fn set_pex_send_interval(&mut self, interval_secs: u64) {
+        self.pex_send_interval = Duration::from_secs(interval_secs);
+        info!(interval_secs, "PEX send interval updated");
+    }
+
+    /// Check if it's time to send a PEX message based on rate limiting
+    pub fn should_send_pex(&self) -> bool {
+        match self.pex_last_send_time {
+            Some(last) => last.elapsed() >= self.pex_send_interval,
+            None => true,
+        }
+    }
+
+    /// Update the last PEX send timestamp
+    pub fn update_pex_last_send(&mut self) {
+        self.pex_last_send_time = Some(Instant::now());
     }
 }

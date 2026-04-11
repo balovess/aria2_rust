@@ -17,6 +17,7 @@ use crate::filesystem::file_allocation;
 use crate::filesystem::resume_helper::{ResumeHelper, ResumeState};
 use crate::http::cookie::Cookie;
 use crate::http::cookie_storage::CookieStorage;
+use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
@@ -33,6 +34,7 @@ pub struct DownloadCommand {
     file_allocation: String,
     cookie_storage: Arc<CookieStorage>,
     cookie_file: Option<String>,
+    no_proxy_matcher: Option<NoProxyMatcher>,
 }
 
 impl DownloadCommand {
@@ -69,6 +71,37 @@ impl DownloadCommand {
             && let Ok(p) = reqwest::Proxy::all(proxy_url.to_string())
         {
             builder = builder.proxy(p);
+        }
+
+        // Apply all-proxy (global proxy for all protocols)
+        // Priority: protocol-specific proxy > all-proxy
+        if options.http_proxy.is_none() {
+            if let Some(ref all_proxy) = options.all_proxy {
+                match ProxyUrl::parse(all_proxy) {
+                    Ok(parsed) => {
+                        match parsed.protocol {
+                            crate::http::socks_connector::ProxyProtocol::Http
+                            | crate::http::socks_connector::ProxyProtocol::Https => {
+                                if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
+                                    builder = builder.proxy(p);
+                                }
+                            }
+                            _ => {
+                                // SOCKS proxies require a custom connector.
+                                // For now, log a note that SOCKS integration is available
+                                // via the SocksConnector trait but requires manual TcpStream wrapping.
+                                tracing::info!(
+                                    "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
+                                    all_proxy
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, e);
+                    }
+                }
+            }
         }
 
         let client = builder.build().map_err(|e| {
@@ -125,6 +158,10 @@ impl DownloadCommand {
             file_allocation: "prealloc".to_string(),
             cookie_storage,
             cookie_file,
+            no_proxy_matcher: options
+                .no_proxy
+                .as_ref()
+                .map(|np| NoProxyMatcher::from_env_value(np)),
         })
     }
 
@@ -158,6 +195,11 @@ impl DownloadCommand {
 
     pub async fn group_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, RequestGroup> {
         self.group.write().await
+    }
+
+    /// Get the NoProxy matcher for checking if a host should bypass proxy
+    pub fn no_proxy_matcher(&self) -> Option<&NoProxyMatcher> {
+        self.no_proxy_matcher.as_ref()
     }
 
     fn should_use_concurrent(&self, total_length: u64, supports_range: bool) -> bool {

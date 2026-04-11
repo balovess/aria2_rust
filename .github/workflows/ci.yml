@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -268,64 +268,35 @@ jobs:
           cd bindings/nodejs
           npm run build
 
-  publish-python:
-    name: Publish Python SDK to PyPI
-    needs: [test, python-test]
+  doc-check:
+    name: Documentation Check
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-      
-      - name: Install build tools
-        run: |
-          cd bindings/python
-          pip install build twine
-      
-      - name: Build package
-        run: |
-          cd bindings/python
-          python -m build
-      
-      - name: Publish to PyPI
-        run: |
-          cd bindings/python
-          twine upload dist/*
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
 
-  publish-nodejs:
-    name: Publish Node.js SDK to NPM
-    needs: [test, nodejs-test]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    
     steps:
       - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate documentation (warnings as errors)
+        run: cargo doc --workspace --document-private-items -D warnings
+
+      - name: Run documentation tests
+        run: cargo test --doc --workspace
+
+  msrv-check:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: '18'
-          registry-url: 'https://registry.npmjs.org'
-      
-      - name: Install dependencies
-        run: |
-          cd bindings/nodejs
-          npm install
-      
-      - name: Build package
-        run: |
-          cd bindings/nodejs
-          npm run build
-      
-      - name: Publish to NPM
-        run: |
-          cd bindings/nodejs
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          toolchain: '1.75'
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check compilation with MSRV
+        run: cargo check --workspace --all-targets

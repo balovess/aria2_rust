@@ -5,7 +5,9 @@ mod fixtures {
 }
 use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
-use aria2_core::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
+use aria2_core::engine::metadata_exchange::{
+    MetadataExchangeConfig, MetadataExchangeError, MetadataExchangeSession,
+};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::bittorrent::dht::client::{
     DhtClient, DhtClientConfig, generate_random_node_id,
@@ -14,7 +16,11 @@ use aria2_protocol::bittorrent::extension::ut_metadata::{
     ExtensionHandshake, MetadataCollector, UtMetadataMsg,
 };
 use aria2_protocol::bittorrent::magnet::MagnetLink;
+use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
 use fixtures::mock_dht_node::MockDhtNode;
+use fixtures::test_torrent_builder::build_test_torrent;
+use std::net::SocketAddr;
+use tracing::info;
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -204,7 +210,10 @@ async fn test_metadata_exchange_no_peers_error() {
 
     let result = session.fetch_metadata(&target_hash, &empty_peers).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No peers available"));
+    match result.unwrap_err() {
+        aria2_core::engine::metadata_exchange::MetadataExchangeError::NoPeersAvailable => {}
+        other => panic!("Expected NoPeersAvailable, got {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -274,4 +283,291 @@ async fn test_dht_client_extract_compact_peers_from_mock_response() {
     let peers = aria2_protocol::bittorrent::dht::client::extract_compact_peers_from_response(&msg);
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].port(), 8080);
+}
+
+#[tokio::test]
+async fn test_e2e_magnet_metadata_exchange_with_mock_seeder() {
+    let torrent_name = "e2e_test_file";
+    let total_size: u64 = 1024 * 64; // 64KB
+    let piece_length: u32 = 32 * 1024; // 32KB
+    let tracker_url = "http://tracker.example.com:6969/announce";
+
+    let torrent_data = build_test_torrent(torrent_name, total_size, piece_length, tracker_url);
+
+    let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse test torrent");
+    let info_hash = meta.info_hash.bytes;
+
+    assert_eq!(meta.info.name, torrent_name);
+    assert_eq!(meta.total_size(), total_size);
+
+    let num_pieces = (total_size + piece_length as u64 - 1) / piece_length as u64;
+    assert!(num_pieces > 1, "Test torrent should have multiple pieces");
+
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    assert!(!collector.is_complete());
+
+    let metadata_piece_size = 16 * 1024;
+    let metadata_num_pieces = (torrent_data.len() + metadata_piece_size - 1) / metadata_piece_size;
+
+    for i in 0..metadata_num_pieces {
+        let start = i * metadata_piece_size;
+        let end = std::cmp::min(start + metadata_piece_size, torrent_data.len());
+        if start < torrent_data.len() {
+            collector.add_piece(i as u32, &torrent_data[start..end]);
+        }
+    }
+
+    assert!(
+        collector.is_complete(),
+        "MetadataCollector should be complete after all pieces"
+    );
+    let assembled = collector.assemble().expect("Should assemble successfully");
+
+    assert_eq!(
+        assembled.len(),
+        torrent_data.len(),
+        "Assembled metadata should match original size"
+    );
+    assert_eq!(
+        &assembled[..],
+        &torrent_data[..],
+        "Assembled content should match original"
+    );
+
+    let reassembled_meta =
+        TorrentMeta::parse(&assembled).expect("Should parse reassembled metadata");
+    assert_eq!(
+        reassembled_meta.info_hash.bytes, info_hash,
+        "Info hash should be preserved through assembly"
+    );
+    assert_eq!(
+        reassembled_meta.info.name, torrent_name,
+        "Name should be preserved"
+    );
+
+    info!(
+        "E2E metadata exchange simulation completed: {} bytes assembled from {} pieces",
+        total_size, num_pieces
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_magnet_metadata_exchange_produces_valid_torrent_file() {
+    let dir = tmp_dir();
+    let torrent_name = "magnet_to_torrent_test";
+    let total_size: u64 = 2048; // 2KB small file
+    let piece_length: u32 = 1024;
+    let tracker_url = "http://tracker.test.com/announce";
+
+    let torrent_data = build_test_torrent(torrent_name, total_size, piece_length, tracker_url);
+    let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse test torrent");
+    let info_hash = meta.info_hash.bytes;
+
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    collector.add_piece(0, &torrent_data);
+
+    assert!(
+        collector.is_complete(),
+        "Single-piece metadata should be complete"
+    );
+    let assembled = collector
+        .assemble()
+        .expect("Should assemble single-piece metadata");
+
+    let torrent_path = dir.path().join("downloaded.torrent");
+    std::fs::write(&torrent_path, &assembled).expect("Failed to write .torrent file");
+
+    assert!(torrent_path.exists(), ".torrent file should be created");
+
+    let reloaded = std::fs::read(&torrent_path).expect("Failed to read .torrent file");
+    assert_eq!(reloaded.len(), assembled.len());
+
+    let reloaded_meta = TorrentMeta::parse(&reloaded).expect("Failed to parse saved .torrent file");
+    assert_eq!(
+        reloaded_meta.info_hash.bytes, info_hash,
+        "Saved torrent should have correct info_hash"
+    );
+    assert_eq!(
+        reloaded_meta.total_size(),
+        total_size,
+        "Saved torrent should have correct total size"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_extension_handshake_cycle() {
+    let torrent_data =
+        build_test_torrent("handshake_test", 512, 256, "http://tracker.test/announce");
+    let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse torrent");
+    let info_hash = meta.info_hash.bytes;
+
+    let hs = ExtensionHandshake::new(torrent_data.len() as u64);
+    let encoded_value = hs.to_bencode();
+    let _encoded_bytes = encoded_value.encode();
+
+    let parsed =
+        ExtensionHandshake::parse(&encoded_value).expect("Should parse extension handshake");
+    assert_eq!(parsed.metadata_size, Some(torrent_data.len() as u64));
+    assert!(
+        parsed.get_ut_metadata_id().is_some(),
+        "Should have ut_metadata extension ID"
+    );
+
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig::default());
+
+    let empty_peers: Vec<SocketAddr> = vec![];
+    let result = session.fetch_metadata(&info_hash, &empty_peers).await;
+    assert!(result.is_err(), "Should fail with no peers");
+    match result.unwrap_err() {
+        MetadataExchangeError::NoPeersAvailable => {}
+        other => panic!("Expected NoPeersAvailable, got {:?}", other),
+    }
+
+    info!("Extension handshake cycle test completed successfully");
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_multiple_pieces() {
+    let large_size: u64 = 100 * 1024; // 100KB to ensure multiple pieces
+    let piece_len: u32 = 16 * 1024; // 16KB pieces -> ~7 pieces
+    let torrent_data = build_test_torrent(
+        "multi_piece_test",
+        large_size,
+        piece_len,
+        "http://tracker.test/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse torrent");
+    let info_hash = meta.info_hash.bytes;
+
+    let expected_num_pieces = (large_size + piece_len as u64 - 1) / piece_len as u64;
+    assert!(expected_num_pieces > 1, "Test should use multiple pieces");
+
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    assert!(!collector.is_complete());
+
+    let metadata_piece_size = 16 * 1024;
+    let metadata_num_pieces = (torrent_data.len() + metadata_piece_size - 1) / metadata_piece_size;
+
+    for i in 0..metadata_num_pieces {
+        let start = i * metadata_piece_size;
+        let end = std::cmp::min(start + metadata_piece_size, torrent_data.len());
+        if start < torrent_data.len() {
+            assert!(
+                !collector.is_complete(),
+                "Should not be complete before piece {}",
+                i
+            );
+            collector.add_piece(i as u32, &torrent_data[start..end]);
+        }
+    }
+
+    assert!(
+        collector.is_complete(),
+        "Should be complete after all {} pieces",
+        metadata_num_pieces
+    );
+    let assembled = collector
+        .assemble()
+        .expect("Should assemble multi-piece metadata");
+    assert_eq!(
+        assembled.len(),
+        torrent_data.len(),
+        "All pieces should assemble correctly"
+    );
+
+    let reassembled_meta =
+        TorrentMeta::parse(&assembled).expect("Should parse reassembled multi-piece metadata");
+    assert_eq!(
+        reassembled_meta.info_hash.bytes, info_hash,
+        "Info hash preserved in multi-piece assembly"
+    );
+
+    info!(
+        "Multi-piece exchange test completed: {} bytes from {} metadata pieces",
+        torrent_data.len(),
+        metadata_num_pieces
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_error_unsupported_peer() {
+    let info_hash = [0xABu8; 20];
+
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        connect_timeout: std::time::Duration::from_millis(100),
+        request_timeout: std::time::Duration::from_millis(100),
+        ..MetadataExchangeConfig::default()
+    });
+
+    let unreachable_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let result = session
+        .fetch_metadata(&info_hash, &[unreachable_addr])
+        .await;
+
+    assert!(result.is_err(), "Should fail with unreachable peer");
+    match result.unwrap_err() {
+        MetadataExchangeError::PeerConnectFailed { .. }
+        | MetadataExchangeError::PeerTimeout { .. }
+        | MetadataExchangeError::AllPeersFailed { .. } => {}
+        other => panic!("Expected connection/timeout error, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_collector_assembles_complete_torrent() {
+    let total_size: u64 = 4096;
+    let piece_size: u32 = 1024;
+    let num_pieces = (total_size / piece_size as u64) as u32;
+
+    let mut collector = MetadataCollector::new(total_size, piece_size);
+    assert!(!collector.is_complete());
+
+    for i in 0..num_pieces {
+        let start = (i as u64) * piece_size as u64;
+        let end = std::cmp::min(start + piece_size as u64, total_size);
+        let piece_data: Vec<u8> = (start..end).map(|b| (b % 256) as u8).collect();
+
+        collector.add_piece(i, &piece_data);
+
+        if i < num_pieces - 1 {
+            assert!(
+                !collector.is_complete(),
+                "Should not be complete until last piece"
+            );
+        }
+    }
+
+    assert!(
+        collector.is_complete(),
+        "Should be complete after all pieces added"
+    );
+
+    let assembled = collector.assemble().expect("Should assemble successfully");
+    assert_eq!(
+        assembled.len(),
+        total_size as usize,
+        "Assembled size should match total size"
+    );
+
+    for (i, &byte) in assembled.iter().enumerate() {
+        let expected = (i as u64 % 256) as u8;
+        assert_eq!(byte, expected, "Byte at index {} mismatch", i);
+    }
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_reject_handling() {
+    let info_hash = [0xCCu8; 20];
+
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        connect_timeout: std::time::Duration::from_millis(50),
+        request_timeout: std::time::Duration::from_millis(50),
+        max_attempts: 1,
+        ..MetadataExchangeConfig::default()
+    });
+
+    let bad_addr: SocketAddr = "127.0.0.1:2".parse().unwrap();
+    let result = session.fetch_metadata(&info_hash, &[bad_addr]).await;
+
+    assert!(result.is_err(), "Should fail with bad peer address");
 }

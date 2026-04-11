@@ -136,6 +136,28 @@ impl BtUploadSession {
                     BtMessage::Bitfield { .. } => {}
                     BtMessage::KeepAlive => {}
                     BtMessage::Port { port: _ } => {}
+                    BtMessage::AllowedFast { index } => {
+                        debug!("Received AllowedFast for piece {}", index);
+                    }
+                    BtMessage::Reject {
+                        index,
+                        offset,
+                        length,
+                    } => {
+                        debug!(
+                            "Received Reject for piece {} offset {} len {}",
+                            index, offset, length
+                        );
+                    }
+                    BtMessage::Suggest { index } => {
+                        debug!("Received Suggest for piece {}", index);
+                    }
+                    BtMessage::HaveAll => {
+                        debug!("Received HaveAll");
+                    }
+                    BtMessage::HaveNone => {
+                        debug!("Received HaveNone");
+                    }
                 },
                 Ok(None) => {
                     debug!("EOF from peer, marking session as dead");

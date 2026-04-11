@@ -7,7 +7,7 @@ use crate::bittorrent::message::handshake::Handshake;
 use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 use crate::bittorrent::peer::id;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PeerAddr {
     pub ip: String,
     pub port: u16,

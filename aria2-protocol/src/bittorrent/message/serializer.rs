@@ -36,6 +36,20 @@ fn build_payload(message: &BtMessage) -> Vec<u8> {
             buf
         }
         BtMessage::Port { port } => port.to_be_bytes().to_vec(),
+        BtMessage::AllowedFast { index } => index.to_be_bytes().to_vec(),
+        BtMessage::Reject {
+            index,
+            offset,
+            length,
+        } => {
+            let mut buf = vec![0u8; 12];
+            buf[0..4].copy_from_slice(&index.to_be_bytes());
+            buf[4..8].copy_from_slice(&offset.to_be_bytes());
+            buf[8..12].copy_from_slice(&length.to_be_bytes());
+            buf
+        }
+        BtMessage::Suggest { index } => index.to_be_bytes().to_vec(),
+        BtMessage::HaveAll | BtMessage::HaveNone => vec![],
         BtMessage::KeepAlive => vec![],
     }
 }
@@ -84,6 +98,25 @@ pub fn serialize_port(port: u16) -> Vec<u8> {
 }
 pub fn serialize_keepalive() -> Vec<u8> {
     serialize(&BtMessage::KeepAlive)
+}
+pub fn serialize_allowed_fast(index: u32) -> Vec<u8> {
+    serialize(&BtMessage::AllowedFast { index })
+}
+pub fn serialize_reject(index: u32, offset: u32, length: u32) -> Vec<u8> {
+    serialize(&BtMessage::Reject {
+        index,
+        offset,
+        length,
+    })
+}
+pub fn serialize_suggest(index: u32) -> Vec<u8> {
+    serialize(&BtMessage::Suggest { index })
+}
+pub fn serialize_have_all() -> Vec<u8> {
+    serialize(&BtMessage::HaveAll)
+}
+pub fn serialize_have_none() -> Vec<u8> {
+    serialize(&BtMessage::HaveNone)
 }
 
 pub fn create_standard_requests(piece_index: u32, piece_size: u32, offset: u32) -> Vec<BtMessage> {

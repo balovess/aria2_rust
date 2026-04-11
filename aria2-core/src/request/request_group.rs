@@ -66,6 +66,10 @@ pub struct DownloadOptions {
     pub max_retries: u32,
     pub retry_wait: u64,
     pub http_proxy: Option<String>,
+    pub all_proxy: Option<String>,
+    pub https_proxy: Option<String>,
+    pub ftp_proxy: Option<String>,
+    pub no_proxy: Option<String>,
     pub dht_file_path: Option<String>,
 
     // ------------------------------------------------------------------

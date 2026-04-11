@@ -1,0 +1,68 @@
+# Security Audit - Full-stack dependency vulnerability scanning
+# Scans Rust (cargo-audit), Node.js (npm audit), and Python (pip-audit) dependencies
+# for known CVEs and advisories. Rust and Node.js audits block on high/critical issues;
+# Python audit runs in warn-only mode initially.
+
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Every Monday at 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+jobs:
+  rust-audit:
+    name: Rust Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
+
+  nodejs-audit:
+    name: Node.js Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: bindings/nodejs/package-lock.json
+
+      - name: Run npm audit
+        run: cd bindings/nodejs && npm audit --audit-level=high
+
+  python-audit:
+    name: Python Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit
+        # Warn-only mode: report vulnerabilities but do not block the pipeline
+        run: cd bindings/python && pip-audit --severity-level high || true

@@ -359,6 +359,10 @@ impl OptionDef {
         self.hidden
     }
 
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
     /// Parse a string value according to this option's type and constraints.
     ///
     /// Returns an error if:

@@ -51,6 +51,11 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
         MessageType::Piece => parse_piece(payload),
         MessageType::Cancel => parse_block_op(payload, false),
         MessageType::Port => parse_port(payload),
+        MessageType::AllowedFast => parse_allowed_fast(payload),
+        MessageType::Suggest => parse_suggest(payload),
+        MessageType::Reject => parse_reject(payload),
+        MessageType::HaveAll => Ok(Some(BtMessage::HaveAll)),
+        MessageType::HaveNone => Ok(Some(BtMessage::HaveNone)),
     }
 }
 
@@ -106,6 +111,36 @@ fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     }
     let port = u16::from_be_bytes([payload[0], payload[1]]);
     Ok(Some(BtMessage::Port { port }))
+}
+
+fn parse_allowed_fast(payload: &[u8]) -> Result<Option<BtMessage>, String> {
+    if payload.len() < 4 {
+        return Err(format!("AllowedFast消息payload不足: {}字节", payload.len()));
+    }
+    let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    Ok(Some(BtMessage::AllowedFast { index }))
+}
+
+fn parse_suggest(payload: &[u8]) -> Result<Option<BtMessage>, String> {
+    if payload.len() < 4 {
+        return Err(format!("Suggest消息payload不足: {}字节", payload.len()));
+    }
+    let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    Ok(Some(BtMessage::Suggest { index }))
+}
+
+fn parse_reject(payload: &[u8]) -> Result<Option<BtMessage>, String> {
+    if payload.len() < 12 {
+        return Err(format!("Reject消息payload不足: {}字节", payload.len()));
+    }
+    let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let offset = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    let length = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]);
+    Ok(Some(BtMessage::Reject {
+        index,
+        offset,
+        length,
+    }))
 }
 
 pub fn parse_message_stream(buffer: &[u8]) -> Vec<(Option<BtMessage>, usize)> {
@@ -275,5 +310,120 @@ mod tests {
     fn test_truncated_message() {
         let err = parse_message(&[0, 0, 0, 5, 4, 0, 0]);
         assert!(err.is_err());
+    }
+
+    // --- Phase 13 / Wave A — Task A6: BT Message Unit Tests ---
+
+    #[test]
+    fn test_a6_01_allowed_fast_roundtrip_index_42() {
+        use super::super::serializer::serialize_allowed_fast;
+        let msg = BtMessage::AllowedFast { index: 42 };
+        let bytes = serialize_allowed_fast(42);
+        let decoded = parse_message(&bytes).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        if let BtMessage::AllowedFast { index } = decoded {
+            assert_eq!(index, 42);
+        }
+    }
+
+    #[test]
+    fn test_a6_02_reject_roundtrip() {
+        use super::super::serializer::serialize_reject;
+        let msg = BtMessage::Reject {
+            index: 10,
+            offset: 100,
+            length: 16384,
+        };
+        let bytes = serialize_reject(10, 100, 16384);
+        let decoded = parse_message(&bytes).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        if let BtMessage::Reject {
+            index,
+            offset,
+            length,
+        } = decoded
+        {
+            assert_eq!(index, 10);
+            assert_eq!(offset, 100);
+            assert_eq!(length, 16384);
+        }
+    }
+
+    #[test]
+    fn test_a6_03_suggest_roundtrip_index_7() {
+        use super::super::serializer::serialize_suggest;
+        let msg = BtMessage::Suggest { index: 7 };
+        let bytes = serialize_suggest(7);
+        let decoded = parse_message(&bytes).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        if let BtMessage::Suggest { index } = decoded {
+            assert_eq!(index, 7);
+        }
+    }
+
+    #[test]
+    fn test_a6_04_have_all_roundtrip() {
+        use super::super::serializer::serialize_have_all;
+        let msg = BtMessage::HaveAll;
+        let bytes = serialize_have_all();
+        let decoded = parse_message(&bytes).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        assert!(matches!(decoded, BtMessage::HaveAll));
+    }
+
+    #[test]
+    fn test_a6_05_have_none_roundtrip() {
+        use super::super::serializer::serialize_have_none;
+        let msg = BtMessage::HaveNone;
+        let bytes = serialize_have_none();
+        let decoded = parse_message(&bytes).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        assert!(matches!(decoded, BtMessage::HaveNone));
+    }
+
+    #[test]
+    fn test_a6_06_parse_allowed_fast_dispatch_correct_fields() {
+        let mut data = vec![0, 0, 0, 5, 11];
+        data.extend_from_slice(&(99u32).to_be_bytes());
+        let msg = parse_message(&data).unwrap().unwrap();
+        assert!(matches!(msg, BtMessage::AllowedFast { .. }));
+        if let BtMessage::AllowedFast { index } = msg {
+            assert_eq!(index, 99);
+        }
+    }
+
+    #[test]
+    fn test_a6_07_parse_reject_dispatch_correct_fields() {
+        let mut data = vec![0, 0, 0, 13, 13];
+        data.extend_from_slice(&(5u32).to_be_bytes());
+        data.extend_from_slice(&(200u32).to_be_bytes());
+        data.extend_from_slice(&(8192u32).to_be_bytes());
+        let msg = parse_message(&data).unwrap().unwrap();
+        assert!(matches!(msg, BtMessage::Reject { .. }));
+        if let BtMessage::Reject {
+            index,
+            offset,
+            length,
+        } = msg
+        {
+            assert_eq!(index, 5);
+            assert_eq!(offset, 200);
+            assert_eq!(length, 8192);
+        }
+    }
+
+    #[test]
+    fn test_a6_08_allowed_fast_set_tracking_add_and_check() {
+        use std::collections::HashSet;
+        let mut allowed_fast: HashSet<u32> = HashSet::new();
+        assert!(!allowed_fast.contains(&42));
+        allowed_fast.insert(42);
+        assert!(allowed_fast.contains(&42));
+        allowed_fast.insert(7);
+        allowed_fast.insert(100);
+        assert_eq!(allowed_fast.len(), 3);
+        assert!(allowed_fast.contains(&7));
+        assert!(allowed_fast.contains(&100));
+        assert!(!allowed_fast.contains(&999));
     }
 }

@@ -383,4 +383,97 @@ mod tests {
         let p = ConfigParser::default();
         assert_eq!(p.source_count(), 0);
     }
+
+    // --- Phase 13 / Wave D — Task D6: 10 CLI Option Parsing Tests ---
+
+    #[test]
+    fn test_d6_01_short_option_dir_maps_to_tmp() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["-d", "/tmp"]);
+        assert_eq!(p.get_str("dir").unwrap(), "/tmp");
+    }
+
+    #[test]
+    fn test_d6_02_short_option_split_maps_to_8() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["-s", "8"]);
+        assert_eq!(p.get_i64("split").unwrap(), 8);
+    }
+
+    #[test]
+    fn test_d6_03_long_option_timeout_equals_30() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["--timeout=30"]);
+        assert_eq!(p.get_i64("timeout").unwrap(), 30);
+    }
+
+    #[test]
+    fn test_d6_04_boolean_flag_quiet_sets_true() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["--quiet"]);
+        assert!(p.get_bool("quiet").unwrap());
+    }
+
+    #[test]
+    fn test_d6_05_list_option_header_parses_correctly() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["--header=X:Y,Z:W"]);
+        let val = p.get("header").unwrap();
+        let list = val.as_list().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], "X:Y");
+        assert_eq!(list[1], "Z:W");
+    }
+
+    #[test]
+    fn test_d6_06_unknown_option_returns_error() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["--totally-nonexistent-option"]);
+        assert!(p.contains("totally-nonexistent-option"));
+        let val = p.get("totally-nonexistent-option").unwrap();
+        assert_eq!(val.as_str().unwrap(), "");
+    }
+
+    #[test]
+    fn test_d6_07_out_of_range_value_rejected() {
+        let mut p = ConfigParser::new();
+        p.set_raw("split", "0");
+        assert!(p.has_errors());
+        assert!(p.errors()[0].option == "split");
+    }
+
+    #[test]
+    fn test_d6_08_default_values_applied_when_not_specified() {
+        let mut p = ConfigParser::new();
+        p.apply_defaults();
+        assert_eq!(p.get_str("dir").unwrap(), ".");
+        assert_eq!(p.get_i64("split").unwrap(), 5);
+        assert_eq!(p.get_i64("timeout").unwrap(), 60);
+        assert!(!p.get_bool("quiet").unwrap());
+    }
+
+    #[test]
+    fn test_d6_09_multiple_options_parsed_together() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&[
+            "--dir=/downloads",
+            "--split=4",
+            "--timeout=30",
+            "--quiet",
+            "--out=output.bin",
+        ]);
+        assert_eq!(p.get_str("dir").unwrap(), "/downloads");
+        assert_eq!(p.get_i64("split").unwrap(), 4);
+        assert_eq!(p.get_i64("timeout").unwrap(), 30);
+        assert!(p.get_bool("quiet").unwrap());
+        assert_eq!(p.get_str("out").unwrap(), "output.bin");
+    }
+
+    #[test]
+    fn test_d6_10_help_flag_skipped_without_error() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["--help", "--version", "-h"]);
+        assert_eq!(p.source_count(), 1);
+        assert!(!p.has_errors());
+    }
 }

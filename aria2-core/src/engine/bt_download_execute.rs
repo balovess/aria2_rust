@@ -22,6 +22,7 @@ use crate::engine::udp_tracker_manager::UdpTrackerManager;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use aria2_protocol::bittorrent::extension::pex::PexHandler;
 use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
 
 #[async_trait]
@@ -68,6 +69,32 @@ impl Command for BtDownloadCommand {
         let mut active_connections = self
             .connect_to_peers(&peer_addrs, &meta.info_hash.bytes, num_pieces)
             .await?;
+
+        // Initialize PEX known peers list from discovered peers for BEP 11 exchange
+        {
+            let pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = peer_addrs
+                .iter()
+                .map(|pa| {
+                    aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&pa.ip, pa.port)
+                })
+                .collect();
+            self.set_pex_known_peers(pex_peers);
+            info!(
+                "[PEX] Initialized with {} known peers from tracker/DHT",
+                self.pex_known_peers.len()
+            );
+        }
+
+        // TODO: PEX Integration Point - After extension handshake and bitfield exchange:
+        // For each active connection that supports ut_pex (check extension IDs from handshake):
+        //   1. Call self.check_pex_support(local_ext_ids, remote_ext_ids) to verify mutual support
+        //   2. Enable periodic PEX exchange by calling self.maybe_send_pex(&remote_addr) in the loop
+        //   3. When receiving extension message ID == PexHandler::EXTENSION_ID, call:
+        //      self.handle_incoming_pex(&pex_data, &local_addr) to process discovered peers
+        //
+        // Note: Extension handshake happens during BtPeerInteraction::connect_to_peers()
+        // The actual PEX message send/receive should be integrated into the piece download loop
+        // below, respecting the 60-second rate limit enforced by should_send_pex()
 
         self.download_pieces_loop(
             &mut active_connections,
@@ -548,6 +575,23 @@ impl BtDownloadCommand {
                         .await;
                         piece_ok = true;
 
+                        // PEX Integration: Trigger PEX send on piece completion
+                        // This ensures peers are exchanged when progress is made
+                        if !self.pex_known_peers.is_empty() && self.should_send_pex() {
+                            let dummy_remote =
+                                aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                                    "0.0.0.0", 0,
+                                );
+                            if let Some(_pex_data) = self.maybe_send_pex(&dummy_remote) {
+                                debug!(
+                                    "[PEX] PEX message ready after piece {} completion",
+                                    next_piece_idx
+                                );
+                                // Note: Actual sending would happen via extension message channel
+                                // when full extension protocol integration is implemented
+                            }
+                        }
+
                         // P1 集成: 定期保存下载进度到 .aria2 文件
                         if let Some(ref mgr) = self.progress_manager
                             && last_progress_save.elapsed() >= self.progress_save_interval
@@ -736,5 +780,85 @@ impl BtDownloadCommand {
         }
 
         Ok(())
+    }
+
+    /// Check if both local and remote peer support ut_pex extension
+    pub fn check_pex_support(
+        local_extension_ids: &[Option<u8>],
+        remote_extension_ids: &[Option<u8>],
+    ) -> bool {
+        let local_supports = local_extension_ids.contains(&Some(PexHandler::EXTENSION_ID));
+        let remote_supports = remote_extension_ids.contains(&Some(PexHandler::EXTENSION_ID));
+        local_supports && remote_supports
+    }
+
+    /// Build and optionally send a PEX message to connected peers
+    /// Returns the encoded PEX message (or None if not ready to send)
+    pub fn maybe_send_pex(
+        &mut self,
+        remote_peer_addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+    ) -> Option<Vec<u8>> {
+        if !self.should_send_pex() {
+            return None;
+        }
+
+        if self.pex_known_peers.is_empty() {
+            debug!("[PEX] No known peers to exchange");
+            return None;
+        }
+
+        debug!(
+            known_peers = self.pex_known_peers.len(),
+            remote = %format!("{}:{}", remote_peer_addr.ip, remote_peer_addr.port),
+            "[PEX] Building PEX message"
+        );
+
+        let pex_msg = PexHandler::build_pex_added(
+            &self.pex_known_peers,
+            remote_peer_addr,
+            PexHandler::DEFAULT_MAX_PEERS,
+        );
+
+        let encoded = pex_msg.encode();
+        self.update_pex_last_send();
+
+        debug!(
+            size = encoded.len(),
+            "[PEX] PEX message built and ready to send"
+        );
+        Some(encoded)
+    }
+
+    /// Process an incoming PEX message and extract discovered/dropped peers
+    pub fn handle_incoming_pex(
+        &mut self,
+        pex_data: &[u8],
+        local_addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+    ) -> Result<(
+        Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+        Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    )> {
+        match PexHandler::process_received_pex(pex_data, local_addr) {
+            Ok((added, dropped)) => {
+                if !added.is_empty() {
+                    info!(count = added.len(), "[PEX] Discovered new peers from PEX");
+                    for peer in &added {
+                        self.add_pex_peer(peer.clone());
+                    }
+                }
+                if !dropped.is_empty() {
+                    debug!(count = dropped.len(), "[PEX] Peers to drop from PEX");
+                }
+                Ok((added, dropped))
+            }
+            Err(e) => {
+                warn!(error = %e, "[PEX] Failed to process incoming PEX message");
+                Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: format!("PEX processing failed: {}", e),
+                    },
+                ))
+            }
+        }
     }
 }

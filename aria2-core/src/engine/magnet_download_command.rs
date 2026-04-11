@@ -138,6 +138,7 @@ impl Command for MagnetDownloadCommand {
             connect_timeout: Duration::from_secs(15),
             request_timeout: Duration::from_secs(10),
             piece_size: 16 * 1024,
+            ..MetadataExchangeConfig::default()
         });
 
         let torrent_bytes = meta_session
