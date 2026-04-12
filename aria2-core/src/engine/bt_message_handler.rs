@@ -12,6 +12,7 @@
 //! - `src/BtMessageDispatcher.h` - Message dispatching
 //! - `src/PeerInteractionCommand.h` - Peer interaction
 
+use crate::engine::bt_download_execute::EndgameState;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use tracing::{debug, info, warn};
@@ -187,6 +188,12 @@ impl BtMessageHandler {
                                 }
                                 BtMessage::Suggest { index } => {
                                     debug!("[BT] Received Suggest for piece {}", index);
+                                    // Note: Priority boost would be applied here if we had
+                                    // access to the piece picker. For now, just log it.
+                                    debug!(
+                                        "[BT] Suggest received for piece {} — would boost priority",
+                                        index
+                                    );
                                 }
                                 BtMessage::HaveAll => {
                                     debug!("[BT] Received HaveAll");
@@ -332,6 +339,347 @@ impl BtMessageHandler {
             "Failed to download piece {} after {} attempts",
             piece_index, MAX_RETRIES
         ))))
+    }
+
+    /// Download all blocks for a piece using endgame mode (duplicate request strategy).
+    ///
+    /// In endgame mode, when few pieces remain, we request each block from ALL available
+    /// peers simultaneously. When any peer responds first, we immediately send Cancel
+    /// messages to the other peers to stop them from sending redundant data.
+    ///
+    /// # Phase 14 - B1/B2: Endgame Duplicate Request Strategy + Cancel on Block Arrival
+    ///
+    /// # Arguments
+    /// * `connections` - Mutable slice of active peer connections
+    /// * `piece_index` - Index of the piece to download
+    /// * `piece_length` - Total length of this piece in bytes
+    /// * `num_blocks` - Number of blocks in this piece
+    /// * `endgame_state` - Mutable reference to EndgameState for tracking duplicate requests
+    ///
+    /// # Returns
+    /// * `Ok(Vec<u8>)` - Complete piece data if all blocks downloaded successfully
+    /// * `Err(Aria2Error)` - If piece download fails after all retries
+    pub async fn download_piece_blocks_endgame(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+    ) -> Result<Vec<u8>> {
+        // Retry the entire piece multiple times (same as normal mode)
+        for _retry in 0..MAX_RETRIES {
+            info!(
+                "[BT] Endgame piece download attempt {} for piece {} ({} peers)",
+                _retry + 1,
+                piece_index,
+                connections.len()
+            );
+
+            let mut piece_data = Vec::with_capacity(piece_length as usize);
+            piece_data.clear();
+            let mut all_blocks_ok = true;
+
+            // Download each block using endgame strategy
+            for block_idx in 0..num_blocks {
+                let offset = block_idx * BLOCK_SIZE;
+                let len = if offset + BLOCK_SIZE > piece_length {
+                    piece_length - offset
+                } else {
+                    BLOCK_SIZE
+                };
+
+                debug!(
+                    "[BT] Endgame: requesting block {}/{} (offset={}, len={}) from all {} peers",
+                    block_idx + 1,
+                    num_blocks,
+                    offset,
+                    len,
+                    connections.len()
+                );
+
+                // Phase 14 - B1: Request this block from ALL peers and track duplicates
+                match Self::request_block_endgame(
+                    connections,
+                    piece_index,
+                    offset,
+                    len,
+                    endgame_state,
+                )
+                .await
+                {
+                    Ok(result) if result.success => {
+                        if let Some(data) = result.data {
+                            // Phase 14 - B2: Cancel redundant requests now that we have the block
+                            Self::cancel_redundant_requests(
+                                connections,
+                                piece_index,
+                                offset,
+                                len,
+                                endgame_state,
+                            )
+                            .await;
+
+                            piece_data.extend_from_slice(&data);
+                        } else {
+                            all_blocks_ok = false;
+                            break;
+                        }
+                    }
+                    Ok(_) => {
+                        warn!("[BT] Endgame: Block {} request returned no data", block_idx);
+                        all_blocks_ok = false;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("[BT] Endgame: Block {} request error: {}", block_idx, e);
+                        all_blocks_ok = false;
+                        break;
+                    }
+                }
+            }
+
+            // Check if we got all blocks
+            if all_blocks_ok && piece_data.len() == piece_length as usize {
+                info!(
+                    "[BT] Endgame: All {} blocks downloaded for piece {} ({} bytes)",
+                    num_blocks,
+                    piece_index,
+                    piece_data.len()
+                );
+                return Ok(piece_data);
+            }
+
+            warn!(
+                "[BT] Endgame: Incomplete piece {} (attempt {}/{}), retrying...",
+                piece_index,
+                _retry + 1,
+                MAX_RETRIES
+            );
+
+            // Small delay before retry
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        Err(Aria2Error::Fatal(FatalError::Config(format!(
+            "Failed to download piece {} in endgame mode after {} attempts",
+            piece_index, MAX_RETRIES
+        ))))
+    }
+
+    /// Request a single block from all peers during endgame mode.
+    ///
+    /// Sends the same block request to every connected peer simultaneously.
+    /// Tracks each request in the EndgameState so we can cancel redundant ones later.
+    ///
+    /// # Phase 14 - B1: Endgame Duplicate Request Strategy
+    async fn request_block_endgame(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        block_offset: u32,
+        block_length: u32,
+        endgame_state: &mut EndgameState,
+    ) -> Result<BlockDownloadResult> {
+        let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+            index: piece_index,
+            begin: block_offset,
+            length: block_length,
+        };
+
+        let mut total_bytes = 0u64;
+
+        // Phase 14 - B1: Send request to ALL peers (not just one)
+        for (conn_idx, conn) in connections.iter_mut().enumerate() {
+            debug!(
+                "[BT] Endgame: Sending duplicate request for block {} to peer {}",
+                block_offset / BLOCK_SIZE,
+                conn_idx
+            );
+
+            // Send request to this peer
+            if conn.send_request(req.clone()).await.is_err() {
+                warn!(
+                    "[BT] Endgame: Failed to send request to peer {}, skipping",
+                    conn_idx
+                );
+                continue;
+            }
+
+            // Track this duplicate request in endgame state
+            endgame_state.track_request(piece_index, block_offset, block_length, conn_idx);
+        }
+
+        // Now wait for the FIRST response from any peer (others will be cancelled later)
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+            Self::wait_for_any_piece_block(connections, piece_index, block_offset),
+        )
+        .await
+        {
+            Ok(Ok((data, _peer_idx))) => {
+                debug!(
+                    "[BT] Endgame: Got block {} data len={} (will cancel {} duplicates)",
+                    block_offset / BLOCK_SIZE,
+                    data.len(),
+                    endgame_state
+                        .get_cancel_targets(piece_index, block_offset, block_length)
+                        .len()
+                        .saturating_sub(1)
+                );
+                total_bytes += data.len() as u64;
+
+                return Ok(BlockDownloadResult {
+                    success: true,
+                    data: Some(data),
+                    bytes_received: total_bytes,
+                });
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "[BT] Endgame: No PIECE message received from any peer: {}",
+                    e
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "[BT] Endgame: Block request timed out after {}s",
+                    BLOCK_REQUEST_TIMEOUT_SECS
+                );
+            }
+        }
+
+        // All peers failed or timed out
+        warn!("[BT] Endgame: Failed to get block from any peer");
+        Ok(BlockDownloadResult {
+            success: false,
+            data: None,
+            bytes_received: total_bytes,
+        })
+    }
+
+    /// Wait for a specific PIECE message from ANY peer.
+    ///
+    /// Unlike `wait_for_piece_block` which waits on a single connection,
+    /// this polls all connections until the expected block arrives.
+    async fn wait_for_any_piece_block(
+        connections: &mut [BtPeerConn],
+        expected_index: u32,
+        expected_begin: u32,
+    ) -> Result<(Vec<u8>, usize)> {
+        // Poll each connection in round-robin fashion
+        for _ in 0..MAX_BLOCK_READ_MESSAGES {
+            for (conn_idx, conn) in connections.iter_mut().enumerate() {
+                match conn.read_message().await {
+                    Ok(Some(msg)) => {
+                        use aria2_protocol::bittorrent::message::types::BtMessage;
+
+                        match msg {
+                            BtMessage::Piece {
+                                index,
+                                begin,
+                                ref data,
+                            } => {
+                                if index == expected_index && begin == expected_begin {
+                                    return Ok((data.clone(), conn_idx));
+                                }
+                                // Not the block we're waiting for, continue
+                                debug!(
+                                    "[BT] Endgame: Received unexpected PIECE (index={}, begin={}) from peer {}, waiting for ({}, {})",
+                                    index, begin, conn_idx, expected_index, expected_begin
+                                );
+                            }
+                            BtMessage::AllowedFast { index } => {
+                                debug!("[BT] Received AllowedFast for piece {}", index);
+                                conn.add_allowed_fast(index);
+                            }
+                            other => {
+                                debug!(
+                                    "[BT] Endgame: Received non-PIECE message while waiting: {:?}",
+                                    other
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // Connection closed by this peer, try next
+                        debug!("[BT] Endgame: Peer {} connection closed", conn_idx);
+                    }
+                    Err(e) => {
+                        debug!("[BT] Endgame: Error reading from peer {}: {}", conn_idx, e);
+                    }
+                }
+            }
+        }
+
+        Err(Aria2Error::Recoverable(
+            RecoverableError::TemporaryNetworkFailure {
+                message: format!(
+                    "Exceeded max messages ({}) without receiving expected block from any peer",
+                    MAX_BLOCK_READ_MESSAGES
+                ),
+            },
+        ))
+    }
+
+    /// Cancel redundant requests for a completed block.
+    ///
+    /// After receiving a block from one peer during endgame mode, sends Cancel
+    /// messages to all other peers that were sent duplicate requests for the same block.
+    ///
+    /// # Phase 14 - B2: Cancel Redundant Requests on Block Arrival
+    async fn cancel_redundant_requests(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        offset: u32,
+        len: u32,
+        endgame_state: &mut EndgameState,
+    ) {
+        // Get list of peers that have pending requests for this block
+        let targets = endgame_state.get_cancel_targets(piece_index, offset, len);
+
+        if targets.is_empty() {
+            debug!(
+                "[BT] Endgame: No redundant requests to cancel for piece {} block {}",
+                piece_index,
+                offset / BLOCK_SIZE
+            );
+            return;
+        }
+
+        let cancel_req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+            index: piece_index,
+            begin: offset,
+            length: len,
+        };
+
+        debug!(
+            "[BT] Endgame: Cancelling {} redundant requests for piece {} block offset={}",
+            targets.len(),
+            piece_index,
+            offset
+        );
+
+        // Send Cancel to each peer that had a pending request
+        for peer_id in targets {
+            if let Some(conn) = connections.get_mut(peer_id) {
+                match conn.send_cancel(&cancel_req).await {
+                    Ok(()) => {
+                        debug!(
+                            "[BT] Endgame: Sent Cancel to peer {} for piece {} offset={} len={}",
+                            peer_id, piece_index, offset, len
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[BT] Endgame: Failed to send Cancel to peer {}: {}",
+                            peer_id, e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Remove the tracked request since we've handled it
+        endgame_state.remove_request(piece_index, offset, len);
     }
 }
 

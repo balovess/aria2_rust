@@ -280,6 +280,21 @@ impl PiecePicker {
     pub fn get_piece_info(&self, index: u32) -> Option<&PieceInfo> {
         self.pieces.get(index as usize)
     }
+
+    /// Get mutable reference to piece info by index
+    ///
+    /// Used for modifying piece properties like priority when receiving
+    /// Suggest messages (BEP 6).
+    pub fn get_piece_info_mut(&mut self, index: u32) -> Option<&mut PieceInfo> {
+        self.pieces.get_mut(index as usize)
+    }
+
+    /// Iterate over all pieces
+    ///
+    /// Returns an iterator over all PieceInfo entries for filtering/sorting operations.
+    pub fn pieces_iter(&self) -> impl Iterator<Item = &PieceInfo> {
+        self.pieces.iter()
+    }
 }
 
 #[cfg(test)]
@@ -501,5 +516,50 @@ mod tests {
     fn test_get_piece_info_out_of_range() {
         let picker = PiecePicker::new(4);
         assert!(picker.get_piece_info(99).is_none());
+    }
+
+    #[test]
+    fn test_get_piece_info_mut_modifies_priority() {
+        let mut picker = PiecePicker::new(5);
+
+        // Check initial priority
+        assert_eq!(picker.get_piece_info(2).unwrap().priority, 0);
+
+        // Modify priority via mutable reference
+        if let Some(info) = picker.get_piece_info_mut(2) {
+            info.priority = 100;
+        }
+
+        // Verify change persisted
+        assert_eq!(picker.get_piece_info(2).unwrap().priority, 100);
+    }
+
+    #[test]
+    fn test_get_piece_info_mut_out_of_range() {
+        let mut picker = PiecePicker::new(3);
+        assert!(picker.get_piece_info_mut(99).is_none());
+    }
+
+    #[test]
+    fn test_pieces_iter_returns_all_pieces() {
+        let picker = PiecePicker::new(5);
+        let pieces: Vec<_> = picker.pieces_iter().collect();
+
+        assert_eq!(pieces.len(), 5);
+        for (i, piece) in pieces.iter().enumerate() {
+            assert_eq!(piece.index, i as u32);
+        }
+    }
+
+    #[test]
+    fn test_pieces_iter_filters_correctly() {
+        let mut picker = PiecePicker::new(5);
+        picker.mark_completed(0);
+        picker.mark_completed(1);
+
+        // Count incomplete pieces via iterator
+        let incomplete_count = picker.pieces_iter().filter(|p| !p.completed).count();
+
+        assert_eq!(incomplete_count, 3); // Pieces 2,3,4
     }
 }

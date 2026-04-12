@@ -189,6 +189,20 @@ impl RateLimiter {
         inner.upload.acquire(bytes).await;
     }
 
+    /// Non-blocking attempt to acquire download tokens.
+    /// Returns true if tokens were available, false otherwise (no wait).
+    pub async fn try_acquire_download(&self, bytes: u64) -> bool {
+        let mut inner = self.inner.lock().await;
+        inner.download.try_acquire(bytes)
+    }
+
+    /// Non-blocking attempt to acquire upload tokens.
+    /// Returns true if tokens were available, false otherwise (no wait).
+    pub async fn try_acquire_upload(&self, bytes: u64) -> bool {
+        let mut inner = self.inner.lock().await;
+        inner.upload.try_acquire(bytes)
+    }
+
     pub fn is_download_limited(&self) -> bool {
         self.download_limited
     }

@@ -65,6 +65,14 @@ impl BtPeerConn {
         self.allowed_fast.contains(&index)
     }
 
+    /// Get a reference to the full AllowedFast set
+    ///
+    /// Returns all piece indices that this peer has allowed us to request
+    /// via BEP 6 Fast Extension, even when choked.
+    pub fn allowed_fast_set(&self) -> &HashSet<u32> {
+        &self.allowed_fast
+    }
+
     pub async fn send_unchoke(&mut self) -> Result<()> {
         match &mut self.inner {
             InnerConnection::Plain(c) => c.send_unchoke().await.map_err(|e| {

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
@@ -6,7 +7,6 @@ use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
     on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
 };
-use crate::engine::bt_piece_downloader::write_piece_to_multi_files;
 use crate::engine::bt_post_download_handler::HookManager;
 use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::bt_tracker_comm::announce_to_public_tracker;
@@ -64,6 +64,18 @@ pub struct BtDownloadCommand {
     pub(crate) pex_last_send_time: Option<Instant>,
     /// Interval between PEX messages (default 60 seconds)
     pub(crate) pex_send_interval: Duration,
+
+    // Endgame mode (Phase 14 - B1/B2): duplicate request tracking for final pieces
+    /// Tracks duplicate block requests during endgame mode
+    pub(crate) endgame_state: super::bt_download_execute::EndgameState,
+
+    // BEP 6 (Fast Extension): track AllowedFast messages sent to peers
+    /// Track which AllowedFast pieces have been sent to each peer
+    /// Key: peer identifier (using connection index for now)
+    pub(crate) allowed_fast_sent_peers: HashMap<usize, HashSet<u32>>,
+
+    /// Track suggest counts per peer to avoid spamming
+    pub(crate) suggest_sent_counts: HashMap<usize, usize>,
 }
 
 impl BtDownloadCommand {
@@ -188,6 +200,13 @@ impl BtDownloadCommand {
             pex_known_peers: Vec::new(),
             pex_last_send_time: None,
             pex_send_interval: Duration::from_secs(60),
+
+            // BEP 6 Fast Extension tracking
+            allowed_fast_sent_peers: HashMap::new(),
+            suggest_sent_counts: HashMap::new(),
+
+            // Endgame mode default values
+            endgame_state: super::bt_download_execute::EndgameState::new(),
         })
     }
 
@@ -243,13 +262,39 @@ impl BtDownloadCommand {
         announce_to_public_tracker(tracker_url, info_hash, peer_id, total_size).await
     }
 
+    /// Wrapper around [`crate::engine::bt_piece_downloader::write_piece_to_multi_files`].
     pub async fn write_piece_to_multi_files(
         layout: &MultiFileLayout,
         piece_idx: u32,
         piece_data: &[u8],
         piece_length: u32,
     ) -> Result<()> {
-        write_piece_to_multi_files(layout, piece_idx, piece_data, piece_length).await
+        crate::engine::bt_piece_downloader::write_piece_to_multi_files(
+            layout,
+            piece_idx,
+            piece_data,
+            piece_length,
+        )
+        .await
+    }
+
+    /// Wrapper around [`crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced`].
+    ///
+    /// Prefer this over `write_piece_to_multi_files` for production use — it
+    /// merges adjacent writes within a 4 KiB gap, reducing syscall count.
+    pub async fn write_piece_to_multi_files_coalesced(
+        layout: &MultiFileLayout,
+        piece_idx: u32,
+        piece_data: &[u8],
+        piece_length: u32,
+    ) -> Result<()> {
+        crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced(
+            layout,
+            piece_idx,
+            piece_data,
+            piece_length,
+        )
+        .await
     }
 
     pub fn is_multi_file(&self) -> bool {
@@ -410,5 +455,17 @@ impl BtDownloadCommand {
     /// Update the last PEX send timestamp
     pub fn update_pex_last_send(&mut self) {
         self.pex_last_send_time = Some(Instant::now());
+    }
+
+    // ==================== Endgame Mode (Phase 14 - B1/B2) API ====================
+
+    /// Get a mutable reference to the EndgameState for tracking duplicate requests
+    pub fn endgame_state_mut(&mut self) -> &mut super::bt_download_execute::EndgameState {
+        &mut self.endgame_state
+    }
+
+    /// Get an immutable reference to the EndgameState
+    pub fn endgame_state(&self) -> &super::bt_download_execute::EndgameState {
+        &self.endgame_state
     }
 }

@@ -123,6 +123,70 @@ impl BtPieceSelector {
         }
     }
 
+    /// Select the next piece for a specific peer, considering BEP 6 AllowedFast
+    ///
+    /// When a peer is choked but has granted us AllowedFast access to some pieces,
+    /// this method prioritizes those pieces before falling back to normal selection.
+    ///
+    /// # Arguments
+    /// * `piece_picker` - The mutable piece picker
+    /// * `peer_conn` - The peer connection (for checking allowed_fast set)
+    /// * `peer_bitfield` - The peer's bitfield (pieces they have)
+    /// * `is_choked` - Whether this peer has choked us
+    /// * `remaining` - Number of incomplete pieces
+    ///
+    /// # Returns
+    /// * `PieceSelectionResult` with the optimal piece for this peer
+    pub fn select_next_piece_for_peer(
+        &self,
+        piece_picker: &mut aria2_protocol::bittorrent::piece::picker::PiecePicker,
+        peer_conn: &crate::engine::bt_peer_connection::BtPeerConn,
+        peer_bitfield: &[u8],
+        is_choked: bool,
+        remaining: usize,
+    ) -> PieceSelectionResult {
+        // If peer is choked BUT has allowed us some pieces, prefer those
+        if is_choked && !peer_conn.allowed_fast_set().is_empty() {
+            debug!(
+                "[BT] Peer is choked but has {} allowed fast pieces, checking...",
+                peer_conn.allowed_fast_set().len()
+            );
+
+            for &fast_idx in peer_conn.allowed_fast_set() {
+                // Check if piece is needed and peer has it
+                if let Some(info) = piece_picker.get_piece_info(fast_idx) {
+                    if !info.completed && !info.in_progress {
+                        if Self::is_bitfield_set(peer_bitfield, fast_idx) {
+                            info!("[BT] Using AllowedFast piece {} despite choke", fast_idx);
+                            return PieceSelectionResult {
+                                piece_index: Some(fast_idx as usize),
+                                is_endgame: false,
+                                remaining_count: remaining,
+                            };
+                        }
+                    }
+                }
+            }
+
+            debug!("[BT] No suitable AllowedFast piece found, falling back");
+        }
+
+        // Fall back to normal selection
+        self.select_next_piece(piece_picker, remaining)
+    }
+
+    /// Check if a bitfield has a specific piece index set (MSB-first ordering)
+    fn is_bitfield_set(bitfield: &[u8], piece_index: u32) -> bool {
+        let byte_idx = (piece_index as usize) / 8;
+        let bit_idx = 7 - ((piece_index as usize) % 8);
+
+        if byte_idx >= bitfield.len() {
+            return false;
+        }
+
+        (bitfield[byte_idx] & (1 << bit_idx)) != 0
+    }
+
     /// Calculate the actual length of a specific piece
     ///
     /// The last piece may be shorter than the standard piece length.
