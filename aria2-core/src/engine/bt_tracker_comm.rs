@@ -1,3 +1,5 @@
+#![allow(clippy::empty_line_after_doc_comments)]
+
 use crate::engine::http_tracker_client::{TrackerEvent, build_tracker_client, is_https_tracker};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use std::time::{Duration, Instant};
@@ -16,7 +18,6 @@ const TRACKER_REQUEST_TIMEOUT_SECS: u64 = 5;
 ///
 /// Extracted from BtDownloadCommand to separate network communication
 /// concerns from download orchestration logic.
-
 // ======================================================================
 // URL Encoding Helper
 // ======================================================================
@@ -350,7 +351,7 @@ impl TrackerEntry {
             Some(_) => 0.1,
             None => 0.0,
         };
-        (base_score - recency_penalty).max(0.0).min(1.0)
+        (base_score - recency_penalty).clamp(0.0, 1.0)
     }
 
     /// Record a successful response with latency measurement
@@ -412,10 +413,10 @@ impl TrackerTier {
     /// Select next available tracker within this tier, preferring higher reliability
     pub fn select_next(&mut self) -> Option<&TrackerEntry> {
         // First try current index if available
-        if self.current_index < self.trackers.len() {
-            if self.trackers[self.current_index].is_available() {
-                return Some(&self.trackers[self.current_index]);
-            }
+        if self.current_index < self.trackers.len()
+            && self.trackers[self.current_index].is_available()
+        {
+            return Some(&self.trackers[self.current_index]);
         }
 
         // Find best available tracker by reliability score

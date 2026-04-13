@@ -251,7 +251,7 @@ fn rand_u64() -> u64 {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    dur.as_nanos() as u64 ^ (dur.as_secs() as u64).wrapping_mul(0x5851F42D4C957F2D)
+    dur.as_nanos() as u64 ^ (dur.as_secs()).wrapping_mul(0x5851F42D4C957F2D)
 }
 
 #[cfg(test)]

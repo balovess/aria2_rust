@@ -32,7 +32,7 @@ use crate::request::request_group::DownloadOptions;
 ///
 /// Provides typed accessors (`as_bool`, `as_usize`, `as_i64`, `as_f64`,
 /// `as_str`, `as_str_vec`) that return the inner value or a sensible default.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum OptionValue {
     /// Boolean flag (true/false).
     Bool(bool),
@@ -47,13 +47,8 @@ pub enum OptionValue {
     /// List of strings (headers, headers, etc.).
     StrVec(Vec<String>),
     /// Absent / unset value.
+    #[default]
     None,
-}
-
-impl Default for OptionValue {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl std::fmt::Display for OptionValue {
@@ -265,7 +260,7 @@ impl OptionHandler {
             if let Some((key, value)) = Self::parse_kv_arg(arg) {
                 if let Some(parsed) = Self::detect_value_type(value.trim()) {
                     tracing::debug!(key, value = ?parsed, "CLI arg applied");
-                    self.set(&key, parsed);
+                    self.set(key, parsed);
                 }
                 i += 1;
                 continue;
@@ -298,10 +293,10 @@ impl OptionHandler {
             // Parse -o key=value
             if arg == "-o" && i + 1 < args.len() {
                 let next = &args[i + 1];
-                if let Some((key, value)) = next.split_once('=') {
-                    if let Some(parsed) = Self::detect_value_type(value.trim()) {
-                        self.set(key, parsed);
-                    }
+                if let Some((key, value)) = next.split_once('=')
+                    && let Some(parsed) = Self::detect_value_type(value.trim())
+                {
+                    self.set(key, parsed);
                 }
                 i += 2;
                 continue;
@@ -378,10 +373,10 @@ impl OptionHandler {
         }
 
         // Negative integer
-        if let Some(neg) = trimmed.strip_prefix('-') {
-            if neg.parse::<i64>().is_ok() {
-                return Some(OptionValue::I64(neg.parse::<i64>().unwrap() * -1));
-            }
+        if let Some(neg) = trimmed.strip_prefix('-')
+            && neg.parse::<i64>().is_ok()
+        {
+            return Some(OptionValue::I64(-neg.parse::<i64>().unwrap()));
         }
 
         // Unsigned integer

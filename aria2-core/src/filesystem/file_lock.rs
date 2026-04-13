@@ -372,7 +372,7 @@ impl DownloadPathLock {
 
     /// Check whether the lock is currently held.
     pub fn is_held(&self) -> bool {
-        self.base_lock.as_ref().map_or(false, |l| l.is_held())
+        self.base_lock.as_ref().is_some_and(|l| l.is_held())
     }
 }
 

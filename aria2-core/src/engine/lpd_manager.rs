@@ -623,21 +623,21 @@ pub fn parse_lpd_announcement(data: &[u8], sender_ip: IpAddr) -> Option<LpdPeer>
 
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with("Hash:") {
-            let val = line[5..].trim();
+        if let Some(rest) = line.strip_prefix("Hash:") {
+            let val = rest.trim();
             // Validate: must be exactly 40 hex characters
             if val.len() == 40 && val.chars().all(|c| c.is_ascii_hexdigit()) {
                 info_hash = val.to_lowercase(); // Normalize to lowercase
             } else {
                 return None; // Invalid info_hash format
             }
-        } else if line.starts_with("Port:") {
-            port = line[5..].trim().parse().ok()?;
+        } else if let Some(rest) = line.strip_prefix("Port:") {
+            port = rest.trim().parse().ok()?;
             if port == 0 {
                 return None; // Port 0 is invalid
             }
-        } else if line.starts_with("Token:") {
-            let token_str = line[6..].trim();
+        } else if let Some(rest) = line.strip_prefix("Token:") {
+            let token_str = rest.trim();
             token = u32::from_str_radix(token_str, 16).ok();
         }
     }

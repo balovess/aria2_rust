@@ -41,6 +41,7 @@ impl CryptoMethod {
 
 /// MSE 握手状态机
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum MseState {
     /// 空闲状态
     Idle,

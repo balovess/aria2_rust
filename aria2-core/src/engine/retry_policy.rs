@@ -30,6 +30,7 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
+    #[allow(clippy::field_reassign_with_default)]
     pub fn new(max_retries: u32, base_wait_ms: u64) -> Self {
         let mut policy = Self::default();
         policy.max_retries = max_retries;

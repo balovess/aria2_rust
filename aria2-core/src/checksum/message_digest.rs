@@ -10,6 +10,7 @@ pub enum HashType {
 }
 
 impl HashType {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<HashType> {
         match s.to_lowercase().as_str() {
             "md5" => Some(HashType::Md5),

@@ -74,21 +74,20 @@ impl App {
                 let c = arg.chars().nth(1).unwrap_or('\0');
                 if let Some(opt_name) = self.map_short_option(c) {
                     if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                        conf.set_global_option(&opt_name, OptionValue::Str(args[i + 1].clone()))
+                        conf.set_global_option(opt_name, OptionValue::Str(args[i + 1].clone()))
                             .await
                             .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
                         i += 2;
                         continue;
                     } else {
-                        conf.set_global_option(&opt_name, OptionValue::Bool(true))
+                        conf.set_global_option(opt_name, OptionValue::Bool(true))
                             .await
                             .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
                         i += 1;
                         continue;
                     }
                 }
-            } else if arg.starts_with("--") {
-                let opt_str = &arg[2..];
+            } else if let Some(opt_str) = arg.strip_prefix("--") {
                 if opt_str == "help" || opt_str == "h" || opt_str == "version" || opt_str == "V" {
                     i += 1;
                     continue;
@@ -134,8 +133,7 @@ impl App {
 
                 i += 1;
                 continue;
-            } else if arg.starts_with('@') {
-                let path = &arg[1..];
+            } else if let Some(path) = arg.strip_prefix('@') {
                 match aria2_core::config::UriListFile::from_file(path) {
                     Ok(uri_list) => {
                         for entry in uri_list.entries() {
@@ -227,7 +225,7 @@ impl App {
         let save_session_path = self
             .get_opt_str("save-session")
             .await
-            .map(|s| std::path::PathBuf::from(s));
+            .map(std::path::PathBuf::from);
         let save_session_interval = self
             .get_opt_i64("save-session-interval")
             .await
@@ -324,16 +322,16 @@ impl App {
                         info!("成功恢复任务 #{}", gid.value());
 
                         // 如果有 BT bitfield，将其存储到 RequestGroup 中供后续使用
-                        if entry.bitfield.is_some() {
-                            if let Some(group_lock) = man.get_group(gid).await {
-                                let group = group_lock.write().await;
-                                *group.bt_bitfield.write().await = entry.bitfield.clone();
-                                debug!(
-                                    "已设置 BT bitfield for GID={}, bits={}",
-                                    gid.value(),
-                                    entry.bitfield.as_ref().map(|b| b.len()).unwrap_or(0)
-                                );
-                            }
+                        if entry.bitfield.is_some()
+                            && let Some(group_lock) = man.get_group(gid).await
+                        {
+                            let group = group_lock.write().await;
+                            *group.bt_bitfield.write().await = entry.bitfield.clone();
+                            debug!(
+                                "已设置 BT bitfield for GID={}, bits={}",
+                                gid.value(),
+                                entry.bitfield.as_ref().map(|b| b.len()).unwrap_or(0)
+                            );
                         }
                     }
                     Err(e) => {
@@ -561,17 +559,17 @@ impl App {
             bt_endgame_threshold: self
                 .get_opt_i64("bt-endgame-threshold")
                 .await
-                .and_then(|v| if v > 0 { Some(v as u32) } else { Some(20) })
+                .map(|v| if v > 0 { v as u32 } else { 20 })
                 .unwrap_or(20),
             max_retries: self
                 .get_opt_i64("max-retries")
                 .await
-                .and_then(|v| if v >= 0 { Some(v as u32) } else { Some(3) })
+                .map(|v| if v >= 0 { v as u32 } else { 3 })
                 .unwrap_or(3),
             retry_wait: self
                 .get_opt_i64("retry-wait")
                 .await
-                .and_then(|v| if v > 0 { Some(v as u64) } else { Some(1) })
+                .map(|v| if v > 0 { v as u64 } else { 1 })
                 .unwrap_or(1),
             http_proxy: self.get_opt_str("http-proxy").await,
             all_proxy: self.get_opt_str("all-proxy").await,
@@ -1016,42 +1014,42 @@ mod tests {
 
         // 创建一个包含 3 个条目的测试会话文件
         let session_content = r#"http://example.com/file1.zip
- GID=1
- TOTAL_LENGTH=1048576
- COMPLETED_LENGTH=524288
- STATUS=active
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=524288
+GID=1
+TOTAL_LENGTH=1048576
+COMPLETED_LENGTH=524288
+STATUS=active
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=524288
 
 http://example.com/file2.iso
- GID=2
- split=4
- dir=/downloads
- TOTAL_LENGTH=10485760
- COMPLETED_LENGTH=0
- STATUS=waiting
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=
+GID=2
+split=4
+dir=/downloads
+TOTAL_LENGTH=10485760
+COMPLETED_LENGTH=0
+STATUS=waiting
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=
 
 ftp://server.com/bigfile.bin
- GID=3
- TOTAL_LENGTH=1073741824
- COMPLETED_LENGTH=536870912
- STATUS=paused
- ERROR_CODE=
- BITFIELD=fff00f
- NUM_PIECES=24
- PIECE_LENGTH=262144
- INFO_HASH=abc123def456
- RESUME_OFFSET=536870912
+GID=3
+TOTAL_LENGTH=1073741824
+COMPLETED_LENGTH=536870912
+STATUS=paused
+ERROR_CODE=
+BITFIELD=fff00f
+NUM_PIECES=24
+PIECE_LENGTH=262144
+INFO_HASH=abc123def456
+RESUME_OFFSET=536870912
 "#;
 
         // 写入会话文件
@@ -1100,52 +1098,52 @@ ftp://server.com/bigfile.bin
 
         // 创建包含已完成条目的会话文件
         let session_content = r#"http://example.com/complete1.zip
- GID=1
- TOTAL_LENGTH=1048576
- COMPLETED_LENGTH=1048576
- STATUS=complete
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=1048576
+GID=1
+TOTAL_LENGTH=1048576
+COMPLETED_LENGTH=1048576
+STATUS=complete
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=1048576
 
 http://example.com/active2.zip
- GID=2
- TOTAL_LENGTH=2048576
- COMPLETED_LENGTH=1024288
- STATUS=active
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=1024288
+GID=2
+TOTAL_LENGTH=2048576
+COMPLETED_LENGTH=1024288
+STATUS=active
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=1024288
 
 http://example.com/complete3.bin
- GID=3
- TOTAL_LENGTH=512
- COMPLETED_LENGTH=512
- STATUS=complete
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=512
+GID=3
+TOTAL_LENGTH=512
+COMPLETED_LENGTH=512
+STATUS=complete
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=512
 
 http://example.com/paused4.iso
- GID=4
- TOTAL_LENGTH=10485760
- COMPLETED_LENGTH=5242880
- STATUS=paused
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=5242880
+GID=4
+TOTAL_LENGTH=10485760
+COMPLETED_LENGTH=5242880
+STATUS=paused
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=5242880
 "#;
 
         tokio::fs::write(&session_file, session_content)
@@ -1338,16 +1336,16 @@ http://example.com/paused4.iso
 
         // 创建带有 BT bitfield 的会话条目
         let session_content = r#"magnet:?xt=urn:btih:abc123def456
- GID=1
- TOTAL_LENGTH=104857600
- COMPLETED_LENGTH=52428800
- STATUS=active
- ERROR_CODE=
- BITFIELD=ffaabb
- NUM_PIECES=20
- PIECE_LENGTH=5242880
- INFO_HASH=abc123def456
- RESUME_OFFSET=52428800
+GID=1
+TOTAL_LENGTH=104857600
+COMPLETED_LENGTH=52428800
+STATUS=active
+ERROR_CODE=
+BITFIELD=ffaabb
+NUM_PIECES=20
+PIECE_LENGTH=5242880
+INFO_HASH=abc123def456
+RESUME_OFFSET=52428800
 "#;
 
         tokio::fs::write(&session_file, session_content)
@@ -1419,28 +1417,28 @@ http://example.com/paused4.iso
 
         // 创建所有条目都无进度的会话文件
         let session_content = r#"http://example.com/new1.zip
- GID=1
- TOTAL_LENGTH=0
- COMPLETED_LENGTH=0
- STATUS=active
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=
+GID=1
+TOTAL_LENGTH=0
+COMPLETED_LENGTH=0
+STATUS=active
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=
 
 http://example.com/new2.iso
- GID=2
- TOTAL_LENGTH=0
- COMPLETED_LENGTH=0
- STATUS=waiting
- ERROR_CODE=
- BITFIELD=
- NUM_PIECES=0
- PIECE_LENGTH=0
- INFO_HASH=
- RESUME_OFFSET=
+GID=2
+TOTAL_LENGTH=0
+COMPLETED_LENGTH=0
+STATUS=waiting
+ERROR_CODE=
+BITFIELD=
+NUM_PIECES=0
+PIECE_LENGTH=0
+INFO_HASH=
+RESUME_OFFSET=
 "#;
 
         tokio::fs::write(&session_file, session_content)

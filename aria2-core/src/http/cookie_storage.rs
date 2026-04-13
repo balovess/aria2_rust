@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::error::{Aria2Error, Result};
 use crate::http::cookie::Cookie;
+use serde::{Deserialize, Serialize};
 
 // ==================== Existing CookieStorage ====================
 
@@ -126,7 +127,7 @@ impl Default for CookieStorage {
 /// and serialization. It is designed to work alongside the existing `Cookie`
 /// from `cookie.rs` while adding SystemTime-based expiration and simpler
 /// URL-based matching.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JarCookie {
     /// Cookie name
     pub name: String,
@@ -215,10 +216,10 @@ impl JarCookie {
         }
 
         // Expiry check: remove expired cookies
-        if let Some(expires) = self.expires {
-            if SystemTime::now() > expires {
-                return false;
-            }
+        if let Some(expires) = self.expires
+            && SystemTime::now() > expires
+        {
+            return false;
         }
 
         true
@@ -331,10 +332,10 @@ impl JarCookie {
                 }
                 "expires" if kv.len() > 1 => {
                     // Only set if not already set by Max-Age
-                    if cookie.expires.is_none() {
-                        if let Ok(dt) = parse_http_date(kv[1].trim()) {
-                            cookie.expires = Some(dt);
-                        }
+                    if cookie.expires.is_none()
+                        && let Ok(dt) = parse_http_date(kv[1].trim())
+                    {
+                        cookie.expires = Some(dt);
                     }
                 }
                 "secure" => {
@@ -386,7 +387,8 @@ impl PartialEq for JarCookie {
 /// }
 /// ```
 pub struct CookieJar {
-    cookies: Vec<JarCookie>,
+    /// Internal cookie storage - made pub for session persistence serialization
+    pub cookies: Vec<JarCookie>,
 }
 
 impl CookieJar {
@@ -480,7 +482,7 @@ impl CookieJar {
     /// ```text
     /// # Netscape HTTP Cookie File
     ///
-    /// .example.com	TRUE	/	FALSE	0	session-cookie	value
+    /// .example.com    TRUE    /    FALSE    0    session-cookie    value
     /// ```
     ///
     /// Fields: domain, include_subdomains, path, is_secure, expires_timestamp, name, value
@@ -587,7 +589,8 @@ fn format_systemtime_as_http_date(time: SystemTime) -> String {
     let mut remaining = days_since_epoch;
 
     loop {
-        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let leap =
+            (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
         let days_in_year = if leap { 366 } else { 365 };
         if remaining < days_in_year {
             break;
@@ -599,7 +602,9 @@ fn format_systemtime_as_http_date(time: SystemTime) -> String {
     let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut month = 0u32;
     while month < 12 {
-        let dim = if month == 1 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) {
+        let dim = if month == 1
+            && ((year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400))
+        {
             29
         } else {
             mdays[month as usize]

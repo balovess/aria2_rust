@@ -1,3 +1,5 @@
+#![allow(clippy::empty_line_after_doc_comments)]
+
 use crate::engine::bt_upload_session::PieceDataProvider;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
@@ -14,7 +16,6 @@ use std::time::Instant;
 ///
 /// Extracted from BtDownloadCommand to follow single responsibility principle,
 /// mirroring original aria2 C++ architecture separation.
-
 // ======================================================================
 // Piece Download State Machine
 // ======================================================================
@@ -71,7 +72,7 @@ impl PieceDownloadState {
     /// * Initialized state with no completed or requested blocks
     pub fn new(piece_index: u32, piece_length: u32, block_size: u32) -> Self {
         let total_blocks = if block_size > 0 {
-            (piece_length + block_size - 1) / block_size
+            piece_length.div_ceil(block_size)
         } else {
             0
         };
@@ -339,6 +340,7 @@ pub async fn write_piece_to_multi_files(
             if let std::collections::hash_map::Entry::Vacant(e) = file_writers.entry(file_idx) {
                 let f = tokio::fs::OpenOptions::new()
                     .create(true)
+                    .truncate(true)
                     .write(true)
                     .open(&file_path)
                     .await
@@ -683,6 +685,7 @@ pub async fn write_piece_to_multi_files_coalesced(
             std::collections::hash_map::Entry::Vacant(e) => {
                 let f = tokio::fs::OpenOptions::new()
                     .create(true)
+                    .truncate(true)
                     .write(true)
                     .open(&file_path)
                     .await

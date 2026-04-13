@@ -99,7 +99,7 @@ impl ChokingAlgorithm {
     /// 3. Sort by score descending
     /// 4. Top K get Unchoke, rest get Choke
     ///    BUT: keep currently unchoked peers unchoked if they're still in top K
-    ///          (avoid churn - only change what's necessary)
+    ///    (avoid churn - only change what's necessary)
     /// 5. Return only the actions that changed state
     pub fn rotate_choke(&mut self) -> Vec<ChokeAction> {
         // Step 1: Check and mark snubbed peers

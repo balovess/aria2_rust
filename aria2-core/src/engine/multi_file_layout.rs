@@ -102,9 +102,7 @@ impl MultiFileLayout {
                 let start_piece = (start_byte / pl) as u32;
                 let start_offset_in_piece = (start_byte % pl) as u32;
 
-                let end_piece = if entry.length == 0 && start_byte == 0 {
-                    0
-                } else if end_byte == 0 {
+                let end_piece = if entry.length == 0 && start_byte == 0 || end_byte == 0 {
                     0
                 } else {
                     ((end_byte - 1) / pl) as u32

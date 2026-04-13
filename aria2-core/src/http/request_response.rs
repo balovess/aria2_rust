@@ -229,8 +229,10 @@ impl HttpRequestBuilder {
         }
 
         // Content-Length header (如果有 body)
-        if self.body.is_some() && !final_headers.contains_key("Content-Length") {
-            let len = self.body.as_ref().unwrap().len();
+        if let Some(body) = &self.body
+            && !final_headers.contains_key("Content-Length")
+        {
+            let len = body.len();
             final_headers.insert("Content-Length".to_string(), len.to_string());
         }
 
@@ -530,9 +532,9 @@ impl Cookie {
         }
 
         // 子域匹配 (cookie domain 以 . 开头)
-        if cookie_domain.starts_with('.') {
-            // .example.com 匹配 example.com 和 sub.example.com
-            host == cookie_domain[1..] || host.ends_with(&cookie_domain)
+        if let Some(stripped) = cookie_domain.strip_prefix('.') {
+            // .example.com matches example.com and sub.example.com
+            host == stripped || host.ends_with(&cookie_domain)
         } else {
             // 不以 . 开头的 domain，需要 host 以 .domain 结尾
             host.ends_with(&format!(".{}", cookie_domain))

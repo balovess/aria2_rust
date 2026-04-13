@@ -168,11 +168,11 @@ impl NoProxyMatcher {
             if let Some(slash_pos) = pattern.rfind('/') {
                 let addr_str = &pattern[..slash_pos];
                 let prefix_str = &pattern[slash_pos + 1..];
-                if let Ok(addr) = addr_str.parse::<IpAddr>() {
-                    if let Ok(prefix) = prefix_str.parse::<u8>() {
-                        entries.push(NoProxyEntry::IpNetwork(addr, prefix));
-                        continue;
-                    }
+                if let Ok(addr) = addr_str.parse::<IpAddr>()
+                    && let Ok(prefix) = prefix_str.parse::<u8>()
+                {
+                    entries.push(NoProxyEntry::IpNetwork(addr, prefix));
+                    continue;
                 }
             }
 
@@ -227,10 +227,9 @@ impl NoProxyMatcher {
 
         for entry in &self.entries {
             if let NoProxyEntry::Domain(pattern) = entry {
-                if pattern.starts_with('.') {
+                if let Some(stripped) = pattern.strip_prefix('.') {
                     // Wildcard subdomain match: .example.com matches *.example.com
-                    if hostname_lower.ends_with(pattern.as_str()) || hostname_lower == &pattern[1..]
-                    {
+                    if hostname_lower.ends_with(pattern.as_str()) || hostname_lower == stripped {
                         return true;
                     }
                 } else {

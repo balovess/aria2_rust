@@ -42,6 +42,7 @@ impl BatchedDiskWriter {
         if !self.opened {
             let f = tokio::fs::OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .read(true)
                 .open(&self.path)

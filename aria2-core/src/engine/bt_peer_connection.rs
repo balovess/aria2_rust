@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum InnerConnection {
     Plain(aria2_protocol::bittorrent::peer::connection::PeerConnection),
     Encrypted(aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection),

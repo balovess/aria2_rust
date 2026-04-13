@@ -171,6 +171,7 @@ impl RpcEngine {
     /// Update progress for a specific task (called by download engine).
     ///
     /// Returns `true` if the task was found and updated, `false` otherwise.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_task_progress(
         &self,
         gid: &str,
@@ -297,6 +298,18 @@ impl RpcEngine {
             "aria2.unpauseAll" => self.handle_unpause_all().await,
             "aria2.changeUri" => self
                 .handle_change_uri(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.saveSession" => self
+                .handle_save_session(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.changePosition" => self
+                .handle_change_position(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.forceRemove" => self
+                .handle_force_remove(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.getVersion" => self.handle_version(),

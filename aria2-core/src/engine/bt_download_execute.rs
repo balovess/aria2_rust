@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -92,7 +94,7 @@ impl EndgameState {
         let key = (piece, offset, len);
         self.active_duplicate_requests
             .get(&key)
-            .map(|peers| peers.iter().copied().collect())
+            .map(|peers| peers.to_vec())
             .unwrap_or_default()
     }
 
@@ -539,7 +541,7 @@ impl BtDownloadCommand {
 
     async fn download_pieces_loop(
         &mut self,
-        active_connections: &mut Vec<BtPeerConn>,
+        active_connections: &mut [BtPeerConn],
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         piece_length: u32,
         total_size: u64,
@@ -1160,7 +1162,7 @@ impl BtDownloadCommand {
         let count = fast_set.len();
 
         for piece_idx in fast_set {
-            let msg = serializer::serialize_allowed_fast(piece_idx);
+            let _msg = serializer::serialize_allowed_fast(piece_idx);
 
             // Note: In a full implementation, this would use a proper message queue/channel.
             // For now, we log and track what would be sent.
@@ -1280,7 +1282,7 @@ impl BtDownloadCommand {
         let count = suggestions.len();
 
         for piece_idx in suggestions {
-            let msg = serializer::serialize_suggest(piece_idx);
+            let _msg = serializer::serialize_suggest(piece_idx);
 
             // Note: In a full implementation, this would use a proper message queue/channel.
             debug!(

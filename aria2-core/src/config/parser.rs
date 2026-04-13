@@ -155,8 +155,8 @@ impl ConfigParser {
                         self.set(&name, OptionValue::Bool(true));
                     }
                 }
-            } else if arg.starts_with('@') {
-                self.parse_file(&arg[1..]);
+            } else if let Some(rest) = arg.strip_prefix('@') {
+                self.parse_file(rest);
             } else {
                 i += 1;
             }
@@ -190,8 +190,8 @@ impl ConfigParser {
     pub fn parse_env_vars(&mut self) {
         self.sources.push(ConfigSource::Environment);
         for (key, value) in std::env::vars() {
-            if key.starts_with("ARIA2_") {
-                let opt_name = key[6..].to_lowercase().replace('_', "-");
+            if let Some(rest) = key.strip_prefix("ARIA2_") {
+                let opt_name = rest.to_lowercase().replace('_', "-");
                 self.set_raw(opt_name, &value);
             }
         }

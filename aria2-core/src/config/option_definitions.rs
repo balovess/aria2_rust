@@ -419,7 +419,6 @@ impl super::OptionRegistry {
 /// ---------------------------------------------------------------------------
 /// BitTorrent Options
 /// ---------------------------------------------------------------------------
-
 impl super::OptionRegistry {
     /// Register BitTorrent-specific options: seeding, DHT, PEX, peer management.
     pub fn register_bt_options(&mut self) {
@@ -568,7 +567,6 @@ impl super::OptionRegistry {
 /// ---------------------------------------------------------------------------
 /// RPC Options
 /// ---------------------------------------------------------------------------
-
 impl super::OptionRegistry {
     /// Register JSON-RPC/XML-RPC server options: listening, authentication, CORS.
     pub fn register_rpc_options(&mut self) {
@@ -637,7 +635,6 @@ impl super::OptionRegistry {
 /// ---------------------------------------------------------------------------
 /// Advanced Options
 /// ---------------------------------------------------------------------------
-
 impl super::OptionRegistry {
     /// Register advanced/performance options: bandwidth limits, disk cache, file allocation.
     pub fn register_advanced_options(&mut self) {

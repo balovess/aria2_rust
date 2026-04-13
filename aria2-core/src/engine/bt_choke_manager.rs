@@ -1,3 +1,6 @@
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::doc_lazy_continuation)]
+
 use tracing::{debug, warn};
 
 use crate::engine::choking_algorithm::ChokingAlgorithm;
@@ -160,10 +163,10 @@ pub fn select_best_peer_for_request(algo: &Option<ChokingAlgorithm>) -> Option<u
             })
             .map(|(i, _)| i);
 
-        if best_idx.is_some() {
+        if let Some(idx) = best_idx {
             debug!(
                 "[BT] Selected peer {} for request (using choking algorithm)",
-                best_idx.unwrap()
+                idx
             );
             return best_idx;
         }

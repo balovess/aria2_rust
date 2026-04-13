@@ -1,5 +1,6 @@
 use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
-use crate::error::{Aria2Error, Result};
+use crate::error::{Aria2Error, FatalError, Result};
+use crate::filesystem::disk_space::check_disk_space;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -73,6 +74,14 @@ where
         return Ok(());
     }
 
+    // K5.3: Pre-allocation disk space check
+    // Verify sufficient disk space before attempting allocation to prevent
+    // failures mid-download due to exhausted storage. The check includes
+    // a 10% headroom margin for filesystem overhead.
+    if let Err(_e) = check_disk_space(path, length) {
+        return Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted));
+    }
+
     if let Some(parent) = path.parent() {
         let parent: &Path = parent;
         if !parent.exists() {
@@ -84,20 +93,20 @@ where
 
     const PROGRESS_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
 
-    if let Some(cb) = on_progress {
-        if length >= PROGRESS_THRESHOLD {
-            cb(0, length);
-        }
+    if let Some(cb) = on_progress
+        && length >= PROGRESS_THRESHOLD
+    {
+        cb(0, length);
     }
 
     let mut adaptor = DirectDiskAdaptor::new();
     adaptor.open(path).await?;
     allocate_file(&mut adaptor, path, length, alloc_strategy).await?;
 
-    if let Some(cb) = on_progress {
-        if length >= PROGRESS_THRESHOLD {
-            cb(length, length);
-        }
+    if let Some(cb) = on_progress
+        && length >= PROGRESS_THRESHOLD
+    {
+        cb(length, length);
     }
 
     adaptor.close().await

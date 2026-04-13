@@ -143,12 +143,11 @@ impl ServerStat {
 
     /// Check if server is available (not in cooldown due to consecutive failures)
     pub fn is_available(&self) -> bool {
-        if self.consecutive_failures >= 3 {
-            if let Some(error_time) = self.last_error_time {
-                if let Ok(elapsed) = error_time.elapsed() {
-                    return elapsed.as_secs() > 60; // cooldown expired?
-                }
-            }
+        if self.consecutive_failures >= 3
+            && let Some(error_time) = self.last_error_time
+            && let Ok(elapsed) = error_time.elapsed()
+        {
+            return elapsed.as_secs() > 60; // cooldown expired?
         }
         true
     }

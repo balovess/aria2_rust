@@ -796,15 +796,15 @@ impl HttpConnectionManager {
 
         let mut stored = 0;
         for (name, value) in response_headers {
-            if name.eq_ignore_ascii_case("set-cookie") {
-                if let Some(cookie) = JarCookie::parse_set_cookie(value) {
-                    jar.store(cookie);
-                    stored += 1;
-                    tracing::debug!(
-                        "Extracted and stored cookie from Set-Cookie header: {}",
-                        &value[..value.len().min(80)]
-                    );
-                }
+            if name.eq_ignore_ascii_case("set-cookie")
+                && let Some(cookie) = JarCookie::parse_set_cookie(value)
+            {
+                jar.store(cookie);
+                stored += 1;
+                tracing::debug!(
+                    "Extracted and stored cookie from Set-Cookie header: {}",
+                    &value[..value.len().min(80)]
+                );
             }
         }
         stored

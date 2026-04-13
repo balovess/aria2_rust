@@ -154,17 +154,17 @@ impl BtPieceSelector {
 
             for &fast_idx in peer_conn.allowed_fast_set() {
                 // Check if piece is needed and peer has it
-                if let Some(info) = piece_picker.get_piece_info(fast_idx) {
-                    if !info.completed && !info.in_progress {
-                        if Self::is_bitfield_set(peer_bitfield, fast_idx) {
-                            info!("[BT] Using AllowedFast piece {} despite choke", fast_idx);
-                            return PieceSelectionResult {
-                                piece_index: Some(fast_idx as usize),
-                                is_endgame: false,
-                                remaining_count: remaining,
-                            };
-                        }
-                    }
+                if let Some(info) = piece_picker.get_piece_info(fast_idx)
+                    && !info.completed
+                    && !info.in_progress
+                    && Self::is_bitfield_set(peer_bitfield, fast_idx)
+                {
+                    info!("[BT] Using AllowedFast piece {} despite choke", fast_idx);
+                    return PieceSelectionResult {
+                        piece_index: Some(fast_idx as usize),
+                        is_endgame: false,
+                        remaining_count: remaining,
+                    };
                 }
             }
 
@@ -267,7 +267,7 @@ impl BtPieceSelector {
 }
 
 /// Helper functions for piece management
-
+///
 /// Build a bitfield vector from completed pieces
 ///
 /// Creates a bitfield representation where each bit indicates whether

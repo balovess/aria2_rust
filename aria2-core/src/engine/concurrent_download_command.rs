@@ -154,6 +154,7 @@ impl Command for ConcurrentDownloadCommand {
         // Ensure the resolved path is released when execute() returns.
         let release_path = |path: &std::path::Path| {
             let p = path.to_path_buf();
+            #[allow(clippy::let_underscore_future)]
             let _ = tokio::spawn(async move {
                 global_registry().release(&p).await;
             });

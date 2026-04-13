@@ -75,38 +75,38 @@ impl DownloadCommand {
 
         // Apply all-proxy (global proxy for all protocols)
         // Priority: protocol-specific proxy > all-proxy
-        if options.http_proxy.is_none() {
-            if let Some(ref all_proxy) = options.all_proxy {
-                match ProxyUrl::parse(all_proxy) {
-                    Ok(parsed) => {
-                        match parsed.protocol {
-                            crate::http::socks_connector::ProxyProtocol::Http
-                            | crate::http::socks_connector::ProxyProtocol::Https => {
-                                if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
-                                    builder = builder.proxy(p);
-                                }
-                            }
-                            _ => {
-                                // SOCKS proxies require a custom connector.
-                                // For now, log a note that SOCKS integration is available
-                                // via the SocksConnector trait but requires manual TcpStream wrapping.
-                                tracing::info!(
-                                    "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
-                                    all_proxy
-                                );
+        if options.http_proxy.is_none()
+            && let Some(ref all_proxy) = options.all_proxy
+        {
+            match ProxyUrl::parse(all_proxy) {
+                Ok(parsed) => {
+                    match parsed.protocol {
+                        crate::http::socks_connector::ProxyProtocol::Http
+                        | crate::http::socks_connector::ProxyProtocol::Https => {
+                            if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
+                                builder = builder.proxy(p);
                             }
                         }
+                        _ => {
+                            // SOCKS proxies require a custom connector.
+                            // For now, log a note that SOCKS integration is available
+                            // via the SocksConnector trait but requires manual TcpStream wrapping.
+                            tracing::info!(
+                                "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
+                                all_proxy
+                            );
+                        }
                     }
-                    Err(e) => {
-                        warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, e);
-                    }
+                }
+                Err(e) => {
+                    warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, e);
                 }
             }
         }
 
         let client = builder.build().map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "创建HTTP客户端失败: {}",
+                "Failed to build HTTP client: {}",
                 e
             )))
         })?;
@@ -710,6 +710,7 @@ impl Command for DownloadCommand {
         // Ensure the resolved path is released when execute() returns (success or failure).
         let release_path = |path: &std::path::Path| {
             let p = path.to_path_buf();
+            #[allow(clippy::let_underscore_future)]
             let _ = tokio::spawn(async move {
                 global_registry().release(&p).await;
             });

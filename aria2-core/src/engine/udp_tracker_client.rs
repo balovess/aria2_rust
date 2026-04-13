@@ -44,6 +44,7 @@ pub struct UdpTrackerRequest {
 }
 
 impl UdpTrackerRequest {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         addr: SocketAddr,
         info_hash: [u8; 20],
@@ -107,6 +108,7 @@ impl UdpTrackerClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_announce(
         &mut self,
         addr: &SocketAddr,

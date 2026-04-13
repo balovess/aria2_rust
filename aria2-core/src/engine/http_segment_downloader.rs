@@ -22,9 +22,7 @@ pub fn calculate_dynamic_segment_size(
 
     if elapsed_secs < 2 || avg_speed_bps < 1024.0 {
         // Too early or too slow — use conservative default
-        return (total_remaining / num_connections.max(1) as u64)
-            .max(MIN_SEGMENT)
-            .min(MAX_SEGMENT);
+        return (total_remaining / num_connections.max(1) as u64).clamp(MIN_SEGMENT, MAX_SEGMENT);
     }
 
     // Target ~10 seconds per segment at current speed
@@ -71,10 +69,10 @@ impl ConnectionLimiter {
 
     /// Release a slot when a connection completes/fails.
     pub fn release(&mut self, host: &str) {
-        if let Some(count) = self.per_host.get_mut(host) {
-            if *count > 0 {
-                *count -= 1;
-            }
+        if let Some(count) = self.per_host.get_mut(host)
+            && *count > 0
+        {
+            *count -= 1;
         }
     }
 

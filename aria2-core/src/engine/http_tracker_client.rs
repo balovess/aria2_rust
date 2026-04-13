@@ -106,7 +106,7 @@ impl TrackerState {
                 if elapsed >= self.min_interval_secs {
                     0
                 } else {
-                    self.min_interval_secs - elapsed
+                    self.min_interval_secs.saturating_sub(elapsed)
                 }
             }
             None => 0,

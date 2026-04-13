@@ -222,7 +222,15 @@ impl ConditionalRequest {
             not_modified: false,
         }
     }
+}
 
+impl Default for ConditionalRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConditionalRequest {
     /// Build headers for conditional request.
     /// If both Last-Modified and ETag present, prefer ETag (stronger validation).
     pub fn to_headers(&self) -> Vec<(String, String)> {
@@ -294,8 +302,7 @@ impl ConditionalRequest {
 
     /// Is resume possible? (have partial data + server supports Range)
     pub fn can_resume(&self, local_file_size: u64) -> bool {
-        self.content_length
-            .map_or(false, |len| local_file_size < len)
+        self.content_length.is_some_and(|len| local_file_size < len)
     }
 
     /// Need full re-download? (416 or no range support detected)
@@ -319,9 +326,7 @@ impl SmartResumeManager {
 
     /// Get or create conditional state for a download
     pub fn get_or_create(&mut self, key: &str) -> &mut ConditionalRequest {
-        self.entries
-            .entry(key.to_string())
-            .or_insert_with(ConditionalRequest::new)
+        self.entries.entry(key.to_string()).or_default()
     }
 
     /// Record that server returned 304 (unchanged)
@@ -334,7 +339,13 @@ impl SmartResumeManager {
     /// Check if any URI returned 304 (all unchanged)
     pub fn is_all_unchanged(&self, keys: &[&str]) -> bool {
         keys.iter()
-            .all(|key| self.entries.get(*key).map_or(false, |e| e.not_modified))
+            .all(|key| self.entries.get(*key).is_some_and(|e| e.not_modified))
+    }
+}
+
+impl Default for SmartResumeManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

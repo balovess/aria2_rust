@@ -167,7 +167,7 @@ impl ProgressBar {
     /// # Returns
     ///
     /// * `true` if the task was found and updated, `false` if GID not found
-    pub fn update_task<F>(&mut self, gid: &str, mut updater: F) -> bool
+    pub fn update_task<F>(&mut self, gid: &str, updater: F) -> bool
     where
         F: FnOnce(&mut TaskProgress),
     {
@@ -482,7 +482,7 @@ pub fn format_eta(total_remaining: u64, speed: f64) -> Option<String> {
 ///
 /// Produces a bar like `[████████░░░░░░░░]`.
 fn format_progress_bar(fraction: f64, width: usize) -> String {
-    let clamped = fraction.max(0.0).min(1.0);
+    let clamped = fraction.clamp(0.0, 1.0);
     let filled = (clamped * width as f64).round() as usize;
     let empty = width.saturating_sub(filled);
 

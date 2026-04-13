@@ -110,6 +110,7 @@ impl DiskWriter for ByteArrayDiskWriter {
 const DEFAULT_DIRECT_WRITE_THRESHOLD: usize = 256 * 1024;
 
 #[async_trait]
+#[allow(clippy::len_without_is_empty)]
 pub trait SeekableDiskWriter: Send + Sync {
     async fn open(&mut self) -> Result<()>;
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
@@ -219,14 +220,14 @@ impl SeekableDiskWriter for CachedDiskWriter {
         self.open().await?;
 
         // Task I2: Rate limiting — non-blocking try_acquire
-        if let Some(ref limiter) = self.rate_limiter {
-            if !limiter.try_acquire_download(data.len() as u64).await {
-                debug!(
-                    "Rate limit exceeded for {} bytes at offset {}, writing without throttling",
-                    data.len(),
-                    offset
-                );
-            }
+        if let Some(ref limiter) = self.rate_limiter
+            && !limiter.try_acquire_download(data.len() as u64).await
+        {
+            debug!(
+                "Rate limit exceeded for {} bytes at offset {}, writing without throttling",
+                data.len(),
+                offset
+            );
         }
 
         let write_len = data.len();
@@ -246,7 +247,7 @@ impl SeekableDiskWriter for CachedDiskWriter {
         self.write_count += 1;
 
         // Adapt threshold every 100 writes
-        if self.write_count % 100 == 0 && self.write_history.len() >= 10 {
+        if self.write_count.is_multiple_of(100) && self.write_history.len() >= 10 {
             let mut sorted: Vec<usize> = self.write_history.iter().copied().collect();
             sorted.sort_unstable();
             let p90_idx = (sorted.len() as f64 * 0.9) as usize;
@@ -255,7 +256,7 @@ impl SeekableDiskWriter for CachedDiskWriter {
                 .copied()
                 .unwrap_or(DEFAULT_DIRECT_WRITE_THRESHOLD);
             // Clamp between 64KB and 4MB
-            self.direct_write_threshold = p90.max(64 * 1024).min(4 * 1024 * 1024);
+            self.direct_write_threshold = p90.clamp(64 * 1024, 4 * 1024 * 1024);
             debug!(
                 "Adaptive direct_write_threshold adjusted to {} bytes (p90={})",
                 self.direct_write_threshold, p90

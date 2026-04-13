@@ -285,7 +285,7 @@ impl WrDiskCache {
             > target
         {
             // Peek at the front (oldest) entry
-            let should_evict = entries.front().map_or(false, |entry| !entry.dirty);
+            let should_evict = entries.front().is_some_and(|entry| !entry.dirty);
 
             if should_evict {
                 // Safe to evict: entry is clean (already flushed)

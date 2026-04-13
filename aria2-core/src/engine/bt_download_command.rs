@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -472,7 +474,7 @@ impl BtDownloadCommand {
         &mut self,
         peer_addr: aria2_protocol::bittorrent::peer::connection::PeerAddr,
     ) {
-        if !self.pex_known_peers.iter().any(|p| *p == peer_addr) {
+        if !self.pex_known_peers.contains(&peer_addr) {
             debug!(addr = %format!("{}:{}", peer_addr.ip, peer_addr.port), "Adding peer to PEX known list");
             self.pex_known_peers.push(peer_addr);
         }
@@ -546,6 +548,7 @@ impl BtDownloadCommand {
     /// * `Ok(true)` if the peer was banned as a result of this call
     /// * `Ok(false)` if the peer was not banned (count below threshold)
     /// * `Err(())` if the peer index is invalid or choking algorithm is not configured
+    #[allow(clippy::result_unit_err)]
     pub fn record_bad_piece_for_peer(
         &mut self,
         peer_idx: usize,
@@ -553,27 +556,27 @@ impl BtDownloadCommand {
     ) -> std::result::Result<bool, ()> {
         use crate::engine::peer_stats::BAD_DATA_THRESHOLD;
 
-        if let Some(ref mut algo) = self.choking_algo {
-            if let Some(peer) = algo.get_peer_mut(peer_idx) {
-                let should_ban = peer.increment_bad_data();
+        if let Some(ref mut algo) = self.choking_algo
+            && let Some(peer) = algo.get_peer_mut(peer_idx)
+        {
+            let should_ban = peer.increment_bad_data();
 
-                warn!(
-                    "[BT] Peer {} sent invalid data for piece {} (bad count: {}/{})",
-                    peer_idx, piece_index, peer.bad_data_count, BAD_DATA_THRESHOLD
+            warn!(
+                "[BT] Peer {} sent invalid data for piece {} (bad count: {}/{})",
+                peer_idx, piece_index, peer.bad_data_count, BAD_DATA_THRESHOLD
+            );
+
+            if should_ban {
+                let reason = format!(
+                    "Too many invalid pieces ({} >= {})",
+                    peer.bad_data_count, BAD_DATA_THRESHOLD
                 );
-
-                if should_ban {
-                    let reason = format!(
-                        "Too many invalid pieces ({} >= {})",
-                        peer.bad_data_count, BAD_DATA_THRESHOLD
-                    );
-                    warn!("[BT] BANNING peer {}: {}", peer_idx, reason);
-                    peer.ban_peer(reason);
-                    return Ok(true); // Peer was banned
-                }
-
-                return Ok(false); // Count incremented but not banned yet
+                warn!("[BT] BANNING peer {}: {}", peer_idx, reason);
+                peer.ban_peer(reason);
+                return Ok(true); // Peer was banned
             }
+
+            return Ok(false); // Count incremented but not banned yet
         }
 
         Err(()) // Invalid peer index or no choking algorithm
@@ -588,14 +591,14 @@ impl BtDownloadCommand {
     ///
     /// * `peer_idx` - The index of the peer in the choking algorithm's peer list
     pub fn record_valid_piece_for_peer(&mut self, peer_idx: usize) {
-        if let Some(ref mut algo) = self.choking_algo {
-            if let Some(peer) = algo.get_peer_mut(peer_idx) {
-                peer.decrement_bad_data();
-                debug!(
-                    "[BT] Peer {} sent valid piece, bad count decremented to {}",
-                    peer_idx, peer.bad_data_count
-                );
-            }
+        if let Some(ref mut algo) = self.choking_algo
+            && let Some(peer) = algo.get_peer_mut(peer_idx)
+        {
+            peer.decrement_bad_data();
+            debug!(
+                "[BT] Peer {} sent valid piece, bad count decremented to {}",
+                peer_idx, peer.bad_data_count
+            );
         }
     }
 

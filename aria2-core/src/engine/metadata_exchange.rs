@@ -127,7 +127,7 @@ impl Default for MetadataExchangeConfig {
 
 impl MetadataExchangeConfig {
     pub fn with_piece_size(mut self, size: u32) -> Self {
-        if size < PIECE_SIZE_MIN || size > PIECE_SIZE_MAX {
+        if !(PIECE_SIZE_MIN..=PIECE_SIZE_MAX).contains(&size) {
             warn!(
                 "piece_size={} is out of valid range [{}-{}], clamping",
                 size, PIECE_SIZE_MIN, PIECE_SIZE_MAX
@@ -256,7 +256,7 @@ impl MetadataExchangeSession {
         })?;
 
         let metadata_size = match remote_hs.metadata_size {
-            Some(size) => size as u64,
+            Some(size) => size,
             None => {
                 warn!(
                     "Peer {} reported metadata_size=None, skipping...",

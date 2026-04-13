@@ -40,11 +40,11 @@ impl UdpTrackerManager {
 
     pub fn parse_tracker_urls(&mut self, urls: &[String]) -> usize {
         let mut added = 0usize;
-        let mut tier = 0u32;
-        for urls_tier in urls.iter() {
+        #[allow(clippy::explicit_counter_loop)]
+        for (tier, urls_tier) in urls.iter().enumerate() {
             for url in urls_tier.split(',') {
                 let trimmed = url.trim();
-                if let Some(endpoint) = Self::parse_udp_url(trimmed, tier) {
+                if let Some(endpoint) = Self::parse_udp_url(trimmed, tier as u32) {
                     debug!(
                         "Adding UDP tracker endpoint: {} -> {}",
                         trimmed, endpoint.addr
@@ -53,7 +53,6 @@ impl UdpTrackerManager {
                     added += 1;
                 }
             }
-            tier += 1;
         }
         if !self.endpoints.is_empty() {
             info!(
@@ -117,6 +116,7 @@ impl UdpTrackerManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn announce(
         &mut self,
         info_hash: &[u8; 20],

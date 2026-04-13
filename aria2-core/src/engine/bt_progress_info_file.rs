@@ -376,8 +376,8 @@ impl BtProgressManager {
                 }
                 "Peers" => {
                     let peer = self.parse_peer_addr(line);
-                    if peer.is_some() {
-                        progress.peers.push(peer.unwrap());
+                    if let Some(p) = peer {
+                        progress.peers.push(p);
                     }
                 }
                 _ => {}
