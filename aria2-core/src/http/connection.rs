@@ -34,6 +34,7 @@ use tokio::time::timeout;
 use url::Url;
 
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::http::cookie_storage::{CookieJar, JarCookie};
 
 /// HTTP 连接配置
 #[derive(Debug, Clone)]
@@ -140,18 +141,24 @@ pub enum ConnectionState {
 /// }
 /// ```
 pub struct HttpConnectionManager {
-    /// 配置参数
+    /// Configuration parameters
     config: HttpConfig,
-    /// 连接池：conn_id -> ActiveConnection
+    /// Connection pool: conn_id -> ActiveConnection
     pool: HashMap<u64, ActiveConnection>,
-    /// 主机到连接 ID 的映射（用于快速查找可复用连接）
+    /// Host-to-connection-ID mapping (for fast lookup of reusable connections)
     host_connections: HashMap<String, Vec<u64>>,
-    /// 当前活跃连接数
+    /// Current active connection count
     active_count: usize,
-    /// 连接 ID 生成器
+    /// Connection ID generator
     id_counter: AtomicU64,
-    /// 最大重定向跳数
+    /// Maximum redirect hops
     max_redirects: u32,
+    /// Optional cookie jar for automatic cookie management on HTTP requests.
+    ///
+    /// When set, the connection manager will:
+    /// - Attach matching Cookie headers to outgoing requests via `attach_cookies_to_request()`
+    /// - Extract and store Set-Cookie headers from responses via `extract_cookies_from_response()`
+    cookie_jar: Option<CookieJar>,
 }
 
 impl HttpConnectionManager {
@@ -190,6 +197,7 @@ impl HttpConnectionManager {
             active_count: 0,
             id_counter: AtomicU64::new(1),
             max_redirects: 5,
+            cookie_jar: None,
         }
     }
 
@@ -656,24 +664,153 @@ impl HttpConnectionManager {
         tracing::info!("连接池已清理");
     }
 
-    /// 强制关闭指定连接
+    /// Force close a specific connection
     ///
-    /// 从连接池中移除指定连接并关闭底层 TCP 连接。
-    /// 用于处理错误情况或异常中断。
+    /// Remove the connection from the pool and close the underlying TCP connection.
+    /// Used for error handling or abnormal termination.
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// * `conn_id` - 要关闭的连接 ID
+    /// * `conn_id` - The ID of the connection to close
     pub async fn close_connection(&mut self, conn_id: u64) {
         if let Some(mut conn) = self.pool.remove(&conn_id) {
             let _ = conn.shutdown().await;
             self.active_count = self.active_count.saturating_sub(1);
             self.remove_from_host_map(&conn.host, conn_id);
-            tracing::debug!("强制关闭连接: id={}", conn_id);
+            tracing::debug!("Force closed connection: id={}", conn_id);
         }
     }
 
-    // ==================== 私有辅助方法 ====================
+    // ==================== Cookie Jar Integration (J4) ====================
+
+    /// Set the cookie jar for automatic cookie management on HTTP requests.
+    ///
+    /// Once set, the connection manager will automatically:
+    /// - Attach `Cookie` headers with matching cookies when building outgoing requests
+    /// - Parse and store cookies from `Set-Cookie` response headers
+    ///
+    /// # Arguments
+    ///
+    /// * `jar` - The CookieJar instance to use for cookie storage and matching
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use aria2_core::http::connection::{HttpConnectionManager, HttpConfig};
+    /// use aria2_core::http::cookie_storage::CookieJar;
+    ///
+    /// let mut manager = HttpConnectionManager::new(&Default::default());
+    /// let jar = CookieJar::new();
+    /// manager.set_cookie_jar(Some(jar));
+    /// ```
+    pub fn set_cookie_jar(&mut self, jar: Option<CookieJar>) {
+        self.cookie_jar = jar;
+    }
+
+    /// Get a reference to the current cookie jar, if one is set.
+    pub fn cookie_jar(&self) -> &Option<CookieJar> {
+        &self.cookie_jar
+    }
+
+    /// Get a mutable reference to the current cookie jar, if one is set.
+    pub fn cookie_jar_mut(&mut self) -> &mut Option<CookieJar> {
+        &mut self.cookie_jar
+    }
+
+    /// Attach matching cookies from the jar to an HTTP request as a Cookie header string.
+    ///
+    /// Call this method before sending an HTTP request to include any stored cookies
+    /// that match the target URL. The returned string can be used directly as the
+    /// value of the `Cookie` request header.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The target URL for the HTTP request
+    ///
+    /// # Returns
+    ///
+    /// `Some(header_value)` containing `"name1=val1; name2=val2"` format if matching
+    /// cookies exist, or `None` if no cookies match or no jar is configured.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use aria2_core::http::connection::HttpConnectionManager;
+    /// use url::Url;
+    ///
+    /// let manager = HttpConnectionManager::new(&Default::default());
+    /// let url = Url::parse("https://example.com/api").unwrap();
+    ///
+    /// if let Some(cookie_header) = manager.attach_cookies_to_request(&url) {
+    ///     // Add "Cookie: {cookie_header}" to your HTTP request headers
+    ///     println!("Cookie: {}", cookie_header);
+    /// }
+    /// ```
+    pub fn attach_cookies_to_request(&self, url: &Url) -> Option<String> {
+        let jar = self.cookie_jar.as_ref()?;
+        let is_https = url.scheme() == "https";
+        jar.cookie_header_for_url(url.as_str(), is_https)
+    }
+
+    /// Extract cookies from response Set-Cookie headers and store them in the jar.
+    ///
+    /// Call this method after receiving an HTTP response to persist any cookies
+    /// set by the server. Each `Set-Cookie` header value is parsed and stored
+    /// in the cookie jar for future requests.
+    ///
+    /// # Arguments
+    ///
+    /// * `response_headers` - The response headers as a slice of `(name, value)` tuples
+    /// * `request_url` - The original request URL (used as default domain/path context)
+    ///
+    /// # Returns
+    ///
+    /// The number of cookies successfully extracted and stored.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use aria2_core::http::connection::HttpConnectionManager;
+    ///
+    /// // After receiving an HTTP response:
+    /// let headers = vec![
+    ///     ("Set-Cookie".to_string(), "session=abc; Domain=example.com".to_string()),
+    ///     ("Set-Cookie".to_string(), "theme=dark".to_string()),
+    /// ];
+    /// let url = url::Url::parse("https://example.com/").unwrap();
+    ///
+    /// let mut manager = HttpConnectionManager::new(&Default::default());
+    /// manager.set_cookie_jar(Some(aria2_core::http::cookie_storage::CookieJar::new()));
+    /// let count = manager.extract_cookies_from_response(&headers, &url);
+    /// println!("Stored {} cookies", count); // Prints: Stored 2 cookies
+    /// ```
+    pub fn extract_cookies_from_response(
+        &mut self,
+        response_headers: &[(String, String)],
+        _request_url: &Url,
+    ) -> usize {
+        let jar = match &mut self.cookie_jar {
+            Some(j) => j,
+            None => return 0,
+        };
+
+        let mut stored = 0;
+        for (name, value) in response_headers {
+            if name.eq_ignore_ascii_case("set-cookie") {
+                if let Some(cookie) = JarCookie::parse_set_cookie(value) {
+                    jar.store(cookie);
+                    stored += 1;
+                    tracing::debug!(
+                        "Extracted and stored cookie from Set-Cookie header: {}",
+                        &value[..value.len().min(80)]
+                    );
+                }
+            }
+        }
+        stored
+    }
+
+    // ==================== Private Helper Methods ====================
 
     /// 从 URL 中提取主机标识（host:port）
     fn extract_host(url: &Url) -> String {
@@ -945,6 +1082,7 @@ impl std::fmt::Debug for HttpConnectionManager {
             .field("idle_timeout", &self.config.idle_timeout)
             .field("active_count", &self.active_count)
             .field("pool_size", &self.pool.len())
+            .field("cookie_jar_set", &self.cookie_jar.is_some())
             .finish()
     }
 }
@@ -1409,5 +1547,197 @@ mod tests {
 
         manager.release(conn2.id).await;
         manager.cleanup().await;
+    }
+
+    // ==================== Cookie Jar Integration Tests (J4) ====================
+
+    #[test]
+    fn test_cookie_jar_initially_none() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+        assert!(manager.cookie_jar().is_none());
+        assert!(manager.cookie_jar_mut().is_none());
+
+        // Attaching cookies without a jar should return None
+        let url = Url::parse("https://example.com/").unwrap();
+        assert!(manager.attach_cookies_to_request(&url).is_none());
+    }
+
+    #[test]
+    fn test_set_and_get_cookie_jar() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+
+        // Initially no jar
+        assert!(manager.cookie_jar().is_none());
+
+        // Set a cookie jar
+        let jar = CookieJar::new();
+        manager.set_cookie_jar(Some(jar));
+        assert!(manager.cookie_jar().is_some());
+
+        // Clear it
+        manager.set_cookie_jar(None);
+        assert!(manager.cookie_jar().is_none());
+    }
+
+    #[test]
+    fn test_attach_cookies_to_request() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+
+        // Create jar and add cookies
+        let mut jar = CookieJar::new();
+        jar.store(JarCookie::new("session_id", "abc123", "example.com"));
+        jar.store(JarCookie::new("theme", "dark", "example.com"));
+        manager.set_cookie_jar(Some(jar));
+
+        // Attach cookies for example.com URL
+        let url = Url::parse("http://example.com/api/data").unwrap();
+        let header = manager.attach_cookies_to_request(&url);
+        assert!(header.is_some(), "Should return Some with matching cookies");
+        let hdr = header.unwrap();
+        assert!(
+            hdr.contains("session_id=abc123"),
+            "Header should contain session_id cookie: {}",
+            hdr
+        );
+        assert!(
+            hdr.contains("theme=dark"),
+            "Header should contain theme cookie: {}",
+            hdr
+        );
+
+        // No cookies for different domain
+        let url2 = Url::parse("http://other.com/").unwrap();
+        let header2 = manager.attach_cookies_to_request(&url2);
+        assert!(header2.is_none(), "No cookies should match other domain");
+    }
+
+    #[test]
+    fn test_extract_cookies_from_response() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+        manager.set_cookie_jar(Some(CookieJar::new()));
+
+        // Simulate response headers with Set-Cookie
+        let response_headers = vec![
+            (
+                "Set-Cookie".to_string(),
+                "session=xyz789; Domain=example.com; Path=/".to_string(),
+            ),
+            (
+                "Set-Cookie".to_string(),
+                "prefs=en-US; Domain=example.com; Path=/; Secure; HttpOnly".to_string(),
+            ),
+            ("Content-Type".to_string(), "text/html".to_string()), // Non-cookie header
+        ];
+
+        let url = Url::parse("https://example.com/login").unwrap();
+        let count = manager.extract_cookies_from_response(&response_headers, &url);
+
+        assert_eq!(count, 2, "Should extract exactly 2 cookies");
+
+        // Verify cookies were stored
+        let jar = manager.cookie_jar().as_ref().unwrap();
+        assert_eq!(jar.len(), 2, "Jar should contain 2 stored cookies");
+
+        // Verify we can retrieve them
+        let cookies = jar.get_cookies_for_url("https://example.com/", true);
+        assert_eq!(cookies.len(), 2);
+
+        let names: Vec<&str> = cookies.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"session"));
+        assert!(names.contains(&"prefs"));
+
+        // Verify Secure flag was parsed correctly
+        let prefs_cookie = cookies.iter().find(|c| c.name == "prefs").unwrap();
+        assert!(prefs_cookie.secure, "prefs cookie should be marked secure");
+        assert!(
+            prefs_cookie.http_only,
+            "prefs cookie should be marked http_only"
+        );
+    }
+
+    #[test]
+    fn test_extract_cookies_no_jar_returns_zero() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+        // No cookie jar set
+
+        let headers = vec![("Set-Cookie".to_string(), "test=val".to_string())];
+        let url = Url::parse("http://example.com/").unwrap();
+        let count = manager.extract_cookies_from_response(&headers, &url);
+
+        assert_eq!(count, 0, "Should return 0 when no jar is set");
+    }
+
+    #[test]
+    fn test_extract_cookies_invalid_header_skipped() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+        manager.set_cookie_jar(Some(CookieJar::new()));
+
+        // Mix of valid and invalid Set-Cookie headers
+        let headers = vec![
+            (
+                "Set-Cookie".to_string(),
+                "valid=test_value; Domain=x.com".to_string(),
+            ),
+            ("Set-Cookie".to_string(), "no-equal-sign".to_string()), // Invalid format
+            ("Set-Cookie".to_string(), "".to_string()),              // Empty - invalid
+        ];
+
+        let url = Url::parse("http://x.com/").unwrap();
+        let count = manager.extract_cookies_from_response(&headers, &url);
+
+        assert_eq!(count, 1, "Only 1 valid cookie should be extracted");
+
+        let jar = manager.cookie_jar().as_ref().unwrap();
+        assert_eq!(jar.len(), 1);
+        let cookies = jar.get_cookies_for_url("http://x.com/", false);
+        assert_eq!(cookies[0].name, "valid");
+    }
+
+    #[test]
+    fn test_debug_format_includes_cookie_jar() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+        let debug_str = format!("{:?}", manager);
+        assert!(!debug_str.contains("cookie_jar_set: true"));
+
+        manager.set_cookie_jar(Some(CookieJar::new()));
+        let debug_str_with_jar = format!("{:?}", manager);
+        assert!(
+            debug_str_with_jar.contains("cookie_jar_set: true"),
+            "Debug output should show cookie_jar is set: {}",
+            debug_str_with_jar
+        );
+    }
+
+    #[test]
+    fn test_secure_cookie_not_sent_over_http() {
+        let mut manager = HttpConnectionManager::new(&create_test_config());
+        let mut jar = CookieJar::new();
+
+        // Add a secure-only cookie
+        let mut secure_cookie = JarCookie::new("token", "secret", "secure.example.com");
+        secure_cookie.secure = true;
+        jar.store(secure_cookie);
+
+        manager.set_cookie_jar(Some(jar));
+
+        // Over HTTP — should NOT get the secure cookie
+        let url_http = Url::parse("http://secure.example.com/api").unwrap();
+        let header_http = manager.attach_cookies_to_request(&url_http);
+        assert!(
+            header_http.is_none(),
+            "Secure cookie must not be sent over HTTP"
+        );
+
+        // Over HTTPS — SHOULD get the secure cookie
+        let url_https = Url::parse("https://secure.example.com/api").unwrap();
+        let header_https = manager.attach_cookies_to_request(&url_https);
+        assert!(
+            header_https.is_some(),
+            "Secure cookie should be sent over HTTPS"
+        );
+        assert!(
+            header_https.unwrap().contains("token=secret"),
+            "Header should contain the secure token cookie"
+        );
     }
 }

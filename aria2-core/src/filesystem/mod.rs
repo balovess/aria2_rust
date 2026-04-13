@@ -5,4 +5,5 @@ pub mod disk_cache;
 pub mod disk_space;
 pub mod disk_writer;
 pub mod file_allocation;
+pub mod file_lock;
 pub mod resume_helper;

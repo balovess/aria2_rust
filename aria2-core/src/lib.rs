@@ -87,6 +87,7 @@ pub mod filesystem;
 pub mod ftp;
 pub mod http;
 pub mod log;
+pub mod option;
 pub mod rate_limiter;
 pub mod request;
 pub mod retry;
@@ -96,6 +97,9 @@ pub mod session;
 pub mod ui;
 pub mod util;
 pub mod validation;
+
+#[cfg(test)]
+mod integration_tests_j2_j5;
 
 use tracing::Level;
 

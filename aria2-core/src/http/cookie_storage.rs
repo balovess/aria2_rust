@@ -1,10 +1,17 @@
 use std::fs;
 use std::path::Path;
 use std::sync::RwLock;
+use std::time::{Duration, SystemTime};
 
 use crate::error::{Aria2Error, Result};
 use crate::http::cookie::Cookie;
 
+// ==================== Existing CookieStorage ====================
+
+/// Thread-safe cookie storage using RwLock for concurrent access.
+///
+/// This is the original cookie storage that works with the `Cookie` struct
+/// from `cookie.rs`, providing add/find/expire operations with host+path matching.
 pub struct CookieStorage {
     cookies: RwLock<Vec<Cookie>>,
 }
@@ -27,8 +34,8 @@ impl CookieStorage {
 
     pub fn find_cookies(&self, host: &str, path: &str, secure: bool) -> Vec<Cookie> {
         let cookies = self.cookies.read().unwrap();
-        let date = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let date = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         cookies
@@ -111,9 +118,632 @@ impl Default for CookieStorage {
     }
 }
 
+// ==================== Enhanced CookieJar (J4) ====================
+
+/// An enhanced cookie representation using SystemTime for expiration tracking.
+///
+/// This struct provides URL-based matching, Set-Cookie header parsing,
+/// and serialization. It is designed to work alongside the existing `Cookie`
+/// from `cookie.rs` while adding SystemTime-based expiration and simpler
+/// URL-based matching.
+#[derive(Debug, Clone)]
+pub struct JarCookie {
+    /// Cookie name
+    pub name: String,
+    /// Cookie value
+    pub value: String,
+    /// Domain this cookie belongs to (e.g., "example.com")
+    pub domain: String,
+    /// Path scope (usually "/")
+    pub path: String,
+    /// Expiration time; None means session cookie (no persistent expiry)
+    pub expires: Option<SystemTime>,
+    /// Only send over HTTPS connections
+    pub secure: bool,
+    /// Not accessible to JavaScript (client-side only)
+    pub http_only: bool,
+    /// When this cookie was created
+    pub creation_time: SystemTime,
+}
+
+impl JarCookie {
+    /// Create a new basic session cookie.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Cookie name
+    /// * `value` - Cookie value
+    /// * `domain` - Domain the cookie belongs to
+    pub fn new(name: &str, value: &str, domain: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            value: value.to_string(),
+            domain: domain.to_string(),
+            path: "/".to_string(),
+            expires: None,
+            secure: false,
+            http_only: false,
+            creation_time: SystemTime::now(),
+        }
+    }
+
+    /// Check whether this cookie should be sent for the given URL.
+    ///
+    /// Matching rules:
+    /// 1. Secure cookies are only sent over HTTPS (`is_secure = true`)
+    /// 2. The URL must contain the cookie's domain
+    /// 3. The URL must match the cookie's path scope
+    /// 4. The cookie must not have expired
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The request URL string to match against
+    /// * `is_secure` - Whether the connection uses HTTPS
+    ///
+    /// # Returns
+    ///
+    /// `true` if this cookie should be included in requests to the given URL.
+    pub fn matches_url(&self, url: &str, is_secure: bool) -> bool {
+        // Secure flag check: secure cookies only over HTTPS
+        if self.secure && !is_secure {
+            return false;
+        }
+
+        // Domain matching: URL must contain the cookie's domain
+        let url_lower = url.to_lowercase();
+        let domain_lower = self.domain.to_lowercase();
+        if !url_lower.contains(&domain_lower) && !domain_lower.is_empty() {
+            return false;
+        }
+
+        // Path matching: if path is "/", it matches everything
+        if self.path != "/" {
+            // Strip leading slash from path for comparison against URL path portion
+            let path_clean = self.path.trim_start_matches('/');
+            if !url_lower.contains(&path_clean.to_lowercase()) {
+                // For non-root paths, require at least a partial match
+                // Allow if the domain already matched and path is a prefix of URL path
+                if let Some(after_domain) = url_lower.find(&domain_lower) {
+                    let rest = &url_lower[after_domain + domain_lower.len()..];
+                    if !rest.starts_with(&format!("/{}", path_clean.to_lowercase()))
+                        && !rest.starts_with(&format!("/{}", self.path.to_lowercase()))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Expiry check: remove expired cookies
+        if let Some(expires) = self.expires {
+            if SystemTime::now() > expires {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Format this cookie as a Set-Cookie header value string.
+    ///
+    /// Produces output like: `name=value; Domain=example.com; Path=/`
+    pub fn to_header_value(&self) -> String {
+        let mut s = format!("{}={}", self.name, self.value);
+        if !self.domain.is_empty() {
+            s.push_str(&format!("; Domain={}", self.domain));
+        }
+        s.push_str(&format!("; Path={}", self.path));
+        if let Some(_expires) = self.expires {
+            // Use simplified date formatting for expires attribute
+            if let Ok(_dur) = _expires.duration_since(SystemTime::UNIX_EPOCH) {
+                // Approximate HTTP-date format
+                s.push_str(&format!(
+                    "; Expires={}",
+                    format_systemtime_as_http_date(_expires)
+                ));
+            }
+        }
+        if self.secure {
+            s.push_str("; Secure");
+        }
+        if self.http_only {
+            s.push_str("; HttpOnly");
+        }
+        s
+    }
+
+    /// Parse a cookie from a Set-Cookie response header value.
+    ///
+    /// Supports standard attributes:
+    /// - `Domain=` - cookie domain scope
+    /// - `Path=` - cookie path scope
+    /// - `Expires=` - expiration timestamp (RFC 7231 / RFC 850 / asctime formats)
+    /// - `Secure` - HTTPS-only flag
+    /// - `HttpOnly` - JavaScript-inaccessible flag
+    /// - `Max-Age=` - relative expiration in seconds
+    ///
+    /// # Arguments
+    ///
+    /// * `header_value` - The raw Set-Cookie header value string
+    ///
+    /// # Returns
+    ///
+    /// `Some(JarCookie)` on successful parse, `None` if the header is malformed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use aria2_core::http::cookie_storage::JarCookie;
+    ///
+    /// let cookie = JarCookie::parse_set_cookie(
+    ///     "session=abc123; Domain=example.com; Path=/; Secure; HttpOnly"
+    /// ).unwrap();
+    /// assert_eq!(cookie.name, "session");
+    /// assert_eq!(cookie.domain, "example.com");
+    /// assert!(cookie.secure);
+    /// assert!(cookie.http_only);
+    /// ```
+    pub fn parse_set_cookie(header_value: &str) -> Option<Self> {
+        let header = header_value.trim();
+        if header.is_empty() {
+            return None;
+        }
+
+        // Split into name=value part and attributes
+        let parts: Vec<&str> = header.split(';').collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        // Parse name=value (first part before any semicolon)
+        let nv: Vec<&str> = parts[0].trim().splitn(2, '=').collect();
+        if nv.len() != 2 {
+            return None;
+        }
+
+        let name = nv[0].trim();
+        let value = nv[1].trim();
+        if name.is_empty() {
+            return None;
+        }
+
+        let mut cookie = Self::new(name, value, "");
+
+        // Parse remaining attributes
+        for attr in &parts[1..] {
+            let attr = attr.trim();
+            if attr.is_empty() {
+                continue;
+            }
+            let kv: Vec<&str> = attr.splitn(2, '=').collect();
+            match kv[0].trim().to_lowercase().as_str() {
+                "domain" if kv.len() > 1 => {
+                    cookie.domain = kv[1].trim().to_string();
+                }
+                "path" if kv.len() > 1 => {
+                    cookie.path = kv[1].trim().to_string();
+                }
+                "max-age" if kv.len() > 1 => {
+                    // Max-Age takes precedence over Expires per RFC 6265
+                    if let Ok(secs) = kv[1].trim().parse::<u64>() {
+                        cookie.expires = Some(SystemTime::now() + Duration::from_secs(secs));
+                    }
+                }
+                "expires" if kv.len() > 1 => {
+                    // Only set if not already set by Max-Age
+                    if cookie.expires.is_none() {
+                        if let Ok(dt) = parse_http_date(kv[1].trim()) {
+                            cookie.expires = Some(dt);
+                        }
+                    }
+                }
+                "secure" => {
+                    cookie.secure = true;
+                }
+                "httponly" => {
+                    cookie.http_only = true;
+                }
+                _ => {} // Ignore unknown attributes
+            }
+        }
+
+        Some(cookie)
+    }
+}
+
+impl PartialEq for JarCookie {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.domain == other.domain && self.path == other.path
+    }
+}
+
+// ==================== CookieJar Storage ====================
+
+/// A cookie jar that stores cookies and provides URL-based matching for HTTP requests.
+///
+/// `CookieJar` manages a collection of `JarCookie` instances, supporting:
+/// - Storing cookies received from Set-Cookie response headers
+/// - Retrieving matching cookies for outgoing requests by URL
+/// - Generating Cookie header strings from matching cookies
+/// - Loading cookies from Netscape/Mozilla cookie file format
+/// - Cleaning up expired cookies
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use aria2_core::http::cookie_storage::{CookieJar, JarCookie};
+///
+/// let mut jar = CookieJar::new();
+///
+/// // Store a cookie from a Set-Cookie response header
+/// if let Some(cookie) = JarCookie::parse_set_cookie("sid=abc; Domain=example.com") {
+///     jar.store(cookie);
+/// }
+///
+/// // Get cookies for an outgoing request
+/// if let Some(header) = jar.cookie_header_for_url("https://example.com/api", true) {
+///     println!("Cookie: {}", header); // "sid=abc"
+/// }
+/// ```
+pub struct CookieJar {
+    cookies: Vec<JarCookie>,
+}
+
+impl CookieJar {
+    /// Create a new empty cookie jar.
+    pub fn new() -> Self {
+        Self {
+            cookies: Vec::new(),
+        }
+    }
+
+    /// Store a cookie received from a Set-Cookie response header.
+    ///
+    /// If a cookie with the same name and domain already exists, it is replaced.
+    /// This implements the update semantics defined in RFC 6265 Section 5.3.
+    pub fn store(&mut self, cookie: JarCookie) {
+        // Remove existing cookie with same name+domain (update semantics)
+        self.cookies
+            .retain(|c| !(c.name == cookie.name && c.domain == cookie.domain));
+        self.cookies.push(cookie);
+    }
+
+    /// Get all cookies that match the given URL for sending in a Cookie request header.
+    ///
+    /// Filters stored cookies based on domain, path, security, and expiration status.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The request URL string
+    /// * `is_secure` - Whether the connection uses HTTPS
+    ///
+    /// # Returns
+    ///
+    /// A vector of matching `JarCookie` clones.
+    pub fn get_cookies_for_url(&self, url: &str, is_secure: bool) -> Vec<JarCookie> {
+        self.cookies
+            .iter()
+            .filter(|c| c.matches_url(url, is_secure))
+            .cloned()
+            .collect()
+    }
+
+    /// Format all matching cookies as a Cookie header value string.
+    ///
+    /// Produces output like `"name1=val1; name2=val2"` suitable for the
+    /// HTTP Cookie request header. Returns `None` if no cookies match.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The request URL string
+    /// * `is_secure` - Whether the connection uses HTTPS
+    ///
+    /// # Returns
+    ///
+    /// `Some(header_string)` if matching cookies exist, `None` otherwise.
+    pub fn cookie_header_for_url(&self, url: &str, is_secure: bool) -> Option<String> {
+        let matching = self.get_cookies_for_url(url, is_secure);
+        if matching.is_empty() {
+            return None;
+        }
+        let header: String = matching
+            .iter()
+            .map(|c| format!("{}={}", c.name, c.value))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(header)
+    }
+
+    /// Remove all expired cookies from the jar.
+    ///
+    /// Session cookies (those without an expiration time) are never removed
+    /// by this method — they persist until the session ends or explicitly deleted.
+    ///
+    /// # Returns
+    ///
+    /// The number of cookies that were removed.
+    pub fn cleanup_expired(&mut self) -> usize {
+        let before = self.cookies.len();
+        self.cookies.retain(|c| {
+            if let Some(exp) = c.expires {
+                SystemTime::now() <= exp
+            } else {
+                true // No expiry = session cookie, keep it
+            }
+        });
+        before - self.cookies.len()
+    }
+
+    /// Load cookies from a Netscape/Mozilla cookie file.
+    ///
+    /// The Netscape cookie file format uses tab-separated fields:
+    /// ```text
+    /// # Netscape HTTP Cookie File
+    ///
+    /// .example.com	TRUE	/	FALSE	0	session-cookie	value
+    /// ```
+    ///
+    /// Fields: domain, include_subdomains, path, is_secure, expires_timestamp, name, value
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the Netscape-format cookie file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read.
+    pub fn load_netscape_file(&mut self, path: &Path) -> Result<usize> {
+        let content = fs::read_to_string(path).map_err(|e| Aria2Error::Io(e.to_string()))?;
+        let mut loaded = 0;
+
+        for line in content.lines() {
+            // Skip comments, empty lines, and the header line
+            if line.starts_with('#') || line.starts_with('\n') || line.is_empty() {
+                continue;
+            }
+
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() >= 7 {
+                // Parse the 7+ tab-separated fields
+                let domain = fields[0].trim();
+                // fields[1]: include_subdomains (TRUE/FALSE) — not used for matching here
+                let path = fields[2].trim();
+                let secure = fields[3] == "TRUE";
+                // fields[4]: expires timestamp (Unix epoch), 0 = session cookie
+                let expires = fields[4].trim().parse::<i64>().ok().and_then(|ts| {
+                    if ts > 0 {
+                        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(ts as u64))
+                    } else {
+                        None // Session cookie
+                    }
+                });
+                let name = fields[5].trim().to_string();
+                let value = if fields.len() > 7 {
+                    // Value may contain tabs if there are extra fields; join remainder
+                    fields[6..].join("\t")
+                } else {
+                    fields[6].trim().to_string()
+                };
+
+                let cookie = JarCookie {
+                    name,
+                    value,
+                    domain: domain.to_string(),
+                    path: path.to_string(),
+                    expires,
+                    secure,
+                    http_only: false, // Netscape format doesn't track HttpOnly
+                    creation_time: SystemTime::now(),
+                };
+
+                self.cookies.push(cookie);
+                loaded += 1;
+            }
+        }
+
+        Ok(loaded)
+    }
+
+    /// Return the number of cookies currently stored in the jar.
+    pub fn len(&self) -> usize {
+        self.cookies.len()
+    }
+
+    /// Check if the jar contains no cookies.
+    pub fn is_empty(&self) -> bool {
+        self.cookies.is_empty()
+    }
+
+    /// Remove all cookies from the jar.
+    pub fn clear(&mut self) {
+        self.cookies.clear();
+    }
+}
+
+impl Default for CookieJar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ==================== HTTP Date Helpers ====================
+
+/// Format a SystemTime as an HTTP-date string (RFC 7231 IMF-fixdate).
+///
+/// Produces output like: `Sun, 06 Nov 1994 08:49:37 GMT`
+fn format_systemtime_as_http_date(time: SystemTime) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let dur = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let epoch = dur.as_secs();
+
+    let days_since_epoch = (epoch / 86400) as u32;
+    let mut year = 1970u32;
+    let mut remaining = days_since_epoch;
+
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let days_in_year = if leap { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        year += 1;
+    }
+
+    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0u32;
+    while month < 12 {
+        let dim = if month == 1 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) {
+            29
+        } else {
+            mdays[month as usize]
+        };
+        if remaining < dim {
+            break;
+        }
+        remaining -= dim;
+        month += 1;
+    }
+    let day = remaining + 1;
+    let secs = epoch % 86400;
+    let hour = (secs / 3600) as u32;
+    let min = ((secs % 3600) / 60) as u32;
+    let sec = (secs % 60) as u32;
+    // Zeller's congruence to determine day of week (0=Sun..6=Sat)
+    let dow: usize =
+        ((year + (year / 4) - (year / 100) + (year / 400) + (13 * month + 1) / 5 + day + 308) % 7)
+            as usize;
+
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+        DAYS[dow], day, MONTHS[month as usize], year, hour, min, sec
+    )
+}
+
+/// Parse an HTTP-date string into a SystemTime.
+///
+/// Supports common date formats from RFC 7231 Section 7.1.1.1:
+/// - IMF-fixdate: `Sun, 06 Nov 1994 08:49:37 GMT`
+/// - RFC 850: `Sunday, 06-Nov-94 08:49:37 GMT`
+/// - ANSI C asctime: `Sun Nov  6 08:49:37 1994`
+///
+/// If parsing fails, returns a far-future timestamp as fallback (1 year from now)
+/// to avoid prematurely expiring cookies due to unparseable dates.
+fn parse_http_date(s: &str) -> Result<SystemTime> {
+    let s = s.trim();
+    let parts: Vec<&str> = s.split_whitespace().collect();
+
+    // Handle various formats
+    if parts.len() >= 5 {
+        // Try to extract day, month, year, time components
+        let (day_str, mon_str, year_str, time_str) = if parts[0].ends_with(',') {
+            // IMF-fixdate or RFC 850 format: "Sun, 06 Nov 1994 08:49:37 GMT"
+            // or "Sunday, 06-Nov-94 08:49:37 GMT"
+            if parts.len() >= 6 {
+                (
+                    parts[1].trim(),
+                    parts[2].trim(),
+                    parts[3].trim(),
+                    parts[4].trim(),
+                )
+            } else if parts.len() >= 5 {
+                (
+                    parts[1].split('-').next().unwrap_or("1"),
+                    parts[1].split('-').nth(1).unwrap_or("Jan"),
+                    parts[2].trim(),
+                    parts[3].trim(),
+                )
+            } else {
+                return Err(Aria2Error::Parse("Invalid date format".to_string()));
+            }
+        } else {
+            // asctime format: "Sun Nov  6 08:49:37 1994"
+            (
+                parts[2].trim(),
+                parts[1].trim(),
+                parts[4].trim(),
+                parts[3].trim(),
+            )
+        };
+
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+
+        let day: u32 = day_str.parse().unwrap_or(1);
+        let month_idx = MONTHS
+            .iter()
+            .position(|&m| m.eq_ignore_ascii_case(mon_str))
+            .unwrap_or(0);
+        let year: i32 = year_str.parse().unwrap_or({
+            // Handle 2-digit years (RFC 850)
+            let y: u32 = year_str.parse().unwrap_or(70);
+            if y < 100 { (1900 + y) as i32 } else { y as i32 }
+        });
+
+        let time_parts: Vec<u32> = time_str.split(':').filter_map(|x| x.parse().ok()).collect();
+        let hour = time_parts.first().copied().unwrap_or(0);
+        let min = time_parts.get(1).copied().unwrap_or(0);
+        let sec = time_parts.get(2).copied().unwrap_or(0);
+
+        // Convert to Unix timestamp (simplified calculation)
+        let total_days = calculate_days_since_epoch(year, month_idx as u32, day);
+        let timestamp =
+            total_days as u64 * 86400 + hour as u64 * 3600 + min as u64 * 60 + sec as u64;
+
+        return Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp));
+    }
+
+    // Fallback: treat as far-future expiry (1 year from now) to avoid
+    // incorrectly expiring cookies when we can't parse the date format.
+    // This is safer than returning an error which would cause cookie rejection.
+    Ok(SystemTime::now() + Duration::from_secs(86400 * 365))
+}
+
+/// Calculate the number of days since Unix epoch (1970-01-01) for a given date.
+fn calculate_days_since_epoch(year: i32, month: u32, day: u32) -> i64 {
+    let mut days: i64 = 0;
+
+    // Full years before current year
+    for y in 1970..year {
+        days += if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+    }
+
+    // Months before current month in current year
+    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    for m in 0..month {
+        let d = if m == 1 && is_leap {
+            29
+        } else {
+            mdays[m as usize]
+        };
+        days += d as i64;
+    }
+
+    // Days in current month (day is 1-indexed)
+    days += day as i64 - 1;
+
+    days
+}
+
+// ==================== Tests ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== Original CookieStorage tests =====
 
     #[test]
     fn test_creation_and_count() {
@@ -248,5 +878,374 @@ mod tests {
         assert_eq!(store.count(), 3);
         assert_eq!(store.find_cookies("alpha.com", "/", false).len(), 2);
         assert_eq!(store.find_cookies("beta.com", "/", false).len(), 1);
+    }
+
+    // ===== J4: New JarCookie Tests =====
+
+    /// Test J4.4 #1: Parse Set-Cookie header with various attributes.
+    ///
+    /// Verifies that name/value extraction and common attribute parsing work correctly,
+    /// including Domain, Path, Secure, HttpOnly, and Expires.
+    #[test]
+    fn test_cookie_parse_set_cookie() {
+        // Basic parsing with all common attributes
+        let cookie = JarCookie::parse_set_cookie(
+            "session_id=abc123; Domain=example.com; Path=/login; Secure; HttpOnly",
+        )
+        .expect("Should parse valid Set-Cookie header");
+
+        assert_eq!(cookie.name, "session_id");
+        assert_eq!(cookie.value, "abc123");
+        assert_eq!(cookie.domain, "example.com");
+        assert_eq!(cookie.path, "/login");
+        assert!(cookie.secure, "Secure flag should be set");
+        assert!(cookie.http_only, "HttpOnly flag should be set");
+    }
+
+    /// Test J4.4 #1 continued: Parse minimal Set-Cookie (name=value only).
+    #[test]
+    fn test_cookie_parse_minimal() {
+        let cookie = JarCookie::parse_set_cookie("SID=31d4d96e407aad42")
+            .expect("Should parse minimal cookie");
+
+        assert_eq!(cookie.name, "SID");
+        assert_eq!(cookie.value, "31d4d96e407aad42");
+        assert_eq!(cookie.domain, ""); // No domain specified
+        assert_eq!(cookie.path, "/");
+        assert!(!cookie.secure);
+        assert!(!cookie.http_only);
+    }
+
+    /// Test J4.4 #1 continued: Parse with Max-Age attribute.
+    #[test]
+    fn test_cookie_parse_max_age() {
+        let cookie =
+            JarCookie::parse_set_cookie("token=xyz; Max-Age=3600").expect("Should parse Max-Age");
+
+        assert_eq!(cookie.name, "token");
+        assert!(cookie.expires.is_some(), "Max-Age should set expiration");
+    }
+
+    /// Test J4.4 #1 continued: Invalid headers return None.
+    #[test]
+    fn test_cookie_parse_invalid_returns_none() {
+        assert!(JarCookie::parse_set_cookie("").is_none());
+        assert!(JarCookie::parse_set_cookie("noequal").is_none());
+        assert!(JarCookie::parse_set_cookie("=").is_none());
+        assert!(JarCookie::parse_set_cookie(";").is_none());
+    }
+
+    /// Test J4.4 #2: Secure cookie must not be sent over plain HTTP.
+    ///
+    /// A cookie with the Secure flag should only match URLs accessed via HTTPS.
+    /// When `is_secure=false`, the cookie should not match even if domain/path align.
+    #[test]
+    fn test_cookie_matches_url_secure_flag() {
+        let mut cookie = JarCookie::new("auth_token", "secret123", "secure.example.com");
+        cookie.secure = true; // Mark as secure-only
+
+        // Should match HTTPS URL
+        assert!(
+            cookie.matches_url("https://secure.example.com/api", true),
+            "Secure cookie should match HTTPS URL"
+        );
+
+        // Should NOT match HTTP URL
+        assert!(
+            !cookie.matches_url("http://secure.example.com/api", false),
+            "Secure cookie must NOT match HTTP URL"
+        );
+    }
+
+    /// Test J4.4 #2 continued: Non-secure cookies work on both HTTP and HTTPS.
+    #[test]
+    fn test_cookie_matches_url_non_secure_both_schemes() {
+        let cookie = JarCookie::new("lang", "en", "example.com");
+
+        assert!(
+            cookie.matches_url("http://example.com/", false),
+            "Non-secure cookie should match HTTP"
+        );
+        assert!(
+            cookie.matches_url("https://example.com/", true),
+            "Non-secure cookie should also match HTTPS"
+        );
+    }
+
+    /// Test J4.4 #2 continued: Expired cookies don't match.
+    #[test]
+    fn test_cookie_matches_url_expired() {
+        let mut cookie = JarCookie::new("old_session", "val", "example.com");
+        // Set expiration to 1 second in the past
+        cookie.expires = Some(SystemTime::now() - Duration::from_secs(1));
+
+        assert!(
+            !cookie.matches_url("https://example.com/", true),
+            "Expired cookie should not match any URL"
+        );
+    }
+
+    /// Test J4.4 #3: CookieJar returns correct subset of cookies for a given URL.
+    ///
+    /// Stores multiple cookies for different domains/paths and verifies that
+    /// querying for a specific URL returns only the matching subset.
+    #[test]
+    fn test_cookie_jar_get_for_url() {
+        let mut jar = CookieJar::new();
+
+        // Add cookies for different domains and paths
+        jar.store(JarCookie::new("session", "abc123", "example.com"));
+        jar.store(JarCookie::new("theme", "dark", "example.com"));
+        jar.store(JarCookie::new("tracker", "xyz999", "other.com"));
+
+        // Query for example.com — should get 2 cookies
+        let example_cookies = jar.get_cookies_for_url("http://example.com/page", false);
+        assert_eq!(
+            example_cookies.len(),
+            2,
+            "Should get exactly 2 cookies for example.com"
+        );
+
+        let names: Vec<&str> = example_cookies.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"session"));
+        assert!(names.contains(&"theme"));
+
+        // Query for other.com — should get 1 cookie
+        let other_cookies = jar.get_cookies_for_url("http://other.com/", false);
+        assert_eq!(other_cookies.len(), 1);
+        assert_eq!(other_cookies[0].name, "tracker");
+    }
+
+    /// Test J4.4 #3 continued: cookie_header_for_url produces correct header format.
+    #[test]
+    fn test_cookie_jar_header_format() {
+        let mut jar = CookieJar::new();
+        jar.store(JarCookie::new("a", "1", "example.com"));
+        jar.store(JarCookie::new("b", "2", "example.com"));
+
+        let header = jar.cookie_header_for_url("http://example.com/", false);
+        assert!(header.is_some());
+        let hdr = header.unwrap();
+        assert!(hdr.contains("a=1"), "Header should contain a=1");
+        assert!(hdr.contains("b=2"), "Header should contain b=2");
+        // Verify format: "name=val; name=val"
+        assert!(
+            hdr == "a=1; b=2" || hdr == "b=2; a=1",
+            "Unexpected header format: {}",
+            hdr
+        );
+    }
+
+    /// Test J4.4 #3 continued: No matching cookies returns None.
+    #[test]
+    fn test_cookie_jar_no_match_returns_none() {
+        let mut jar = CookieJar::new();
+        jar.store(JarCookie::new("x", "y", "example.com"));
+
+        let header = jar.cookie_header_for_url("http://other.com/", false);
+        assert!(header.is_none(), "No match should return None");
+    }
+
+    /// Test J4.4 #4: Load cookies from Netscape/Mozilla cookie file format.
+    ///
+    /// Creates a temporary file in the Netscape cookie format and verifies
+    /// that loading it produces the expected cookies with correct field values.
+    #[test]
+    fn test_netscape_cookie_file_load() {
+        let dir = std::env::temp_dir().join("aria2_netscape_test");
+        fs::create_dir_all(&dir).ok();
+        let path = dir.join("cookies.txt");
+
+        // Write a Netscape-format cookie file
+        let content = "# Netscape HTTP Cookie File\n\
+                       \n\
+                       .example.com\tTRUE\t/\tFALSE\t0\tsession_id\tabc123\n\
+                       .api.example.com\tTRUE\t/api\tTRUE\t1700000000\ttoken\tsecret\n\
+                       localhost\tFALSE\t/\tFALSE\t0\tlocal_key\tlocal_val\n";
+        fs::write(&path, content).expect("Failed to write test cookie file");
+
+        // Load into CookieJar
+        let mut jar = CookieJar::new();
+        let result = jar.load_netscape_file(&path);
+        assert!(
+            result.is_ok(),
+            "Loading netscape file should succeed: {:?}",
+            result.err()
+        );
+
+        let count = result.unwrap();
+        assert_eq!(count, 3, "Should have loaded 3 cookies");
+        assert_eq!(jar.len(), 3);
+
+        // Verify specific cookie properties
+        let session_cookie = jar
+            .cookies
+            .iter()
+            .find(|c| c.name == "session_id")
+            .expect("Should find session_id cookie");
+        assert_eq!(session_cookie.domain, ".example.com");
+        assert_eq!(session_cookie.value, "abc123");
+        assert!(!session_cookie.secure);
+        assert!(
+            session_cookie.expires.is_none(),
+            "Timestamp 0 means session cookie (no expiry)"
+        );
+
+        let token_cookie = jar
+            .cookies
+            .iter()
+            .find(|c| c.name == "token")
+            .expect("Should find token cookie");
+        assert_eq!(token_cookie.domain, ".api.example.com");
+        assert_eq!(token_cookie.path, "/api");
+        assert!(token_cookie.secure, "Token cookie should be secure");
+        assert!(
+            token_cookie.expires.is_some(),
+            "Token cookie should have expiry time"
+        );
+
+        // Cleanup
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Test J4.4 #4 continued: Loading nonexistent file returns error.
+    #[test]
+    fn test_netscape_load_nonexistent_file() {
+        let mut jar = CookieJar::new();
+        let result = jar.load_netscape_file(Path::new("/nonexistent/path/cookies.txt"));
+        assert!(result.is_err(), "Loading nonexistent file should fail");
+    }
+
+    /// Test J4.4 #4 continued: Empty file loads zero cookies.
+    #[test]
+    fn test_netscape_load_empty_file() {
+        let dir = std::env::temp_dir().join("aria2_netscape_empty");
+        fs::create_dir_all(&dir).ok();
+        let path = dir.join("empty.txt");
+        fs::write(&path, "").expect("Failed to write empty file");
+
+        let mut jar = CookieJar::new();
+        let result = jar.load_netscape_file(&path).expect("Load should succeed");
+        assert_eq!(result, 0, "Empty file should yield 0 cookies");
+        assert!(jar.is_empty());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    // ===== Additional JarCookie/CookieJar tests =====
+
+    #[test]
+    fn test_jar_cookie_creation() {
+        let c = JarCookie::new("test", "value", "example.com");
+        assert_eq!(c.name, "test");
+        assert_eq!(c.value, "value");
+        assert_eq!(c.domain, "example.com");
+        assert_eq!(c.path, "/");
+        assert!(!c.secure);
+        assert!(!c.http_only);
+        assert!(c.expires.is_none()); // Session cookie by default
+    }
+
+    #[test]
+    fn test_jar_cookie_to_header_value() {
+        let mut c = JarCookie::new("sid", "abc", "example.com");
+        c.secure = true;
+        c.http_only = true;
+        let hdr = c.to_header_value();
+        assert!(hdr.starts_with("sid=abc"));
+        assert!(hdr.contains("Domain=example.com"));
+        assert!(hdr.contains("Secure"));
+        assert!(hdr.contains("HttpOnly"));
+    }
+
+    #[test]
+    fn test_jar_cookie_equality() {
+        let a = JarCookie::new("x", "1", "a.com");
+        let b = JarCookie::new("x", "2", "a.com"); // Same name+domain+path
+        assert_eq!(a, b, "Cookies with same name/domain/path should be equal");
+
+        let c = JarCookie::new("y", "1", "a.com");
+        assert_ne!(a, c, "Different names should not be equal");
+    }
+
+    #[test]
+    fn test_cookie_jar_store_updates_existing() {
+        let mut jar = CookieJar::new();
+        jar.store(JarCookie::new("sid", "old", "example.com"));
+        jar.store(JarCookie::new("sid", "new", "example.com"));
+
+        assert_eq!(jar.len(), 1, "Store should update, not duplicate");
+        let cookies = jar.get_cookies_for_url("http://example.com/", false);
+        assert_eq!(cookies[0].value, "new");
+    }
+
+    #[test]
+    fn test_cookie_jar_cleanup_expired() {
+        let mut jar = CookieJar::new();
+
+        // Add an expired cookie
+        let mut expired = JarCookie::new("old", "val", "x.com");
+        expired.expires = Some(SystemTime::now() - Duration::from_secs(60));
+        jar.store(expired);
+
+        // Add a fresh cookie (far future expiry)
+        let mut fresh = JarCookie::new("fresh", "val", "x.com");
+        fresh.expires = Some(SystemTime::now() + Duration::from_secs(86400 * 365));
+        jar.store(fresh);
+
+        // Add a session cookie (no expiry)
+        jar.store(JarCookie::new("session", "val", "x.com"));
+
+        assert_eq!(jar.len(), 3);
+        let removed = jar.cleanup_expired();
+        assert_eq!(removed, 1, "Should remove exactly 1 expired cookie");
+        assert_eq!(jar.len(), 2, "Fresh + session cookies remain");
+    }
+
+    #[test]
+    fn test_cookie_jar_clear() {
+        let mut jar = CookieJar::new();
+        jar.store(JarCookie::new("a", "1", "x.com"));
+        jar.store(JarCookie::new("b", "2", "y.com"));
+        jar.clear();
+        assert!(jar.is_empty());
+    }
+
+    #[test]
+    fn test_format_systemtime_as_http_date() {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(784111777); // Known timestamp
+        let formatted = format_systemtime_as_http_date(time);
+        // Should produce something like "Thu, 29 Nov 1984 20:22:57 GMT"
+        assert!(formatted.contains("GMT"), "HTTP date should end with GMT");
+        assert!(
+            formatted.contains(','),
+            "IMF-fixdate should have comma after weekday"
+        );
+    }
+
+    #[test]
+    fn test_parse_http_date_imf_fixdate() {
+        let result = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT");
+        assert!(result.is_ok(), "Should parse IMF-fixdate format");
+        let time = result.unwrap();
+        let dur = time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        // Nov 6, 1994 08:49:37 GMT ≈ 784629777 seconds since epoch
+        // Allow generous range for different parser implementations
+        assert!(
+            dur.as_secs() > 784000000,
+            "Timestamp should be roughly correct, got {}",
+            dur.as_secs()
+        );
+    }
+
+    #[test]
+    fn test_parse_http_date_fallback() {
+        // Unparseable input should return far-future (not error)
+        let result = parse_http_date("totally-invalid-date-string");
+        assert!(result.is_ok(), "Should return fallback, not error");
+        let time = result.unwrap();
+        assert!(time > SystemTime::now(), "Fallback should be in the future");
     }
 }

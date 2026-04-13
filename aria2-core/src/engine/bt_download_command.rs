@@ -15,6 +15,7 @@ use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
+use crate::filesystem::file_lock::DownloadPathLock;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 pub use crate::engine::bt_message_handler::{
@@ -85,6 +86,11 @@ pub struct BtDownloadCommand {
     // Web-seed (BEP 19 / HTTP fallback) integration
     /// URLs extracted from torrent's url-list field for HTTP piece download fallback
     pub(crate) web_seed_urls: Vec<String>,
+
+    // File lock (J6): prevents concurrent aria2 instances from writing to same output dir
+    /// Download path lock held for the lifetime of this command.
+    /// Prevents other aria2 instances from writing to the same output directory.
+    pub download_path_lock: Option<DownloadPathLock>,
 }
 
 impl BtDownloadCommand {
@@ -181,6 +187,21 @@ impl BtDownloadCommand {
             multi_file_layout.is_some()
         );
 
+        // Acquire download path lock (J6): prevents concurrent instances from
+        // writing to the same output directory. If acquisition fails, log a
+        // warning but do not fail the download -- the lock is a best-effort guard.
+        let download_path_lock =
+            match DownloadPathLock::acquire_for_download(&effective_output_path) {
+                Ok(lock) => Some(lock),
+                Err(e) => {
+                    warn!(
+                        "Failed to acquire download path lock: {}. Proceeding without lock.",
+                        e
+                    );
+                    None
+                }
+            };
+
         Ok(Self {
             group: Arc::new(tokio::sync::RwLock::new(group)),
             output_path: effective_output_path,
@@ -222,6 +243,9 @@ impl BtDownloadCommand {
 
             // Web-seed URLs (extracted from torrent url-list field)
             web_seed_urls: crate::engine::bt_web_seed::parse_url_list_from_bytes(torrent_bytes),
+
+            // Download path lock (J6)
+            download_path_lock,
         })
     }
 
