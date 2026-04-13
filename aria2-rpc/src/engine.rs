@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use super::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use super::server::{
     AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalOptions, GlobalStat, PeerInfo,
-    StatusInfo, TaskOptions, create_gid,
+    RpcAuthMiddleware, StatusInfo, TaskOptions, create_gid,
 };
 use super::websocket::{DownloadEvent, EventPublisher, EventType};
 use aria2_core::engine::multi_file_layout::TorrentFileEntry;
@@ -33,6 +33,8 @@ pub struct RpcEngine {
     pub(super) stopped_tasks: Arc<RwLock<Vec<StatusInfo>>>,
     /// Event publisher for WebSocket notifications
     pub(super) event_publisher: Arc<EventPublisher>,
+    /// Authentication middleware for token-based RPC auth
+    pub(super) auth_middleware: RpcAuthMiddleware,
 }
 
 /// Internal state for an active download task.
@@ -132,12 +134,21 @@ impl RpcEngine {
             task_opts: Arc::new(RwLock::new(HashMap::new())),
             stopped_tasks: Arc::new(RwLock::new(Vec::new())),
             event_publisher: Arc::new(EventPublisher::default()),
+            auth_middleware: RpcAuthMiddleware::default(),
         }
     }
 
     /// Chainable builder method to set authentication config.
-    pub fn with_auth(self, auth: AuthConfig) -> Self {
-        let _ = auth;
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        if let Some(token) = &auth.token {
+            self.auth_middleware = RpcAuthMiddleware::new(token);
+        }
+        self
+    }
+
+    /// Chainable builder method to set auth middleware directly.
+    pub fn with_auth_middleware(mut self, middleware: RpcAuthMiddleware) -> Self {
+        self.auth_middleware = middleware;
         self
     }
 
@@ -206,8 +217,18 @@ impl RpcEngine {
     /// This is the central entry point for all JSON-RPC requests.
     /// It matches on the method name and delegates to the appropriate
     /// handler implementation in [rpc_handlers].
+    ///
+    /// Before dispatching, validates the request token against the
+    /// configured `rpc-secret` (if any) via [`RpcAuthMiddleware`].
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+
+        // Authenticate: extract token from params and validate
+        let token = req.params.get("token").and_then(|v| v.as_str());
+        if let Err(auth_err) = self.auth_middleware.validate(token) {
+            return auth_err.into_response(req.id.clone());
+        }
+
         match req.method.as_str() {
             "aria2.addUri" => self
                 .handle_add_uri(req)
@@ -280,6 +301,10 @@ impl RpcEngine {
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.getVersion" => self.handle_version(),
             "aria2.getSessionInfo" => self.handle_session_info(),
+            "system.multicall" => self
+                .handle_multicall(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
             _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),
         }
     }
@@ -466,5 +491,83 @@ mod tests {
         .with_id(2);
         let set_resp = engine.handle_request(&set_req).await;
         assert!(set_resp.is_success());
+    }
+
+    // =========================================================================
+    // Auth Integration Tests (G4 Part B)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_engine_auth_default_accepts_all() {
+        // Default engine has no auth configured — all requests pass
+        let engine = RpcEngine::new();
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(
+            resp.is_success(),
+            "Default engine should accept requests without token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_auth_valid_token_passes() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
+
+        // Request with correct token in params
+        let req = JsonRpcRequest::new(
+            "aria2.getVersion",
+            serde_json::json!({"token": "my-secret"}),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "Valid token should be accepted");
+    }
+
+    #[tokio::test]
+    async fn test_engine_auth_wrong_token_rejected() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
+
+        // Request with wrong token
+        let req = JsonRpcRequest::new(
+            "aria2.getVersion",
+            serde_json::json!({"token": "wrong-token"}),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_error(), "Wrong token should be rejected");
+        assert_eq!(
+            resp.error.unwrap().code,
+            -32001,
+            "Should return Unauthorized error code"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_auth_missing_token_rejected() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
+
+        // Request without any token parameter
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(
+            resp.is_error(),
+            "Missing token should be rejected when auth is enabled"
+        );
+        assert_eq!(resp.error.unwrap().code, -32001);
+    }
+
+    #[tokio::test]
+    async fn test_engine_auth_via_config_token() {
+        // Test that AuthConfig.token flows through correctly
+        let engine = RpcEngine::new().with_auth(AuthConfig::default().with_token("config-secret"));
+
+        // Use object-style params where token is a named field
+        let req = JsonRpcRequest::new(
+            "aria2.getVersion",
+            serde_json::json!({"token": "config-secret"}),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "Token from AuthConfig should work");
     }
 }

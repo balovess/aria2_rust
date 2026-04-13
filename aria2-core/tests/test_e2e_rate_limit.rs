@@ -33,6 +33,7 @@ fn _create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
         bt_max_upload_slots: None,
         bt_optimistic_unchoke_interval: None,
         bt_snubbed_timeout: None,
+        bt_prioritize_piece: "rarest".to_string(),
         all_proxy: None,
         https_proxy: None,
         ftp_proxy: None,

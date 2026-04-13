@@ -62,8 +62,10 @@ pub mod xml_rpc;
 pub use engine::RpcEngine;
 pub use json_rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse, parse_request};
 pub use server::{
-    AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalStat, ServerConfig, StatusInfo,
-    UriEntry, create_gid,
+    AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalStat, RpcAuthMiddleware, ServerConfig,
+    StatusInfo, UriEntry, create_gid,
 };
-pub use websocket::{DownloadEvent, EventPublisher, EventType, WsSession};
+pub use websocket::{
+    DownloadEvent, EventPublisher, EventType, NotificationBatcher, WsConfig, WsSession,
+};
 pub use xml_rpc::{XmlRpcMember, XmlRpcRequest, XmlRpcResponse, XmlRpcValue};

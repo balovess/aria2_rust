@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use crate::error::{Aria2Error, Result};
 use crate::segment::Segment;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DownloadStatus {
     Waiting,
     Active,
@@ -40,6 +40,39 @@ impl GroupId {
 
     pub fn value(&self) -> u64 {
         self.0
+    }
+
+    /// Create GroupId from hex string (e.g., "deadbeef")
+    ///
+    /// Returns None if the string is not valid hex or too large for u64.
+    pub fn from_hex_string(hex_str: &str) -> Option<Self> {
+        let trimmed = hex_str.trim_start_matches("0x");
+        if trimmed.is_empty() {
+            return None;
+        }
+        let val = u64::from_str_radix(trimmed, 16).ok()?;
+        Some(GroupId(val))
+    }
+
+    /// Generate a random GroupId using current timestamp + random
+    pub fn new_random() -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut hasher = DefaultHasher::new();
+        nanos.hash(&mut hasher);
+        rand::random::<u64>().hash(&mut hasher);
+        GroupId(hasher.finish())
+    }
+
+    /// Format GID as hex string (lowercase, no prefix)
+    pub fn to_hex_string(&self) -> String {
+        format!("{:016x}", self.0)
     }
 }
 
@@ -86,6 +119,13 @@ pub struct DownloadOptions {
     /// Timeout in seconds after which a peer is considered snubbed (not sending data).
     /// Default: 60.
     pub bt_snubbed_timeout: Option<u64>,
+
+    // ------------------------------------------------------------------
+    // Piece selection priority mode (G2)
+    // ------------------------------------------------------------------
+    /// Piece selection priority: "rarest" (default), "head" (sequential from start),
+    /// "tail" (sequential from end).
+    pub bt_prioritize_piece: String,
 }
 
 pub struct RequestGroup {
@@ -334,6 +374,14 @@ impl RequestGroup {
     /// Get BT bitfield (async, uses RwLock)
     pub async fn get_bt_bitfield(&self) -> Option<Vec<u8>> {
         self.bt_bitfield.read().await.clone()
+    }
+
+    /// Set resume offset for HTTP/FTP range request resumption
+    pub fn set_resume_offset(&self, offset: u64) {
+        // Store resume offset in completed_length so the download engine
+        // knows where to resume from
+        self.completed_length_atomic
+            .store(offset, Ordering::Relaxed);
     }
 }
 

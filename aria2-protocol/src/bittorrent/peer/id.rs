@@ -6,8 +6,8 @@ pub fn generate_peer_id() -> [u8; 20] {
     let mut id = [0u8; 20];
     id[..8].copy_from_slice(PEER_ID_PREFIX);
     let mut rng = rand::thread_rng();
-    for i in 8..20 {
-        id[i] = rng.gen_range(b'A'..=b'Z');
+    for id in &mut id[8..] {
+        *id = rng.gen_range(b'A'..=b'Z');
     }
     id
 }
@@ -17,14 +17,12 @@ pub fn generate_peer_id_with_prefix(prefix: &str) -> [u8; 20] {
     let prefix_bytes = prefix.as_bytes();
     let copy_len = prefix_bytes.len().min(8);
     id[..copy_len].copy_from_slice(&prefix_bytes[..copy_len]);
-    if copy_len < 8 {
-        for i in copy_len..8 {
-            id[i] = b'-';
-        }
+    for slot in &mut id[copy_len..8] {
+        *slot = b'-';
     }
     let mut rng = rand::thread_rng();
-    for i in 8..20 {
-        id[i] = rng.gen_range(b'0'..=b'9');
+    for slot in &mut id[8..] {
+        *slot = rng.gen_range(b'0'..=b'9');
     }
     id
 }

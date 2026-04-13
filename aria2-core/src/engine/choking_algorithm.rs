@@ -1,4 +1,4 @@
-use rand::Rng;
+use std::collections::HashSet;
 
 use super::peer_stats::PeerStats;
 
@@ -48,6 +48,13 @@ impl Default for ChokingConfig {
 pub struct ChokingAlgorithm {
     peers: Vec<PeerStats>,
     config: ChokingConfig,
+    /// Explicitly snubbed peer indices (separate from PeerStats.is_snubbed for
+    /// algorithm-level control). Peers in this set always receive score -1000.
+    snubbed_peers: HashSet<usize>,
+    /// Index of the current optimistically unchoked peer (for rotation).
+    current_optimistic_peer: Option<usize>,
+    /// Round-robin counter for optimistic unchoke rotation.
+    optimistic_rotation_counter: usize,
 }
 
 impl ChokingAlgorithm {
@@ -56,6 +63,9 @@ impl ChokingAlgorithm {
         Self {
             peers: Vec::new(),
             config,
+            snubbed_peers: HashSet::new(),
+            current_optimistic_peer: None,
+            optimistic_rotation_counter: 0,
         }
     }
 
@@ -106,7 +116,10 @@ impl ChokingAlgorithm {
             .peers
             .iter()
             .enumerate()
-            .map(|(i, peer)| (i, Self::calculate_peer_score(peer)))
+            .map(|(i, peer)| {
+                let is_snubbed = self.snubbed_peers.contains(&i);
+                (i, Self::calculate_peer_score(peer, is_snubbed))
+            })
             .collect();
 
         // Sort by score descending
@@ -146,21 +159,25 @@ impl ChokingAlgorithm {
     /// Selects ONE choked+interested peer for optimistic unchoke.
     /// This gives new/unknown peers a chance to prove themselves.
     ///
+    /// Uses round-robin rotation among eligible non-snubbed peers
+    /// to ensure fair distribution of the optimistic unchoke slot.
+    ///
     /// Returns Some(index) if found, None if no eligible peer
     pub fn optimistically_unchoke(&mut self) -> Option<usize> {
         // Find candidates that are:
         //   - Currently choked (am_choking == true)
         //   - Interested in us (peer_interested == true)
-        //   - Not snubbed
+        //   - Not snubbed (neither PeerStats.is_snubbed nor in explicit set)
         //   - Not recently optimistically unchoked (>interval ago)
         let candidates: Vec<usize> = self
             .peers
             .iter()
             .enumerate()
-            .filter(|(_, peer)| {
+            .filter(|(i, peer)| {
                 peer.am_choking
                     && peer.peer_interested
                     && !peer.is_snubbed
+                    && !self.snubbed_peers.contains(i)
                     && peer.time_since_last_optimistic_unchoke().as_secs()
                         >= self.config.optimistic_unchoke_interval_secs
             })
@@ -171,22 +188,94 @@ impl ChokingAlgorithm {
             return None;
         }
 
-        // Randomly select one from candidates
-        let mut rng = rand::thread_rng();
-        let selected_idx = rng.gen_range(0..candidates.len());
-        let selected = candidates[selected_idx];
+        // Use round-robin selection: pick next candidate after current position
+        let selected = self.rotate_optimistic_unchoked(&candidates);
 
         // Mark as optimistically unchoked
-        self.peers[selected].record_optimistic_unchoke();
+        if let Some(peer) = self.peers.get_mut(selected) {
+            peer.record_optimistic_unchoke();
+        }
+        self.current_optimistic_peer = Some(selected);
 
         Some(selected)
     }
 
-    /// Called whenever we receive data from a peer
+    /// Rotate which peer gets the optimistic unchoke slot using round-robin.
+    ///
+    /// Picks a different peer than the current one when possible,
+    /// cycling through eligible peers in order.
+    ///
+    /// # Arguments
+    /// * `eligible_peers` - Indices of peers that are eligible for optimistic unchoke
+    ///
+    /// # Returns
+    /// The index of the selected peer from the eligible set
+    pub fn rotate_optimistic_unchoked(&mut self, eligible_peers: &[usize]) -> usize {
+        if eligible_peers.is_empty() {
+            panic!("rotate_optimistic_unchoked called with empty eligible list");
+        }
+
+        if eligible_peers.len() == 1 {
+            return eligible_peers[0];
+        }
+
+        // Find position of current optimistic peer in eligible list
+        let current_pos = self
+            .current_optimistic_peer
+            .and_then(|curr| eligible_peers.iter().position(|&x| x == curr));
+
+        // Advance to next peer in round-robin order
+        let next_pos = match current_pos {
+            Some(pos) => (pos + 1) % eligible_peers.len(),
+            None => self.optimistic_rotation_counter % eligible_peers.len(),
+        };
+
+        self.optimistic_rotation_counter = self.optimistic_rotation_counter.wrapping_add(1);
+        eligible_peers[next_pos]
+    }
+
+    /// Called whenever we receive data from a peer.
+    /// Automatically unsnubs the peer if it was in the explicit snubbed set.
     pub fn on_data_received(&mut self, peer_idx: usize, bytes: u64) {
         if let Some(peer) = self.peers.get_mut(peer_idx) {
             peer.on_data_received(bytes);
         }
+        // Auto-unsnub: receiving data means the peer is responsive again
+        self.unsnub_peer(peer_idx);
+    }
+
+    /// Explicitly mark a peer as snubbed (algorithm-level).
+    ///
+    /// This adds the peer to the `snubbed_peers` set, which causes
+    /// `calculate_peer_score` to return -1000 for this peer, ensuring
+    /// they always get choked on the next rotation.
+    pub fn mark_peer_snubbed(&mut self, peer_id: usize) {
+        if self.snubbed_peers.insert(peer_id) {
+            tracing::debug!("[BT] Peer {} explicitly marked as snubbed", peer_id);
+        }
+    }
+
+    /// Remove a peer from the explicit snubbed set (they sent data again).
+    ///
+    /// Returns `true` if the peer was actually in the snubbed set (newly un-snubbed),
+    /// `false` if they were not snubbed.
+    pub fn unsnub_peer(&mut self, peer_id: usize) -> bool {
+        if self.snubbed_peers.remove(&peer_id) {
+            tracing::debug!("[BT] Peer {} un-snubbed (data received)", peer_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if a peer is in the explicit snubbed set.
+    pub fn is_explicitly_snubbed(&self, peer_id: usize) -> bool {
+        self.snubbed_peers.contains(&peer_id)
+    }
+
+    /// Get the number of explicitly snubbed peers.
+    pub fn snubbed_count(&self) -> usize {
+        self.snubbed_peers.len()
     }
 
     /// Check all peers for snubbed status
@@ -211,10 +300,10 @@ impl ChokingAlgorithm {
     /// Score components:
     ///   1. Download speed contribution (how much they give us): weight 0.5
     ///   2. Upload speed contribution (reciprocity): weight 0.3
-    ///   3. Snubbed penalty: -1000 if snubbed
+    ///   3. Snubbed penalty: -1000 if snubbed (either in PeerStats or algorithm set)
     ///   4. Interest bonus: +50 if peer_interested
     ///   5. New peer bonus (time since unchoke < 60s): +30 (anti-churn)
-    fn calculate_peer_score(peer: &PeerStats) -> f64 {
+    fn calculate_peer_score(peer: &PeerStats, is_explicitly_snubbed: bool) -> f64 {
         let mut score = 0.0;
 
         // Download speed (primary factor - tit-for-tat)
@@ -225,7 +314,8 @@ impl ChokingAlgorithm {
         score += peer.upload_speed * 0.000005;
 
         // Snubbed penalty (heavy penalty to avoid wasting slots)
-        if peer.is_snubbed {
+        // Check both PeerStats-level and algorithm-level snubbing
+        if peer.is_snubbed || is_explicitly_snubbed {
             score -= 1000.0;
         }
 
@@ -448,14 +538,22 @@ mod tests {
         let mut snubbed_peer = create_test_peer(50000.0, 500.0, true, true);
         snubbed_peer.is_snubbed = true;
 
-        let normal_score = ChokingAlgorithm::calculate_peer_score(&normal_peer);
-        let snubbed_score = ChokingAlgorithm::calculate_peer_score(&snubbed_peer);
+        let normal_score = ChokingAlgorithm::calculate_peer_score(&normal_peer, false);
+        let snubbed_score_stats = ChokingAlgorithm::calculate_peer_score(&snubbed_peer, false);
+        let snubbed_score_explicit = ChokingAlgorithm::calculate_peer_score(&normal_peer, true);
 
         // Snubbed peer should have much lower score (penalty of -1000)
-        assert!(snubbed_score < normal_score);
+        assert!(snubbed_score_stats < normal_score);
         assert!(
-            (normal_score - snubbed_score) > 900.0,
-            "Expected large score difference due to snubbed penalty"
+            (normal_score - snubbed_score_stats) > 900.0,
+            "Expected large score difference due to PeerStats snubbed penalty"
+        );
+
+        // Explicitly snubbed peer should also have much lower score
+        assert!(snubbed_score_explicit < normal_score);
+        assert!(
+            (normal_score - snubbed_score_explicit) > 900.0,
+            "Expected large score difference due to explicit snubbed penalty"
         );
     }
 
@@ -540,5 +638,185 @@ mod tests {
         assert_eq!(config.optimistic_unchoke_interval_secs, 30);
         assert_eq!(config.snubbed_timeout_secs, 60);
         assert_eq!(config.choke_rotation_interval_secs, 10);
+    }
+
+    // ==================== G1: Snubbing Enhancement Tests ====================
+
+    #[test]
+    fn test_snub_detection_after_timeout() {
+        // Test that peers are detected as snubbed after timeout
+        let config = ChokingConfig {
+            snubbed_timeout_secs: 1,
+            ..Default::default()
+        };
+        let mut algo = ChokingAlgorithm::new(config);
+
+        let peer = PeerStats::new([0u8; 20], "127.0.0.1:6882".parse().unwrap());
+        algo.add_peer(peer);
+
+        // Wait for timeout
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Check snubbed status - should detect via PeerStats timeout
+        let snubbed_indices = algo.check_snubbed_peers();
+        assert_eq!(snubbed_indices.len(), 1);
+        assert!(algo.get_peer(0).unwrap().is_snubbed);
+    }
+
+    #[test]
+    fn test_snubbed_peer_always_choked() {
+        // Test that explicitly snubbed peers always get choked
+        let config = ChokingConfig {
+            max_upload_slots: 2,
+            ..Default::default()
+        };
+        let mut algo = ChokingAlgorithm::new(config);
+
+        // Add 3 peers - peer 0 is high speed but will be snubbed
+        algo.add_peer(create_test_peer(100000.0, 1000.0, true, true)); // Peer 0: high speed
+        algo.add_peer(create_test_peer(50000.0, 500.0, true, true)); // Peer 1: medium speed
+        algo.add_peer(create_test_peer(30000.0, 300.0, true, true)); // Peer 2: low speed
+
+        // Explicitly snub peer 0 (the highest speed one)
+        algo.mark_peer_snubbed(0);
+        assert!(algo.is_explicitly_snubbed(0));
+        assert_eq!(algo.snubbed_count(), 1);
+
+        // Run choke rotation - snubbed peer should be choked despite high score
+        let actions = algo.rotate_choke();
+
+        // Find action for peer 0 - it should be Choked or NoChange(if already choked)
+        let peer0_action = actions
+            .iter()
+            .find(|a| matches!(a, ChokeAction::NoChange(0) | ChokeAction::Choke(0)));
+        assert!(
+            peer0_action.is_some(),
+            "Peer 0 should have an action in results"
+        );
+        // Peer 0 started as choked (am_choking=true), so with -1000 score it stays choked
+        match peer0_action.unwrap() {
+            ChokeAction::Choke(_) | ChokeAction::NoChange(_) => {} // Expected
+            ChokeAction::Unchoke(_) => panic!("Snubbed peer 0 should NEVER be unchoked"),
+        }
+    }
+
+    #[test]
+    fn test_unsnub_on_data_received() {
+        // Test that receiving data from a peer auto-unsnubs them
+        let config = ChokingConfig::default();
+        let mut algo = ChokingAlgorithm::new(config);
+
+        let peer = PeerStats::new([0u8; 20], "127.0.0.1:6883".parse().unwrap());
+        algo.add_peer(peer);
+
+        // Explicitly snub peer 0
+        algo.mark_peer_snubbed(0);
+        assert!(algo.is_explicitly_snubbed(0));
+        assert_eq!(algo.snubbed_count(), 1);
+
+        // Receive data from peer 0 - should auto-unsnub
+        algo.on_data_received(0, 1024);
+        assert!(
+            !algo.is_explicitly_snubbed(0),
+            "Peer should be un-snubbed after data received"
+        );
+        assert_eq!(algo.snubbed_count(), 0);
+    }
+
+    #[test]
+    fn test_opt_unchoking_rotation_changes_peer() {
+        // Test that optimistic unchoke rotates among eligible peers
+        let config = ChokingConfig {
+            optimistic_unchoke_interval_secs: 0, // Allow immediate re-selection
+            ..Default::default()
+        };
+        let mut algo = ChokingAlgorithm::new(config);
+
+        // Add 3 eligible peers (all choked + interested)
+        algo.add_peer(create_test_peer(1000.0, 100.0, true, true));
+        algo.add_peer(create_test_peer(2000.0, 200.0, true, true));
+        algo.add_peer(create_test_peer(3000.0, 300.0, true, true));
+
+        // First optimistic unchoke
+        let first = algo.optimistically_unchoke();
+        assert!(first.is_some());
+        let first_idx = first.unwrap();
+
+        // Second optimistic unchoke - should pick a DIFFERENT peer (round-robin)
+        // Reset the last_optimistic_unchoke time so they're eligible again
+        for i in 0..3 {
+            if let Some(p) = algo.get_peer_mut(i) {
+                p.last_optimistic_unchoke_at =
+                    std::time::Instant::now() - std::time::Duration::from_secs(1);
+            }
+        }
+
+        let second = algo.optimistically_unchoke();
+        assert!(second.is_some());
+        let second_idx = second.unwrap();
+
+        // With round-robin, second should differ from first (unless only 1 candidate)
+        // Since all 3 are eligible and we use rotation, we expect different peer
+        assert_ne!(
+            first_idx, second_idx,
+            "Optimistic unchoke should rotate to a different peer"
+        );
+    }
+
+    #[test]
+    fn test_opt_unchoking_excludes_snubbed_peers() {
+        // Test that snubbed peers are excluded from optimistic unchoke candidates
+        let config = ChokingConfig {
+            optimistic_unchoke_interval_secs: 0,
+            ..Default::default()
+        };
+        let mut algo = ChokingAlgorithm::new(config);
+
+        // Peer 0: eligible but will be snubbed
+        algo.add_peer(create_test_peer(5000.0, 500.0, true, true));
+        // Peer 1: eligible and NOT snubbed
+        algo.add_peer(create_test_peer(3000.0, 300.0, true, true));
+
+        // Snub peer 0
+        algo.mark_peer_snubbed(0);
+
+        // Optimistic unchoke should ONLY select peer 1
+        let result = algo.optimistically_unchoke();
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap(),
+            1,
+            "Should select non-snubbed peer for optimistic unchoke"
+        );
+    }
+
+    #[test]
+    fn test_mark_snubbed_idempotent() {
+        let config = ChokingConfig::default();
+        let mut algo = ChokingAlgorithm::new(config);
+
+        algo.add_peer(create_test_peer(100.0, 10.0, true, true));
+
+        // Marking same peer twice should not increase count
+        algo.mark_peer_snubbed(0);
+        assert_eq!(algo.snubbed_count(), 1);
+        algo.mark_peer_snubbed(0); // Duplicate
+        assert_eq!(
+            algo.snubbed_count(),
+            1,
+            "Duplicate mark should not increase count"
+        );
+    }
+
+    #[test]
+    fn test_unsnub_non_snubbed_peer_returns_false() {
+        let config = ChokingConfig::default();
+        let mut algo = ChokingAlgorithm::new(config);
+
+        algo.add_peer(create_test_peer(100.0, 10.0, true, true));
+
+        // Unsnubbing a peer that was never snubbed returns false
+        let result = algo.unsnub_peer(0);
+        assert!(!result, "Unsnubbing non-snubbed peer should return false");
     }
 }

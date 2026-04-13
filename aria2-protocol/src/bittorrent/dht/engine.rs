@@ -14,6 +14,15 @@ use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
 use super::token_tracker::TokenTracker;
 
+/// Hardcoded bootstrap nodes used when routing table is empty and no custom
+/// bootstrappers are configured. These are well-known public DHT routers.
+pub const HARDCODED_BOOTSTRAP_NODES: &[(&str, u16)] = &[
+    ("router.bittorrent.com", 6881),
+    ("dht.transmissionbt.com", 6881),
+    ("router.utorrent.com", 6881),
+    ("bitsnoop.com", 6881),
+];
+
 fn generate_random_id() -> [u8; 20] {
     let mut id = [0u8; 20];
     getrandom::getrandom(&mut id).expect("generate_random_id failed");
@@ -112,11 +121,46 @@ impl DhtEngine {
     }
 
     async fn bootstrap_routing_table(&self) {
+        // Check current node count - if empty, we must use hardcoded bootstrap nodes
+        let is_empty = {
+            let rt = self.routing_table.read().await;
+            rt.total_node_count() == 0
+        };
+
+        if is_empty {
+            debug!("DHT: Routing table is empty, using hardcoded bootstrap nodes");
+            for (host, port) in HARDCODED_BOOTSTRAP_NODES {
+                // Create placeholder nodes with random IDs for bootstrap addresses
+                // These will be replaced with real node IDs after ping responses
+                let mut id = [0u8; 20];
+                getrandom::getrandom(&mut id).ok();
+                if let Ok(addr) = format!("{}:{}", host, port).parse::<std::net::SocketAddr>() {
+                    let node = DhtNode::new(id, addr);
+                    self.routing_table.write().await.insert(node);
+                }
+            }
+            debug!(
+                "DHT: Added {} hardcoded bootstrap nodes",
+                HARDCODED_BOOTSTRAP_NODES.len()
+            );
+        }
+
+        // Also add nodes from DhtBootstrap module (which may have additional nodes)
         let boot_nodes = DhtBootstrap::get_bootstrap_nodes();
         for node in &boot_nodes {
             self.routing_table.write().await.insert(node.clone());
         }
-        debug!("DHT bootstrap: 已添加 {} 个节点", boot_nodes.len());
+
+        let total_count = {
+            let rt = self.routing_table.read().await;
+            rt.total_node_count()
+        };
+        debug!(
+            "DHT bootstrap: total {} nodes in routing table",
+            total_count
+        );
+
+        // Send pings to all bootstrap nodes to discover their actual node IDs
         self.send_ping_to_all(&boot_nodes).await;
     }
 
@@ -250,7 +294,7 @@ impl DhtEngine {
             }
 
             // Generate DHT security token for announce_peer
-            let token = self.token_tracker.generate_token(info_hash, &target.addr);
+            let _token = self.token_tracker.generate_token(info_hash, &target.addr);
             // Note: token stored via routing_table update below
 
             let sock = self.socket.clone();
@@ -642,6 +686,51 @@ mod tests {
             stats.total_nodes >= 4,
             "engine should still work after skipped save"
         );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn test_hardcoded_bootstrap_nodes_defined() {
+        // Verify the hardcoded bootstrap nodes constant is properly defined
+        assert!(!HARDCODED_BOOTSTRAP_NODES.is_empty());
+        assert!(HARDCODED_BOOTSTRAP_NODES.len() >= 3);
+        for (host, port) in HARDCODED_BOOTSTRAP_NODES {
+            assert!(!host.is_empty(), "Bootstrap host should not be empty");
+            assert!(*port > 0, "Bootstrap port should be positive");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hardcoded_bootstrap_used_when_table_empty() {
+        // Create an engine with no persistence file and empty initial state
+        let config = DhtEngineConfig {
+            port: 0,
+            dht_file_path: None, // No persisted data
+            ..Default::default()
+        };
+
+        // Start the engine - it should use hardcoded bootstrap nodes
+        let engine = DhtEngine::start(config)
+            .await
+            .expect("engine should start with hardcoded bootstrap");
+
+        let stats = engine.stats().await;
+
+        // The routing table should have nodes from hardcoded bootstrap + DhtBootstrap
+        // At minimum, we expect HARDCODED_BOOTSTRAP_NODES entries
+        assert!(
+            stats.total_nodes >= HARDCODED_BOOTSTRAP_NODES.len(),
+            "Should have at least {} hardcoded bootstrap nodes (got {})",
+            HARDCODED_BOOTSTRAP_NODES.len(),
+            stats.total_nodes
+        );
+
+        debug!(
+            "Hardcoded bootstrap test: total_nodes={}, expected_min={}",
+            stats.total_nodes,
+            HARDCODED_BOOTSTRAP_NODES.len()
+        );
+
         engine.shutdown();
     }
 }

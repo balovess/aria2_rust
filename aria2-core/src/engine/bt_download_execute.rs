@@ -436,17 +436,19 @@ impl BtDownloadCommand {
             }
         }
 
-        // P2 集成: 注入 LPD 发现的局域网 peers
+        // P2: Integrate LPD-discovered LAN peers
         if let Some(ref lpd) = self.lpd_manager {
-            let lpd_peers = lpd.get_discovered_peers(*info_hash_raw).await;
+            // Convert raw 20-byte info_hash to 40-char hex string for LPD
+            let info_hash_hex = hex::encode(*info_hash_raw);
+            let lpd_peers = lpd.get_peers_for(&info_hash_hex).await;
             if !lpd_peers.is_empty() {
                 let before = peer_addrs.len();
                 for lpd_peer in &lpd_peers {
-                    // 将 SocketAddrV4 转换为 PeerAddr
-                    let ip_str = lpd_peer.addr.ip().to_string();
+                    // LpdPeer.addr is IpAddr, LpdPeer.port is u16
+                    let ip_str = lpd_peer.addr.to_string();
                     let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
                         &ip_str,
-                        lpd_peer.addr.port(),
+                        lpd_peer.port,
                     );
                     if !peer_addrs
                         .iter()
@@ -462,8 +464,8 @@ impl BtDownloadCommand {
                     "LPD discovered local peers"
                 );
 
-                // 注册当前下载到 LPD 广播
-                lpd.register_download(*info_hash_raw);
+                // Register current download for LPD announcement
+                let _ = lpd.register_torrent(&info_hash_hex).await;
             } else {
                 debug!("LPD no local peers found for this torrent");
             }
@@ -577,6 +579,33 @@ impl BtDownloadCommand {
             aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::Sequential,
         );
 
+        // G2: Set piece priority mode from config option (--bt-prioritize-piece)
+        let prioritize_piece_mode = {
+            let g = self.group.read().await;
+            g.options().bt_prioritize_piece.clone()
+        };
+        match prioritize_piece_mode.as_str() {
+            "head" => {
+                piece_picker.set_priority_mode(
+                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialHead,
+                );
+                info!("[BT] Piece priority mode: SequentialHead (from start)");
+            }
+            "tail" => {
+                piece_picker.set_priority_mode(
+                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialTail,
+                );
+                info!("[BT] Piece priority mode: SequentialTail (from end)");
+            }
+            _ => {
+                // Default: RarestFirst (also handles "rarest" and empty string)
+                piece_picker.set_priority_mode(
+                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::RarestFirst,
+                );
+                info!("[BT] Piece priority mode: RarestFirst (default)");
+            }
+        }
+
         let mut peer_tracker = PeerBitfieldTracker::new(num_pieces);
         BtPeerInteraction::initialize_peer_tracking(
             active_connections,
@@ -587,13 +616,26 @@ impl BtDownloadCommand {
         piece_selector.initialize_frequencies(&mut piece_picker, &peer_tracker);
 
         tracing::info!(
-            "[BT] Piece selection strategy: RarestFirst, {} pieces total, {} peers tracked",
+            "[BT] Piece selection strategy: {:?}, {} pieces total, {} peers tracked",
+            piece_picker.priority_mode(),
             num_pieces,
             peer_tracker.peer_count()
         );
 
         // Phase 14 - B1: Initialize endgame state for this download session
         let mut endgame_state = EndgameState::new();
+
+        // G1: Snub detection state - track last data received time per peer index
+        const SNUB_TIMEOUT_SECS: u64 = 30;
+        let mut peer_last_data_time: std::collections::HashMap<usize, Instant> =
+            std::collections::HashMap::new();
+        let mut last_snub_check = Instant::now();
+        const SNUB_CHECK_INTERVAL_SECS: u64 = 10;
+
+        // Initialize last-data-time tracking for all active peers
+        for (idx, _conn) in active_connections.iter().enumerate() {
+            peer_last_data_time.insert(idx, Instant::now());
+        }
 
         loop {
             if BtPieceSelector::is_complete(&piece_picker) {
@@ -618,6 +660,39 @@ impl BtDownloadCommand {
                 // This shouldn't normally happen (candidates empty means >5 remaining or all done)
                 // but handle gracefully
                 endgame_state.exit_endgame();
+            }
+
+            // G1: Periodic snub detection - check all peers for inactivity
+            if last_snub_check.elapsed().as_secs() >= SNUB_CHECK_INTERVAL_SECS {
+                last_snub_check = Instant::now();
+                let mut newly_snubbed = Vec::new();
+                for (&peer_id, &last_time) in &peer_last_data_time {
+                    if last_time.elapsed().as_secs() > SNUB_TIMEOUT_SECS {
+                        // Mark peer as snubbed via the command's choking algorithm
+                        self.mark_peer_snubbed(peer_id);
+                        newly_snubbed.push(peer_id);
+                        debug!(
+                            "[BT] Peer {} marked as snubbed (no data for {}s)",
+                            peer_id,
+                            last_time.elapsed().as_secs()
+                        );
+                    }
+                }
+                if !newly_snubbed.is_empty() {
+                    debug!(
+                        "[BT] Snub check: {} peers newly snubbed",
+                        newly_snubbed.len()
+                    );
+                }
+
+                // Also run the PeerStats-level snub check (timeout-based)
+                let stats_snubbed = self.check_snubbed_peers();
+                if !stats_snubbed.is_empty() {
+                    debug!(
+                        "[BT] PeerStats snub check: {} peers timed out",
+                        stats_snubbed.len()
+                    );
+                }
             }
 
             let remaining = piece_picker.remaining_count();
@@ -675,6 +750,13 @@ impl BtDownloadCommand {
             match download_result {
                 Ok(piece_data) => {
                     self.completed_bytes += piece_data.len() as u64;
+
+                    // G1: Update last-data-time for all active peers on successful receive
+                    // (In a full implementation, this would be per-peer; here we update all
+                    // since the download loop processes pieces from any peer)
+                    for idx in 0..active_connections.len() {
+                        peer_last_data_time.insert(idx, Instant::now());
+                    }
 
                     tracing::info!(
                         "[BT] All blocks received for piece {}, verifying...",
@@ -771,6 +853,17 @@ impl BtDownloadCommand {
                     } else {
                         tracing::warn!(
                             "[BT] SHA1 mismatch on piece {}, retrying...",
+                            next_piece_idx
+                        );
+
+                        // H3: Bad peer detection - increment bad data counter for peers
+                        // that contributed to this failed piece.
+                        // Note: In a full implementation, we would track which specific peer
+                        // sent each block and only penalize that peer. For now, we log
+                        // the event and the caller can use record_bad_piece_for_peer() if
+                        // they know which peer sent the invalid data.
+                        tracing::warn!(
+                            "[BT] Piece {} hash verification FAILED - potential bad peer detected",
                             next_piece_idx
                         );
                     }

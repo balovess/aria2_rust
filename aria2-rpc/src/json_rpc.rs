@@ -11,6 +11,8 @@ pub enum JsonRpcError {
     InvalidParams(String),
     InternalError(String),
     ServerError(i32, String),
+    /// Authentication failure — token missing or invalid (code: -32001)
+    Unauthorized(String),
 }
 
 impl fmt::Display for JsonRpcError {
@@ -22,6 +24,7 @@ impl fmt::Display for JsonRpcError {
             Self::InvalidParams(s) => write!(f, "Invalid params: {}", s),
             Self::InternalError(s) => write!(f, "Internal error: {}", s),
             Self::ServerError(code, s) => write!(f, "Server error ({}): {}", code, s),
+            Self::Unauthorized(s) => write!(f, "Unauthorized: {}", s),
         }
     }
 }
@@ -37,6 +40,7 @@ impl JsonRpcError {
             Self::InvalidParams(_) => -32602,
             Self::InternalError(_) => -32603,
             Self::ServerError(c, _) => *c,
+            Self::Unauthorized(_) => -32001,
         }
     }
 
@@ -46,7 +50,8 @@ impl JsonRpcError {
             | Self::InvalidRequest(s)
             | Self::MethodNotFound(s)
             | Self::InvalidParams(s)
-            | Self::InternalError(s) => s.clone(),
+            | Self::InternalError(s)
+            | Self::Unauthorized(s) => s.clone(),
             Self::ServerError(_, s) => s.clone(),
         }
     }
@@ -381,6 +386,7 @@ mod tests {
         assert_eq!(JsonRpcError::InvalidParams("x".into()).code(), -32602);
         assert_eq!(JsonRpcError::InternalError("x".into()).code(), -32603);
         assert_eq!(JsonRpcError::ServerError(-100, "x".into()).code(), -100);
+        assert_eq!(JsonRpcError::Unauthorized("x".into()).code(), -32001);
     }
 
     #[test]

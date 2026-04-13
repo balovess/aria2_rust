@@ -34,9 +34,9 @@ impl HttpHeaderProcessor {
         let pos = cd.find("filename=")?;
         let rest = &cd[pos + 9..];
         let rest = rest.trim();
-        if rest.starts_with('"') {
-            if let Some(end_quote) = rest[1..].find('"') {
-                return Some(rest[1..end_quote + 1].to_string());
+        if let Some(rest) = rest.strip_prefix('"') {
+            if let Some(end_quote) = rest.find('"') {
+                return Some(rest[..end_quote].to_string());
             }
         } else {
             let end_pos = rest.find(';').unwrap_or(rest.len());

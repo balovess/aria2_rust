@@ -27,7 +27,7 @@ use aria2_core::engine::bt_progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
 };
 use aria2_core::engine::lpd_manager::{
-    LPD_MULTICAST_ADDR, LPD_MULTICAST_PORT, LpdAnnounce, LpdManager,
+    LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
 };
 use aria2_core::request::request_group::GroupId;
 
@@ -705,289 +705,181 @@ async fn bt_hook_chain_order() {
 }
 
 // ===========================================================================
-// Test 8: LPD register and announce packet construction
+// Test 8: LPD registration, announce, and BEP 14 text format
 // ===========================================================================
 
-/// Create LpdManager(enabled=true), register a download info_hash,
-/// then build announce packets and verify they conform to BEP 14 spec:
-/// 43 bytes total: from_hash(20) + to_hash(20) + port(2BE) + terminator(1).
+/// Create LpdManager, register a torrent via info_hash hex string,
+/// verify LPD constants and text-format announcement parsing.
 #[tokio::test]
 async fn bt_lpd_register_announce_packet() {
-    let listen_port: u16 = 6881;
-    let manager = LpdManager::new(true, listen_port);
+    let manager = LpdManager::new();
 
     // Verify initial state
-    assert!(manager.is_enabled(), "LPD should be enabled after creation");
-    assert_eq!(
-        manager.listen_port(),
-        listen_port,
-        "Listen port should match configured value"
-    );
-    assert_eq!(
-        manager.announce_interval(),
-        300,
-        "Default announce interval should be 300 seconds"
-    );
-
-    // Register a download
-    let info_hash: [u8; 20] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-        0x10, 0x11, 0x12, 0x13, 0x14,
-    ];
-    manager.register_download(info_hash);
-
-    // Wait for async registration to complete (spawned task)
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Verify the download appears in active downloads
-    let count = manager.active_download_count().await;
     assert!(
-        count >= 1,
-        "Active download count should be >= 1 after registration, got {}",
-        count
+        manager.is_available(),
+        "LPD should be available after creation"
     );
-
-    // Build announces and verify packet structure
-    let announces = manager.build_announces().await;
-    assert!(
-        !announces.is_empty(),
-        "Should produce at least one announce packet"
-    );
-
-    // Find the announce for our info_hash
-    let matching = announces
-        .iter()
-        .find(|a| a.from_hash == info_hash && a.to_hash == info_hash);
-    assert!(
-        matching.is_some(),
-        "Should find an announce for our registered info_hash"
-    );
-
-    let announce = matching.unwrap();
-
-    // Verify announce packet structure conforms to BEP 14
-    let packet = announce.to_bytes();
-    assert_eq!(
-        packet.len(),
-        43,
-        "LPD announce packet must be exactly 43 bytes per BEP 14, got {}",
-        packet.len()
-    );
-
-    // Verify from_hash occupies bytes 0-19
-    assert_eq!(
-        &packet[0..20],
-        info_hash.as_slice(),
-        "Bytes 0-19 should be from_hash"
-    );
-
-    // Verify to_hash occupies bytes 20-39
-    assert_eq!(
-        &packet[20..40],
-        info_hash.as_slice(),
-        "Bytes 20-39 should be to_hash"
-    );
-
-    // Verify port (bytes 41-42, big-endian)
-    let port_from_packet = u16::from_be_bytes([packet[40], packet[41]]);
-    assert_eq!(
-        port_from_packet, listen_port,
-        "Port in packet should match listen port"
-    );
-
-    // Verify terminator byte (byte 42 = 0x00)
-    assert_eq!(packet[42], 0x00, "Last byte should be 0x00 (terminator)");
 
     // Verify LPD multicast address constants
     assert_eq!(
         LPD_MULTICAST_ADDR, "239.192.152.143",
         "LPD multicast address constant"
     );
-    assert_eq!(LPD_MULTICAST_PORT, 6771, "LPD multicast port constant");
+    assert_eq!(LPD_PORT, 6771, "LPD multicast port constant");
 
-    // Test round-trip: parse the packet back
-    let parsed = LpdAnnounce::from_bytes(&packet);
-    assert!(parsed.is_some(), "Packet should parse back successfully");
-    let parsed_announce = parsed.unwrap();
-    assert_eq!(parsed_announce.from_hash, announce.from_hash);
-    assert_eq!(parsed_announce.to_hash, announce.to_hash);
-    assert_eq!(parsed_announce.port, announce.port);
+    // Register a download using hex string info_hash
+    let info_hex = "0102030405060708090a0b0c0d0e0f1011121415";
+    manager.register_torrent(info_hex).await.unwrap();
 
-    // Test that short packets fail to parse
-    let short_packet = vec![0u8; 42]; // 1 byte too short
+    // Verify the download appears in active hashes
+    let active = manager.active_hashes.read().await;
     assert!(
-        LpdAnnounce::from_bytes(&short_packet).is_none(),
-        "Short packets (< 43 bytes) should fail to parse"
+        active.contains(info_hex),
+        "Info hash should be in active set after registration"
     );
+    drop(active);
 
-    // Test set_enabled / toggle
-    assert!(manager.is_enabled(), "Should start enabled");
-    manager.set_enabled(false);
+    // Test announce_torrent (sends UDP multicast)
+    let result = manager.announce_torrent(info_hex, 6881).await;
     assert!(
-        !manager.is_enabled(),
-        "Should be disabled after set_enabled(false)"
-    );
-    manager.set_enabled(true);
-    assert!(manager.is_enabled(), "Should be re-enabled");
-
-    // Test set_announce_interval
-    manager.set_announce_interval(600);
-    assert_eq!(
-        manager.announce_interval(),
-        600,
-        "Announce interval should update to 600"
+        result.is_ok(),
+        "announce_torrent should succeed: {:?}",
+        result.err()
     );
 
-    // Test that interval floor is 60 seconds
-    manager.set_announce_interval(10);
-    assert_eq!(
-        manager.announce_interval(),
-        60,
-        "Interval below 60 should be clamped to 60"
+    // Test BEP 14 text format parsing with valid announcement
+    let valid_msg =
+        b"Hash: 0102030405060708090a0b0c0d0e0f1011121415\nPort: 6881\nToken: deadbeef\n";
+    let sender_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 42));
+    let parsed = parse_lpd_announcement(valid_msg, sender_ip);
+    assert!(parsed.is_some(), "Valid LPD message should parse");
+    let peer = parsed.unwrap();
+    assert_eq!(peer.info_hash, info_hex);
+    assert_eq!(peer.port, 6881);
+    assert_eq!(peer.addr, sender_ip);
+    assert_eq!(peer.token, Some(0xdeadbeef));
+
+    // Test parsing rejects malformed messages
+    let short_hash = b"Hash: abc\nPort: 1234\nToken: 01020304\n";
+    assert!(
+        parse_lpd_announcement(short_hash, sender_ip).is_none(),
+        "Short hash should be rejected"
     );
+
+    let missing_port = b"Hash: 0102030405060708090a0b0c0d0e0f1011121415\nToken: deadbeef\n";
+    assert!(
+        parse_lpd_announcement(missing_port, sender_ip).is_none(),
+        "Missing port should be rejected"
+    );
+
+    let empty = b"";
+    assert!(
+        parse_lpd_announcement(empty, sender_ip).is_none(),
+        "Empty message should be rejected"
+    );
+
+    // Test unregister removes torrent
+    manager.unregister_torrent(info_hex).await;
+    let active2 = manager.active_hashes.read().await;
+    assert!(
+        !active2.contains(info_hex),
+        "Info hash should not be in active set after unregister"
+    );
+
+    // Test get_peers_for returns empty for unknown hash
+    let peers = manager
+        .get_peers_for("ffffffffffffffffffffffffffffffffffffffff")
+        .await;
+    assert!(peers.is_empty(), "Unknown hash should have no peers");
 
     eprintln!("[TEST8] LPD register & announce packet PASSED");
 }
 
 // ===========================================================================
-// Test 9: LPD peer discovery roundtrip
+// Test 9: LPD peer discovery via update_peers and cleanup
 // ===========================================================================
 
-/// LpdManager with a registered download, inject/simulate incoming announce
-/// packet via handle_incoming_packet, verify peer is discovered.
+/// LpdManager with a registered torrent, manually add discovered peers
+/// via update_peers(), verify peer tracking, dedup, and cleanup.
 #[tokio::test]
 async fn bt_lpd_peer_discovery_roundtrip() {
-    let listen_port: u16 = 6882;
-    let manager = LpdManager::new(true, listen_port);
+    let manager = LpdManager::new();
 
-    let info_hash: [u8; 20] = [
-        0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
-        0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
-    ];
+    let info_hex = "a0b0c0d0e0f0102030405060708090a0b0c0d0e1011";
 
-    // Register the download we want to discover peers for
-    manager.register_download(info_hash);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Register the torrent we want to discover peers for
+    manager.register_torrent(info_hex).await.unwrap();
 
-    // Initially no discovered peers
-    let initial_count = manager.discovered_peer_count().await;
-    assert_eq!(initial_count, 0, "Should start with 0 discovered peers");
+    // Initially no peers for this hash
+    let peers = manager.get_peers_for(info_hex).await;
+    assert!(peers.is_empty(), "Should start with 0 peers");
 
-    // Simulate an incoming LPD announce packet from a remote peer
-    let remote_peer_addr = std::net::SocketAddrV4::new(
-        std::net::Ipv4Addr::new(10, 0, 0, 42),
-        6881, // Remote peer's listening port
-    );
-
-    // Construct a valid LPD announce packet targeting our info_hash
-    let incoming_announce = LpdAnnounce {
-        from_hash: [0xFFu8; 20], // Sender's hash (doesn't matter much for this test)
-        to_hash: info_hash,      // Targeting our download
-        port: 6881,              // Remote peer's port
-    };
-    let packet_bytes = incoming_announce.to_bytes();
-
-    // Feed the packet into the manager
-    manager
-        .handle_incoming_packet(&packet_bytes, remote_peer_addr)
-        .await;
-
-    // Give time for internal processing
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Verify peer was discovered
-    let discovered_count = manager.discovered_peer_count().await;
-    assert_eq!(
-        discovered_count, 1,
-        "Should have discovered 1 peer after processing announce packet"
-    );
-
-    // Verify the discovered peer details
-    let peers = manager.get_discovered_peers(info_hash).await;
-    assert_eq!(peers.len(), 1, "Should find 1 peer for our info_hash");
-
-    let peer = &peers[0];
-    assert_eq!(
-        peer.addr.ip(),
-        &std::net::Ipv4Addr::new(10, 0, 0, 42),
-        "Discovered peer IP should match sender address"
-    );
-    assert_eq!(
-        peer.addr.port(),
+    // Manually add discovered peers (simulating what parse_lpd_announcement + update_peers would do)
+    let peer1 = LpdPeer::with_token(
+        info_hex,
         6881,
-        "Discovered peer port should be 6881"
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 42)),
+        0xdeadbeef,
     );
-    assert_eq!(
-        peer.source_hash, info_hash,
-        "Peer source_hash should be our info_hash"
+    let peer2 = LpdPeer::new(
+        info_hex,
+        6991,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 99)),
+    );
+    manager
+        .update_peers(info_hex, vec![peer1.clone(), peer2.clone()])
+        .await;
+
+    // Verify peers were added (HashSet doesn't guarantee order)
+    let discovered = manager.get_peers_for(info_hex).await;
+    assert_eq!(discovered.len(), 2, "Should have 2 peers after update");
+
+    let ips: Vec<_> = discovered.iter().map(|p| p.addr).collect();
+    assert!(
+        ips.contains(&std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 42))),
+        "Should contain peer1 IP"
     );
     assert!(
-        !peer.is_expired(Duration::from_secs(3600)),
-        "Freshly discovered peer should not be expired"
+        ips.contains(&std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 99))),
+        "Should contain peer2 IP"
     );
 
-    // Simulate a second announce from a different peer
-    let remote_peer_addr_2 =
-        std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(10, 0, 0, 99), 6991);
-    let announce_2 = LpdAnnounce {
-        from_hash: [0xEEu8; 20],
-        to_hash: info_hash,
-        port: 6991,
-    };
-    manager
-        .handle_incoming_packet(&announce_2.to_bytes(), remote_peer_addr_2)
-        .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let ports: Vec<_> = discovered.iter().map(|p| p.port).collect();
+    assert!(ports.contains(&6881), "Should contain port 6881");
+    assert!(ports.contains(&6991), "Should contain port 6991");
 
-    let count_after_second = manager.discovered_peer_count().await;
+    // Check token is preserved for the peer that had one
+    let with_token: Vec<_> = discovered.iter().filter(|p| p.token.is_some()).collect();
+    assert_eq!(with_token.len(), 1, "Exactly 1 peer should have token");
+    assert_eq!(with_token[0].token, Some(0xdeadbeef));
+
+    // Adding same peer again should dedup (LpdPeer Hash uses info_hash + addr)
+    manager.update_peers(info_hex, vec![peer1.clone()]).await;
+    let after_dup = manager.get_peers_for(info_hex).await;
     assert_eq!(
-        count_after_second, 2,
-        "Should have 2 discovered peers after second announce"
+        after_dup.len(),
+        2,
+        "Duplicate peer should not increase count"
     );
 
-    // Duplicate announce should not add another entry (just refresh timestamp)
-    manager
-        .handle_incoming_packet(&packet_bytes, remote_peer_addr)
-        .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Test cleanup of expired peers with near-zero TTL
+    let removed = manager.cleanup_expired_peers(Duration::from_nanos(1)).await;
+    assert_eq!(removed, 2, "All 2 peers should be cleaned up");
 
-    let count_after_dup = manager.discovered_peer_count().await;
-    assert_eq!(
-        count_after_dup, 2,
-        "Duplicate announce should not increase peer count"
-    );
-
-    // Test cleanup of expired peers (using very short TTL)
-    manager.cleanup_expired_peers(Duration::from_nanos(1)).await;
-    let count_after_cleanup = manager.discovered_peer_count().await;
-    assert_eq!(
-        count_after_cleanup, 0,
-        "All peers should be cleaned up with near-zero TTL"
-    );
-
-    // Test unregister removes download
-    manager.unregister_download(info_hash);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let dl_count = manager.active_download_count().await;
+    let after_cleanup = manager.get_peers_for(info_hex).await;
     assert!(
-        dl_count == 0,
-        "Active download count should be 0 after unregister, got {}",
-        dl_count
+        after_cleanup.is_empty(),
+        "No peers should remain after cleanup"
     );
 
-    // Test that disabled manager ignores incoming packets
-    manager.register_download(info_hash);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    manager.set_enabled(false);
-    manager
-        .handle_incoming_packet(&packet_bytes, remote_peer_addr)
-        .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let disabled_count = manager.discovered_peer_count().await;
-    assert_eq!(
-        disabled_count, 0,
-        "Disabled manager should not discover peers from incoming packets"
+    // Test unregister removes torrent
+    manager.unregister_torrent(info_hex).await;
+    let active = manager.active_hashes.read().await;
+    assert!(
+        !active.contains(info_hex),
+        "Info hash should not be in active set after unregister"
     );
+    drop(active);
 
     eprintln!("[TEST9] LPD peer discovery roundtrip PASSED");
 }

@@ -24,7 +24,7 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "md5" | "md5sum" => Some(Self::Md5),
             "sha-1" | "sha1" | "sha1sum" => Some(Self::Sha1),
@@ -118,7 +118,7 @@ pub enum MediaType {
 }
 
 impl MediaType {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "application/x-bittorrent" | "torrent" => Self::Torrent,
             "application/xml" | "text/xml" | "xml" => Self::Xml,
@@ -332,7 +332,7 @@ impl MetalinkDocument {
                         "hash" => {
                             if let Some(ref mut f) = current_file
                                 && let Some(algo) =
-                                    HashAlgorithm::from_str(&find_attr(&pending_attrs, "type"))
+                                    HashAlgorithm::parse(&find_attr(&pending_attrs, "type"))
                             {
                                 f.hashes.push(HashEntry::new(algo, &text_buf));
                             }
@@ -370,7 +370,7 @@ impl MetalinkDocument {
                             if let Some(ref mut f) = current_file {
                                 let type_attr = find_attr(&pending_attrs, "mediatype");
                                 let mut entry =
-                                    MetaUrlEntry::new(&text_buf, MediaType::from_str(&type_attr));
+                                    MetaUrlEntry::new(&text_buf, MediaType::parse(&type_attr));
                                 for (key, val) in &pending_attrs {
                                     match key.as_str() {
                                         "priority" => {
@@ -392,8 +392,8 @@ impl MetalinkDocument {
                                 let len_s = find_attr(&pending_attrs, "length");
                                 let type_s = find_attr(&pending_attrs, "type");
                                 let length: u32 = len_s.parse().unwrap_or(0);
-                                let algo = HashAlgorithm::from_str(&type_s)
-                                    .unwrap_or(HashAlgorithm::Sha256);
+                                let algo =
+                                    HashAlgorithm::parse(&type_s).unwrap_or(HashAlgorithm::Sha256);
                                 let hashes: Vec<String> =
                                     text_buf.split_whitespace().map(|s| s.to_string()).collect();
                                 f.pieces = Some(PieceInfo {
@@ -558,25 +558,19 @@ mod tests {
 
     #[test]
     fn test_hash_algorithm_parsing() {
-        assert_eq!(HashAlgorithm::from_str("md5"), Some(HashAlgorithm::Md5));
-        assert_eq!(
-            HashAlgorithm::from_str("SHA-256"),
-            Some(HashAlgorithm::Sha256)
-        );
-        assert_eq!(
-            HashAlgorithm::from_str("sha512"),
-            Some(HashAlgorithm::Sha512)
-        );
-        assert_eq!(HashAlgorithm::from_str("unknown"), None);
+        assert_eq!(HashAlgorithm::parse("md5"), Some(HashAlgorithm::Md5));
+        assert_eq!(HashAlgorithm::parse("SHA-256"), Some(HashAlgorithm::Sha256));
+        assert_eq!(HashAlgorithm::parse("sha512"), Some(HashAlgorithm::Sha512));
+        assert_eq!(HashAlgorithm::parse("unknown"), None);
         assert_eq!(HashAlgorithm::Md5.hash_len(), 32);
         assert_eq!(HashAlgorithm::Sha256.hash_len(), 64);
     }
 
     #[test]
     fn test_mediatype_detection() {
-        assert!(MediaType::from_str("torrent").is_torrent());
-        assert!(MediaType::from_str("application/x-bittorrent").is_torrent());
-        assert!(!MediaType::from_str("xml").is_torrent());
+        assert!(MediaType::parse("torrent").is_torrent());
+        assert!(MediaType::parse("application/x-bittorrent").is_torrent());
+        assert!(!MediaType::parse("xml").is_torrent());
     }
 
     #[test]

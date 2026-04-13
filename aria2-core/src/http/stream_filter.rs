@@ -4,6 +4,7 @@
 //! 通过 `FilterChain` 可以将多个过滤器串联使用，实现复杂的数据处理流水线。
 
 use crate::error::{Aria2Error, Result};
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 use flate2::read::GzDecoder;
 use std::io::{Cursor, Read};
 
@@ -866,6 +867,28 @@ impl AutoFilterSelector {
                         chain.push(Box::new(BZip2Decoder::new()));
                     }
                     _ => {
+                        // Identity / none encoding → passthrough (no decoder needed)
+                        if encoding.eq_ignore_ascii_case("identity")
+                            || encoding.eq_ignore_ascii_case("none")
+                        {
+                            // No decoder needed for identity encoding
+                            continue;
+                        }
+
+                        // LZMA / x-lzma → log warning, return identity chain (not yet supported)
+                        if encoding.contains("lzma") {
+                            tracing::warn!(
+                                "LZMA encoding not yet supported, returning passthrough"
+                            );
+                            continue;
+                        }
+
+                        // Brotli (br) → placeholder for future support
+                        if encoding.eq_ignore_ascii_case("br") {
+                            tracing::debug!("Brotli encoding detected but not yet implemented");
+                            continue;
+                        }
+
                         tracing::debug!("Unknown transfer encoding: {}", encoding);
                     }
                 }
@@ -889,6 +912,28 @@ impl AutoFilterSelector {
                         // identity 表示无编码，忽略
                     }
                     _ => {
+                        // Identity / none encoding → passthrough (no decoder needed)
+                        if encoding.eq_ignore_ascii_case("identity")
+                            || encoding.eq_ignore_ascii_case("none")
+                        {
+                            // No decoder needed for identity encoding
+                            continue;
+                        }
+
+                        // LZMA / x-lzma → log warning, return identity chain (not yet supported)
+                        if encoding.contains("lzma") {
+                            tracing::warn!(
+                                "LZMA encoding not yet supported, returning passthrough"
+                            );
+                            continue;
+                        }
+
+                        // Brotli (br) → placeholder for future support
+                        if encoding.eq_ignore_ascii_case("br") {
+                            tracing::debug!("Brotli encoding detected but not yet implemented");
+                            continue;
+                        }
+
                         tracing::debug!("Unknown content encoding: {}", encoding);
                     }
                 }
@@ -896,5 +941,504 @@ impl AutoFilterSelector {
         }
 
         chain
+    }
+}
+
+/// Detect content encoding from magic bytes as fallback when Content-Encoding header
+/// may be incorrect or missing.
+///
+/// Examines the first few bytes of data to identify known compression formats:
+/// - Gzip: bytes [0x1f, 0x8b]
+/// - BZ2: bytes [0x42, 0x5a] ("BZ")
+/// - Zlib/Deflate: byte [0x78] followed by valid flag byte
+///
+/// # Arguments
+///
+/// * `data` - Raw data bytes to examine
+///
+/// # Returns
+///
+/// A string slice representing the detected encoding:
+/// - "gzip" for GZip compressed data
+/// - "bzip2" for BZip2 compressed data
+/// - "deflate" for Zlib/Deflate compressed data
+/// - "identity" for uncompressed/unknown data
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use aria2_core::http::stream_filter::detect_encoding_from_magic_bytes;
+///
+/// let gzip_data = vec![0x1f, 0x8b, 0x08, ...];
+/// assert_eq!(detect_encoding_from_magic_bytes(&gzip_data), "gzip");
+/// ```
+pub fn detect_encoding_from_magic_bytes(data: &[u8]) -> &'static str {
+    // Check for Gzip magic number: 0x1f 0x8b
+    if data.len() >= 2 {
+        if data[0] == 0x1f && data[1] == 0x8b {
+            return "gzip";
+        }
+        // Check for BZip2 magic number: 0x42 0x5a ("BZ")
+        if data[0] == 0x42 && data[1] == 0x5a {
+            return "bzip2";
+        }
+    }
+    // Check for Zlib/Deflate magic number: 0x78 followed by valid flag byte
+    if !data.is_empty() && data[0] == 0x78 {
+        return "deflate";
+    }
+    // Default to identity (no compression)
+    "identity"
+}
+
+/// Wraps a disk writer with automatic stream filtering.
+///
+/// Data written through this wrapper passes through the configured
+/// FilterChain before being written to disk. This enables transparent
+/// decompression of compressed streams during download.
+///
+/// # Type Parameters
+///
+/// * `W` - A type implementing `SeekableDiskWriter` for actual disk I/O
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use aria2_core::http::stream_filter::{StreamingFilterWriter, FilterChain, GZipDecoder};
+/// use aria2_core::filesystem::disk_writer::CachedDiskWriter;
+///
+/// let writer = CachedDiskWriter::new(&path, None, None);
+/// let mut chain = FilterChain::new();
+/// chain.push(Box::new(GZipDecoder::new()));
+///
+/// let mut filter_writer = StreamingFilterWriter::new(writer, chain);
+/// filter_writer.write_filtered(&compressed_data).await?;
+/// filter_writer.flush_filtered().await?;
+/// ```
+pub struct StreamingFilterWriter<W: SeekableDiskWriter> {
+    /// Underlying disk writer for actual I/O operations
+    inner: W,
+    /// Filter chain to process data through
+    chain: FilterChain,
+    /// Buffered input data waiting to be processed
+    buffer: Vec<u8>,
+    /// Process data in chunks of this size (default 64KB)
+    chunk_size: usize,
+    /// Total bytes written to underlying writer (after filtering)
+    total_written: u64,
+    /// Total bytes received as input (before filtering)
+    total_input: u64,
+    /// Current write offset in the underlying writer
+    write_offset: u64,
+}
+
+impl<W: SeekableDiskWriter> StreamingFilterWriter<W> {
+    /// Create a new StreamingFilterWriter with default settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The underlying disk writer
+    /// * `chain` - The filter chain to apply to all written data
+    ///
+    /// # Returns
+    ///
+    /// A new StreamingFilterWriter instance with 64KB chunk size
+    pub fn new(inner: W, chain: FilterChain) -> Self {
+        Self {
+            inner,
+            chain,
+            buffer: Vec::with_capacity(64 * 1024),
+            chunk_size: 64 * 1024,
+            total_written: 0,
+            total_input: 0,
+            write_offset: 0,
+        }
+    }
+
+    /// Set custom chunk size for processing.
+    ///
+    /// Smaller chunks use less memory but may be less efficient.
+    /// Larger chunks improve throughput but increase memory usage.
+    /// Minimum chunk size is 1KB.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Desired chunk size in bytes (minimum 1024)
+    ///
+    /// # Returns
+    ///
+    /// Self for method chaining
+    pub fn with_chunk_size(mut self, size: usize) -> Self {
+        self.chunk_size = size.max(1024);
+        self
+    }
+
+    /// Write data through the filter chain to underlying writer.
+    ///
+    /// Data is buffered internally until a full chunk is accumulated,
+    /// then processed through the filter chain and written to disk.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw (possibly compressed) data to write
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) on success, or an error string if filtering/writing fails
+    ///
+    /// # Errors
+    ///
+    /// - If the filter chain fails to process the data
+    /// - If the underlying writer fails to write
+    pub async fn write_filtered(&mut self, data: &[u8]) -> Result<()> {
+        self.total_input += data.len() as u64;
+        self.buffer.extend_from_slice(data);
+
+        // Process complete chunks
+        while self.buffer.len() >= self.chunk_size {
+            let chunk = self.buffer.drain(..self.chunk_size).collect::<Vec<_>>();
+            let filtered = self.chain.process(&chunk)?;
+            if !filtered.is_empty() {
+                self.inner.write_at(self.write_offset, &filtered).await?;
+                self.write_offset += filtered.len() as u64;
+                self.total_written += filtered.len() as u64;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Flush remaining buffered data through the filter chain.
+    ///
+    /// Must be called after all data has been written to ensure
+    /// remaining buffered data is processed and written to disk.
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) on success, or an error string if flushing fails
+    ///
+    /// # Errors
+    ///
+    /// - If the filter chain fails during final processing
+    /// - If the underlying writer fails to flush
+    pub async fn flush_filtered(&mut self) -> Result<()> {
+        // Process any remaining buffered data
+        if !self.buffer.is_empty() {
+            let remaining = std::mem::take(&mut self.buffer);
+            let filtered = self.chain.process(&remaining)?;
+            if !filtered.is_empty() {
+                self.inner.write_at(self.write_offset, &filtered).await?;
+                self.write_offset += filtered.len() as u64;
+                self.total_written += filtered.len() as u64;
+            }
+        }
+
+        // Flush the underlying writer
+        self.inner.flush().await?;
+        Ok(())
+    }
+
+    /// Get total number of input bytes received (before filtering).
+    ///
+    /// # Returns
+    ///
+    /// Total uncompressed/compressed input bytes
+    pub fn total_input_bytes(&self) -> u64 {
+        self.total_input
+    }
+
+    /// Get total number of output bytes written (after filtering).
+    ///
+    /// # Returns
+    ///
+    /// Total decompressed/filtered output bytes
+    pub fn total_output_bytes(&self) -> u64 {
+        self.total_written
+    }
+
+    /// Calculate compression ratio (output / input).
+    ///
+    /// Values > 1.0 indicate expansion (common with already-compressed data).
+    /// Values < 1.0 indicate successful compression.
+    /// Returns 1.0 if no data has been processed.
+    ///
+    /// # Returns
+    ///
+    /// Compression ratio as f64
+    pub fn compression_ratio(&self) -> f64 {
+        if self.total_input > 0 {
+            self.total_output_bytes() as f64 / self.total_input as f64
+        } else {
+            1.0
+        }
+    }
+
+    /// Consume this wrapper and return the underlying writer.
+    ///
+    /// Useful when you need direct access to the underlying writer
+    /// after streaming is complete.
+    ///
+    /// # Returns
+    ///
+    /// The inner SeekableDiskWriter instance
+    pub fn into_inner(self) -> W {
+        self.inner
+    }
+
+    /// Get a reference to the inner writer.
+    ///
+    /// # Returns
+    ///
+    /// Immutable reference to the underlying SeekableDiskWriter
+    pub fn inner(&self) -> &W {
+        &self.inner
+    }
+
+    /// Get a mutable reference to the inner writer.
+    ///
+    /// # Returns
+    ///
+    /// Mutable reference to the underlying SeekableDiskWriter
+    pub fn inner_mut(&mut self) -> &mut W {
+        &mut self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::path::{Path, PathBuf};
+
+    // Mock implementation of SeekableDiskWriter for testing
+    struct MockSeekableWriter {
+        data: Vec<u8>,
+        opened: bool,
+    }
+
+    impl MockSeekableWriter {
+        fn new() -> Self {
+            MockSeekableWriter {
+                data: Vec::new(),
+                opened: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SeekableDiskWriter for MockSeekableWriter {
+        async fn open(&mut self) -> Result<()> {
+            self.opened = true;
+            Ok(())
+        }
+
+        async fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
+            // Ensure vector is large enough
+            let end = offset as usize + buf.len();
+            if self.data.len() < end {
+                self.data.resize(end, 0);
+            }
+            self.data[offset as usize..end].copy_from_slice(buf);
+            Ok(())
+        }
+
+        async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+            let start = offset as usize;
+            if start >= self.data.len() {
+                return Ok(0);
+            }
+            let available = self.data.len() - start;
+            let to_copy = available.min(buf.len());
+            buf[..to_copy].copy_from_slice(&self.data[start..start + to_copy]);
+            Ok(to_copy)
+        }
+
+        async fn truncate(&mut self, length: u64) -> Result<()> {
+            self.data.truncate(length as usize);
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn len(&self) -> Result<u64> {
+            Ok(self.data.len() as u64)
+        }
+
+        fn path(&self) -> &Path {
+            static PATH: std::sync::LazyLock<PathBuf> =
+                std::sync::LazyLock::new(|| PathBuf::from("/mock/path"));
+            &PATH
+        }
+    }
+
+    #[test]
+    fn test_detect_magic_gzip() {
+        // Test GZip magic bytes: 0x1f 0x8b
+        let gzip_data = vec![0x1f, 0x8b, 0x08, 0x00];
+        assert_eq!(detect_encoding_from_magic_bytes(&gzip_data), "gzip");
+
+        // Test with exactly 2 bytes (minimum required)
+        let gzip_minimal = vec![0x1f, 0x8b];
+        assert_eq!(detect_encoding_from_magic_bytes(&gzip_minimal), "gzip");
+
+        // Test with more realistic gzip header
+        let gzip_realistic = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+        assert_eq!(detect_encoding_from_magic_bytes(&gzip_realistic), "gzip");
+    }
+
+    #[test]
+    fn test_detect_magic_bzip2() {
+        // Test BZip2 magic bytes: 0x42 0x5a ("BZ")
+        let bzip2_data = vec![0x42, 0x5a, 0x68, 0x39]; // "BZh9" - common bzip2 start
+        assert_eq!(detect_encoding_from_magic_bytes(&bzip2_data), "bzip2");
+
+        // Test with minimal bzip2 header
+        let bzip2_minimal = vec![0x42, 0x5a];
+        assert_eq!(detect_encoding_from_magic_bytes(&bzip2_minimal), "bzip2");
+
+        // Test that BZ is detected before checking for deflate (0x78)
+        let bzip2_not_deflate = vec![0x42, 0x5a, 0x78, 0x9c];
+        assert_eq!(
+            detect_encoding_from_magic_bytes(&bzip2_not_deflate),
+            "bzip2"
+        );
+    }
+
+    #[test]
+    fn test_unknown_encoding_passthrough() {
+        // Test that AutoFilterSelector handles unknown encodings without errors
+
+        // Test "br" (Brotli) - should return empty chain (passthrough)
+        let chain_br = AutoFilterSelector::select_filters(Some("br"), None);
+        assert_eq!(
+            chain_br.len(),
+            0,
+            "Brotli encoding should result in empty filter chain"
+        );
+
+        // Test "lzma" - should return empty chain (passthrough)
+        let chain_lzma = AutoFilterSelector::select_filters(Some("lzma"), None);
+        assert_eq!(
+            chain_lzma.len(),
+            0,
+            "LZMA encoding should result in empty filter chain"
+        );
+
+        // Test "identity" - should return empty chain (no decoder needed)
+        let chain_identity = AutoFilterSelector::select_filters(Some("identity"), None);
+        assert_eq!(
+            chain_identity.len(),
+            0,
+            "Identity encoding should result in empty filter chain"
+        );
+
+        // Test "none" - should return empty chain (no decoder needed)
+        let chain_none = AutoFilterSelector::select_filters(Some("none"), None);
+        assert_eq!(
+            chain_none.len(),
+            0,
+            "None encoding should result in empty filter chain"
+        );
+
+        // Test Transfer-Encoding with unknown values
+        let chain_te_br = AutoFilterSelector::select_filters(None, Some("br"));
+        assert_eq!(
+            chain_te_br.len(),
+            0,
+            "Transfer-Encoding br should result in empty filter chain"
+        );
+
+        let chain_te_lzma = AutoFilterSelector::select_filters(None, Some("lzma"));
+        assert_eq!(
+            chain_te_lzma.len(),
+            0,
+            "Transfer-Encoding lzma should result in empty filter chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_filter_writer_basic() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as SyncWrite;
+
+        // Create test data and compress it with gzip
+        let original_data = b"Hello, StreamingFilterWriter! This is a test of the streaming filter writer implementation.";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(original_data).unwrap();
+        let compressed_data = encoder.finish().unwrap();
+
+        // Verify the compressed data starts with gzip magic bytes
+        assert_eq!(compressed_data[0], 0x1f);
+        assert_eq!(compressed_data[1], 0x8b);
+
+        // Create a filter chain with GZip decoder
+        let mut chain = FilterChain::new();
+        chain.push(Box::new(GZipDecoder::new()));
+
+        // Create StreamingFilterWriter with mock writer
+        let mock_writer = MockSeekableWriter::new();
+        let mut filter_writer = StreamingFilterWriter::new(mock_writer, chain);
+
+        // Write compressed data through the filter
+        filter_writer
+            .write_filtered(&compressed_data)
+            .await
+            .unwrap();
+
+        // Verify input tracking
+        assert_eq!(
+            filter_writer.total_input_bytes(),
+            compressed_data.len() as u64,
+            "Input byte count should match compressed data size"
+        );
+
+        // Flush remaining data
+        filter_writer.flush_filtered().await.unwrap();
+
+        // Verify output tracking
+        assert!(
+            filter_writer.total_output_bytes() > 0,
+            "Should have written decompressed data"
+        );
+
+        // Verify compression ratio
+        let ratio = filter_writer.compression_ratio();
+        assert!(
+            ratio > 0.0,
+            "Compression ratio should be > 0, got {}",
+            ratio
+        );
+
+        // Retrieve inner writer and verify decompressed data
+        let inner = filter_writer.into_inner();
+        let written_data = &inner.data;
+
+        // Verify the decompressed data matches original
+        assert_eq!(
+            written_data, original_data,
+            "Decompressed data should match original input"
+        );
+
+        // Test with chunk size customization
+        let mock_writer2 = MockSeekableWriter::new();
+        let mut chain2 = FilterChain::new();
+        chain2.push(Box::new(GZipDecoder::new()));
+        let mut filter_writer2 =
+            StreamingFilterWriter::new(mock_writer2, chain2).with_chunk_size(1024);
+
+        filter_writer2
+            .write_filtered(&compressed_data)
+            .await
+            .unwrap();
+        filter_writer2.flush_filtered().await.unwrap();
+
+        let inner2 = filter_writer2.into_inner();
+        assert_eq!(
+            &inner2.data, original_data,
+            "Should produce same result with custom chunk size"
+        );
     }
 }

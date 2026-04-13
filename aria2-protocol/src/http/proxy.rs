@@ -83,12 +83,12 @@ impl ProxyConfig {
     fn from_url(url: &str) -> Option<Self> {
         let url = url.trim();
 
-        let (proxy_type, rest) = if url.starts_with("socks5://") {
-            (ProxyType::Socks5, &url[9..])
-        } else if url.starts_with("http://") {
-            (ProxyType::Http, &url[7..])
-        } else if url.starts_with("https://") {
-            (ProxyType::Http, &url[8..])
+        let (proxy_type, rest) = if let Some(r) = url.strip_prefix("socks5://") {
+            (ProxyType::Socks5, r)
+        } else if let Some(r) = url.strip_prefix("http://") {
+            (ProxyType::Http, r)
+        } else if let Some(r) = url.strip_prefix("https://") {
+            (ProxyType::Http, r)
         } else {
             (ProxyType::Http, url)
         };

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const EMA_ALPHA: f64 = 0.7;
@@ -10,8 +10,14 @@ pub struct ServerStat {
     single_connection_avg_speed: AtomicU64,
     multi_connection_avg_speed: AtomicU64,
     last_updated: AtomicU64,
-    status: AtomicU8,
+    status: AtomicU32,
     counter: AtomicU32,
+    // Fields for failure tracking and availability cooldown
+    // Note: These use plain types (not atomic) because ServerStat is already
+    // protected by RwLock in ServerStatMan's internal HashMap
+    pub last_error_time: Option<SystemTime>,
+    pub last_error_code: Option<u16>,
+    pub consecutive_failures: u32,
 }
 
 impl Clone for ServerStat {
@@ -26,8 +32,12 @@ impl Clone for ServerStat {
                 self.multi_connection_avg_speed.load(Ordering::Relaxed),
             ),
             last_updated: AtomicU64::new(self.last_updated.load(Ordering::Relaxed)),
-            status: AtomicU8::new(self.status.load(Ordering::Relaxed)),
+            status: AtomicU32::new(self.status.load(Ordering::Relaxed)),
             counter: AtomicU32::new(self.counter.load(Ordering::Relaxed)),
+            // Clone new fields
+            last_error_time: self.last_error_time,
+            last_error_code: self.last_error_code,
+            consecutive_failures: self.consecutive_failures,
         }
     }
 }
@@ -40,8 +50,12 @@ impl ServerStat {
             single_connection_avg_speed: AtomicU64::new(0),
             multi_connection_avg_speed: AtomicU64::new(0),
             last_updated: AtomicU64::new(0),
-            status: AtomicU8::new(0),
+            status: AtomicU32::new(0),
             counter: AtomicU32::new(0),
+            // Initialize new fields
+            last_error_time: None,
+            last_error_code: None,
+            consecutive_failures: 0,
         }
     }
 
@@ -49,14 +63,14 @@ impl ServerStat {
         self.download_speed.store(speed, Ordering::Relaxed);
         if is_multi {
             let old = self.multi_connection_avg_speed.load(Ordering::Relaxed);
-            let new = ema(old, speed);
+            let new_val = ema(old, speed);
             self.multi_connection_avg_speed
-                .store(new, Ordering::Relaxed);
+                .store(new_val, Ordering::Relaxed);
         } else {
             let old = self.single_connection_avg_speed.load(Ordering::Relaxed);
-            let new = ema(old, speed);
+            let new_val = ema(old, speed);
             self.single_connection_avg_speed
-                .store(new, Ordering::Relaxed);
+                .store(new_val, Ordering::Relaxed);
         }
         self.touch();
     }
@@ -125,6 +139,43 @@ impl ServerStat {
             .unwrap_or_default()
             .as_secs();
         self.last_updated.store(now, Ordering::Relaxed);
+    }
+
+    /// Check if server is available (not in cooldown due to consecutive failures)
+    pub fn is_available(&self) -> bool {
+        if self.consecutive_failures >= 3 {
+            if let Some(error_time) = self.last_error_time {
+                if let Ok(elapsed) = error_time.elapsed() {
+                    return elapsed.as_secs() > 60; // cooldown expired?
+                }
+            }
+        }
+        true
+    }
+
+    /// Get the last error time as unix timestamp (0 if never failed)
+    pub fn get_last_error_time(&self) -> u64 {
+        self.last_error_time
+            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Get the last error code (0 if never failed)
+    pub fn get_last_error_code(&self) -> u16 {
+        self.last_error_code.unwrap_or(0)
+    }
+
+    /// Get consecutive failure count
+    pub fn get_consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+
+    /// Set error tracking fields (for use by ServerStatMan::mark_failure)
+    /// Note: Requires &mut self because these fields are not atomic
+    pub fn set_failure_info(&mut self, error_code: u16) {
+        self.last_error_time = Some(SystemTime::now());
+        self.last_error_code = Some(error_code);
+        self.consecutive_failures += 1;
     }
 }
 
@@ -238,5 +289,71 @@ mod tests {
 
         assert!(stat.get_download_speed() > 0);
         assert!(stat.is_fresh(60));
+    }
+
+    // ======================================================================
+    // Tests for Availability Cooldown
+    // ======================================================================
+
+    #[test]
+    fn test_server_available_initially() {
+        let stat = ServerStat::new("fresh.server");
+        assert!(stat.is_available(), "New server should be available");
+    }
+
+    #[test]
+    fn test_server_available_with_few_failures() {
+        let mut stat = ServerStat::new("some.failures");
+        stat.consecutive_failures = 2;
+        stat.last_error_time = Some(SystemTime::now());
+        assert!(
+            stat.is_available(),
+            "Server with <3 failures should still be available"
+        );
+    }
+
+    #[test]
+    fn test_server_unavailable_after_3_failures() {
+        let mut stat = ServerStat::new("cooldown.server");
+        stat.consecutive_failures = 3;
+        stat.last_error_time = Some(SystemTime::now());
+        assert!(
+            !stat.is_available(),
+            "Server with 3+ recent failures should be unavailable"
+        );
+    }
+
+    #[test]
+    fn test_server_available_after_cooldown_expires() {
+        let mut stat = ServerStat::new("recovered.server");
+        stat.consecutive_failures = 5;
+        // Simulate error that happened more than 60 seconds ago
+        stat.last_error_time = Some(SystemTime::now() - std::time::Duration::from_secs(61));
+        assert!(
+            stat.is_available(),
+            "Server should become available after cooldown expires"
+        );
+    }
+
+    #[test]
+    fn test_set_failure_info() {
+        let mut stat = ServerStat::new("failure.test");
+
+        // Initially no failures
+        assert_eq!(stat.get_consecutive_failures(), 0);
+        assert_eq!(stat.get_last_error_code(), 0);
+        assert_eq!(stat.get_last_error_time(), 0);
+
+        // Set failure info
+        stat.set_failure_info(500);
+
+        assert_eq!(stat.get_consecutive_failures(), 1);
+        assert_eq!(stat.get_last_error_code(), 500);
+        assert!(stat.get_last_error_time() > 0);
+
+        // Set another failure
+        stat.set_failure_info(503);
+        assert_eq!(stat.get_consecutive_failures(), 2);
+        assert_eq!(stat.get_last_error_code(), 503);
     }
 }

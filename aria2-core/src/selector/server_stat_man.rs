@@ -54,6 +54,21 @@ impl ServerStatMan {
         let map = self.stats.read().unwrap();
         map.keys().cloned().collect()
     }
+
+    /// Mark a host as failed, updating error tracking fields.
+    ///
+    /// Clones the existing ServerStat, applies failure info via set_failure_info,
+    /// and replaces the entry in the map so all future Arc holders see the update.
+    pub fn mark_failure(&self, host: &str, error_code: u16) {
+        let mut map = self.stats.write().unwrap();
+        if let Some(stat_arc) = map.get(host) {
+            // Dereference Arc to get inner ServerStat, then clone the inner value
+            let inner: &ServerStat = stat_arc;
+            let mut updated = inner.clone();
+            updated.set_failure_info(error_code);
+            map.insert(host.to_string(), Arc::new(updated));
+        }
+    }
 }
 
 impl Default for ServerStatMan {
@@ -141,5 +156,48 @@ mod tests {
         assert_eq!(hosts.len(), 2);
         assert!(hosts.contains(&"alpha.com".to_string()));
         assert!(hosts.contains(&"beta.com".to_string()));
+    }
+
+    // ======================================================================
+    // Tests for mark_failure
+    // ======================================================================
+
+    #[test]
+    fn test_mark_failure_updates_stats() {
+        let man = ServerStatMan::new();
+        man.get_or_create("failing.host");
+
+        // Mark as failed with error code 500
+        man.mark_failure("failing.host", 500);
+
+        let stat = man.find_stat("failing.host").unwrap();
+        assert_eq!(stat.get_consecutive_failures(), 1);
+        assert!(stat.get_last_error_time() > 0);
+        assert_eq!(stat.get_last_error_code(), 500);
+    }
+
+    #[test]
+    fn test_mark_failure_multiple_times() {
+        let man = ServerStatMan::new();
+        man.get_or_create("repeated.failures");
+
+        for i in 0..5u16 {
+            man.mark_failure("repeated.failures", i);
+        }
+
+        let stat = man.find_stat("repeated.failures").unwrap();
+        assert_eq!(stat.get_consecutive_failures(), 5);
+        assert!(
+            !stat.is_available(),
+            "Should be unavailable after 5 failures"
+        );
+    }
+
+    #[test]
+    fn test_mark_failure_nonexistent_host() {
+        let man = ServerStatMan::new();
+        // Should not panic on nonexistent host
+        man.mark_failure("nonexistent.host", 404);
+        assert_eq!(man.count(), 0); // No stat created
     }
 }

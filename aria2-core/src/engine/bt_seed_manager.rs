@@ -7,6 +7,12 @@ use crate::error::Result;
 use super::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
 use super::choking_algorithm::{ChokeAction, ChokingAlgorithm};
 
+/// Threshold for banning peers that send too many invalid pieces.
+///
+/// When a peer sends `BAD_DATA_THRESHOLD` or more pieces with invalid hashes,
+/// they are permanently banned for the remainder of the session.
+pub const BAD_DATA_THRESHOLD: u32 = 3;
+
 #[derive(Debug, Clone, Default)]
 pub struct SeedExitCondition {
     pub seed_time: Option<Duration>,
@@ -54,6 +60,54 @@ impl SeedExitCondition {
             seed_time: time,
             seed_ratio: r,
         }
+    }
+
+    /// Check if the seed ratio condition has been met.
+    ///
+    /// Returns `true` when seeding should stop based on upload/download ratio:
+    /// - If `seed_ratio <= 0.0`, returns `false` (infinite seeding)
+    /// - If `downloaded == 0`, returns `false` (nothing downloaded yet)
+    /// - Otherwise, checks if `uploaded / downloaded >= seed_ratio`
+    ///
+    /// # Arguments
+    ///
+    /// * `uploaded` - Total bytes uploaded during this session
+    /// * `downloaded` - Total bytes downloaded during this session
+    /// * `seed_ratio` - Target ratio (e.g., 1.0 means 1:1 upload:download)
+    pub fn check_seed_condition(uploaded: u64, downloaded: u64, seed_ratio: f64) -> bool {
+        if seed_ratio <= 0.0 {
+            return false; // Infinite seeding (ratio 0 or negative)
+        }
+        if downloaded == 0 {
+            return false; // Nothing downloaded yet, can't compute ratio
+        }
+        (uploaded as f64 / downloaded as f64) >= seed_ratio
+    }
+
+    /// Check if the seed time condition has been met.
+    ///
+    /// Returns `true` when pure seeding duration exceeds the limit:
+    /// - If `seed_time_secs == 0`, returns `false` (infinite seeding)
+    /// - If not in pure seeding phase (`is_pure_seeding == false`), returns `false`
+    /// - Otherwise, checks if elapsed seconds since `seeding_started_at >= seed_time_secs`
+    ///
+    /// # Arguments
+    ///
+    /// * `seeding_started_at` - Instant when pure seeding phase began
+    /// * `seed_time_secs` - Maximum allowed seeding duration in seconds (0 = infinite)
+    /// * `is_pure_seeding` - Whether all pieces are complete (true = in seeding phase)
+    pub fn check_seed_time(
+        seeding_started_at: Instant,
+        seed_time_secs: u64,
+        is_pure_seeding: bool,
+    ) -> bool {
+        if seed_time_secs == 0 {
+            return false; // Infinite seeding
+        }
+        if !is_pure_seeding {
+            return false; // Still downloading, haven't entered pure seeding yet
+        }
+        seeding_started_at.elapsed().as_secs() >= seed_time_secs
     }
 }
 
@@ -546,5 +600,84 @@ mod tests {
         );
         assert!(mgr.choking_algo.is_some());
         assert_eq!(mgr.choking_algo.unwrap().len(), 0); // No peers added yet
+    }
+
+    // ==================================================================
+    // H2: Seed condition utility function tests
+    // ==================================================================
+
+    #[test]
+    fn test_seed_ratio_met_1_0() {
+        // Ratio 1.0: should stop when uploaded >= downloaded
+        assert!(!SeedExitCondition::check_seed_condition(500, 1000, 1.0));
+        assert!(SeedExitCondition::check_seed_condition(1000, 1000, 1.0));
+        assert!(SeedExitCondition::check_seed_condition(1500, 1000, 1.0));
+    }
+
+    #[test]
+    fn test_seed_ratio_infinite_never_stops() {
+        // Ratio 0.0 means infinite seeding - never stops
+        assert!(!SeedExitCondition::check_seed_condition(999999, 1, 0.0));
+        assert!(!SeedExitCondition::check_seed_condition(u64::MAX, 1, -1.0));
+    }
+
+    #[test]
+    fn test_seed_ratio_zero_downloaded() {
+        // Nothing downloaded yet - can't compute ratio
+        assert!(!SeedExitCondition::check_seed_condition(1000, 0, 2.0));
+    }
+
+    #[test]
+    fn test_seed_time_met_stops() {
+        let start = Instant::now();
+        // Time not met immediately after start
+        assert!(!SeedExitCondition::check_seed_time(start, 5, true));
+        // Time met when elapsed >= limit (simulate with negative time)
+        let past_start = Instant::now() - Duration::from_secs(10);
+        assert!(SeedExitCondition::check_seed_time(past_start, 5, true));
+    }
+
+    #[test]
+    fn test_seed_time_infinite_zero() {
+        // seed_time=0 means infinite seeding
+        let start = Instant::now();
+        assert!(!SeedExitCondition::check_seed_time(start, 0, true));
+    }
+
+    #[test]
+    fn test_seed_time_not_pure_seeding() {
+        // If still downloading (not pure seeding), time check returns false
+        let past_start = Instant::now() - Duration::from_secs(100);
+        assert!(
+            !SeedExitCondition::check_seed_time(past_start, 5, false),
+            "Should not stop if not in pure seeding phase"
+        );
+    }
+
+    #[test]
+    fn test_both_conditions_either_triggers_stop() {
+        // Test that either condition being met triggers exit
+        let past_start = Instant::now() - Duration::from_secs(100);
+
+        // Time condition met, ratio not met -> should stop (time triggers)
+        assert!(
+            SeedExitCondition::check_seed_time(past_start, 5, true)
+                || SeedExitCondition::check_seed_condition(500, 1000, 2.0),
+            "Time condition should trigger stop"
+        );
+
+        // Ratio condition met, time not met -> should stop (ratio triggers)
+        assert!(
+            !SeedExitCondition::check_seed_time(Instant::now(), 100, true)
+                && SeedExitCondition::check_seed_condition(2000, 1000, 1.5),
+            "Ratio condition should trigger stop"
+        );
+
+        // Neither met -> should NOT stop
+        assert!(
+            !SeedExitCondition::check_seed_time(Instant::now(), 100, true)
+                && !SeedExitCondition::check_seed_condition(500, 1000, 2.0),
+            "Neither condition met, should continue seeding"
+        );
     }
 }

@@ -81,6 +81,7 @@ pub fn build_connect_request(txn_id: u32) -> Vec<u8> {
     buf
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_announce_request(
     conn_id: u64,
     txn_id: u32,
@@ -211,6 +212,86 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
         seeders,
         peers,
     })
+}
+
+/// Result of scraping one info hash from a UDP tracker
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrapeResult {
+    pub seeders: u32,
+    pub leechers: u32,
+    pub completed: u32,
+}
+
+/// Build a UDP tracker SCRAPE request
+///
+/// # Arguments
+/// * `conn_id` - Connection ID obtained from CONNECT response
+/// * `txn_id` - Transaction ID for this request
+/// * `info_hashes` - Slice of 20-byte info hashes to query (max ~74 per request)
+pub fn build_scrape_request(conn_id: u64, txn_id: u32, info_hashes: &[[u8; 20]]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + info_hashes.len() * 20);
+    buf.extend_from_slice(&conn_id.to_be_bytes());
+    buf.extend_from_slice(&(UdpAction::Scrape as i32).to_be_bytes());
+    buf.extend_from_slice(&txn_id.to_be_bytes());
+    for ih in info_hashes {
+        buf.extend_from_slice(ih);
+    }
+    buf
+}
+
+/// Parse a SCRAPE response from a UDP tracker
+///
+/// Response format:
+/// - action (4 bytes, big-endian) = 2
+/// - transaction_id (4 bytes)
+/// - For each info hash: seeders(4), leechers(4), completed(4)
+pub fn parse_scrape_response(data: &[u8]) -> Result<Vec<ScrapeResult>, String> {
+    if data.len() < 8 {
+        return Err(format!(
+            "SCRAPE response too short: {} bytes (min 8)",
+            data.len()
+        ));
+    }
+    let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    if action != UdpAction::Scrape as i32 {
+        return Err(format!("Unexpected action in SCRAPE response: {}", action));
+    }
+
+    // Skip action + transaction_id = 8 bytes
+    let body = &data[8..];
+    if !body.len().is_multiple_of(12) {
+        return Err(format!(
+            "SCRAPE response body length {} is not a multiple of 12",
+            body.len()
+        ));
+    }
+
+    let count = body.len() / 12;
+    let mut results = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = i * 12;
+        if offset + 12 > body.len() {
+            return Err("SCRAPE response body truncated".into());
+        }
+        results.push(ScrapeResult {
+            seeders: u32::from_be_bytes(
+                body[offset..offset + 4]
+                    .try_into()
+                    .map_err(|e| format!("Failed to read seeders: {}", e))?,
+            ),
+            leechers: u32::from_be_bytes(
+                body[offset + 4..offset + 8]
+                    .try_into()
+                    .map_err(|e| format!("Failed to read leechers: {}", e))?,
+            ),
+            completed: u32::from_be_bytes(
+                body[offset + 8..offset + 12]
+                    .try_into()
+                    .map_err(|e| format!("Failed to read completed: {}", e))?,
+            ),
+        });
+    }
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -398,5 +479,111 @@ mod tests {
             assert_eq!(UdpAction::from_i32(*a as i32), Some(*a));
         }
         assert_eq!(UdpAction::from_i32(99), None);
+    }
+
+    // --- Scrape tests ---
+
+    #[test]
+    fn test_scrape_request_encoding() {
+        let conn_id = 0x123456789ABCDEF0u64;
+        let txn_id = 0xDEADBEEFu32;
+        let info_hashes = [[0xABu8; 20], [0xCDu8; 20]];
+
+        let req = build_scrape_request(conn_id, txn_id, &info_hashes);
+
+        // Header: conn_id(8) + action(4) + txn_id(4) + hashes(20*2) = 56 bytes
+        assert_eq!(req.len(), 56);
+
+        // Verify connection ID
+        let parsed_conn_id = u64::from_be_bytes(req[0..8].try_into().unwrap());
+        assert_eq!(parsed_conn_id, conn_id);
+
+        // Verify action = 2 (scrape)
+        let action = i32::from_be_bytes(req[8..12].try_into().unwrap());
+        assert_eq!(action, UdpAction::Scrape as i32);
+
+        // Verify transaction ID
+        let parsed_txn = u32::from_be_bytes(req[12..16].try_into().unwrap());
+        assert_eq!(parsed_txn, txn_id);
+
+        // Verify first info hash
+        assert_eq!(&req[16..36], &[0xABu8; 20]);
+
+        // Verify second info hash
+        assert_eq!(&req[36..56], &[0xCDu8; 20]);
+    }
+
+    #[test]
+    fn test_scrape_response_parsing_single_hash() {
+        let mut data = vec![0u8; 20]; // 8 header + 12 data for 1 hash
+        data[0..4].copy_from_slice(&(UdpAction::Scrape as i32).to_be_bytes()); // action=2
+        data[4..8].copy_from_slice(&0x12345678u32.to_be_bytes()); // txn_id
+        data[8..12].copy_from_slice(&100u32.to_be_bytes()); // seeders=100
+        data[12..16].copy_from_slice(&50u32.to_be_bytes()); // leechers=50
+        data[16..20].copy_from_slice(&200u32.to_be_bytes()); // completed=200
+
+        let results = parse_scrape_response(&data).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0],
+            ScrapeResult {
+                seeders: 100,
+                leechers: 50,
+                completed: 200,
+            }
+        );
+    }
+
+    #[test]
+    fn test_scrape_response_parsing_multi_hash() {
+        let mut data = vec![0u8; 44]; // 8 header + 12*3 data for 3 hashes
+        data[0..4].copy_from_slice(&(UdpAction::Scrape as i32).to_be_bytes());
+        data[4..8].copy_from_slice(&0xAABBCCDDu32.to_be_bytes());
+
+        // Hash 1: seeders=10, leechers=5, completed=100
+        data[8..12].copy_from_slice(&10u32.to_be_bytes());
+        data[12..16].copy_from_slice(&5u32.to_be_bytes());
+        data[16..20].copy_from_slice(&100u32.to_be_bytes());
+
+        // Hash 2: seeders=999, leechers=888, completed=777
+        data[20..24].copy_from_slice(&999u32.to_be_bytes());
+        data[24..28].copy_from_slice(&888u32.to_be_bytes());
+        data[28..32].copy_from_slice(&777u32.to_be_bytes());
+
+        // Hash 3: seeders=1, leechers=2, completed=3
+        data[32..36].copy_from_slice(&1u32.to_be_bytes());
+        data[36..40].copy_from_slice(&2u32.to_be_bytes());
+        data[40..44].copy_from_slice(&3u32.to_be_bytes());
+
+        let results = parse_scrape_response(&data).unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].seeders, 10);
+        assert_eq!(results[0].leechers, 5);
+        assert_eq!(results[0].completed, 100);
+        assert_eq!(results[1].seeders, 999);
+        assert_eq!(results[1].leechers, 888);
+        assert_eq!(results[1].completed, 777);
+        assert_eq!(results[2].seeders, 1);
+        assert_eq!(results[2].leechers, 2);
+        assert_eq!(results[2].completed, 3);
+    }
+
+    #[test]
+    fn test_scrape_error_action() {
+        // Action != 2 should return error
+        let mut data = vec![0u8; 20];
+        data[0..4].copy_from_slice(&3i32.to_be_bytes()); // error action
+        data[4..8].copy_from_slice(&0x12345678u32.to_be_bytes());
+
+        let result = parse_scrape_response(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unexpected action"));
+    }
+
+    #[test]
+    fn test_scrape_response_too_short() {
+        // Less than 8 bytes should error
+        assert!(parse_scrape_response(&[0u8; 7]).is_err());
+        assert!(parse_scrape_response(&[]).is_err());
     }
 }

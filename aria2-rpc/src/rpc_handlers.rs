@@ -640,6 +640,116 @@ impl RpcEngine {
             serde_json::json!([gid, 0]),
         ))
     }
+
+    // =========================================================================
+    // System Multicall Handler (H6)
+    // =========================================================================
+
+    /// Handle `system.multicall` - Execute multiple RPC calls in one HTTP request
+    ///
+    /// This is a batch operation that allows clients to send multiple RPC method
+    /// calls in a single HTTP request, reducing round-trip latency.
+    ///
+    /// Parameters:
+    /// - [0]: Array of call objects, each containing:
+    ///   - "methodName": String - The RPC method to invoke
+    ///   - "params": Array - Parameters for the method (optional)
+    ///
+    /// Returns: Array of results, one per call. If a call fails, its result
+    /// will be an error object instead of a success value.
+    ///
+    /// # Example Request
+    ///
+    /// ```json
+    /// {
+    ///   "method": "system.multicall",
+    ///   "params": [[
+    ///     {"methodName": "aria2.getVersion", "params": []},
+    ///     {"methodName": "aria2.getGlobalStat", "params": []}
+    ///   ]],
+    ///   "id": 1
+    /// }
+    /// ```
+    pub async fn handle_multicall(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let calls: Vec<serde_json::Value> = req.get_param(0)?;
+
+        if calls.is_empty() {
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                serde_json::json!([]),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(calls.len());
+
+        for (index, call_obj) in calls.iter().enumerate() {
+            let method_name = call_obj
+                .get("methodName")
+                .or_else(|| call_obj.get("method_name"))
+                .or_else(|| call_obj.get("method"))
+                .ok_or_else(|| {
+                    JsonRpcError::InvalidParams(format!(
+                        "Call #{} missing 'methodName' field",
+                        index
+                    ))
+                })?
+                .as_str()
+                .ok_or_else(|| {
+                    JsonRpcError::InvalidParams(format!(
+                        "Call #{} 'methodName' must be a string",
+                        index
+                    ))
+                })?;
+
+            let call_params = call_obj
+                .get("params")
+                .or_else(|| call_obj.get("parameters"))
+                .cloned()
+                .unwrap_or(serde_json::json!([]));
+
+            // Build a sub-request for this individual call
+            let sub_request = JsonRpcRequest::new(method_name, call_params);
+
+            // Dispatch the sub-request directly (avoid recursive async by
+            // not going through handle_request which would re-enter multicall)
+            let id = sub_request.id.clone().unwrap_or_default();
+            let sub_response = match sub_request.method.as_str() {
+                "aria2.addUri" => self.handle_add_uri(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.tellActive" => self.handle_tell_active(&sub_request).await?,
+                "aria2.getGlobalStat" => self.handle_global_stat().await,
+                "aria2.getVersion" => self.handle_version(),
+                "aria2.getSessionInfo" => self.handle_session_info(),
+                "system.multicall" => {
+                    JsonRpcResponse::error(Some(id), -32600, "Nested system.multicall is not supported".to_string())
+                }
+                _ => JsonRpcResponse::error(Some(id), -32601, format!("Method not found: {}", sub_request.method)),
+            };
+
+            // Extract result or error from response
+            match sub_response.result {
+                Some(result_value) => results.push(result_value),
+                None => {
+                    // Error case - push error structure
+                    if let Some(err) = sub_response.error {
+                        results.push(serde_json::json!({
+                            "code": err.code,
+                            "message": err.message
+                        }));
+                    } else {
+                        results.push(serde_json::json!(null));
+                    }
+                }
+            }
+        }
+
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::json!(results),
+        ))
+    }
 }
 
 // =========================================================================
@@ -1018,5 +1128,162 @@ mod handler_tests {
     async fn test_engine_default() {
         let engine = RpcEngine::default();
         assert_eq!(engine.task_count().await, 0);
+    }
+
+    // =========================================================================
+    // System Multicall Tests (H6)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_multicall_executes_multiple_methods() {
+        let engine = RpcEngine::new();
+
+        // Build a multicall request with getVersion and getGlobalStat
+        let multicall_req = JsonRpcRequest::new(
+            "system.multicall",
+            serde_json::json!([[
+                {"methodName": "aria2.getVersion", "params": []},
+                {"methodName": "aria2.getGlobalStat", "params": []},
+                {"methodName": "aria2.getSessionInfo", "params": []},
+            ]]),
+        )
+        .with_id(1);
+
+        let resp = engine.handle_request(&multicall_req).await;
+        assert!(resp.is_success(), "Multicall should succeed");
+
+        let result_value = resp.result.unwrap();
+        let results = result_value.as_array().expect("Should return array");
+        assert_eq!(results.len(), 3, "Should have 3 results");
+
+        // First result: getVersion - should contain version info
+        let version_result = &results[0];
+        assert!(
+            version_result.get("version").is_some() || version_result.as_str().is_some(),
+            "getVersion result should contain version info"
+        );
+
+        // Second result: getGlobalStat - should contain stat object
+        let stat_result = &results[1];
+        assert!(
+            stat_result.get("downloadSpeed").is_some(),
+            "getGlobalStat should contain downloadSpeed"
+        );
+
+        // Third result: getSessionInfo - should contain sessionId
+        let session_result = &results[2];
+        assert!(
+            session_result.get("sessionId").is_some(),
+            "getSessionInfo should contain sessionId"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multicall_preserves_order() {
+        let engine = RpcEngine::new();
+
+        // Add tasks first so we can query them
+        for i in 0..3 {
+            let req = JsonRpcRequest::new(
+                "aria2.addUri",
+                serde_json::json!([format!("http://order-test.com/{}", i)]),
+            )
+            .with_id(i);
+            engine.handle_request(&req).await;
+        }
+
+        // Multicall that mixes read operations
+        let multicall_req = JsonRpcRequest::new(
+            "system.multicall",
+            serde_json::json!([[
+                {"methodName": "aria2.getVersion", "params": []},
+                {"methodName": "aria2.tellActive", "params": []},
+                {"methodName": "aria2.getGlobalStat", "params": []},
+                {"methodName": "aria2.getSessionInfo", "params": []},
+            ]]),
+        )
+        .with_id(10);
+
+        let resp = engine.handle_request(&multicall_req).await;
+        assert!(resp.is_success());
+
+        let result_value = resp.result.unwrap();
+        let results = result_value.as_array().unwrap();
+        assert_eq!(results.len(), 4, "Should have 4 results in order");
+
+        // Verify order is preserved
+        // Result 0: Version (object with version string)
+        assert!(results[0].get("version").is_some() || results[0].get("enabledFeatures").is_some());
+
+        // Result 1: tellActive (array of active tasks)
+        let active = results[1].as_array().expect("tellActive should return array");
+        assert_eq!(active.len(), 3, "Should have 3 active tasks");
+
+        // Result 2: GlobalStat (object)
+        assert!(results[2].get("downloadSpeed").is_some());
+
+        // Result 3: SessionInfo (object)
+        assert!(results[3].get("sessionId").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_multicall_empty_calls_returns_empty_array() {
+        let engine = RpcEngine::new();
+
+        let req = JsonRpcRequest::new(
+            "system.multicall",
+            serde_json::json!([[]]), // Empty array of calls
+        )
+        .with_id(1);
+
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success());
+
+        let result_value = resp.result.unwrap();
+        let results = result_value.as_array().unwrap();
+        assert!(results.is_empty(), "Empty calls should return empty array");
+    }
+
+    #[tokio::test]
+    async fn test_multicall_with_add_uri_and_status() {
+        let engine = RpcEngine::new();
+
+        // Multicall that adds a task and then queries status
+        // Note: In the test mock, addUri creates a task entry but tellActive
+        // may return 0 since tasks are tracked separately. This tests that
+        // both calls execute without error in the batch.
+        let multicall_req = JsonRpcRequest::new(
+            "system.multicall",
+            serde_json::json!([[
+                {
+                    "methodName": "aria2.addUri",
+                    "params": [["http://multicall-test.com/file.bin"]]
+                },
+                {
+                    "methodName": "aria2.getGlobalStat",
+                    "params": []
+                },
+            ]]),
+        )
+        .with_id(1);
+
+        let resp = engine.handle_request(&multicall_req).await;
+        assert!(resp.is_success(), "Multicall with addUri + getGlobalStat should succeed");
+
+        let result_value = resp.result.unwrap();
+        let results = result_value.as_array().unwrap();
+        assert_eq!(results.len(), 2);
+
+        // First result: addUri should return non-null
+        assert!(
+            !results[0].is_null(),
+            "addUri should return a value"
+        );
+
+        // Second result: getGlobalStat should return stat object
+        assert!(
+            results[1].get("downloadSpeed").is_some(),
+            "getGlobalStat should contain downloadSpeed"
+        );
     }
 }

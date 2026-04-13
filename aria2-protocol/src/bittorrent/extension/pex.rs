@@ -202,8 +202,8 @@ fn decode_compact_peers(data: &[u8]) -> Result<Vec<PeerAddr>, String> {
         return Ok(Vec::new());
     }
 
-    let is_v4 = data.len() % PexHandler::COMPACT_PEER_SIZE_V4 == 0;
-    let is_v6 = data.len() % PexHandler::COMPACT_PEER_SIZE_V6 == 0
+    let is_v4 = data.len().is_multiple_of(PexHandler::COMPACT_PEER_SIZE_V4);
+    let is_v6 = data.len().is_multiple_of(PexHandler::COMPACT_PEER_SIZE_V6)
         && data.len() >= PexHandler::COMPACT_PEER_SIZE_V6;
 
     if !is_v4 && !is_v6 {

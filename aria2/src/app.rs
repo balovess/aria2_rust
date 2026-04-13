@@ -479,6 +479,11 @@ impl App {
             bt_snubbed_timeout: options
                 .get("bt-snubbed-timeout")
                 .and_then(|v| v.parse::<u64>().ok()),
+            // G2: Piece selection priority mode
+            bt_prioritize_piece: options
+                .get("bt-prioritize-piece")
+                .cloned()
+                .unwrap_or_else(|| "rarest".to_string()),
         }
     }
 
@@ -587,6 +592,11 @@ impl App {
                 .get_opt_i64("bt-snubbed-timeout")
                 .await
                 .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+            // G2: Piece selection priority mode
+            bt_prioritize_piece: self
+                .get_opt_str("bt-prioritize-piece")
+                .await
+                .unwrap_or_else(|| "rarest".to_string()),
         };
 
         let mut engine_lock = self.engine.lock().await;

@@ -131,21 +131,21 @@ mod tests {
 
     #[test]
     fn test_lpd_peer_conversion_to_peeraddr() {
-        // LpdPeer 使用 SocketAddrV4，需要能正确转换为字符串格式
-        let lpd_peer = LpdPeer {
-            addr: std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(192, 168, 1, 100), 6881),
-            discovered_at: std::time::Instant::now(),
-            source_hash: [0x12u8; 20],
-        };
+        // LpdPeer uses IpAddr + separate port field
+        let lpd_peer = LpdPeer::new(
+            "0123456789abcdef0123456789abcdef01234567",
+            6881,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 100)),
+        );
 
-        // 验证 addr 字段可访问且格式正确
-        let ip_str = lpd_peer.addr.ip().to_string();
-        let port = lpd_peer.addr.port();
+        // Verify addr field is accessible and format correct
+        let ip_str = lpd_peer.addr.to_string();
+        let port = lpd_peer.port;
 
         assert_eq!(ip_str, "192.168.1.100");
         assert_eq!(port, 6881);
 
-        // 验证可用于构造 PeerAddr 字符串格式
+        // Verify can be used to construct PeerAddr string format
         let peer_addr_str = format!("{}:{}", ip_str, port);
         assert_eq!(peer_addr_str, "192.168.1.100:6881");
     }
@@ -244,36 +244,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_lpd_register_and_discover_via_command() {
-        let lpd = Arc::new(LpdManager::new(true, 6881));
-        let info_hash = [0xEFu8; 20];
+        let lpd = LpdManager::new();
+        let info_hash = "efefefefefefefefefefefefefefefefefefefef";
 
-        // 注册下载
-        lpd.register_download(info_hash);
+        // Register torrent
+        lpd.register_torrent(info_hash).await.unwrap();
 
-        // 等待异步注册完成
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Verify registered
+        let active = lpd.active_hashes.read().await;
+        assert!(
+            active.contains(info_hash),
+            "Should have 1 active download after registration"
+        );
+        drop(active);
 
-        // 验证已注册
-        let count = lpd.active_download_count().await;
-        assert_eq!(count, 1, "Should have 1 active download after registration");
-
-        // 查询 peers（应该为空，因为没有真实网络）
-        let peers = lpd.get_discovered_peers(info_hash).await;
+        // Query peers (should be empty, no real network)
+        let peers = lpd.get_peers_for(info_hash).await;
         assert!(
             peers.is_empty(),
             "No peers should be discovered without real network"
         );
 
-        // 注销下载
-        lpd.unregister_download(info_hash);
+        // Unregister
+        lpd.unregister_torrent(info_hash).await;
 
-        // 等待异步注销完成
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // 验证已注销
-        let count_after = lpd.active_download_count().await;
-        assert_eq!(
-            count_after, 0,
+        // Verify unregistered
+        let active_after = lpd.active_hashes.read().await;
+        assert!(
+            !active_after.contains(info_hash),
             "Should have 0 active downloads after unregistration"
         );
 

@@ -60,35 +60,190 @@ fn base64_decode(s: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
+// =========================================================================
+// RPC Authentication Middleware (G4 Part B)
+// =========================================================================
+
+use crate::json_rpc::JsonRpcError;
+
+/// Middleware for token-based RPC authorization.
+///
+/// Validates that incoming JSON-RPC requests include a valid secret token
+/// when `rpc-secret` is configured. An empty/absent secret means auth is
+/// disabled and all requests are accepted.
+///
+/// The token is extracted from the `token` parameter in each request's params.
+pub struct RpcAuthMiddleware {
+    /// Secret token for authorization. Empty string = no auth required.
+    secret: String,
+}
+
+impl RpcAuthMiddleware {
+    /// Create a new authentication middleware with the given secret.
+    ///
+    /// # Arguments
+    ///
+    /// * `secret` - The RPC secret token. Pass empty string to disable auth.
+    pub fn new(secret: &str) -> Self {
+        Self {
+            secret: secret.to_string(),
+        }
+    }
+
+    /// Validate a JSON-RPC request's token parameter.
+    ///
+    /// Returns `Ok(())` if authentication passes, `Err(JsonRpcError::Unauthorized)` if it fails.
+    ///
+    /// # Behavior
+    ///
+    /// - If no secret is configured (empty string) → always returns `Ok(())`
+    /// - If token matches the secret → returns `Ok(())`
+    /// - If token is provided but wrong → returns `Err(Unauthorized("Invalid token"))`
+    /// - If no token provided but secret is set → returns `Err(Unauthorized("Token required"))`
+    pub fn validate(&self, token: Option<&str>) -> Result<(), JsonRpcError> {
+        // No auth configured — accept all requests
+        if self.secret.is_empty() {
+            return Ok(());
+        }
+        match token {
+            Some(t) if t == self.secret => Ok(()),
+            Some(_) => Err(JsonRpcError::Unauthorized("Invalid token".to_string())),
+            None => Err(JsonRpcError::Unauthorized(
+                "Token required (set rpc-secret)".to_string(),
+            )),
+        }
+    }
+
+    /// Returns true if authentication is enabled (non-empty secret).
+    pub fn is_auth_enabled(&self) -> bool {
+        !self.secret.is_empty()
+    }
+
+    /// Returns a reference to the configured secret (for testing/debugging only).
+    #[allow(dead_code)]
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+}
+
+impl Default for RpcAuthMiddleware {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CorsConfig {
     pub allow_origin: String,
     pub allow_methods: String,
     pub allow_headers: String,
     pub allow_credentials: bool,
+    /// Parsed list of allowed origins for efficient lookup
+    allowed_origins: Vec<String>,
 }
 
 impl Default for CorsConfig {
     fn default() -> Self {
-        Self {
-            allow_origin: "*".to_string(),
-            allow_methods: "POST, GET, OPTIONS".to_string(),
-            allow_headers: "Content-Type, Authorization".to_string(),
-            allow_credentials: false,
-        }
+        Self::with_allowed_origins(vec!["*".to_string()])
     }
 }
 
 impl CorsConfig {
+    /// Create a new CorsConfig from a comma-separated list of allowed origins
+    ///
+    /// Special value "*" allows all origins (wildcard mode).
+    /// Multiple origins can be specified as "http://localhost:8080,https://example.com"
+    pub fn with_allowed_origins(origins: Vec<String>) -> Self {
+        let allow_origin = if origins.len() == 1 && origins[0] == "*" {
+            "*".to_string()
+        } else {
+            origins.join(", ")
+        };
+
+        Self {
+            allow_origin: allow_origin.clone(),
+            allow_methods: "POST, GET, OPTIONS".to_string(),
+            allow_headers: "Content-Type, Authorization".to_string(),
+            allow_credentials: false,
+            allowed_origins: origins,
+        }
+    }
+
+    /// Create CorsConfig from an option value string (comma-separated origins)
+    pub fn from_option_value(value: &str) -> Self {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == "*" {
+            return Self::default();
+        }
+
+        let origins: Vec<String> = if trimmed == "*" {
+            vec!["*".to_string()]
+        } else {
+            trimmed
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+
+        Self::with_allowed_origins(origins)
+    }
+
     pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
         self.allow_origin = origin.into();
         self
     }
+
     pub fn with_credentials(mut self) -> Self {
         self.allow_credentials = true;
         self
     }
 
+    /// Check if a given origin is allowed by this CORS configuration
+    ///
+    /// Returns true if:
+    /// - Wildcard mode is enabled ("*" is in allowed_origins)
+    /// - The origin exactly matches one of the allowed origins
+    /// - No origin header is provided (browser navigation / non-CORS request)
+    pub fn allows_origin(&self, origin: Option<&str>) -> bool {
+        // Wildcard allows everything
+        if self.allowed_origins.contains(&"*".to_string()) {
+            return true;
+        }
+
+        match origin {
+            Some(o) => self.allowed_origins.iter().any(|allowed| allowed == o),
+            None => true, // No Origin header = allow (browser navigation)
+        }
+    }
+
+    /// Generate CORS headers for a response
+    ///
+    /// Returns None if the origin is not allowed.
+    /// Returns Some(headers) with appropriate CORS headers if allowed.
+    pub fn headers_for_origin(&self, origin: Option<&str>) -> Option<Vec<(&'static str, String)>> {
+        let origin_str = match origin {
+            Some(o) if self.allows_origin(Some(o)) => o.to_string(),
+            None if self.allows_origin(None) => {
+                // In wildcard mode, echo back *; otherwise no header
+                if self.allowed_origins.contains(&"*".to_string()) {
+                    "*".to_string()
+                } else {
+                    return Some(vec![]); // Allow but don't set specific origin
+                }
+            }
+            _ => return None, // Origin not allowed
+        };
+
+        Some(vec![
+            ("Access-Control-Allow-Origin", origin_str),
+            ("Access-Control-Allow-Methods", self.allow_methods.clone()),
+            ("Access-Control-Allow-Headers", self.allow_headers.clone()),
+            ("Access-Control-Max-Age", "86400".to_string()),
+        ])
+    }
+
+    /// Get headers as static str pairs (for non-origin-specific responses)
     pub fn to_headers(&self) -> Vec<(&str, &str)> {
         vec![
             ("Access-Control-Allow-Origin", &self.allow_origin),
@@ -96,6 +251,11 @@ impl CorsConfig {
             ("Access-Control-Allow-Headers", &self.allow_headers),
             ("Access-Control-Max-Age", "86400"),
         ]
+    }
+
+    /// Handle OPTIONS preflight request - returns true if preflight should be allowed
+    pub fn handle_preflight(&self, origin: Option<&str>) -> bool {
+        self.allows_origin(origin)
     }
 }
 
@@ -610,5 +770,192 @@ mod tests {
 
         let roundtrip: PeerInfo = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip.port, 6881);
+    }
+
+    // =========================================================================
+    // RpcAuthMiddleware Tests (G4 Part B)
+    // =========================================================================
+
+    #[test]
+    fn test_auth_valid_token_passes() {
+        let middleware = RpcAuthMiddleware::new("my-secret-token");
+        // Valid token should pass
+        assert!(middleware.validate(Some("my-secret-token")).is_ok());
+    }
+
+    #[test]
+    fn test_auth_wrong_token_rejected() {
+        let middleware = RpcAuthMiddleware::new("my-secret-token");
+        let result = middleware.validate(Some("wrong-token"));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), -32001);
+        assert!(err.to_string().contains("Invalid token"));
+    }
+
+    #[test]
+    fn test_auth_no_secret_configured_accepts_all() {
+        let middleware = RpcAuthMiddleware::new(""); // Empty secret = no auth
+        // All should pass when no secret is configured
+        assert!(middleware.validate(None).is_ok());
+        assert!(middleware.validate(Some("anything")).is_ok());
+        assert!(middleware.validate(Some("")).is_ok());
+        assert!(
+            !middleware.is_auth_enabled(),
+            "Auth should be disabled with empty secret"
+        );
+    }
+
+    #[test]
+    fn test_auth_token_required_when_secret_set() {
+        let middleware = RpcAuthMiddleware::new("secret123");
+        // No token provided but secret is set → should fail
+        let result = middleware.validate(None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), -32001);
+        assert!(err.to_string().contains("Token required"));
+        assert!(
+            middleware.is_auth_enabled(),
+            "Auth should be enabled with non-empty secret"
+        );
+    }
+
+    #[test]
+    fn test_auth_middleware_default() {
+        let middleware = RpcAuthMiddleware::default();
+        assert!(!middleware.is_auth_enabled());
+        assert!(middleware.validate(None).is_ok());
+        assert!(middleware.validate(Some("x")).is_ok());
+    }
+
+    #[test]
+    fn test_auth_middleware_secret_accessor() {
+        let middleware = RpcAuthMiddleware::new("test-secret");
+        assert_eq!(middleware.secret(), "test-secret");
+    }
+
+    // =========================================================================
+    // CORS Configuration Tests (H6)
+    // =========================================================================
+
+    #[test]
+    fn test_cors_wildcard_allows_any_origin() {
+        let cors = CorsConfig::default(); // Default is wildcard "*"
+
+        // Wildcard should allow any origin
+        assert!(cors.allows_origin(Some("http://localhost:8080")));
+        assert!(cors.allows_origin(Some("https://example.com")));
+        assert!(cors.allows_origin(Some("http://192.168.1.1:3000")));
+        assert!(cors.allows_origin(None)); // No origin header
+    }
+
+    #[test]
+    fn test_cors_specific_domain_blocks_others() {
+        let cors = CorsConfig::from_option_value("http://localhost:8080,https://example.com");
+
+        // Allowed origins should pass
+        assert!(
+            cors.allows_origin(Some("http://localhost:8080")),
+            "Should allow exact match for localhost"
+        );
+        assert!(
+            cors.allows_origin(Some("https://example.com")),
+            "Should allow exact match for example.com"
+        );
+
+        // Non-allowed origins should be blocked
+        assert!(
+            !cors.allows_origin(Some("http://evil.com")),
+            "Should block non-listed origin"
+        );
+        assert!(
+            !cors.allows_origin(Some("http://localhost:8081")),
+            "Should block different port"
+        );
+        assert!(
+            !cors.allows_origin(Some("http://localhost:8080/extra")),
+            "Should block origin with path (strict matching)"
+        );
+
+        // No origin header should still be allowed
+        assert!(
+            cors.allows_origin(None),
+            "No origin header should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_cors_preflight_returns_true_for_allowed() {
+        let cors = CorsConfig::from_option_value("http://localhost:8080");
+
+        // Preflight should succeed for allowed origin
+        assert!(cors.handle_preflight(Some("http://localhost:8080")));
+
+        // Preflight should fail for disallowed origin
+        assert!(!cors.handle_preflight(Some("http://evil.com")));
+
+        // No origin - preflight should succeed
+        assert!(cors.handle_preflight(None));
+    }
+
+    #[test]
+    fn test_cors_from_option_value_parsing() {
+        // Test wildcard
+        let cors_wildcard = CorsConfig::from_option_value("*");
+        assert!(cors_wildcard.allows_origin(Some("anything")));
+        assert_eq!(cors_wildcard.allow_origin, "*");
+
+        // Test empty string defaults to wildcard
+        let cors_empty = CorsConfig::from_option_value("");
+        assert!(cors_empty.allows_origin(Some("anything")));
+
+        // Test multiple origins
+        let cors_multi =
+            CorsConfig::from_option_value("http://a.com, https://b.com, http://c.com:9090");
+        assert!(cors_multi.allows_origin(Some("http://a.com")));
+        assert!(cors_multi.allows_origin(Some("https://b.com")));
+        assert!(cors_multi.allows_origin(Some("http://c.com:9090")));
+        assert!(!cors_multi.allows_origin(Some("http://d.com")));
+
+        // Test with whitespace handling
+        let cors_spaces = CorsConfig::from_option_value("  http://a.com , https://b.com  ");
+        assert!(cors_spaces.allows_origin(Some("http://a.com")));
+        assert!(cors_spaces.allows_origin(Some("https://b.com")));
+    }
+
+    #[test]
+    fn test_cors_headers_for_origin() {
+        let cors = CorsConfig::from_option_value("http://localhost:8080");
+
+        // Allowed origin should produce headers
+        let headers = cors.headers_for_origin(Some("http://localhost:8080"));
+        assert!(
+            headers.is_some(),
+            "Should return headers for allowed origin"
+        );
+        let headers = headers.unwrap();
+        assert!(
+            headers
+                .iter()
+                .any(|(k, _)| *k == "Access-Control-Allow-Origin"),
+            "Should contain Allow-Origin header"
+        );
+
+        // Disallowed origin should return None
+        let blocked = cors.headers_for_origin(Some("http://evil.com"));
+        assert!(blocked.is_none(), "Should return None for blocked origin");
+    }
+
+    #[test]
+    fn test_cors_with_allowed_origins_constructor() {
+        let cors = CorsConfig::with_allowed_origins(vec![
+            "https://api.example.com".to_string(),
+            "http://localhost:3000".to_string(),
+        ]);
+
+        assert!(cors.allows_origin(Some("https://api.example.com")));
+        assert!(cors.allows_origin(Some("http://localhost:3000")));
+        assert!(!cors.allows_origin(Some("http://other.com")));
     }
 }

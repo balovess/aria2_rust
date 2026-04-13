@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
-    AnnounceResponse, CONNECTION_TIMEOUT_SECS, ConnectResponse, UdpAction, UdpError, UdpEvent,
-    UdpState, build_announce_request, build_connect_request, parse_announce_response,
-    parse_connect_response,
+    AnnounceResponse, CONNECTION_TIMEOUT_SECS, ConnectResponse, ScrapeResult, UdpAction, UdpError,
+    UdpEvent, UdpState, build_announce_request, build_connect_request, build_scrape_request,
+    parse_announce_response, parse_connect_response, parse_scrape_response,
 };
 
 const REQUEST_TIMEOUT_SECS: u64 = 15;
@@ -36,6 +36,10 @@ pub struct UdpTrackerRequest {
     pub dispatched_at: Option<Instant>,
     pub fail_count: u32,
     pub reply: Option<AnnounceResponse>,
+    /// Scrape results populated when this is a scrape request
+    pub scrape_results: Option<Vec<ScrapeResult>>,
+    /// Info hashes for scrape requests (can be multiple)
+    pub scrape_info_hashes: Vec<[u8; 20]>,
     txn_id: u32,
 }
 
@@ -66,6 +70,8 @@ impl UdpTrackerRequest {
             dispatched_at: None,
             fail_count: 0,
             reply: None,
+            scrape_results: None,
+            scrape_info_hashes: Vec::new(),
             txn_id: 0,
         }
     }
@@ -120,6 +126,30 @@ impl UdpTrackerClient {
         debug!("Added announce request for {}", addr);
     }
 
+    /// Add a SCRAPE request to query statistics for one or more info hashes
+    ///
+    /// # Arguments
+    /// * `addr` - UDP tracker socket address
+    /// * `info_hashes` - Slice of 20-byte info hashes to query (max ~74 per request)
+    pub async fn add_scrape(&mut self, addr: &SocketAddr, info_hashes: &[[u8; 20]]) {
+        // Use first info hash for the request struct (scrape can have multiple)
+        let first_ih = if info_hashes.is_empty() {
+            [0u8; 20]
+        } else {
+            info_hashes[0]
+        };
+
+        let mut req =
+            UdpTrackerRequest::new(*addr, first_ih, [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+        req.scrape_info_hashes = info_hashes.to_vec();
+        self.pending.push_back(req);
+        debug!(
+            "Added scrape request for {} ({} hashes)",
+            addr,
+            info_hashes.len()
+        );
+    }
+
     pub async fn process_one(&mut self) -> bool {
         loop {
             if self.pending.is_empty() && self.waiting_for_conn.is_empty() {
@@ -131,6 +161,10 @@ impl UdpTrackerClient {
 
                 if let Some(conn) = self.conn_cache.get(&host_key) {
                     if conn.updated_at.elapsed().as_secs() < CONNECTION_TIMEOUT_SECS {
+                        // Route to appropriate send method based on request type
+                        if !req.scrape_info_hashes.is_empty() {
+                            return self.send_scrape(&mut req, conn.id).await;
+                        }
                         return self.send_announce(&mut req, conn.id).await;
                     } else {
                         self.conn_cache.remove(&host_key);
@@ -199,6 +233,72 @@ impl UdpTrackerClient {
             }
             Err(e) => {
                 warn!("Send ANNOUNCE to {} failed: {}", req.remote_addr, e);
+                req.fail_count += 1;
+                req.error = Some(UdpError::Network);
+                if req.fail_count < MAX_RETRIES {
+                    self.pending.push_front(std::mem::replace(
+                        req,
+                        UdpTrackerRequest::new(
+                            req.remote_addr,
+                            req.info_hash,
+                            req.peer_id,
+                            req.downloaded,
+                            req.left,
+                            req.uploaded,
+                            req.event,
+                            req.num_want,
+                            req.port,
+                        ),
+                    ));
+                }
+                true
+            }
+        }
+    }
+
+    async fn send_scrape(&mut self, req: &mut UdpTrackerRequest, conn_id: u64) -> bool {
+        let txn_id = self.next_txn();
+        req.txn_id = txn_id;
+        req.dispatched_at = Some(Instant::now());
+        req.state = UdpState::Pending;
+
+        // Build scrape payload with all info hashes from this request
+        let hashes: Vec<[u8; 20]> = req.scrape_info_hashes.clone();
+        if hashes.is_empty() {
+            warn!("Scrape request with no info hashes for {}", req.remote_addr);
+            return true;
+        }
+
+        let payload = build_scrape_request(conn_id, txn_id, &hashes);
+
+        match self.socket.send_to(&payload, req.remote_addr).await {
+            Ok(len) => {
+                self.txn_map.insert(txn_id, self.inflight.len());
+                // Preserve scrape_info_hashes when replacing the request
+                let mut replacement = UdpTrackerRequest::new(
+                    req.remote_addr,
+                    req.info_hash,
+                    req.peer_id,
+                    req.downloaded,
+                    req.left,
+                    req.uploaded,
+                    req.event,
+                    req.num_want,
+                    req.port,
+                );
+                replacement.scrape_info_hashes = std::mem::take(&mut req.scrape_info_hashes);
+                self.inflight.push_back(std::mem::replace(req, replacement));
+                debug!(
+                    "Sent SCRAPE {} bytes to {} (txn={}, {} hashes)",
+                    len,
+                    req.remote_addr,
+                    txn_id,
+                    hashes.len()
+                );
+                true
+            }
+            Err(e) => {
+                warn!("Send SCRAPE to {} failed: {}", req.remote_addr, e);
                 req.fail_count += 1;
                 req.error = Some(UdpError::Network);
                 if req.fail_count < MAX_RETRIES {
@@ -342,6 +442,31 @@ impl UdpTrackerClient {
                 req.error = Some(UdpError::TrackerError);
                 self.pending.push_back(req);
             }
+            Some(UdpAction::Scrape) => match parse_scrape_response(data) {
+                Ok(results) => {
+                    info!(
+                        "SCRAPE response from {}: {} info hashes scraped",
+                        from,
+                        results.len()
+                    );
+                    // Store scrape results in a dedicated collection
+                    for result in &results {
+                        debug!(
+                            "  seeders={} leechers={} completed={}",
+                            result.seeders, result.leechers, result.completed
+                        );
+                    }
+                    req.scrape_results = Some(results);
+                    req.state = UdpState::Complete;
+                    req.error = Some(UdpError::Success);
+                    self.pending.push_back(req);
+                }
+                Err(e) => {
+                    warn!("Parse SCRAPE response from {} failed: {}", from, e);
+                    req.error = Some(UdpError::TrackerError);
+                    self.pending.push_back(req);
+                }
+            },
             _ => {
                 warn!("Unknown action {} from {}", action_val, from);
                 req.error = Some(UdpError::TrackerError);
@@ -421,6 +546,14 @@ impl UdpTrackerClient {
         self.pending
             .iter()
             .filter_map(|r| r.reply.as_ref())
+            .collect()
+    }
+
+    /// Get all completed scrape results from pending requests
+    pub fn completed_scrape_results(&self) -> Vec<&Vec<ScrapeResult>> {
+        self.pending
+            .iter()
+            .filter_map(|r| r.scrape_results.as_ref())
             .collect()
     }
 
@@ -661,5 +794,123 @@ mod tests {
     async fn test_shared_client_creation() {
         let shared = UdpTrackerClient::create_shared(0).await;
         assert!(shared.is_ok(), "Shared client creation should succeed");
+    }
+
+    // --- Scrape tests ---
+
+    #[tokio::test]
+    async fn test_add_scrape_request() {
+        let mut client = UdpTrackerClient::new(0).await.unwrap();
+        let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
+        let hashes = [[0xAAu8; 20], [0xBBu8; 20], [0xCCu8; 20]];
+
+        client.add_scrape(&addr, &hashes).await;
+        assert_eq!(client.pending.len(), 1);
+
+        let req = &client.pending[0];
+        assert!(!req.scrape_info_hashes.is_empty());
+        assert_eq!(req.scrape_info_hashes.len(), 3);
+        assert_eq!(req.scrape_info_hashes[0], [0xAAu8; 20]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_scrape_response_single_hash() {
+        let mut client = UdpTrackerClient::new(0).await.unwrap();
+        let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
+        let hashes = [[0x11u8; 20]];
+
+        // Manually set up an in-flight scrape request
+        let txn_id = client.next_txn();
+        let mut req =
+            UdpTrackerRequest::new(addr, hashes[0], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+        req.txn_id = txn_id;
+        req.dispatched_at = Some(Instant::now());
+        req.scrape_info_hashes = hashes.to_vec();
+        client.inflight.push_back(req);
+        client.txn_map.insert(txn_id, 0);
+
+        // Build scrape response: action=2, txn_id, seeders=42, leechers=10, completed=999
+        let mut resp_data = vec![0u8; 20];
+        resp_data[0..4].copy_from_slice(&(UdpAction::Scrape as i32).to_be_bytes());
+        resp_data[4..8].copy_from_slice(&txn_id.to_be_bytes());
+        resp_data[8..12].copy_from_slice(&42u32.to_be_bytes());
+        resp_data[12..16].copy_from_slice(&10u32.to_be_bytes());
+        resp_data[16..20].copy_from_slice(&999u32.to_be_bytes());
+
+        client.handle_response(&resp_data, &addr).await;
+
+        let scrape_results = client.completed_scrape_results();
+        assert_eq!(scrape_results.len(), 1);
+        assert_eq!(scrape_results[0].len(), 1);
+        assert_eq!(scrape_results[0][0].seeders, 42);
+        assert_eq!(scrape_results[0][0].leechers, 10);
+        assert_eq!(scrape_results[0][0].completed, 999);
+    }
+
+    #[tokio::test]
+    async fn test_handle_scrape_response_multi_hash() {
+        let mut client = UdpTrackerClient::new(0).await.unwrap();
+        let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
+        let hashes = [[0x22u8; 20], [0x33u8; 20]];
+
+        let txn_id = client.next_txn();
+        let mut req =
+            UdpTrackerRequest::new(addr, hashes[0], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+        req.txn_id = txn_id;
+        req.dispatched_at = Some(Instant::now());
+        req.scrape_info_hashes = hashes.to_vec();
+        client.inflight.push_back(req);
+        client.txn_map.insert(txn_id, 0);
+
+        // Response for 2 info hashes
+        let mut resp_data = vec![0u8; 32]; // 8 header + 12*2
+        resp_data[0..4].copy_from_slice(&(UdpAction::Scrape as i32).to_be_bytes());
+        resp_data[4..8].copy_from_slice(&txn_id.to_be_bytes());
+        // Hash 1
+        resp_data[8..12].copy_from_slice(&100u32.to_be_bytes());
+        resp_data[12..16].copy_from_slice(&50u32.to_be_bytes());
+        resp_data[16..20].copy_from_slice(&200u32.to_be_bytes());
+        // Hash 2
+        resp_data[20..24].copy_from_slice(&5u32.to_be_bytes());
+        resp_data[24..28].copy_from_slice(&3u32.to_be_bytes());
+        resp_data[28..32].copy_from_slice(&7u32.to_be_bytes());
+
+        client.handle_response(&resp_data, &addr).await;
+
+        let scrape_results = client.completed_scrape_results();
+        assert_eq!(scrape_results.len(), 1);
+        assert_eq!(scrape_results[0].len(), 2);
+        assert_eq!(scrape_results[0][0].seeders, 100);
+        assert_eq!(scrape_results[0][1].seeders, 5);
+    }
+
+    #[tokio::test]
+    async fn test_scrape_error_action_returns_error() {
+        let mut client = UdpTrackerClient::new(0).await.unwrap();
+        let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
+
+        let txn_id = client.next_txn();
+        let mut req =
+            UdpTrackerRequest::new(addr, [0x99u8; 20], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+        req.txn_id = txn_id;
+        req.dispatched_at = Some(Instant::now());
+        req.scrape_info_hashes = vec![[0x99u8; 20]];
+        client.inflight.push_back(req);
+        client.txn_map.insert(txn_id, 0);
+
+        // Send error action instead of scrape action
+        let mut err_data = vec![0u8; 23];
+        err_data[0..4].copy_from_slice(&3i32.to_be_bytes()); // Error action
+        err_data[4..8].copy_from_slice(&txn_id.to_be_bytes());
+        err_data[8..23].copy_from_slice(b"scrape failed!!");
+
+        client.handle_response(&err_data, &addr).await;
+
+        // Should not have successful scrape results
+        let scrape_results = client.completed_scrape_results();
+        assert!(
+            scrape_results.is_empty(),
+            "Error response should not produce scrape results"
+        );
     }
 }

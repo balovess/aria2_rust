@@ -554,6 +554,14 @@ impl super::OptionRegistry {
                 .desc("Listening port range")
                 .category(OptionCategory::BitTorrent),
         );
+
+        // --- Piece Selection Priority (G2) ---
+        self.register(
+            OptionDef::new("bt-prioritize-piece", OptionType::String)
+                .default(OptionValue::Str("rarest".into()))
+                .desc("Piece selection priority mode: 'rarest' (default), 'head' (sequential from start), 'tail' (sequential from end)")
+                .category(OptionCategory::BitTorrent),
+        );
     }
 }
 
@@ -615,6 +623,12 @@ impl super::OptionRegistry {
         self.register(
             OptionDef::new("rpc-allow-origin", OptionType::String)
                 .desc("CORS Allow-Origin value")
+                .category(OptionCategory::Rpc),
+        );
+        self.register(
+            OptionDef::new("rpc-cors-domain", OptionType::String)
+                .default(OptionValue::Str("*".into()))
+                .desc("CORS allowed domains for RPC (comma-separated, * for all)")
                 .category(OptionCategory::Rpc),
         );
     }

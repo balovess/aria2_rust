@@ -279,10 +279,9 @@ impl FtpConnection {
                 is_multiline = true;
                 message.push_str(&trimmed[4..]);
                 message.push('\n');
-            } else if separator == b' ' {
-                message.push_str(&trimmed[4..]);
-                break;
-            } else if is_multiline && trimmed.starts_with(&format!("{:3} ", code.unwrap_or(0))) {
+            } else if separator == b' '
+                || (is_multiline && trimmed.starts_with(&format!("{:3} ", code.unwrap_or(0))))
+            {
                 message.push_str(&trimmed[4..]);
                 break;
             } else if is_multiline {

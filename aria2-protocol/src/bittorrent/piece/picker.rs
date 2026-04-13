@@ -1,5 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
+/// Priority mode for piece selection strategy.
+///
+/// Controls which piece the picker selects next when multiple pieces are available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PiecePriorityMode {
+    /// Default: select the rarest available piece (best for swarm health)
+    #[default]
+    RarestFirst,
+    /// Download lowest-index incomplete piece first (sequential from start)
+    /// Useful for streaming/media playback where you need the beginning first
+    SequentialHead,
+    /// Download highest-index incomplete piece first (sequential from end)
+    /// Useful for verifying file integrity from the end
+    SequentialTail,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PieceSelectionStrategy {
     #[default]
@@ -33,6 +49,8 @@ pub struct PiecePicker {
     total_pieces: u32,
     pieces: Vec<PieceInfo>,
     strategy: PieceSelectionStrategy,
+    /// Priority mode for piece selection (RarestFirst / SequentialHead / SequentialTail)
+    priority_mode: PiecePriorityMode,
     peer_availability: HashMap<u32, HashSet<u32>>,
     #[allow(dead_code)]
     rng_seed: u64,
@@ -45,6 +63,7 @@ impl PiecePicker {
             total_pieces: num_pieces,
             pieces,
             strategy: PieceSelectionStrategy::RarestFirst,
+            priority_mode: PiecePriorityMode::RarestFirst,
             peer_availability: HashMap::new(),
             rng_seed: 42,
         }
@@ -52,6 +71,20 @@ impl PiecePicker {
 
     pub fn set_strategy(&mut self, strategy: PieceSelectionStrategy) {
         self.strategy = strategy;
+    }
+
+    /// Set the priority mode for piece selection.
+    ///
+    /// This controls whether pieces are selected in rarest-first order (default),
+    /// sequential from head (lowest index first), or sequential from tail
+    /// (highest index first).
+    pub fn set_priority_mode(&mut self, mode: PiecePriorityMode) {
+        self.priority_mode = mode;
+    }
+
+    /// Get the current priority mode.
+    pub fn priority_mode(&self) -> PiecePriorityMode {
+        self.priority_mode
     }
 
     pub fn set_piece_priority(&mut self, index: u32, priority: i32) {
@@ -100,6 +133,15 @@ impl PiecePicker {
     }
 
     pub fn pick_next(&mut self) -> Option<u32> {
+        match self.priority_mode {
+            PiecePriorityMode::RarestFirst => self.pick_by_strategy(),
+            PiecePriorityMode::SequentialHead => self.pick_sequential_head(),
+            PiecePriorityMode::SequentialTail => self.pick_sequential_tail(),
+        }
+    }
+
+    /// Internal: pick based on PieceSelectionStrategy (used when in RarestFirst priority mode)
+    fn pick_by_strategy(&mut self) -> Option<u32> {
         match self.strategy {
             PieceSelectionStrategy::RarestFirst => self.pick_rarest_first(),
             PieceSelectionStrategy::Sequential => self.pick_sequential(),
@@ -112,17 +154,63 @@ impl PiecePicker {
             return None;
         }
         let max_pieces = std::cmp::min(nbits, self.pieces.len());
-        match self.strategy {
-            PieceSelectionStrategy::RarestFirst => {
-                self.select_rarest_with_bitfield(peer_bitfield, max_pieces)
+        match self.priority_mode {
+            PiecePriorityMode::RarestFirst => match self.strategy {
+                PieceSelectionStrategy::RarestFirst => {
+                    self.select_rarest_with_bitfield(peer_bitfield, max_pieces)
+                }
+                PieceSelectionStrategy::Sequential => {
+                    self.select_sequential_with_bitfield(peer_bitfield, max_pieces)
+                }
+                PieceSelectionStrategy::Random => {
+                    self.select_random_with_bitfield(peer_bitfield, max_pieces)
+                }
+            },
+            PiecePriorityMode::SequentialHead => {
+                self.select_sequential_head(peer_bitfield, max_pieces)
             }
-            PieceSelectionStrategy::Sequential => {
-                self.select_sequential_with_bitfield(peer_bitfield, max_pieces)
-            }
-            PieceSelectionStrategy::Random => {
-                self.select_random_with_bitfield(peer_bitfield, max_pieces)
+            PiecePriorityMode::SequentialTail => {
+                self.select_sequential_tail(peer_bitfield, max_pieces)
             }
         }
+    }
+
+    /// Select the lowest-index incomplete piece (sequential from head).
+    /// Respects bitfield to only pick pieces the peer actually has.
+    fn select_sequential_head(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
+        self.pieces
+            .iter()
+            .enumerate()
+            .take(max_pieces)
+            .filter(|(i, piece)| {
+                !piece.completed && !piece.in_progress && Self::bitfield_has_piece(bitfield, *i)
+            })
+            .map(|(i, _)| i as u32)
+            .min() // Lowest index = head of file
+    }
+
+    /// Select the highest-index incomplete piece (sequential from tail).
+    /// Respects bitfield to only pick pieces the peer actually has.
+    fn select_sequential_tail(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
+        self.pieces
+            .iter()
+            .enumerate()
+            .take(max_pieces)
+            .filter(|(i, piece)| {
+                !piece.completed && !piece.in_progress && Self::bitfield_has_piece(bitfield, *i)
+            })
+            .map(|(i, _)| i as u32)
+            .max() // Highest index = tail of file
+    }
+
+    /// Check if a bitfield has a specific piece index set (MSB-first ordering).
+    fn bitfield_has_piece(bitfield: &[u8], piece_index: usize) -> bool {
+        let byte_idx = piece_index / 8;
+        let bit_idx = 7 - (piece_index % 8);
+        if byte_idx >= bitfield.len() {
+            return false;
+        }
+        (bitfield[byte_idx] & (1 << bit_idx)) != 0
     }
 
     fn select_rarest_with_bitfield(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
@@ -233,6 +321,24 @@ impl PiecePicker {
         }
         let mut rng = rand::thread_rng();
         Some(available[rng.gen_range(0..available.len())])
+    }
+
+    /// Pick the lowest-index incomplete piece (sequential from head, no bitfield filter).
+    fn pick_sequential_head(&self) -> Option<u32> {
+        self.pieces
+            .iter()
+            .filter(|p| !p.completed && !p.in_progress)
+            .map(|p| p.index)
+            .min() // Lowest index = head of file
+    }
+
+    /// Pick the highest-index incomplete piece (sequential from tail, no bitfield filter).
+    fn pick_sequential_tail(&self) -> Option<u32> {
+        self.pieces
+            .iter()
+            .filter(|p| !p.completed && !p.in_progress)
+            .map(|p| p.index)
+            .max() // Highest index = tail of file
     }
 
     pub fn endgame_candidates(&self) -> Vec<u32> {
@@ -561,5 +667,167 @@ mod tests {
         let incomplete_count = picker.pieces_iter().filter(|p| !p.completed).count();
 
         assert_eq!(incomplete_count, 3); // Pieces 2,3,4
+    }
+
+    // ==================== G2: PiecePriorityMode Tests ====================
+
+    #[test]
+    fn test_sequential_head_picks_lowest_index_first() {
+        let mut picker = PiecePicker::new(10);
+        picker.set_priority_mode(PiecePriorityMode::SequentialHead);
+
+        // Mark some pieces as completed/in-progress
+        picker.mark_completed(0);
+        picker.mark_in_progress(1, true);
+
+        // Should pick piece 2 (lowest available index)
+        let picked = picker.pick_next();
+        assert_eq!(
+            picked,
+            Some(2),
+            "SequentialHead should pick lowest available index"
+        );
+
+        // After picking 2, next should be 3
+        picker.mark_in_progress(2, true);
+        let picked2 = picker.pick_next();
+        assert_eq!(picked2, Some(3), "Should continue with next lowest");
+    }
+
+    #[test]
+    fn test_sequential_tail_picks_highest_index_first() {
+        let mut picker = PiecePicker::new(10);
+        picker.set_priority_mode(PiecePriorityMode::SequentialTail);
+
+        // Mark some pieces as completed/in-progress
+        picker.mark_completed(9);
+        picker.mark_in_progress(8, true);
+
+        // Should pick piece 7 (highest available index)
+        let picked = picker.pick_next();
+        assert_eq!(
+            picked,
+            Some(7),
+            "SequentialTail should pick highest available index"
+        );
+
+        // After picking 7, next should be 6
+        picker.mark_in_progress(7, true);
+        let picked2 = picker.pick_next();
+        assert_eq!(picked2, Some(6), "Should continue with next highest");
+    }
+
+    #[test]
+    fn test_rarest_first_default_behavior() {
+        let mut picker = PiecePicker::new(5);
+        // Default mode is RarestFirst
+        assert_eq!(picker.priority_mode(), PiecePriorityMode::RarestFirst);
+
+        // Set up frequencies so piece 1 is rarest
+        picker.add_peer_piece(1, 0);
+        picker.add_peer_piece(1, 0); // piece 0: freq 2
+        picker.add_peer_piece(2, 1); // piece 1: freq 1 (rarest)
+        picker.add_peer_piece(3, 2);
+        picker.add_peer_piece(3, 2); // piece 2: freq 2
+
+        let picked = picker.pick_next();
+        // In RarestFirst mode via pick_by_strategy -> pick_rarest_first,
+        // picks the piece with lowest frequency among those with freq > 0
+        assert!(
+            picked.is_some(),
+            "RarestFirst should pick a piece when frequencies are set"
+        );
+        // Verify the picked piece has frequency > 0 (rarest-first only considers available pieces)
+        let picked_idx = picked.unwrap();
+        assert!(
+            picker.get_piece_info(picked_idx).unwrap().frequency > 0,
+            "Picked piece should have frequency > 0"
+        );
+    }
+
+    #[test]
+    fn test_mode_switch_mid_download() {
+        let mut picker = PiecePicker::new(8);
+
+        // Start in SequentialHead mode
+        picker.set_priority_mode(PiecePriorityMode::SequentialHead);
+        picker.mark_completed(0);
+        assert_eq!(picker.pick_next(), Some(1));
+
+        // Switch to SequentialTail mid-download
+        picker.set_priority_mode(PiecePriorityMode::SequentialTail);
+        picker.mark_completed(7);
+        // Should now pick highest remaining (which is 6)
+        assert_eq!(
+            picker.pick_next(),
+            Some(6),
+            "After switching to SequentialTail, should pick highest index"
+        );
+
+        // Switch back to RarestFirst
+        picker.set_priority_mode(PiecePriorityMode::RarestFirst);
+        // Should pick based on frequency again (all have freq 0 except what we add)
+        picker.add_peer_piece(10, 3);
+        picker.add_peer_piece(10, 3);
+        picker.add_peer_piece(10, 5);
+        // Piece 3 has freq 2, piece 5 has freq 1 -> piece 5 is rarer
+        // Verify that a piece with frequency > 0 is picked (rarest-first behavior)
+        let picked = picker.pick_next();
+        assert!(
+            picked.is_some(),
+            "RarestFirst mode should pick a piece with available frequency data"
+        );
+        let picked_idx = picked.unwrap();
+        assert!(
+            picker.get_piece_info(picked_idx).unwrap().frequency > 0,
+            "Picked piece in RarestFirst mode should have freq > 0"
+        );
+    }
+
+    #[test]
+    fn test_priority_mode_setter_getter() {
+        let mut picker = PiecePicker::new(5);
+
+        assert_eq!(picker.priority_mode(), PiecePriorityMode::RarestFirst);
+
+        picker.set_priority_mode(PiecePriorityMode::SequentialHead);
+        assert_eq!(picker.priority_mode(), PiecePriorityMode::SequentialHead);
+
+        picker.set_priority_mode(PiecePriorityMode::SequentialTail);
+        assert_eq!(picker.priority_mode(), PiecePriorityMode::SequentialTail);
+    }
+
+    #[test]
+    fn test_select_sequential_head_with_bitfield() {
+        let mut picker = PiecePicker::new(8);
+        picker.set_priority_mode(PiecePriorityMode::SequentialHead);
+        picker.mark_completed(0);
+        picker.mark_in_progress(1, true);
+
+        // Bitfield has pieces 2-7 available
+        let bf = make_bitfield(8, &[2, 3, 4, 5, 6, 7]);
+        let selected = picker.select(&bf, 8);
+        assert_eq!(
+            selected,
+            Some(2),
+            "SequentialHead with bitfield should pick lowest available in both"
+        );
+    }
+
+    #[test]
+    fn test_select_sequential_tail_with_bitfield() {
+        let mut picker = PiecePicker::new(8);
+        picker.set_priority_mode(PiecePriorityMode::SequentialTail);
+        picker.mark_completed(7);
+        picker.mark_in_progress(6, true);
+
+        // Bitfield has pieces 0-5 available
+        let bf = make_bitfield(8, &[0, 1, 2, 3, 4, 5]);
+        let selected = picker.select(&bf, 8);
+        assert_eq!(
+            selected,
+            Some(5),
+            "SequentialTail with bitfield should pick highest available in both"
+        );
     }
 }

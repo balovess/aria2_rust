@@ -52,7 +52,9 @@ fn test_seed_manager_no_exit_infinite() {
     let cond = SeedExitCondition::infinite();
     let mut mgr = make_empty_mgr(cond);
     mgr.total_uploaded = u64::MAX;
-    mgr.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(86400);
+    mgr.seeding_start_time = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .unwrap_or(std::time::Instant::now());
     assert!(!mgr.should_exit());
 }
 

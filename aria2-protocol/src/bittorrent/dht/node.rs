@@ -43,8 +43,8 @@ impl DhtNode {
 
     pub fn distance_to(&self, target: &[u8; 20]) -> usize {
         let mut distance = 0usize;
-        for i in 0..20 {
-            let xor = self.id[i] ^ target[i];
+        for (i, &t) in target.iter().enumerate().take(20) {
+            let xor = self.id[i] ^ t;
             if xor != 0 {
                 distance += (19 - i) * 8 + (7 - xor.leading_zeros()) as usize;
             }

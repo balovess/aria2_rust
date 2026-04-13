@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 use super::message::{DhtMessage, DhtMessageBuilder};
@@ -8,6 +9,110 @@ use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
 use super::transaction::TransactionManager;
 use crate::bittorrent::bencode::codec::BencodeValue;
+
+/// Represents a compact node address extracted from DHT responses.
+/// Supports both IPv4 (type 0x04) and IPv6 (type 0x06) formats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactNode {
+    /// IPv4 node: IP address + port
+    V4(std::net::Ipv4Addr, u16),
+    /// IPv6 node: IP address + port
+    V6(std::net::Ipv6Addr, u16),
+}
+
+impl CompactNode {
+    /// Convert to a standard SocketAddr
+    pub fn to_socket_addr(&self) -> SocketAddr {
+        match self {
+            CompactNode::V4(ip, port) => SocketAddr::from((*ip, *port)),
+            CompactNode::V6(ip, port) => {
+                SocketAddr::V6(std::net::SocketAddrV6::new(*ip, *port, 0, 0))
+            }
+        }
+    }
+}
+
+/// Parse compact nodes from raw data using type-byte detection.
+///
+/// DHT get_peers responses may return nodes in a format where each entry is prefixed
+/// by an address type byte:
+/// - Type 0x04 = IPv4: type(1) + IP(4) + port(2) = 7 bytes per node
+/// - Type 0x06 = IPv6: type(1) + IP(16) + port(2) = 19 bytes per node
+///
+/// This function handles mixed IPv4/IPv6 responses correctly.
+///
+/// # Arguments
+/// * `data` - Raw bytes containing compact node data
+/// * `start` - Starting offset within the data buffer
+/// * `count` - Maximum number of nodes to parse
+///
+/// # Returns
+/// A vector of parsed [`CompactNode`] entries
+pub fn parse_compact_nodes(data: &[u8], start: usize, count: usize) -> Vec<CompactNode> {
+    let mut nodes = Vec::new();
+    let mut offset = start;
+
+    for _ in 0..count {
+        if offset >= data.len() {
+            break;
+        }
+
+        let node_type = data[offset];
+        offset += 1;
+
+        match node_type {
+            0x04 => {
+                // IPv4: 4 bytes IP + 2 bytes port = 6 bytes total after type byte
+                if offset + 6 > data.len() {
+                    break;
+                }
+                let ip = std::net::Ipv4Addr::new(
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                );
+                let port = u16::from_be_bytes([data[offset + 4], data[offset + 5]]);
+                nodes.push(CompactNode::V4(ip, port));
+                offset += 6;
+            }
+            0x06 => {
+                // IPv6: 16 bytes IP + 2 bytes port = 18 bytes total after type byte
+                if offset + 18 > data.len() {
+                    break;
+                }
+                let ip = std::net::Ipv6Addr::from([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                    data[offset + 8],
+                    data[offset + 9],
+                    data[offset + 10],
+                    data[offset + 11],
+                    data[offset + 12],
+                    data[offset + 13],
+                    data[offset + 14],
+                    data[offset + 15],
+                ]);
+                let port = u16::from_be_bytes([data[offset + 16], data[offset + 17]]);
+                nodes.push(CompactNode::V6(ip, port));
+                offset += 18;
+            }
+            _ => {
+                // Unknown type byte - stop parsing
+                debug!("Unknown compact node type byte: 0x{:02X}", node_type);
+                break;
+            }
+        }
+    }
+
+    nodes
+}
 
 pub struct DhtClientConfig {
     pub self_id: [u8; 20],
@@ -34,11 +139,27 @@ pub struct DiscoveredPeers {
     pub nodes_contacted: usize,
 }
 
+/// Cache entry for nodes discovered during find_peers queries.
+/// Stores discovered peer addresses and the timestamp of discovery.
+struct NodeCacheEntry {
+    /// Peer addresses discovered for this info_hash
+    peers: Vec<SocketAddr>,
+    /// When this cache entry was created or last updated
+    timestamp: Instant,
+    /// How many nodes were contacted to get these results
+    nodes_contacted: usize,
+}
+
+/// Default TTL for node cache entries (5 minutes)
+const NODE_CACHE_TTL_SECS: u64 = 300;
+
 pub struct DhtClient {
     config: DhtClientConfig,
     routing_table: RoutingTable,
     #[allow(dead_code)] // Reserved for future DHT transaction management
     tx_manager: TransactionManager,
+    /// Cache of discovered peers keyed by info_hash
+    node_cache: HashMap<[u8; 20], NodeCacheEntry>,
 }
 
 impl DhtClient {
@@ -53,6 +174,7 @@ impl DhtClient {
             config,
             routing_table,
             tx_manager: TransactionManager::new(),
+            node_cache: HashMap::new(),
         }
     }
 
@@ -60,6 +182,24 @@ impl DhtClient {
         &mut self,
         target_info_hash: &[u8; 20],
     ) -> Result<DiscoveredPeers, String> {
+        // Check cache first for valid (non-expired) entries
+        if let Some(entry) = self.node_cache.get(target_info_hash) {
+            if entry.timestamp.elapsed().as_secs() < NODE_CACHE_TTL_SECS {
+                debug!(
+                    "DHT: returning cached peers for info_hash ({} peers, age={}s)",
+                    entry.peers.len(),
+                    entry.timestamp.elapsed().as_secs()
+                );
+                return Ok(DiscoveredPeers {
+                    addresses: entry.peers.clone(),
+                    nodes_contacted: entry.nodes_contacted,
+                });
+            } else {
+                // Expired entry - remove it
+                self.node_cache.remove(target_info_hash);
+            }
+        }
+
         let socket = DhtSocket::bind(0).await?;
         let mut all_peers: Vec<SocketAddr> = Vec::new();
         let mut nodes_contacted = 0usize;
@@ -72,10 +212,7 @@ impl DhtClient {
             );
 
             if !all_peers.is_empty() {
-                return Ok(DiscoveredPeers {
-                    addresses: all_peers,
-                    nodes_contacted,
-                });
+                break;
             }
 
             let closest_nodes = self
@@ -141,6 +278,16 @@ impl DhtClient {
 
         all_peers.sort();
         all_peers.dedup();
+
+        // Store results in cache for future lookups
+        self.node_cache.insert(
+            *target_info_hash,
+            NodeCacheEntry {
+                peers: all_peers.clone(),
+                timestamp: Instant::now(),
+                nodes_contacted,
+            },
+        );
 
         Ok(DiscoveredPeers {
             addresses: all_peers,
@@ -447,5 +594,162 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(client.discover_peers(&target)).unwrap();
         assert!(result.addresses.is_empty());
+    }
+
+    // ==================== H1: IPv6 Compact Node Tests ====================
+
+    #[test]
+    fn test_parse_compact_nodes_ipv4() {
+        // Build type-byte format data for 2 IPv4 nodes
+        // Type 0x04 + IP(4) + port(2) = 7 bytes per node
+        let mut data = Vec::new();
+
+        // Node 1: 192.168.1.1:8080
+        data.push(0x04); // type
+        data.extend_from_slice(&[192, 168, 1, 1]); // IP
+        data.extend_from_slice(&[0x1F, 0x90]); // port 8080
+
+        // Node 2: 10.0.0.2:6881
+        data.push(0x04); // type
+        data.extend_from_slice(&[10, 0, 0, 2]); // IP
+        data.extend_from_slice(&[0x1A, 0xE1]); // port 6881
+
+        let nodes = parse_compact_nodes(&data, 0, 10);
+        assert_eq!(nodes.len(), 2);
+
+        match &nodes[0] {
+            CompactNode::V4(ip, port) => {
+                assert_eq!(*ip, std::net::Ipv4Addr::new(192, 168, 1, 1));
+                assert_eq!(*port, 8080);
+            }
+            _ => panic!("Expected IPv4 node"),
+        }
+
+        match &nodes[1] {
+            CompactNode::V4(ip, port) => {
+                assert_eq!(*ip, std::net::Ipv4Addr::new(10, 0, 0, 2));
+                assert_eq!(*port, 6881);
+            }
+            _ => panic!("Expected IPv4 node"),
+        }
+    }
+
+    #[test]
+    fn test_parse_compact_nodes_ipv6() {
+        // Build type-byte format data for 2 IPv6 nodes
+        // Type 0x06 + IP(16) + port(2) = 19 bytes per node
+        let mut data = Vec::new();
+
+        // Node 1: ::1:8080 (loopback)
+        data.push(0x06); // type
+        data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // IP ::1
+        data.extend_from_slice(&[0x1F, 0x90]); // port 8080
+
+        // Node 2: fe80::1:6881
+        data.push(0x06); // type
+        data.extend_from_slice(&[0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // IP
+        data.extend_from_slice(&[0x1A, 0xE1]); // port 6881
+
+        let nodes = parse_compact_nodes(&data, 0, 10);
+        assert_eq!(nodes.len(), 2);
+
+        match &nodes[0] {
+            CompactNode::V6(ip, port) => {
+                assert_eq!(*ip, std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
+                assert_eq!(*port, 8080);
+            }
+            _ => panic!("Expected IPv6 node"),
+        }
+
+        match &nodes[1] {
+            CompactNode::V6(ip, port) => {
+                assert_eq!(*ip, std::net::Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 1));
+                assert_eq!(*port, 6881);
+            }
+            _ => panic!("Expected IPv6 node"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mixed_nodes() {
+        // Build mixed IPv4/IPv6 response
+        let mut data = Vec::new();
+
+        // IPv4 node first
+        data.push(0x04);
+        data.extend_from_slice(&[172, 16, 0, 1]);
+        data.extend_from_slice(&[0x1F, 0x90]);
+
+        // Then IPv6 node
+        data.push(0x06);
+        data.extend_from_slice(&[0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        data.extend_from_slice(&[0x1A, 0xE1]);
+
+        // Another IPv4 node
+        data.push(0x04);
+        data.extend_from_slice(&[10, 0, 0, 5]);
+        data.extend_from_slice(&[0x00, 0x50]);
+
+        let nodes = parse_compact_nodes(&data, 0, 10);
+        assert_eq!(nodes.len(), 3);
+
+        // Verify types are correct
+        assert!(matches!(nodes[0], CompactNode::V4(..)));
+        assert!(matches!(nodes[1], CompactNode::V6(..)));
+        assert!(matches!(nodes[2], CompactNode::V4(..)));
+    }
+
+    #[test]
+    fn test_parse_compact_nodes_unknown_type_stops() {
+        let mut data = Vec::new();
+
+        // Valid IPv4 node
+        data.push(0x04);
+        data.extend_from_slice(&[192, 168, 1, 1]);
+        data.extend_from_slice(&[0x1F, 0x90]);
+
+        // Unknown type byte - should stop parsing here
+        data.push(0xFF);
+
+        // This should NOT be parsed
+        data.push(0x04);
+        data.extend_from_slice(&[10, 0, 0, 1]);
+        data.extend_from_slice(&[0x00, 0x50]);
+
+        let nodes = parse_compact_nodes(&data, 0, 10);
+        assert_eq!(nodes.len(), 1); // Only the first valid node
+    }
+
+    #[test]
+    fn test_parse_compact_nodes_truncated_data() {
+        let mut data = Vec::new();
+        // Type byte for IPv6 but not enough data after it
+        data.push(0x06);
+        data.extend_from_slice(&[0, 0, 0, 0]); // Only 4 bytes of IP instead of 16
+
+        let nodes = parse_compact_nodes(&data, 0, 10);
+        assert!(nodes.is_empty()); // Should return empty due to truncation
+    }
+
+    #[test]
+    fn test_compact_node_to_socket_addr_v4() {
+        let node = CompactNode::V4(std::net::Ipv4Addr::new(192, 168, 1, 100), 8080);
+        let addr = node.to_socket_addr();
+        assert_eq!(
+            addr.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 100))
+        );
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn test_compact_node_to_socket_addr_v6() {
+        let node = CompactNode::V6(
+            std::net::Ipv6Addr::new(0x2001, 0x0DB8, 0, 0, 0, 0, 0, 1),
+            443,
+        );
+        let addr = node.to_socket_addr();
+        assert!(matches!(addr.ip(), std::net::IpAddr::V6(_)));
+        assert_eq!(addr.port(), 443);
     }
 }

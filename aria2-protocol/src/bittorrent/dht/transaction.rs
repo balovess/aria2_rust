@@ -5,6 +5,7 @@ const TRANSACTION_TIMEOUT_SECS: u64 = 30;
 
 struct PendingTransaction {
     created_at: Instant,
+    #[allow(clippy::type_complexity)]
     callback: Box<dyn FnOnce(&[u8]) + Send>,
 }
 

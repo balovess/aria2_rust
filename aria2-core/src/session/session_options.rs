@@ -122,6 +122,7 @@ mod tests {
             bt_max_upload_slots: Some(4),
             bt_optimistic_unchoke_interval: Some(30),
             bt_snubbed_timeout: Some(60),
+            bt_prioritize_piece: "rarest".to_string(),
         };
 
         let map = download_options_to_map(&opts);

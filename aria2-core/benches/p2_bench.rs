@@ -224,7 +224,7 @@ fn bench_lpd_announce_deserialize_50(c: &mut Criterion) {
 
 fn bench_lpd_manager_handle_packet(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let manager = LpdManager::new(true, 6881);
+    let manager = LpdManager::new();
 
     // Pre-register a download so packets match (must be inside tokio runtime context)
     let test_hash = make_test_hash(0x01);
