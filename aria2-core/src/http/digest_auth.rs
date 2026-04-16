@@ -62,7 +62,7 @@ impl DigestAuthChallenge {
     /// - The required `nonce` parameter is missing
     ///
     /// # Example
-    /// ```
+    /// ```rust,ignore
     /// let challenge = DigestAuthChallenge::parse(
     ///     r#"Digest realm="test realm", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", qop="auth""#
     /// ).unwrap();
@@ -171,7 +171,7 @@ impl DigestAuthResponse {
     /// that can be serialized via [`to_header_value`](Self::to_header_value).
     ///
     /// # Algorithm (RFC 2617):
-    /// ```
+    /// ```text
     /// HA1 = MD5(username:realm:password)
     /// HA2 = MD5(method:uri)
     /// if qop is set:

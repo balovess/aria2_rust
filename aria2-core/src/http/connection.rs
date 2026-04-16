@@ -1311,13 +1311,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let handle = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        handler(stream);
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                handler(stream);
             }
         });
 
@@ -1373,7 +1368,7 @@ mod tests {
         let mut redirect_chain = HashSet::new();
         redirect_chain.insert(current_url.clone());
 
-        let urls = vec![
+        let urls = [
             "http://example.com/page1",
             "http://example.com/page2",
             "http://example.com/page3",

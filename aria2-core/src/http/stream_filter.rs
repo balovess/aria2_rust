@@ -5,6 +5,7 @@
 
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_writer::SeekableDiskWriter;
+use bzip2_rs::DecoderReader as BzDecoder;
 use flate2::read::GzDecoder;
 use std::io::{Cursor, Read};
 
@@ -520,9 +521,7 @@ impl StreamFilter for ChunkedDecoder {
 /// let decompressed = decoder.filter(compressed_data)?;
 /// ```
 pub struct BZip2Decoder {
-    /// 内部 BzDecompressor 实例
-    inner: Option<bzip2::read::BzDecoder<std::io::Cursor<Vec<u8>>>>,
-    /// 是否已完成解压
+    inner: Option<BzDecoder<Cursor<Vec<u8>>>>,
     finished: bool,
 }
 
@@ -589,7 +588,7 @@ impl StreamFilter for BZip2Decoder {
         // 初始化解码器
         if self.inner.is_none() {
             let cursor = Cursor::new(input.to_vec());
-            self.inner = Some(bzip2::read::BzDecoder::new(cursor));
+            self.inner = Some(BzDecoder::new(cursor));
         } else {
             return Err(Aria2Error::Parse(
                 "BZip2 incremental decoding not supported in this implementation".to_string(),

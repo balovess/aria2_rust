@@ -220,7 +220,7 @@ async fn test_e2e_ftp_custom_output_filename() {
         &url,
         &DownloadOptions::default(),
         dir.path().to_str(),
-        Some("ftp_download.dat".into()),
+        Some("ftp_download.dat"),
     )
     .expect("创建FtpDownloadCommand失败");
 

@@ -120,7 +120,7 @@ mod tests {
     fn test_assert_file_contents_mismatch_panics() {
         let dir = setup_temp_dir();
         let f = dir.path().join("mismatch_test.bin");
-        std::fs::write(&f, &[1, 2, 3]).unwrap();
+        std::fs::write(&f, [1, 2, 3]).unwrap();
         // This should panic due to content mismatch
         let result = std::panic::catch_unwind(|| {
             assert_file_contents(&f, &[9, 9, 9]);

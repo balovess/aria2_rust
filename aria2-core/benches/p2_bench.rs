@@ -8,14 +8,12 @@ use aria2_core::auth::digest_auth::{
 };
 use aria2_core::engine::bt_mse_handshake::{CryptoMethod, MseCryptoContext, MseHandshakeManager};
 use aria2_core::engine::bt_progress_info_file::{BtProgress, BtProgressManager, DownloadStats};
-use aria2_core::engine::lpd_manager::{LpdAnnounce, LpdManager};
+use aria2_core::engine::lpd_manager::{LpdManager, parse_lpd_announcement};
 use aria2_core::http::stream_filter::{ChunkedDecoder, FilterChain, GZipDecoder, StreamFilter};
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::io::Write as _;
-use std::net::Ipv4Addr;
-use std::net::SocketAddrV4;
 
 // ====== Helper functions ======
 
@@ -82,7 +80,7 @@ fn build_chunked_data(total_size: usize, chunk_size: usize) -> Vec<u8> {
 }
 
 fn create_large_progress(num_pieces: u32) -> BtProgress {
-    let bitfield_len = ((num_pieces + 7) / 8) as usize;
+    let bitfield_len = num_pieces.div_ceil(8) as usize;
     let bitfield: Vec<u8> = (0..bitfield_len)
         .map(|i| if i < bitfield_len - 1 { 0xFF } else { 0x0F })
         .collect();
@@ -177,20 +175,25 @@ fn bench_www_authenticate_parse(c: &mut Criterion) {
 // ====== LPD Benchmarks (3个) ======
 
 fn bench_lpd_announce_serialize_50(c: &mut Criterion) {
-    let announces: Vec<LpdAnnounce> = (0..50)
-        .map(|i| LpdAnnounce {
-            from_hash: make_test_hash(i as u8),
-            to_hash: make_test_hash((i + 1) as u8),
-            port: 6881 + i as u16,
+    // Benchmark: format 50 LPD announcement text messages (Hash/Port/Token)
+    let info_hashes: Vec<String> = (0..50)
+        .map(|i| {
+            let hash = make_test_hash(i as u8);
+            hash.iter().map(|b| format!("{:02x}", b)).collect()
         })
         .collect();
 
     c.bench_function("lpd_announce_serialize_50", |b| {
         b.iter(|| {
             let mut total = 0usize;
-            for a in &announces {
-                let bytes = black_box(a.to_bytes());
-                total += bytes.len();
+            for hash in &info_hashes {
+                let msg = format!(
+                    "Hash: {}\nPort: {}\nToken: {:08x}\n",
+                    black_box(hash),
+                    black_box(6881u16),
+                    black_box(0xDEAD_BEEF_u32),
+                );
+                total += msg.len();
             }
             black_box(total)
         });
@@ -198,14 +201,18 @@ fn bench_lpd_announce_serialize_50(c: &mut Criterion) {
 }
 
 fn bench_lpd_announce_deserialize_50(c: &mut Criterion) {
+    // Benchmark: parse 50 LPD announcement text messages
     let serialized: Vec<Vec<u8>> = (0..50)
         .map(|i| {
-            let ann = LpdAnnounce {
-                from_hash: make_test_hash(i as u8),
-                to_hash: make_test_hash((i + 1) as u8),
-                port: 6881 + i as u16,
-            };
-            ann.to_bytes()
+            let hash = make_test_hash(i as u8);
+            let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+            format!(
+                "Hash: {}\nPort: {}\nToken: {:08x}\n",
+                hash_hex,
+                6881 + i as u16,
+                0xDEAD_BEEF_u32,
+            )
+            .into_bytes()
         })
         .collect();
 
@@ -213,7 +220,9 @@ fn bench_lpd_announce_deserialize_50(c: &mut Criterion) {
         b.iter(|| {
             let mut count = 0usize;
             for data in &serialized {
-                if LpdAnnounce::from_bytes(black_box(data)).is_some() {
+                if parse_lpd_announcement(black_box(data), std::net::Ipv4Addr::UNSPECIFIED.into())
+                    .is_some()
+                {
                     count += 1;
                 }
             }
@@ -227,29 +236,35 @@ fn bench_lpd_manager_handle_packet(c: &mut Criterion) {
     let manager = LpdManager::new();
 
     // Pre-register a download so packets match (must be inside tokio runtime context)
-    let test_hash = make_test_hash(0x01);
+    let test_hash_hex: String = make_test_hash(0x01)
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
     rt.block_on(async {
-        manager.register_download(test_hash);
+        manager.register_torrent(&test_hash_hex).await.unwrap();
         // Give time for async registration
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     });
 
+    // Build a raw LPD announcement packet (text format per BEP-14)
     let packet = {
-        let ann = LpdAnnounce {
-            from_hash: make_test_hash(0x02),
-            to_hash: test_hash,
-            port: 6881,
-        };
-        ann.to_bytes()
+        let to_hash_hex: String = make_test_hash(0x02)
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        format!(
+            "Hash: {}\nPort: {}\nToken: {:08x}\n",
+            to_hash_hex, 6881, 0xCAFE_u32,
+        )
+        .into_bytes()
     };
-
-    let src_addr = SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 6881);
 
     c.bench_function("lpd_manager_handle_packet", |b| {
         b.to_async(&rt).iter(|| async {
-            let mgr = &manager;
-            mgr.handle_incoming_packet(black_box(&packet), black_box(src_addr))
-                .await;
+            let _peer = parse_lpd_announcement(
+                black_box(&packet),
+                std::net::Ipv4Addr::new(192, 168, 1, 100).into(),
+            );
         });
     });
 }

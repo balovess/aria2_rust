@@ -644,10 +644,12 @@ mod tests {
     #[test]
     fn test_download_options_choking_config_custom() {
         // Verify that custom choking config values can be set
-        let mut opts = DownloadOptions::default();
-        opts.bt_max_upload_slots = Some(8);
-        opts.bt_optimistic_unchoke_interval = Some(15);
-        opts.bt_snubbed_timeout = Some(45);
+        let opts = DownloadOptions {
+            bt_max_upload_slots: Some(8),
+            bt_optimistic_unchoke_interval: Some(15),
+            bt_snubbed_timeout: Some(45),
+            ..DownloadOptions::default()
+        };
 
         assert_eq!(opts.bt_max_upload_slots, Some(8));
         assert_eq!(opts.bt_optimistic_unchoke_interval, Some(15));
@@ -657,10 +659,12 @@ mod tests {
     #[test]
     fn test_download_options_choking_config_clone() {
         // Verify choking config fields are preserved through Clone
-        let mut opts = DownloadOptions::default();
-        opts.bt_max_upload_slots = Some(6);
-        opts.bt_optimistic_unchoke_interval = Some(20);
-        opts.bt_snubbed_timeout = Some(90);
+        let opts = DownloadOptions {
+            bt_max_upload_slots: Some(6),
+            bt_optimistic_unchoke_interval: Some(20),
+            bt_snubbed_timeout: Some(90),
+            ..DownloadOptions::default()
+        };
 
         let cloned = opts.clone();
 

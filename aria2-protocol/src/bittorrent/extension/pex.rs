@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn test_build_pex_message() {
         let addr = PeerAddr::new("1.2.3.4", 5678);
-        let msg = PexHandler::build_pex_message(&[addr.clone()], &[]);
+        let msg = PexHandler::build_pex_message(std::slice::from_ref(&addr), &[]);
         assert!(msg.is_dict());
         assert!(msg.dict_get("added").is_some());
         assert!(msg.dict_get("added.f").is_some());
@@ -321,7 +321,7 @@ mod tests {
 
         let bencode_msg = PexHandler::build_pex_message(&peers, &[]);
         let encoded = bencode_msg.encode();
-        assert!(encoded.len() > 0);
+        assert!(!encoded.is_empty());
     }
 
     #[test]
@@ -445,7 +445,7 @@ mod tests {
         let added_data = msg.dict_get("added").unwrap().as_bytes().unwrap();
         let decoded = decode_compact_peers(added_data).unwrap();
 
-        assert!(!decoded.iter().any(|p| *p == remote_addr));
+        assert!(!decoded.contains(&remote_addr));
         assert_eq!(decoded.len(), 2);
     }
 
@@ -635,7 +635,7 @@ mod tests {
 
         let client_addr = PeerAddr::new("10.0.0.50", 6890);
 
-        let _local_ext_ids = vec![None, Some(1), Some(2)];
+        let _local_ext_ids = [None, Some(1), Some(2)];
         let remote_ext_ids = vec![Some(1), None, Some(3)];
 
         assert!(
@@ -655,7 +655,7 @@ mod tests {
             "Client should discover 3 peers from seeder's PEX"
         );
         assert!(
-            !discovered_peers.iter().any(|p| *p == client_addr),
+            !discovered_peers.contains(&client_addr),
             "Discovered peers should not include client's own address"
         );
 

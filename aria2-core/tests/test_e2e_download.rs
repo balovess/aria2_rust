@@ -166,7 +166,7 @@ async fn test_e2e_custom_output_filename() {
         &url,
         &DownloadOptions::default(),
         dir.path().to_str(),
-        Some("custom_name.dat".into()),
+        Some("custom_name.dat"),
     )
     .expect("创建DownloadCommand失败");
 

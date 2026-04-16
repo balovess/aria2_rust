@@ -989,11 +989,7 @@ mod tests {
         {
             let tmp_dir = std::env::temp_dir();
             let tmp_str = tmp_dir.to_string_lossy().to_string();
-            assert!(
-                validator
-                    .validate("dir", &Value::String(tmp_str.into()))
-                    .is_ok()
-            );
+            assert!(validator.validate("dir", &Value::String(tmp_str)).is_ok());
         }
     }
 

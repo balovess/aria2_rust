@@ -38,13 +38,14 @@ const BURST_THRESHOLD_MULTIPLIER: f64 = 3.0;
 ///
 /// # Example Usage
 ///
-/// ```
+/// ```rust,ignore
 /// use aria2_core::util::speed_smooth::SpeedSmoother;
 ///
 /// let mut smoother = SpeedSmoother::new(10);
 /// smoother.record_bytes(1024); // Record 1KB downloaded
 /// // ... after some time ...
 /// let speed = smoother.smoothed_speed();
+/// let remaining_bytes = 50000u64;
 /// let eta = smoother.eta_seconds(remaining_bytes);
 /// ```
 pub struct SpeedSmoother {

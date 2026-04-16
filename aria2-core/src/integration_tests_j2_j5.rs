@@ -7,7 +7,7 @@ mod j2_j5_integration_tests {
         ConnectionLimiter, calculate_dynamic_segment_size, score_source,
     };
     use crate::http::conditional_get::{
-        ConditionalRequest, ResumeAction, SimpleDateTime, SmartResumeManager, handle_resume_status,
+        ConditionalRequest, ResumeAction, SimpleDateTime, handle_resume_status,
     };
 
     #[test]

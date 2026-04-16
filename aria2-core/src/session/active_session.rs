@@ -485,7 +485,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("创建临时目录失败");
 
         // 测试各种间隔配置
-        let intervals = vec![
+        let intervals = [
             Duration::from_secs(1),
             Duration::from_secs(30),
             Duration::from_secs(60),

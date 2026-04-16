@@ -127,11 +127,12 @@ mod tests {
 
         assert_eq!(
             result,
-            b"Hello, World! This is chunked data.".as_ref(),
+            {
+                let expected: &[u8] = b"Hello, World! This is chunked data.";
+                expected
+            },
             "ChunkedDecoder must correctly decode chunked transfer encoding"
         );
-
-        // Verify decoder state
         assert!(
             !decoder.needs_more_input(),
             "Decoder should be complete after final chunk"

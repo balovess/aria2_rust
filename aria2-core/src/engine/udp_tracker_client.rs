@@ -770,7 +770,7 @@ mod tests {
         client.handle_timeouts().await;
         assert!(
             client.inflight.is_empty()
-                || client.pending.len() > 0
+                || !client.pending.is_empty()
                 || !client.waiting_for_conn.is_empty(),
             "Timed-out request should be moved"
         );

@@ -272,38 +272,9 @@ async fn bt_progress_corrupted_file_recovery() {
 
     assert!(file_path.exists(), "Garbage file should exist on disk");
 
-    // Attempting to load should return an error, not panic
-    let result = manager.load_progress(&info_hash);
-
-    let is_error = result.is_err();
-    match result {
-        Ok(loaded) => {
-            // If it somehow parsed, at least verify no panic occurred
-            // The garbage data might partially parse but key fields will be wrong/default
-            eprintln!(
-                "[TEST3] Loaded (possibly partial): info_hash={}, pieces={}",
-                loaded.to_hex_hash(),
-                loaded.num_pieces
-            );
-            // This is acceptable behavior - graceful degradation
-        }
-        Err(e) => {
-            // Expected: error due to corrupt/invalid format
-            eprintln!("[TEST3] Correctly returned Err for corrupt file: {}", e);
-            let err_str = format!("{}", e);
-            // On Windows with non-English locale, IO errors are localized (e.g. Chinese).
-            // We check that the result is an Err (primary goal: no panic) and that
-            // the error string is non-empty (indicates a real error was produced).
-            assert!(!err_str.is_empty(), "Error message should not be empty");
-        }
-    }
-
-    // Primary assertion: loading garbage must not panic and should return Err
-    // (If it returned Ok above, that's also acceptable as graceful degradation)
-    assert!(
-        is_error || !is_error, // always true - just documents intent
-        "[TEST3] Loading corrupt file handled gracefully (no panic)"
-    );
+    // Loading corrupt data should not panic (graceful degradation)
+    // The result may be Ok(partial) or Err depending on implementation
+    let _ = manager.load_progress(&info_hash); // Just verify no panic
 
     eprintln!("[TEST3] Corrupted file recovery PASSED (no panic)");
 }

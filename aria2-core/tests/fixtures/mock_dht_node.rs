@@ -16,15 +16,10 @@ impl MockDhtNode {
         let s = socket_arc.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
-            loop {
-                match s.recv_from(&mut buf).await {
-                    Ok((len, _src)) => {
-                        if len > 0 {
-                            let resp = Self::build_get_peers_response(&peers_clone);
-                            let _ = s.send_to(&resp, _src).await;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok((len, _src)) = s.recv_from(&mut buf).await {
+                if len > 0 {
+                    let resp = Self::build_get_peers_response(&peers_clone);
+                    let _ = s.send_to(&resp, _src).await;
                 }
             }
         });
@@ -46,7 +41,7 @@ impl MockDhtNode {
                 ));
             }
         }
-        result.push_str("e");
+        result.push('e');
         result.into_bytes()
     }
 

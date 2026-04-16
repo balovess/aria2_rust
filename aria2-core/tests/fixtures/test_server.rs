@@ -94,10 +94,10 @@ impl TestServer {
                             "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes={}-{}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
                             start, end.min(total as usize), body.len()
                         ).into_bytes()
-                        .into_iter().chain(body.into_iter()).collect()
+                        .into_iter().chain(body).collect()
                     } else { http_404() }
                 } else {
-                    let body: Vec<u8> = (0..=100u8).map(|i| i).collect();
+                    let body: Vec<u8> = (0..=100u8).collect();
                     http_response(200, "application/octet-stream", &body)
                 }
             }
@@ -136,7 +136,7 @@ fn http_response(code: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
     )
     .into_bytes()
     .into_iter()
-    .chain(body.to_vec().into_iter())
+    .chain(body.to_vec())
     .collect()
 }
 

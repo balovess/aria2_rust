@@ -853,7 +853,7 @@ async fn test_http_concurrent_segment_assembly() {
     for (i, opt) in results.iter().enumerate() {
         let (status, body_opt) = opt
             .as_ref()
-            .expect(format!("Segment {} request failed", i).as_str());
+            .unwrap_or_else(|| panic!("Segment {} request failed", i));
         assert_eq!(
             *status, 206,
             "Segment {} should return 206 Partial Content, got {}",

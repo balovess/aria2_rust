@@ -172,7 +172,7 @@ mod tests {
     use super::*;
 
     fn make_bf(pieces: u32, indices: &[u32]) -> Vec<u8> {
-        let len = ((pieces as usize) + 7) / 8;
+        let len = (pieces as usize).div_ceil(8);
         let mut bf = vec![0u8; len];
         for &idx in indices {
             if idx < pieces {
@@ -305,13 +305,13 @@ mod tests {
     fn test_empty_tracker_no_crash() {
         let tracker = PeerBitfieldTracker::new(50);
         assert_eq!(tracker.peer_count(), 0);
-        assert_eq!(tracker.missing_pieces(&vec![false; 50]).len(), 50);
+        assert_eq!(tracker.missing_pieces(&[false; 50]).len(), 50);
         assert!(tracker.peers_having_piece(0).is_empty());
         assert!(!tracker.peer_has_piece("nonexistent", 0));
         assert_eq!(tracker.get_peer_bitfield_raw("nope"), None);
         assert!(tracker.get_peer_bitfield_or_empty("nope").is_empty());
 
-        let stats = tracker.stats(Some(&vec![false; 50]));
+        let stats = tracker.stats(Some(&[false; 50]));
         assert_eq!(stats.peer_count, 0);
         assert!(!stats.is_endgame, "50 missing > 20 threshold");
     }

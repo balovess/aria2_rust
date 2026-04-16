@@ -53,7 +53,7 @@ fn bench_option_value_display(c: &mut Criterion) {
     let values: Vec<OptionValue> = vec![
         OptionValue::Str("a long string value".into()),
         OptionValue::Int(999999999),
-        OptionValue::Float(3.14159265358979),
+        OptionValue::Float(std::f64::consts::PI),
         OptionValue::Bool(true),
         OptionValue::List(vec!["x".into(), "y".into(), "z".into()]),
     ];

@@ -72,15 +72,14 @@ impl MockHttpServer {
 
                         for route in routes_guard.iter() {
                             // Check method match
-                            if let Some(ref m) = route.method {
-                                if m != &method {
-                                    continue;
-                                }
+                            if let Some(ref m) = route.method
+                                && m != &method
+                            {
+                                continue;
                             }
 
                             // Check path match (prefix or exact)
-                            if path.starts_with(&route.path_pattern) || &route.path_pattern == path
-                            {
+                            if path.starts_with(&route.path_pattern) || route.path_pattern == path {
                                 let handler = &route.handler;
                                 return Ok::<Response<Body>, Infallible>(handler(&req));
                             }
@@ -205,28 +204,27 @@ impl MockHttpServer {
             path.as_str(),
             move |req: &Request<Body>| -> Response<Body> {
                 // Parse Range header
-                if let Some(range_header) = req.headers().get("Range") {
-                    if let Ok(range_str) = range_header.to_str() {
-                        // Parse "bytes=start-end"
-                        if range_str.starts_with("bytes=") {
-                            let range_part = &range_str[6..];
-                            if let Some((start_str, end_str)) = range_part.split_once('-') {
-                                let start: u64 = start_str.parse().unwrap_or(0);
-                                let end: u64 = end_str.parse().unwrap_or(body.len() as u64 - 1);
-                                let end = end.min(body.len() as u64 - 1);
+                if let Some(range_header) = req.headers().get("Range")
+                    && let Ok(range_str) = range_header.to_str()
+                {
+                    // Parse "bytes=start-end"
+                    if let Some(range_part) = range_str.strip_prefix("bytes=")
+                        && let Some((start_str, end_str)) = range_part.split_once('-')
+                    {
+                        let start: u64 = start_str.parse().unwrap_or(0);
+                        let end: u64 = end_str.parse().unwrap_or(body.len() as u64 - 1);
+                        let end = end.min(body.len() as u64 - 1);
 
-                                let slice = &body[start as usize..=end as usize];
-                                return Response::builder()
-                                    .status(StatusCode::PARTIAL_CONTENT)
-                                    .header(
-                                        "Content-Range",
-                                        format!("bytes={}-{}/{}", start, end, body.len()),
-                                    )
-                                    .header("Accept-Ranges", "bytes")
-                                    .body(Body::from(slice.to_vec()))
-                                    .unwrap();
-                            }
-                        }
+                        let slice = &body[start as usize..=end as usize];
+                        return Response::builder()
+                            .status(StatusCode::PARTIAL_CONTENT)
+                            .header(
+                                "Content-Range",
+                                format!("bytes={}-{}/{}", start, end, body.len()),
+                            )
+                            .header("Accept-Ranges", "bytes")
+                            .body(Body::from(slice.to_vec()))
+                            .unwrap();
                     }
                 }
 
@@ -475,10 +473,10 @@ impl MockHttpServer {
 
     /// Shutdown server gracefully
     pub async fn shutdown(self) {
-        if let Some(tx) = self.shutdown_tx {
-            if let Ok(sender) = Arc::try_unwrap(tx) {
-                let _ = sender.send(());
-            }
+        if let Some(tx) = self.shutdown_tx
+            && let Ok(sender) = Arc::try_unwrap(tx)
+        {
+            let _ = sender.send(());
         }
         // Give time for graceful shutdown
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

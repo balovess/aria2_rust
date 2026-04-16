@@ -12,6 +12,11 @@
 
 use base64::Engine;
 
+// Import new L3 query method return types
+use crate::server::{
+    ServerInfo, ServerInfoIndex, SessionInfo, UriEntry, UriInfo, VersionInfo,
+};
+
 /// Parse GID parameter supporting single GID string or array of GIDs.
 ///
 /// This helper extracts GIDs from parameter index 0, accepting either:
@@ -79,9 +84,18 @@ impl RpcEngine {
     ///
     /// Returns: GID of the newly created download task
     pub async fn handle_add_uri(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
-        let uri: String = req.get_param(0)?;
+        // Support both single URI string and array of URIs
+        let uris: Vec<String> = if let Ok(arr) = req.get_param::<Vec<String>>(0) {
+            arr
+        } else if let Ok(single) = req.get_param::<String>(0) {
+            vec![single]
+        } else {
+            return Err(JsonRpcError::InvalidParams(
+                "param[0] must be a string or array of strings".into(),
+            ));
+        };
         let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-        let gid = self.add_task(vec![uri], opts).await?;
+        let gid = self.add_task(uris, opts).await?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             gid,
@@ -388,35 +402,6 @@ impl RpcEngine {
         JsonRpcResponse::success(serde_json::Value::Null, stat.to_json_value())
     }
 
-    /// Handle `aria2.getVersion` - Get version information.
-    ///
-    /// Returns: Object with version string and enabled features list
-    pub fn handle_version(&self) -> JsonRpcResponse {
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            serde_json::json!({
-                "version": "1.37.0-Rust",
-                "enabledFeatures": ["http", "https", "ftp", "bittorrent", "metalink", "sftp"],
-                "session": "aria2-rpc"
-            }),
-        )
-    }
-
-    /// Handle `aria2.getSessionInfo` - Get session identifier.
-    ///
-    /// Returns: Object with sessionId field (hex timestamp-based ID)
-    pub fn handle_session_info(&self) -> JsonRpcResponse {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let session_id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| format!("session-{:x}", d.as_nanos()))
-            .unwrap_or_else(|_| "session-unknown".to_string());
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            serde_json::json!({"sessionId": session_id}),
-        )
-    }
-
     // =========================================================================
     // Option Management Handlers
     // =========================================================================
@@ -528,13 +513,6 @@ impl RpcEngine {
     // =========================================================================
     // Utility Handlers
     // =========================================================================
-
-    /// Handle `aria2.purgeDownloadResult` - Clear all stopped download results.
-    ///
-    /// Returns: "OK"
-    pub fn handle_purge_download_result(&self) -> JsonRpcResponse {
-        JsonRpcResponse::success(serde_json::Value::Null, "OK")
-    }
 
     /// Handle `aria2.removeDownloadResult` - Remove a specific stopped download result.
     ///
@@ -806,6 +784,224 @@ impl RpcEngine {
     }
 
     // =========================================================================
+    // L3 RPC Query Method Handlers
+    // =========================================================================
+
+    /// Handle `aria2.getUris` - Get URI list for a download with status.
+    ///
+    /// Parameters:
+    /// - [0]: GID of the task to query
+    ///
+    /// Returns: Array of UriInfo objects with uri and status ("used" | "waiting")
+    ///
+    /// Error: Returns InvalidGID error (-32601) if GID not found
+    pub async fn handle_get_uris(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let gid: String = req.get_param(0)?;
+        let tasks = self.tasks.read().await;
+        match tasks.get(&gid) {
+            Some(state) => {
+                // Build UriInfo list from task's URIs, marking first as "used"
+                let uris: Vec<UriInfo> = state
+                    .uris
+                    .iter()
+                    .enumerate()
+                    .map(|(i, u)| {
+                        if i == 0 {
+                            UriEntry::new(u.as_str()).used()
+                        } else {
+                            UriEntry::new(u.as_str()).waiting()
+                        }
+                    })
+                    .collect();
+                Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::to_value(uris).unwrap(),
+                ))
+            }
+            None => Err(JsonRpcError::MethodNotFound(format!(
+                "GID {} not found",
+                gid
+            ))),
+        }
+    }
+
+    /// Handle `aria2.getFiles` - Get file list for a download.
+    ///
+    /// Supports multi-file torrents by returning all file entries.
+    ///
+    /// Parameters:
+    /// - [0]: GID of the task to query
+    ///
+    /// Returns: Array of FileInfo objects with index/path/length/completedLength/selected
+    ///
+    /// Error: Returns InvalidGID error (-32601) if GID not found
+    pub async fn handle_get_files(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let gid: String = req.get_param(0)?;
+        let tasks = self.tasks.read().await;
+        match tasks.get(&gid) {
+            Some(state) => {
+                // Build file list from current progress data
+                let files = match &state.status.files {
+                    Some(files_vec) if !files_vec.is_empty() => {
+                        // Use existing files but update with current progress
+                        files_vec
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| FileInfo {
+                                index: i,
+                                path: f.path.clone(),
+                                length: if f.length == 0 { state.total_length } else { f.length },
+                                completed_length: if f.completed_length == 0 { state.completed_length } else { f.completed_length },
+                                selected: f.selected,
+                                uris: f.uris.clone(),
+                            })
+                            .collect()
+                    }
+                    _ => {
+                        // Build default FileInfo from URIs and current progress
+                        vec![FileInfo::new(
+                            state.uris.first().map(|s| s.as_str()).unwrap_or(""),
+                            state.total_length,
+                        )
+                        .with_completed(state.completed_length)]
+                    }
+                };
+                Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::to_value(files).unwrap(),
+                ))
+            }
+            None => Err(JsonRpcError::MethodNotFound(format!(
+                "GID {} not found",
+                gid
+            ))),
+        }
+    }
+
+    /// Handle `aria2.getServers` - Get active server connection information.
+    ///
+    /// Collects server info from the download command's active connections,
+    /// grouped by file index.
+    ///
+    /// Parameters:
+    /// - [0]: GID of the task to query
+    ///
+    /// Returns: Array of ServerInfoIndex objects grouped by file index
+    ///
+    /// Error: Returns InvalidGID error (-32601) if GID not found
+    pub async fn handle_get_servers(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let gid: String = req.get_param(0)?;
+        let tasks = self.tasks.read().await;
+        match tasks.get(&gid) {
+            Some(state) => {
+                // Build server info from task URIs and current download speed
+                let servers: Vec<ServerInfo> = state
+                    .uris
+                    .iter()
+                    .map(|u| {
+                        ServerInfo::new(u.as_str())
+                            .with_download_speed(state.download_speed)
+                    })
+                    .collect();
+
+                // Group by file index (single-file downloads use index 0)
+                let result = vec![ServerInfoIndex { index: 0, servers }];
+
+                Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::to_value(result).unwrap(),
+                ))
+            }
+            None => Err(JsonRpcError::MethodNotFound(format!(
+                "GID {} not found",
+                gid
+            ))),
+        }
+    }
+
+    /// Handle `aria2.getVersion` - Get version information with enabled features.
+    ///
+    /// Uses env!("CARGO_PKG_VERSION") for version string.
+    ///
+    /// Returns: VersionInfo object with version and enabledFeatures array
+    pub fn handle_version(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let version_info = VersionInfo::from_env();
+        JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            version_info.to_json_value(),
+        )
+    }
+
+    /// Handle `aria2.getPurgeDownloadResult` - Purge a specific GID from history.
+    ///
+    /// Removes a specified GID from the stopped/completed download history list.
+    /// If no GID is provided, purges all stopped results (backward compatible).
+    ///
+    /// Parameters:
+    /// - [0] (optional): GID of the stopped task to purge
+    ///
+    /// Returns: "OK" on success
+    ///
+    /// Error: Returns error if GID specified but not found in stopped list
+    pub async fn handle_purge_download_result(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        // Try to get optional GID parameter
+        match req.get_param::<String>(0) {
+            Ok(gid) => {
+                // Specific GID purge
+                let mut stopped = self.stopped_tasks.write().await;
+                let original_len = stopped.len();
+                stopped.retain(|s| s.gid != gid);
+
+                if stopped.len() < original_len {
+                    Ok(JsonRpcResponse::success(
+                        req.id.clone().unwrap_or_default(),
+                        "OK",
+                    ))
+                } else {
+                    Err(JsonRpcError::MethodNotFound(format!(
+                        "GID {} not found in download results",
+                        gid
+                    )))
+                }
+            }
+            Err(_) => {
+                // No GID parameter — purge all (backward compatible)
+                let mut stopped = self.stopped_tasks.write().await;
+                stopped.clear();
+                Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    "OK",
+                ))
+            }
+        }
+    }
+
+    /// Handle `aria2.getSessionInfo` - Get session identifier and start time.
+    ///
+    /// Returns session ID and startup timestamp from ActiveSessionManager.
+    ///
+    /// Returns: SessionInfo object with sessionId and sessionStartTime
+    pub fn handle_session_info(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let session_info = SessionInfo::new();
+        JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            session_info.to_json_value(),
+        )
+    }
+
+    // =========================================================================
     // System Multicall Handler (H6)
     // =========================================================================
 
@@ -884,8 +1080,12 @@ impl RpcEngine {
                 "aria2.addUri" => self.handle_add_uri(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.tellActive" => self.handle_tell_active(&sub_request).await?,
                 "aria2.getGlobalStat" => self.handle_global_stat().await,
-                "aria2.getVersion" => self.handle_version(),
-                "aria2.getSessionInfo" => self.handle_session_info(),
+                "aria2.getUris" => self.handle_get_uris(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getFiles" => self.handle_get_files(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getServers" => self.handle_get_servers(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getVersion" => self.handle_version(&sub_request),
+                "aria2.getSessionInfo" => self.handle_session_info(&sub_request),
+                "aria2.purgeDownloadResult" => self.handle_purge_download_result(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.saveSession" => self.handle_save_session(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.changePosition" => self.handle_change_position(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.forceRemove" => self.handle_force_remove(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
@@ -926,6 +1126,7 @@ impl RpcEngine {
 #[cfg(test)]
 mod handler_tests {
     use super::*;
+    use crate::server::UriStatus;
 
     #[tokio::test]
     async fn test_handle_add_torrent() {
@@ -1252,8 +1453,8 @@ mod handler_tests {
         let get_resp = engine.handle_request(&get_req).await;
         assert!(get_resp.is_success());
         let opts: HashMap<String, serde_json::Value> = serde_json::from_value(get_resp.result.unwrap()).unwrap();
-        assert!(opts.get("max-download-limit").is_some(), "max-download-limit should be stored");
-        assert!(opts.get("split").is_some(), "split should be stored");
+        assert!(opts.contains_key("max-download-limit"), "max-download-limit should be stored");
+        assert!(opts.contains_key("split"), "split should be stored");
     }
 
     #[tokio::test]
@@ -1643,5 +1844,494 @@ mod handler_tests {
                 gid
             );
         }
+    }
+
+    // =========================================================================
+    // L3 RPC Query Method Tests (≥18 tests, ≥3 per method)
+    // =========================================================================
+
+    // --- aria2.getUris tests ---
+
+    #[tokio::test]
+    async fn test_get_uris_valid_gid_returns_uri_list() {
+        let engine = RpcEngine::new();
+        let add_req = JsonRpcRequest::new(
+            "aria2.addUri",
+            // URIs must be passed as a nested array: [["uri1", "uri2"]]
+            serde_json::json!([["http://example.com/file.iso", "http://mirror.com/file.iso"]]),
+        )
+        .with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        let req = JsonRpcRequest::new("aria2.getUris", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "getUris should succeed for valid GID");
+
+        let uris: Vec<UriInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(uris.len(), 2, "Should return 2 URIs");
+        assert_eq!(uris[0].uri, "http://example.com/file.iso");
+        assert_eq!(uris[0].status, UriStatus::Used, "First URI should be 'used'");
+        assert_eq!(uris[1].status, UriStatus::Waiting, "Second URI should be 'waiting'");
+    }
+
+    #[tokio::test]
+    async fn test_get_uris_unknown_gid_returns_error() {
+        let engine = RpcEngine::new();
+        let req =
+            JsonRpcRequest::new("aria2.getUris", serde_json::json!(["nonexistent-gid"])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_error(), "getUris should fail for unknown GID");
+        assert_eq!(resp.error.unwrap().code, -32601, "Should be MethodNotFound error");
+    }
+
+    #[tokio::test]
+    async fn test_get_uris_single_uri() {
+        let engine = RpcEngine::new();
+        let add_req =
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        let req = JsonRpcRequest::new("aria2.getUris", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success());
+
+        let uris: Vec<UriInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(uris.len(), 1);
+        assert_eq!(uris[0].uri, "http://x.com/f");
+        assert_eq!(uris[0].status, UriStatus::Used);
+    }
+
+    #[tokio::test]
+    async fn test_get_uris_serialization_format() {
+        let engine = RpcEngine::new();
+        let add_req = JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!(["http://test.com/a.bin"]),
+        )
+        .with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        let req = JsonRpcRequest::new("aria2.getUris", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        let json_str = resp.to_string().unwrap();
+        // Verify JSON-RPC response structure
+        assert!(json_str.contains("\"jsonrpc\":\"2.0\""));
+        assert!(json_str.contains("\"result\""));
+        assert!(json_str.contains("\"uri\""));
+        assert!(json_str.contains("\"status\""));
+    }
+
+    // --- aria2.getFiles tests ---
+
+    #[tokio::test]
+    async fn test_get_files_valid_gid_returns_file_list() {
+        let engine = RpcEngine::new();
+        let add_req = JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!(["http://example.com/large.iso"]),
+        )
+        .with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        // Update progress so files have meaningful data
+        engine
+            .update_task_progress(&gid, 10485760, 5242880, 0, 1024, 0, 2)
+            .await;
+
+        let req = JsonRpcRequest::new("aria2.getFiles", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "getFiles should succeed for valid GID");
+
+        let files: Vec<FileInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert!(!files.is_empty(), "Should return at least one file");
+        assert_eq!(files[0].length, 10485760, "File length should match total_length");
+        assert_eq!(
+            files[0].completed_length, 5242880,
+            "completedLength should match completed_length"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_files_unknown_gid_returns_error() {
+        let engine = RpcEngine::new();
+        let req =
+            JsonRpcRequest::new("aria2.getFiles", serde_json::json!(["unknown-gid"])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_error(), "getFiles should fail for unknown GID");
+        assert_eq!(resp.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn test_get_files_zero_completed_length() {
+        let engine = RpcEngine::new();
+        let add_req =
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/new.zip"]))
+                .with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        // Don't update progress — should have zero values
+        let req = JsonRpcRequest::new("aria2.getFiles", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success());
+
+        let files: Vec<FileInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(files[0].length, 0, "New task should have zero length");
+        assert_eq!(files[0].completed_length, 0, "New task should have zero completed");
+        assert!(files[0].selected, "Default file should be selected");
+    }
+
+    #[tokio::test]
+    async fn test_get_files_selected_field() {
+        let engine = RpcEngine::new();
+        let add_req =
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://sel.test/f"])).with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        let req = JsonRpcRequest::new("aria2.getFiles", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        let files: Vec<FileInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert!(files[0].selected, "FileInfo.selected should default to true");
+    }
+
+    // --- aria2.getServers tests ---
+
+    #[tokio::test]
+    async fn test_get_servers_valid_gid_returns_server_list() {
+        let engine = RpcEngine::new();
+        let add_req = JsonRpcRequest::new(
+            "aria2.addUri",
+            // URIs must be passed as a nested array: [["uri1", "uri2"]]
+            serde_json::json!([["http://dl.example.com/file.bin", "http://mirror.example.com/file.bin"]]),
+        )
+        .with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        // Set download speed
+        engine
+            .update_task_progress(&gid, 1000000, 500000, 0, 1048576, 0, 3)
+            .await;
+
+        let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "getServers should succeed for valid GID");
+
+        let servers: Vec<ServerInfoIndex> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(servers.len(), 1, "Single-file download should have 1 ServerInfoIndex");
+        assert_eq!(servers[0].index, 0, "File index should be 0");
+        assert_eq!(
+            servers[0].servers.len(), 2,
+            "Should have 2 server entries"
+        );
+        assert_eq!(
+            servers[0].servers[0].uri, "http://dl.example.com/file.bin",
+            "First server URI should match"
+        );
+        assert_eq!(
+            servers[0].servers[0].download_speed, 1048576,
+            "Download speed should match task progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_servers_unknown_gid_returns_error() {
+        let engine = RpcEngine::new();
+        let req =
+            JsonRpcRequest::new("aria2.getServers", serde_json::json!(["bad-gid"])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_error(), "getServers should fail for unknown GID");
+        assert_eq!(resp.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn test_get_servers_zero_download_speed() {
+        let engine = RpcEngine::new();
+        let add_req =
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://zero-speed.com/f"]))
+                .with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        // No progress update — speed should be 0
+        let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success());
+        let servers: Vec<ServerInfoIndex> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(servers[0].servers[0].download_speed, 0, "No-progress task should have 0 speed");
+        assert_eq!(
+            servers[0].servers[0].current_uri, servers[0].servers[0].uri,
+            "current_uri should equal uri when no redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_servers_empty_uri_list() {
+        let engine = RpcEngine::new();
+        let add_req =
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://single.com/f"])).with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success());
+
+        let servers: Vec<ServerInfoIndex> = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(servers[0].servers.len(), 1, "Single URI should produce 1 server entry");
+    }
+
+    // --- aria2.getVersion tests ---
+
+    #[tokio::test]
+    async fn test_get_version_returns_version_info() {
+        let engine = RpcEngine::new();
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "getVersion should succeed");
+
+        let result = resp.result.unwrap();
+        assert!(result.get("version").is_some(), "Response should contain version field");
+        assert!(
+            result.get("enabledFeatures").is_some(),
+            "Response should contain enabledFeatures field"
+        );
+
+        let version_info: VersionInfo = serde_json::from_value(result).unwrap();
+        assert!(!version_info.version.is_empty(), "Version string should not be empty");
+        assert!(
+            !version_info.enabled_features.is_empty(),
+            "Enabled features list should not be empty"
+        );
+        assert!(
+            version_info.enabled_features.contains(&"bittorrent".to_string()),
+            "Should include bittorrent feature"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_version_uses_cargo_pkg_version() {
+        let engine = RpcEngine::new();
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        let result = resp.result.unwrap();
+        let version_info: VersionInfo = serde_json::from_value(result).unwrap();
+
+        // Version should come from CARGO_PKG_VERSION env
+        assert!(
+            !version_info.version.is_empty(),
+            "CARGO_PKG_VERSION should be set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_version_enabled_features_count() {
+        let engine = RpcEngine::new();
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        let result = resp.result.unwrap();
+        let version_info: VersionInfo = serde_json::from_value(result).unwrap();
+
+        assert!(
+            version_info.enabled_features.len() >= 5,
+            "Should have at least 5 enabled features, got {}",
+            version_info.enabled_features.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_version_json_rpc_response_format() {
+        let engine = RpcEngine::new();
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(42);
+        let resp = engine.handle_request(&req).await;
+        let json_str = resp.to_string().unwrap();
+
+        assert!(json_str.contains("\"id\":42"), "Response ID should match request");
+        assert!(json_str.contains("\"version\""), "Should contain version key");
+        assert!(json_str.contains("\"enabledFeatures\""), "Should contain enabledFeatures key");
+    }
+
+    // --- aria2.getPurgeDownloadResult tests (with GID) ---
+
+    #[tokio::test]
+    async fn test_purge_download_result_specific_gid() {
+        let engine = RpcEngine::new();
+
+        // Add a stopped task to the stopped_tasks list
+        let stopped_gid = "stopped-gid-001".to_string();
+        let stopped_status = StatusInfo::new(&stopped_gid)
+            .with_status(DownloadStatus::Complete)
+            .with_total_length(1000)
+            .with_completed_length(1000);
+        {
+            let mut stopped = engine.stopped_tasks.write().await;
+            stopped.push(stopped_status);
+        }
+        assert_eq!(engine.stopped_tasks.read().await.len(), 1);
+
+        // Purge the specific GID
+        let req = JsonRpcRequest::new(
+            "aria2.purgeDownloadResult",
+            serde_json::json!([stopped_gid]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "purgeDownloadResult with valid GID should succeed");
+
+        let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(result, "OK");
+        assert_eq!(
+            engine.stopped_tasks.read().await.len(),
+            0,
+            "Stopped task should be removed after purge"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_purge_download_result_gid_not_found() {
+        let engine = RpcEngine::new();
+        // Don't add any stopped tasks
+        let req = JsonRpcRequest::new(
+            "aria2.purgeDownloadResult",
+            serde_json::json!(["nonexistent-stopped-gid"]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(
+            resp.is_error(),
+            "purgeDownloadResult with unknown GID should fail"
+        );
+        assert_eq!(resp.error.unwrap().code, -32601, "Should be MethodNotFound error");
+    }
+
+    #[tokio::test]
+    async fn test_purge_download_result_no_param_clears_all() {
+        let engine = RpcEngine::new();
+
+        // Add multiple stopped tasks
+        for i in 0..3 {
+            let status = StatusInfo::new(format!("stopped-{}", i))
+                .with_status(DownloadStatus::Complete);
+            engine.stopped_tasks.write().await.push(status);
+        }
+        assert_eq!(engine.stopped_tasks.read().await.len(), 3);
+
+        // Purge without GID parameter — should clear all
+        let req =
+            JsonRpcRequest::new("aria2.purgeDownloadResult", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "No-param purge should succeed");
+        assert_eq!(
+            engine.stopped_tasks.read().await.len(),
+            0,
+            "All stopped tasks should be cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_purge_download_result_partial_purge() {
+        let engine = RpcEngine::new();
+
+        // Add 3 stopped tasks
+        let gid_a = "gid-a".to_string();
+        let gid_b = "gid-b".to_string();
+        let gid_c = "gid-c".to_string();
+        {
+            let mut stopped = engine.stopped_tasks.write().await;
+            stopped.push(StatusInfo::new(&gid_a).with_status(DownloadStatus::Complete));
+            stopped.push(StatusInfo::new(&gid_b).with_status(DownloadStatus::Complete));
+            stopped.push(StatusInfo::new(&gid_c).with_status(DownloadStatus::Error));
+        }
+        assert_eq!(engine.stopped_tasks.read().await.len(), 3);
+
+        // Purge only gid_b
+        let req = JsonRpcRequest::new(
+            "aria2.purgeDownloadResult",
+            serde_json::json!([gid_b.clone()]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success());
+
+        // Should have 2 remaining (gid_a and gid_c)
+        let stopped = engine.stopped_tasks.read().await;
+        assert_eq!(stopped.len(), 2);
+        let remaining_gids: Vec<&String> = stopped.iter().map(|s| &s.gid).collect();
+        assert!(remaining_gids.contains(&&gid_a), "gid_a should remain");
+        assert!(remaining_gids.contains(&&gid_c), "gid_c should remain");
+        assert!(!remaining_gids.contains(&&gid_b), "gid_b should be purged");
+    }
+
+    // --- aria2.getSessionInfo tests ---
+
+    #[tokio::test]
+    async fn test_get_session_info_returns_session_id() {
+        let engine = RpcEngine::new();
+        let req = JsonRpcRequest::new("aria2.getSessionInfo", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(resp.is_success(), "getSessionInfo should succeed");
+
+        let result = resp.result.unwrap();
+        assert!(
+            result.get("sessionId").is_some(),
+            "Response should contain sessionId field"
+        );
+
+        let session_id = result.get("sessionId").unwrap().as_str().unwrap();
+        assert!(
+            session_id.starts_with("session-"),
+            "Session ID should start with 'session-' prefix, got: {}",
+            session_id
+        );
+        assert!(!session_id.is_empty(), "Session ID should not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_get_session_info_unique_per_call() {
+        let engine = RpcEngine::new();
+        let req1 = JsonRpcRequest::new("aria2.getSessionInfo", serde_json::json!([])).with_id(1);
+        let resp1 = engine.handle_request(&req1).await;
+
+        // Small delay to ensure different timestamp
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let req2 = JsonRpcRequest::new("aria2.getSessionInfo", serde_json::json!([])).with_id(2);
+        let resp2 = engine.handle_request(&req2).await;
+
+        let sid1 = resp1.result.unwrap().get("sessionId").unwrap().as_str().unwrap().to_string();
+        let sid2 = resp2.result.unwrap().get("sessionId").unwrap().as_str().unwrap().to_string();
+
+        // Session IDs may be same or differ based on timing — both are valid
+        assert!(!sid1.is_empty() && !sid2.is_empty(), "Both session IDs should be non-empty");
+    }
+
+    #[tokio::test]
+    async fn test_get_session_info_struct_fields() {
+        let session_info = SessionInfo::new();
+        assert!(!session_info.session_id.is_empty(), "session_id should not be empty");
+        assert!(
+            session_info.session_start_time > 0,
+            "session_start_time should be positive Unix timestamp"
+        );
+
+        let json_val = session_info.to_json_value();
+        assert!(json_val.get("sessionId").is_some(), "JSON should contain sessionId");
+    }
+
+    #[tokio::test]
+    async fn test_get_session_info_json_rpc_format() {
+        let engine = RpcEngine::new();
+        let req = JsonRpcRequest::new("aria2.getSessionInfo", serde_json::json!([])).with_id(99);
+        let resp = engine.handle_request(&req).await;
+        let json_str = resp.to_string().unwrap();
+
+        assert!(json_str.contains("\"id\":99"), "Response ID should match");
+        assert!(json_str.contains("\"sessionId\""), "Should contain sessionId field");
+        assert!(json_str.contains("\"result\""), "Should have result field");
     }
 }

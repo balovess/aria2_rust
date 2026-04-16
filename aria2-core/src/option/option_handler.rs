@@ -604,8 +604,8 @@ mod tests {
         assert_eq!(handler.get("max-concurrent-downloads").as_usize(), 5);
         assert_eq!(handler.get("max-connection-per-server").as_usize(), 16);
         assert_eq!(handler.get("min-split-size").as_usize(), 1_048_576);
-        assert_eq!(handler.get("continue").as_bool(), true);
-        assert_eq!(handler.get("quiet").as_bool(), false);
+        assert!(handler.get("continue").as_bool());
+        assert!(!handler.get("quiet").as_bool());
         assert_eq!(handler.get("seed-ratio").as_f64(), 0.0);
         assert_eq!(handler.get("rpc-listen-port").as_usize(), 6800);
         assert_eq!(handler.get("console-log-level").as_str(), "notice");
@@ -626,7 +626,7 @@ mod tests {
         assert!((handler.get("seed-ratio").as_f64() - 2.5).abs() < f64::EPSILON);
 
         handler.set("quiet", OptionValue::Bool(true));
-        assert_eq!(handler.get("quiet").as_bool(), true);
+        assert!(handler.get("quiet").as_bool());
 
         handler.set(
             "header",
@@ -643,6 +643,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_load_config_file() {
         let mut handler = OptionHandler::new();
 
@@ -680,9 +681,9 @@ allow-overwrite=false
         assert_eq!(handler.get("dir").as_str(), "/home/user/downloads");
         assert_eq!(handler.get("split").as_usize(), 16);
         assert_eq!(handler.get("max-connection-per-server").as_usize(), 8);
-        assert_eq!(handler.get("quiet").as_bool(), true);
+        assert!(handler.get("quiet").as_bool());
         assert!((handler.get("seed-ratio").as_f64() - 1.5).abs() < f64::EPSILON);
-        assert_eq!(handler.get("allow-overwrite").as_bool(), false);
+        assert!(!handler.get("allow-overwrite").as_bool());
 
         // Verify list parsing
         let list_val = handler.get("custom-list");
@@ -690,9 +691,10 @@ allow-overwrite=false
         assert_eq!(list_val.as_str_vec()[0], "header1");
 
         // Verify auto-detected types
-        assert_eq!(handler.get("bool-flag").as_bool(), true); // yes -> true
+        assert!(handler.get("bool-flag").as_bool()); // yes -> true
         assert_eq!(handler.get("number-key").as_usize(), 42);
-        assert!((handler.get("float-key").as_f64() - 3.14).abs() < 0.001);
+        let float_val = handler.get("float-key").as_f64();
+        assert!((float_val - 3.14).abs() < f64::EPSILON);
 
         // Defaults should still be intact for unmentioned keys
         assert_eq!(handler.get("rpc-listen-port").as_usize(), 6800);
@@ -724,7 +726,7 @@ quiet=false
         // Verify config values loaded
         assert_eq!(handler.get("dir").as_str(), "/config/dir");
         assert_eq!(handler.get("split").as_usize(), 4);
-        assert_eq!(handler.get("quiet").as_bool(), false);
+        assert!(!handler.get("quiet").as_bool());
 
         // Now apply CLI args (should override config)
         let cli_args: Vec<String> = vec![
@@ -740,10 +742,10 @@ quiet=false
         // CLI args should win over config
         assert_eq!(handler.get("dir").as_str(), "/cli/dir");
         assert_eq!(handler.get("split").as_usize(), 12);
-        assert_eq!(handler.get("quiet").as_bool(), true); // CLI flag overrides config
+        assert!(handler.get("quiet").as_bool()); // CLI flag overrides config
         assert_eq!(handler.get("max-connection-per-server").as_usize(), 8);
         assert!((handler.get("seed-ratio").as_f64() - 2.0).abs() < f64::EPSILON);
-        assert_eq!(handler.get("continue").as_bool(), false); // --no-continue
+        assert!(!handler.get("continue").as_bool()); // --no-continue
 
         // Cleanup
         let _ = std::fs::remove_file(&config_path);
@@ -790,6 +792,7 @@ quiet=false
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_detect_value_type_edge_cases() {
         // Test various auto-detection scenarios
         assert_eq!(
@@ -816,7 +819,10 @@ quiet=false
             OptionHandler::detect_value_type("-10"),
             Some(OptionValue::I64(-10))
         );
-        assert!((OptionHandler::detect_value_type("3.14").unwrap().as_f64() - 3.14).abs() < 0.001);
+        let detected = OptionHandler::detect_value_type("3.14159")
+            .unwrap()
+            .as_f64();
+        assert!((detected - 3.14159).abs() < 0.001); // use full precision to avoid lint
         assert_eq!(
             OptionHandler::detect_value_type("\"quoted string\""),
             Some(OptionValue::Str("quoted string".into()))
@@ -845,10 +851,10 @@ quiet=false
         assert_eq!(OptionValue::Usize(42).to_string(), "42");
         assert_eq!(OptionValue::I64(-10).to_string(), "-10");
         assert_eq!(
-            format!(
-                "{:.2}",
+            format!("{:.2}", {
+                #[allow(clippy::approx_constant)]
                 OptionValue::F64(3.14).to_string().parse::<f64>().unwrap()
-            ),
+            }),
             "3.14"
         ); // approximate
         assert_eq!(OptionValue::Str("hello".to_string()).to_string(), "hello");

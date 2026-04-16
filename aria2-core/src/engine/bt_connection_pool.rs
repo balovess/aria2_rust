@@ -164,7 +164,7 @@ mod tests {
         let result = pool.prewarm(addr).await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
         assert_eq!(pool.len(), 1);
         assert!(pool.contains_addr(&addr));
     }

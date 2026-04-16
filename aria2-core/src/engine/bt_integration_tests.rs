@@ -47,7 +47,7 @@ mod tests {
         let manager = BtProgressManager::new(&temp_dir).expect("Failed to create progress manager");
 
         // 验证字段可以通过 setter 设置
-        assert!(manager.get_progress_file_path(&[0u8; 20]).exists() == false || true);
+        assert!(!manager.get_progress_file_path(&[0u8; 20]).exists());
     }
 
     #[test]

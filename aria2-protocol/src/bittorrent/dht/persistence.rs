@@ -451,8 +451,8 @@ mod tests {
 
         assert_eq!(deserialized.self_id, self_id);
         assert_eq!(deserialized.nodes.len(), 3);
-        for i in 0..3 {
-            assert_eq!(deserialized.nodes[i].addr, addrs[i]);
+        for (i, node) in deserialized.nodes.iter().enumerate().take(3) {
+            assert_eq!(node.addr, addrs[i]);
         }
     }
 

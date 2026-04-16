@@ -204,7 +204,7 @@ impl MockBtSeeder {
 
         // Send have-all bitfield
         let num_pieces = pieces.len().max(1);
-        let bf_size = (num_pieces + 7) / 8;
+        let bf_size = num_pieces.div_ceil(8);
         let bitfield: Vec<u8> = vec![0xFF; bf_size];
         let mut bf_msg = Vec::with_capacity(5 + bitfield.len());
         bf_msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
@@ -277,10 +277,10 @@ impl MockBtSeeder {
 
                             bytes_sent += piece_msg.len() as u64;
 
-                            if let Some(limit) = config.choke_after_n_bytes {
-                                if bytes_sent >= limit {
-                                    break;
-                                }
+                            if let Some(limit) = config.choke_after_n_bytes
+                                && bytes_sent >= limit
+                            {
+                                break;
                             }
 
                             if stream.write_all(&piece_msg).await.is_err() {

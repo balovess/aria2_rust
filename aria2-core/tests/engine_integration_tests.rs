@@ -362,7 +362,7 @@ async fn engine_bt_progress_persistence() {
     let file_data: Vec<u8> = (0..total_size).map(|i| (i % 256) as u8).collect();
 
     // Compute piece hashes
-    let num_pieces = ((total_size + piece_length as u64 - 1) / piece_length as u64) as usize;
+    let num_pieces = total_size.div_ceil(piece_length as u64) as usize;
     let mut pieces_hash = Vec::with_capacity(num_pieces * 20);
     for i in 0..num_pieces {
         let start = i * piece_length as usize;
@@ -480,7 +480,7 @@ async fn engine_bt_hook_chain_fires() {
     use sha1::{Digest, Sha1};
     let file_data: Vec<u8> = (0..total_size).map(|i| (i % 256) as u8).collect();
 
-    let num_pieces = ((total_size + piece_length as u64 - 1) / piece_length as u64) as usize;
+    let num_pieces = total_size.div_ceil(piece_length as u64) as usize;
     let mut pieces_hash = Vec::with_capacity(num_pieces * 20);
     for i in 0..num_pieces {
         let start = i * piece_length as usize;
@@ -680,7 +680,7 @@ async fn engine_bt_download_with_tracker() {
     use sha1::{Digest, Sha1};
     let file_data: Vec<u8> = (0..total_size).map(|i| (i % 256) as u8).collect();
 
-    let num_pieces = ((total_size + piece_length as u64 - 1) / piece_length as u64) as usize;
+    let num_pieces = total_size.div_ceil(piece_length as u64) as usize;
     let mut pieces_hash = Vec::with_capacity(num_pieces * 20);
     for i in 0..num_pieces {
         let start = i * piece_length as usize;
@@ -1052,7 +1052,7 @@ async fn engine_session_save_restore_roundtrip() {
 
         // Verify session contains task information
         assert!(
-            session_content.contains("session_test_1") || session_content.len() > 0,
+            session_content.contains("session_test_1") || !session_content.is_empty(),
             "Session file should contain task info or be non-empty"
         );
 

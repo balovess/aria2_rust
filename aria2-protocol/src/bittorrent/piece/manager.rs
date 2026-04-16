@@ -89,12 +89,7 @@ mod tests {
 
     #[test]
     fn test_manager_creation() {
-        let hashes: Vec<[u8; 20]> = (0..3)
-            .map(|_| {
-                let h = [0u8; 20];
-                h
-            })
-            .collect();
+        let hashes: Vec<[u8; 20]> = (0..3).map(|_| [0u8; 20]).collect();
         let mgr = PieceManager::new(3, 512, 1024, hashes);
         assert_eq!(mgr.num_pieces(), 3);
         assert_eq!(mgr.piece_length(), 512);
@@ -103,12 +98,7 @@ mod tests {
 
     #[test]
     fn test_last_piece_size() {
-        let hashes: Vec<[u8; 20]> = (0..3)
-            .map(|_| {
-                let h = [0u8; 20];
-                h
-            })
-            .collect();
+        let hashes: Vec<[u8; 20]> = (0..3).map(|_| [0u8; 20]).collect();
         let mgr = PieceManager::new(3, 512, 1100, hashes);
         assert_eq!(mgr.piece_size(0), 512);
         assert_eq!(mgr.piece_size(1), 512);
@@ -117,12 +107,7 @@ mod tests {
 
     #[test]
     fn test_mark_and_verify() {
-        let hashes: Vec<[u8; 20]> = (0..2)
-            .map(|_| {
-                let h = [0u8; 20];
-                h
-            })
-            .collect();
+        let hashes: Vec<[u8; 20]> = (0..2).map(|_| [0u8; 20]).collect();
         let mut mgr = PieceManager::new(2, 100, 150, hashes);
         assert!(!mgr.is_completed(0));
 
@@ -139,12 +124,7 @@ mod tests {
 
     #[test]
     fn test_total_progress() {
-        let hashes: Vec<[u8; 20]> = (0..4)
-            .map(|_| {
-                let h = [0u8; 20];
-                h
-            })
-            .collect();
+        let hashes: Vec<[u8; 20]> = (0..4).map(|_| [0u8; 20]).collect();
         let mut mgr = PieceManager::new(4, 256, 800, hashes);
         assert_eq!(mgr.total_progress(), 0.0);
 

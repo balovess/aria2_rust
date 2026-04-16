@@ -363,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_creation() {
         let mgr = ConfigManager::new();
-        assert!(mgr.has_errors() == false || true);
+        assert!(!mgr.has_errors());
         let dir = mgr.get_global_str("dir").await;
         assert!(dir.is_some());
     }

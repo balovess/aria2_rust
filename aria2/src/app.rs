@@ -1285,11 +1285,8 @@ RESUME_OFFSET=5242880
             Some(102400),
             "max-download-limit 应正确映射"
         );
-        assert_eq!(
-            opts.bt_force_encrypt, true,
-            "bt-force-encrypt=true 应正确映射"
-        );
-        assert_eq!(opts.enable_dht, false, "enable-dht=false 应正确映射");
+        assert!(opts.bt_force_encrypt, "bt-force-encrypt=true 应正确映射");
+        assert!(!opts.enable_dht, "enable-dht=false 应正确映射");
     }
 
     /// 测试 6: 会话文件不存在时的优雅处理

@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(deduped, 1, "One event should have been deduplicated");
 
         // Flush should return exactly 1 event
-        let batch = batcher.maybe_flush(); // force flush by checking
+        let _batch = batcher.maybe_flush(); // force flush by checking
         // Use flush via maybe_flush with elapsed time — but since we just pushed,
         // we need to verify the pending count is correct.
         // The maybe_flush won't trigger immediately if interval hasn't passed,
@@ -687,8 +687,7 @@ mod tests {
 
         // Push 19 events — no flush yet
         for i in 0..19 {
-            let flushed =
-                batcher.push(DownloadEvent::download_start(&format!("gid-{}", i), vec![]));
+            let flushed = batcher.push(DownloadEvent::download_start(format!("gid-{}", i), vec![]));
             assert!(!flushed, "Push {} should not trigger flush yet", i);
         }
         assert_eq!(batcher.pending_count(), 19);
@@ -717,7 +716,7 @@ mod tests {
         // Push some events
         for i in 0..5 {
             batcher.push(DownloadEvent::download_complete(
-                &format!("gid-timer-{}", i),
+                format!("gid-timer-{}", i),
                 vec![],
             ));
         }

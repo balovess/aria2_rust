@@ -272,7 +272,22 @@ impl RpcEngine {
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.getGlobalStat" => self.handle_global_stat().await,
-            "aria2.purgeDownloadResult" => self.handle_purge_download_result(),
+            "aria2.getUris" => self
+                .handle_get_uris(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.getFiles" => self
+                .handle_get_files(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.getServers" => self
+                .handle_get_servers(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.purgeDownloadResult" => self
+                .handle_purge_download_result(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.removeDownloadResult" => self
                 .handle_remove_download_result(req)
                 .await
@@ -312,8 +327,8 @@ impl RpcEngine {
                 .handle_force_remove(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getVersion" => self.handle_version(),
-            "aria2.getSessionInfo" => self.handle_session_info(),
+            "aria2.getVersion" => self.handle_version(req),
+            "aria2.getSessionInfo" => self.handle_session_info(req),
             "system.multicall" => self
                 .handle_multicall(req)
                 .await

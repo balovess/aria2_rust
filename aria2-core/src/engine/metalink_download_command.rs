@@ -333,271 +333,6 @@ impl MetalinkDownloadCommand {
 }
 
 // =========================================================================
-// K3.3 — Tests for Metalink Priority Ordering
-// =========================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aria2_protocol::metalink::parser::UrlEntry;
-
-    /// Test K3.3 #1: Priority descending order works correctly.
-    ///
-    /// Verifies that URLs are sorted by priority in descending order
-    /// (higher priority number = tried first).
-    #[test]
-    fn test_priority_descending_order() {
-        let urls = vec![
-            UrlEntry::new("http://mirror3.example.com/file.bin").with_priority(1),
-            UrlEntry::new("http://mirror1.example.com/file.bin").with_priority(3),
-            UrlEntry::new("http://mirror2.example.com/file.bin").with_priority(2),
-        ];
-
-        let sorted = select_mirrors_by_priority(&urls, "");
-
-        // Should be ordered by priority descending: [3, 2, 1]
-        assert_eq!(sorted.len(), 3, "Should return all URLs");
-        assert_eq!(
-            sorted[0].priority, 3,
-            "First URL should have highest priority (3)"
-        );
-        assert_eq!(
-            sorted[1].priority, 2,
-            "Second URL should have medium priority (2)"
-        );
-        assert_eq!(
-            sorted[2].priority, 1,
-            "Third URL should have lowest priority (1)"
-        );
-
-        // Verify URL ordering matches priority
-        assert!(
-            sorted[0].url.contains("mirror1"),
-            "First should be mirror1 (priority 3)"
-        );
-        assert!(
-            sorted[1].url.contains("mirror2"),
-            "Second should be mirror2 (priority 2)"
-        );
-        assert!(
-            sorted[2].url.contains("mirror3"),
-            "Third should be mirror3 (priority 1)"
-        );
-    }
-
-    /// Test K3.3 #2: Location preference boosts matching URLs among same priority.
-    ///
-    /// When multiple URLs have the same priority, those matching the location
-    /// preference should be tried first.
-    #[test]
-    fn test_location_preference_boosts_matching() {
-        let urls = vec![
-            UrlEntry::new("http://us-mirror1.example.com/file.bin")
-                .with_priority(5)
-                .with_location("us"),
-            UrlEntry::new("http://eu-mirror1.example.com/file.bin")
-                .with_priority(5)
-                .with_location("eu"),
-            UrlEntry::new("http://eu-mirror2.example.com/file.bin")
-                .with_priority(5)
-                .with_location("eu"),
-            UrlEntry::new("http://jp-mirror1.example.com/file.bin")
-                .with_priority(5)
-                .with_location("jp"),
-        ];
-
-        // Prefer EU locations
-        let sorted = select_mirrors_by_priority(&urls, "eu");
-
-        assert_eq!(sorted.len(), 4, "Should return all URLs");
-
-        // All have same priority (5), so EU ones should come first
-        let eu_urls: Vec<_> = sorted
-            .iter()
-            .filter(|u| u.location.as_deref() == Some("eu"))
-            .collect();
-
-        assert_eq!(eu_urls.len(), 2, "Should find 2 EU mirrors");
-
-        // EU mirrors should appear before non-EU mirrors
-        let first_non_eu_idx = sorted
-            .iter()
-            .position(|u| u.location.as_deref() != Some("eu"))
-            .expect("Should find at least one non-EU mirror");
-
-        let last_eu_idx = sorted
-            .iter()
-            .rposition(|u| u.location.as_deref() == Some("eu"))
-            .expect("Should find EU mirrors");
-
-        assert!(
-            last_eu_idx < first_non_eu_idx,
-            "EU mirrors should come before non-EU mirrors"
-        );
-
-        // Test with US preference
-        let sorted_us = select_mirrors_by_priority(&urls, "us");
-        let us_first = &sorted_us[0];
-        assert_eq!(
-            us_first.location.as_deref(),
-            Some("us"),
-            "US mirror should be first when preferring US"
-        );
-    }
-
-    /// Test K3.3 #3: Failover tries all mirrors then returns error when all fail.
-    ///
-    /// Verifies that try_mirrors_with_failover attempts every mirror and
-    /// returns an error message when all attempts fail.
-    #[tokio::test]
-    async fn test_failover_tries_all_then_errors() {
-        let urls = vec![
-            UrlEntry::new("http://mirror1.fail/file.bin").with_priority(3),
-            UrlEntry::new("http://mirror2.fail/file.bin").with_priority(2),
-            UrlEntry::new("http://mirror3.fail/file.bin").with_priority(1),
-        ];
-
-        // Download function that always fails
-        let fail_fn = |url: &str| -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = std::result::Result<Vec<u8>, String>> + '_>,
-        > {
-            let url_owned = url.to_string();
-            Box::pin(async move { Err(format!("Connection refused to {}", url_owned)) })
-        };
-
-        let url_refs: Vec<&UrlEntry> = urls.iter().collect();
-
-        let result = try_mirrors_with_failover(&url_refs, fail_fn).await;
-
-        assert!(result.is_err(), "Should return error when all mirrors fail");
-
-        let error_msg = result.unwrap_err();
-        assert!(
-            error_msg.contains("All 3 mirrors failed"),
-            "Error message should indicate all 3 mirrors failed"
-        );
-    }
-
-    /// Test K3.3 #4: Single mirror succeeds immediately without failover.
-    ///
-    /// Verifies that when there's only one mirror and it succeeds,
-    /// the data is returned without attempting additional failover.
-    #[tokio::test]
-    async fn test_single_mirror_no_failover_needed() {
-        let urls =
-            vec![UrlEntry::new("http://working-mirror.example.com/success.bin").with_priority(10)];
-
-        let expected_data = b"Downloaded file content".to_vec();
-
-        // Download function that succeeds immediately
-        // Use Arc so data can be cloned multiple times (Fn trait requirement)
-        let data_shared = std::sync::Arc::new(expected_data.clone());
-        let success_fn = move |_url: &str| {
-            let data = data_shared.clone();
-            async move { Ok((*data).clone()) }
-        };
-
-        let result = try_mirrors_with_failover(&urls.iter().collect::<Vec<_>>(), &success_fn).await;
-
-        assert!(result.is_ok(), "Single working mirror should succeed");
-
-        let downloaded_data = result.unwrap();
-        assert_eq!(
-            downloaded_data, expected_data,
-            "Downloaded data should match expected content"
-        );
-        assert_eq!(
-            downloaded_data.len(),
-            expected_data.len(),
-            "Should download exactly {} bytes",
-            expected_data.len()
-        );
-    }
-
-    /// Additional test: Mixed priorities with location preference.
-    ///
-    /// Verifies that primary sort (priority) takes precedence over secondary
-    /// sort (location). A higher-priority non-matching URL should still come
-    /// before a lower-priority matching URL.
-    #[test]
-    fn test_priority_overrides_location() {
-        let urls = vec![
-            UrlEntry::new("http://low-eu.example.com/file.bin")
-                .with_priority(1)
-                .with_location("eu"), // Low priority but matches location
-            UrlEntry::new("http://high-us.example.com/file.bin")
-                .with_priority(10)
-                .with_location("us"), // High priority but doesn't match
-        ];
-
-        let sorted = select_mirrors_by_priority(&urls, "eu");
-
-        // High priority (10) should come first even though it doesn't match location
-        assert_eq!(
-            sorted[0].priority, 10,
-            "Higher priority URL should come first regardless of location match"
-        );
-        assert_eq!(
-            sorted[0].url, "http://high-us.example.com/file.bin",
-            "First should be high-priority US URL"
-        );
-        assert_eq!(
-            sorted[1].priority, 1,
-            "Lower priority URL should come second"
-        );
-    }
-
-    /// Additional test: Empty resource list returns empty result.
-    #[test]
-    fn test_empty_resources_returns_empty() {
-        let urls: Vec<UrlEntry> = Vec::new();
-        let sorted = select_mirrors_by_priority(&urls, "");
-
-        assert!(sorted.is_empty(), "Empty input should produce empty output");
-    }
-
-    /// Additional test: Failover succeeds on second attempt after first fails.
-    #[tokio::test]
-    async fn test_failover_succeeds_on_second_mirror() {
-        let urls = vec![
-            UrlEntry::new("http://failing-mirror.example.com/file.bin").with_priority(5),
-            UrlEntry::new("http://working-mirror.example.com/file.bin").with_priority(3),
-        ];
-
-        let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count_clone = attempt_count.clone();
-        let fallback_fn = move |url: &str| {
-            let url_owned = url.to_string();
-            let count = count_clone.clone();
-            async move {
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if url_owned.contains("failing") {
-                    Err("Connection timeout".to_string())
-                } else {
-                    Ok(b"Success data".to_vec())
-                }
-            }
-        };
-
-        let result =
-            try_mirrors_with_failover(&urls.iter().collect::<Vec<_>>(), &fallback_fn).await;
-
-        assert!(result.is_ok(), "Should succeed on second mirror");
-        assert_eq!(
-            attempt_count.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "Should have attempted 2 mirrors"
-        );
-
-        let data = result.unwrap();
-        assert_eq!(
-            data, b"Success data",
-            "Data from second mirror should be returned"
-        );
-    }
-}
-
-// =========================================================================
 // K3 — Metalink Priority Ordering Functions
 // =========================================================================
 
@@ -755,4 +490,269 @@ where
     }
 
     Err(format!("All {} mirrors failed", sorted_urls.len()))
+}
+
+// =========================================================================
+// K3.3 — Tests for Metalink Priority Ordering
+// =========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aria2_protocol::metalink::parser::UrlEntry;
+
+    /// Test K3.3 #1: Priority descending order works correctly.
+    ///
+    /// Verifies that URLs are sorted by priority in descending order
+    /// (higher priority number = tried first).
+    #[test]
+    fn test_priority_descending_order() {
+        let urls = vec![
+            UrlEntry::new("http://mirror3.example.com/file.bin").with_priority(1),
+            UrlEntry::new("http://mirror1.example.com/file.bin").with_priority(3),
+            UrlEntry::new("http://mirror2.example.com/file.bin").with_priority(2),
+        ];
+
+        let sorted = select_mirrors_by_priority(&urls, "");
+
+        // Should be ordered by priority descending: [3, 2, 1]
+        assert_eq!(sorted.len(), 3, "Should return all URLs");
+        assert_eq!(
+            sorted[0].priority, 3,
+            "First URL should have highest priority (3)"
+        );
+        assert_eq!(
+            sorted[1].priority, 2,
+            "Second URL should have medium priority (2)"
+        );
+        assert_eq!(
+            sorted[2].priority, 1,
+            "Third URL should have lowest priority (1)"
+        );
+
+        // Verify URL ordering matches priority
+        assert!(
+            sorted[0].url.contains("mirror1"),
+            "First should be mirror1 (priority 3)"
+        );
+        assert!(
+            sorted[1].url.contains("mirror2"),
+            "Second should be mirror2 (priority 2)"
+        );
+        assert!(
+            sorted[2].url.contains("mirror3"),
+            "Third should be mirror3 (priority 1)"
+        );
+    }
+
+    /// Test K3.3 #2: Location preference boosts matching URLs among same priority.
+    ///
+    /// When multiple URLs have the same priority, those matching the location
+    /// preference should be tried first.
+    #[test]
+    fn test_location_preference_boosts_matching() {
+        let urls = vec![
+            UrlEntry::new("http://us-mirror1.example.com/file.bin")
+                .with_priority(5)
+                .with_location("us"),
+            UrlEntry::new("http://eu-mirror1.example.com/file.bin")
+                .with_priority(5)
+                .with_location("eu"),
+            UrlEntry::new("http://eu-mirror2.example.com/file.bin")
+                .with_priority(5)
+                .with_location("eu"),
+            UrlEntry::new("http://jp-mirror1.example.com/file.bin")
+                .with_priority(5)
+                .with_location("jp"),
+        ];
+
+        // Prefer EU locations
+        let sorted = select_mirrors_by_priority(&urls, "eu");
+
+        assert_eq!(sorted.len(), 4, "Should return all URLs");
+
+        // All have same priority (5), so EU ones should come first
+        let eu_urls: Vec<_> = sorted
+            .iter()
+            .filter(|u| u.location.as_deref() == Some("eu"))
+            .collect();
+
+        assert_eq!(eu_urls.len(), 2, "Should find 2 EU mirrors");
+
+        // EU mirrors should appear before non-EU mirrors
+        let first_non_eu_idx = sorted
+            .iter()
+            .position(|u| u.location.as_deref() != Some("eu"))
+            .expect("Should find at least one non-EU mirror");
+
+        let last_eu_idx = sorted
+            .iter()
+            .rposition(|u| u.location.as_deref() == Some("eu"))
+            .expect("Should find EU mirrors");
+
+        assert!(
+            last_eu_idx < first_non_eu_idx,
+            "EU mirrors should come before non-EU mirrors"
+        );
+
+        // Test with US preference
+        let sorted_us = select_mirrors_by_priority(&urls, "us");
+        let us_first = &sorted_us[0];
+        assert_eq!(
+            us_first.location.as_deref(),
+            Some("us"),
+            "US mirror should be first when preferring US"
+        );
+    }
+
+    /// Test K3.3 #3: Failover tries all mirrors then returns error when all fail.
+    ///
+    /// Verifies that try_mirrors_with_failover attempts every mirror and
+    /// returns an error message when all attempts fail.
+    #[tokio::test]
+    async fn test_failover_tries_all_then_errors() {
+        let urls = [
+            UrlEntry::new("http://mirror1.fail/file.bin").with_priority(3),
+            UrlEntry::new("http://mirror2.fail/file.bin").with_priority(2),
+            UrlEntry::new("http://mirror3.fail/file.bin").with_priority(1),
+        ];
+
+        // Download function that always fails
+        let fail_fn = |url: &str| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<Vec<u8>, String>> + '_>,
+        > {
+            let url_owned = url.to_string();
+            Box::pin(async move { Err(format!("Connection refused to {}", url_owned)) })
+        };
+
+        let url_refs: Vec<&UrlEntry> = urls.iter().collect();
+
+        let result = try_mirrors_with_failover(&url_refs, fail_fn).await;
+
+        assert!(result.is_err(), "Should return error when all mirrors fail");
+
+        let error_msg = result.unwrap_err();
+        assert!(
+            error_msg.contains("All 3 mirrors failed"),
+            "Error message should indicate all 3 mirrors failed"
+        );
+    }
+
+    /// Test K3.3 #4: Single mirror succeeds immediately without failover.
+    ///
+    /// Verifies that when there's only one mirror and it succeeds,
+    /// the data is returned without attempting additional failover.
+    #[tokio::test]
+    async fn test_single_mirror_no_failover_needed() {
+        let urls =
+            [UrlEntry::new("http://working-mirror.example.com/success.bin").with_priority(10)];
+
+        let expected_data = b"Downloaded file content".to_vec();
+
+        // Download function that succeeds immediately
+        // Use Arc so data can be cloned multiple times (Fn trait requirement)
+        let data_shared = std::sync::Arc::new(expected_data.clone());
+        let success_fn = move |_url: &str| {
+            let data = data_shared.clone();
+            async move { Ok((*data).clone()) }
+        };
+
+        let result = try_mirrors_with_failover(&urls.iter().collect::<Vec<_>>(), &success_fn).await;
+
+        assert!(result.is_ok(), "Single working mirror should succeed");
+
+        let downloaded_data = result.unwrap();
+        assert_eq!(
+            downloaded_data, expected_data,
+            "Downloaded data should match expected content"
+        );
+        assert_eq!(
+            downloaded_data.len(),
+            expected_data.len(),
+            "Should download exactly {} bytes",
+            expected_data.len()
+        );
+    }
+
+    /// Additional test: Mixed priorities with location preference.
+    ///
+    /// Verifies that primary sort (priority) takes precedence over secondary
+    /// sort (location). A higher-priority non-matching URL should still come
+    /// before a lower-priority matching URL.
+    #[test]
+    fn test_priority_overrides_location() {
+        let urls = vec![
+            UrlEntry::new("http://low-eu.example.com/file.bin")
+                .with_priority(1)
+                .with_location("eu"), // Low priority but matches location
+            UrlEntry::new("http://high-us.example.com/file.bin")
+                .with_priority(10)
+                .with_location("us"), // High priority but doesn't match
+        ];
+
+        let sorted = select_mirrors_by_priority(&urls, "eu");
+
+        // High priority (10) should come first even though it doesn't match location
+        assert_eq!(
+            sorted[0].priority, 10,
+            "Higher priority URL should come first regardless of location match"
+        );
+        assert_eq!(
+            sorted[0].url, "http://high-us.example.com/file.bin",
+            "First should be high-priority US URL"
+        );
+        assert_eq!(
+            sorted[1].priority, 1,
+            "Lower priority URL should come second"
+        );
+    }
+
+    /// Additional test: Empty resource list returns empty result.
+    #[test]
+    fn test_empty_resources_returns_empty() {
+        let urls: Vec<UrlEntry> = Vec::new();
+        let sorted = select_mirrors_by_priority(&urls, "");
+
+        assert!(sorted.is_empty(), "Empty input should produce empty output");
+    }
+
+    /// Additional test: Failover succeeds on second attempt after first fails.
+    #[tokio::test]
+    async fn test_failover_succeeds_on_second_mirror() {
+        let urls = [
+            UrlEntry::new("http://failing-mirror.example.com/file.bin").with_priority(5),
+            UrlEntry::new("http://working-mirror.example.com/file.bin").with_priority(3),
+        ];
+
+        let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_clone = attempt_count.clone();
+        let fallback_fn = move |url: &str| {
+            let url_owned = url.to_string();
+            let count = count_clone.clone();
+            async move {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if url_owned.contains("failing") {
+                    Err("Connection timeout".to_string())
+                } else {
+                    Ok(b"Success data".to_vec())
+                }
+            }
+        };
+
+        let result =
+            try_mirrors_with_failover(&urls.iter().collect::<Vec<_>>(), &fallback_fn).await;
+
+        assert!(result.is_ok(), "Should succeed on second mirror");
+        assert_eq!(
+            attempt_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "Should have attempted 2 mirrors"
+        );
+
+        let data = result.unwrap();
+        assert_eq!(
+            data, b"Success data",
+            "Data from second mirror should be returned"
+        );
+    }
 }

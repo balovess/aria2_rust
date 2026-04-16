@@ -366,7 +366,7 @@ mod tests {
 
         let limit = sel.adjust_lowest_speed_limit(&uris);
         assert!(limit > 0);
-        let expected = (10000u64 as f64 * 0.3) as u64;
+        let expected = (10000_f64 * 0.3) as u64;
         assert!(
             (limit as i64 - expected as i64).abs() <= 1,
             "limit={} expected={}",
@@ -413,7 +413,7 @@ mod tests {
 
         for host in &["a.com", "b.com", "c.com"] {
             sel.stat_man.update(host, 5000, false);
-            let s = sel.stat_man.find_stat(*host).unwrap();
+            let s = sel.stat_man.find_stat(host).unwrap();
             s.increment_counter();
         }
 
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn test_adaptive_report_failure() {
         let man = Arc::new(ServerStatMan::new());
-        let mut sel = AdaptiveUriSelector::new(Arc::clone(&man));
+        let _sel = AdaptiveUriSelector::new(Arc::clone(&man));
 
         // Create a stat for the host
         man.get_or_create("failing.server");
@@ -492,8 +492,6 @@ mod tests {
             Some(std::time::SystemTime::now() - std::time::Duration::from_secs(61));
         // Re-insert the modified stat
         {
-            use std::collections::HashMap;
-            use std::sync::{Arc, RwLock};
             // Access internal map through mark_failure pattern
             man.mark_failure("cooldown.test", 500); // This will create a new version
         }

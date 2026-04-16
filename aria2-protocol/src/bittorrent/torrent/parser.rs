@@ -224,8 +224,8 @@ mod tests {
 
     fn make_simple_torrent() -> Vec<u8> {
         let mut pieces_data = vec![0u8; 40];
-        for i in 0..40 {
-            pieces_data[i] = i as u8;
+        for (i, piece) in pieces_data.iter_mut().enumerate().take(40) {
+            *piece = i as u8;
         }
 
         let mut info = BTreeMap::new();

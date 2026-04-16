@@ -123,11 +123,7 @@ fn test_inmemory_provider_all_pieces_complete() {
     for i in 0..3u32 {
         assert!(provider.has_piece(i), "piece {} should be set", i);
         let data = provider
-            .get_piece_data(
-                i,
-                0,
-                512.min(provider.num_pieces() as u32 * 512 - i as u32 * 512),
-            )
+            .get_piece_data(i, 0, 512.min(provider.num_pieces() * 512 - i * 512))
             .unwrap();
         assert!(!data.is_empty());
         assert!(data.iter().all(|&b| b == 0xAA));

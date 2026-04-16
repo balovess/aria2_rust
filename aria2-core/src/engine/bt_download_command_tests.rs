@@ -774,8 +774,7 @@ mod tests {
 
         let result_oob_offset = provider.get_piece_data(0, 200, 10);
         assert!(
-            result_oob_offset.is_none()
-                || result_oob_offset.as_ref().map_or(true, |d| d.is_empty()),
+            result_oob_offset.is_none() || result_oob_offset.as_ref().is_none_or(|d| d.is_empty()),
             "Out-of-bounds offset should return None or empty"
         );
 

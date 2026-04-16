@@ -695,11 +695,13 @@ mod tests {
 
     #[test]
     fn test_constants_are_reasonable() {
-        assert!(MAX_RETRIES >= 1);
-        assert!(MAX_RETRIES <= 10);
-        assert!(BLOCK_REQUEST_TIMEOUT_SECS >= 1);
-        assert!(BLOCK_REQUEST_TIMEOUT_SECS <= 30);
-        assert!(MAX_BLOCK_READ_MESSAGES >= 100);
+        const _: () = {
+            assert!(MAX_RETRIES >= 1);
+            assert!(MAX_RETRIES <= 10);
+            assert!(BLOCK_REQUEST_TIMEOUT_SECS >= 1);
+            assert!(BLOCK_REQUEST_TIMEOUT_SECS <= 30);
+            assert!(MAX_BLOCK_READ_MESSAGES >= 100);
+        };
     }
 
     #[test]

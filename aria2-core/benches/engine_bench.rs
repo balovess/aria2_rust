@@ -74,7 +74,7 @@ fn bench_multi_progress_render(c: &mut Criterion) {
         b.iter(|| {
             let mut mp = MultiProgress::new();
             for i in 0..10 {
-                mp.add(&format!("task{}", i), 1024 * 1024 * 10);
+                mp.add(format!("task{}", i), 1024 * 1024 * 10);
             }
             for step in 0..50 {
                 for i in 0..10 {

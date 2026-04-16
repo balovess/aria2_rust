@@ -63,7 +63,7 @@ fn test_sftp_command_custom_output_dir_and_name() {
         "sftp://root@server.example.com:22/etc/config.conf",
         &DownloadOptions::default(),
         Some("/tmp/downloads"),
-        Some("my_config.conf".into()),
+        Some("my_config.conf"),
     );
     assert!(result.is_ok());
 }

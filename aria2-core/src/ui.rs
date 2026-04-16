@@ -413,7 +413,10 @@ mod tests {
     #[test]
     fn test_status_panel_verbose_mode() {
         let panel = StatusPanel::new(false);
-        assert!(panel.should_update() || true);
+        assert!(
+            !panel.should_update(),
+            "immediately after creation, interval not yet elapsed"
+        );
     }
 
     #[test]

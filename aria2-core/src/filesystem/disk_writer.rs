@@ -619,10 +619,7 @@ mod tests {
         for i in 0..110 {
             let size = if i % 10 == 0 { 64 * 1024 } else { 2 * 1024 }; // 90% are 2KB
             let data = vec![i as u8; size];
-            writer
-                .write_at((i * size as usize) as u64, &data)
-                .await
-                .unwrap();
+            writer.write_at((i * size) as u64, &data).await.unwrap();
         }
 
         assert_eq!(writer.write_count(), 110);

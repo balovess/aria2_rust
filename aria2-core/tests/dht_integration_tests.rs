@@ -684,7 +684,7 @@ fn test_engine_uses_token_tracker() {
         let engine = DhtEngine::start(config).await?;
         // Verify engine has a working token tracker by generating tokens
         let hash = [0xEEu8; 20];
-        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        let _addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
         // Engine's token tracker is private but we can verify it works via find_peers
         let _discovery = engine.find_peers(&hash).await;
         Ok(())

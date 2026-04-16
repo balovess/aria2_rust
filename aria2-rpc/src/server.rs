@@ -519,6 +519,141 @@ pub enum UriStatus {
     Waiting,
 }
 
+// =========================================================================
+// L3 RPC Query Method Return Types
+// =========================================================================
+
+/// URI information returned by `aria2.getUris`.
+///
+/// Contains the URI string and its current status (used or waiting).
+/// Reuses [`UriEntry`] internally for compatibility.
+pub type UriInfo = UriEntry;
+
+/// Server connection information for a specific file index.
+///
+/// Returned by `aria2.getServers`, grouped by file index in a
+/// [`ServerInfoIndex`] wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerInfoIndex {
+    /// File index (0-based)
+    pub index: usize,
+    /// List of active server connections for this file
+    pub servers: Vec<ServerInfo>,
+}
+
+/// Individual server connection details.
+///
+/// Contains URI, current active URI (after redirects), and download speed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerInfo {
+    /// Original server URI
+    pub uri: String,
+    /// Current active URI (may differ from original after redirects)
+    pub current_uri: String,
+    /// Current download speed from this server (bytes/sec)
+    pub download_speed: u64,
+}
+
+impl ServerInfo {
+    /// Create a new ServerInfo instance.
+    pub fn new(uri: impl Into<String>) -> Self {
+        let uri_str = uri.into();
+        Self {
+            current_uri: uri_str.clone(),
+            uri: uri_str,
+            download_speed: 0,
+        }
+    }
+
+    /// Set the current (possibly redirected) URI.
+    pub fn with_current_uri(mut self, uri: impl Into<String>) -> Self {
+        self.current_uri = uri.into();
+        self
+    }
+
+    /// Set the download speed.
+    pub fn with_download_speed(mut self, speed: u64) -> Self {
+        self.download_speed = speed;
+        self
+    }
+}
+
+/// Version information returned by `aria2.getVersion`.
+///
+/// Contains the aria2 version string and list of enabled features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionInfo {
+    /// Version string (e.g., "1.37.0-Rust")
+    pub version: String,
+    /// List of enabled feature names (serialized as "enabledFeatures" in JSON)
+    #[serde(rename = "enabledFeatures")]
+    pub enabled_features: Vec<String>,
+}
+
+impl VersionInfo {
+    /// Create VersionInfo from environment or defaults.
+    pub fn from_env() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            enabled_features: vec![
+                "http".to_string(),
+                "https".to_string(),
+                "ftp".to_string(),
+                "bittorrent".to_string(),
+                "metalink".to_string(),
+                "sftp".to_string(),
+            ],
+        }
+    }
+
+    /// Convert to JSON-RPC response value (camelCase keys).
+    pub fn to_json_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabledFeatures": self.enabled_features,
+            "version": self.version
+        })
+    }
+}
+
+/// Session information returned by `aria2.getSessionInfo`.
+///
+/// Contains session identifier and startup timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Unique session identifier
+    pub session_id: String,
+    /// Session start time as Unix timestamp (seconds since epoch)
+    pub session_start_time: u64,
+}
+
+impl SessionInfo {
+    /// Create a new SessionInfo with current timestamp.
+    pub fn new() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            session_id: format!("session-{:x}", start_time),
+            session_start_time: start_time,
+        }
+    }
+
+    /// Convert to JSON-RPC response value (camelCase key).
+    pub fn to_json_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sessionId": self.session_id
+        })
+    }
+}
+
+impl Default for SessionInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub peer_id: String,

@@ -763,79 +763,6 @@ impl DhtStateSnapshot {
 }
 
 // =========================================================================
-// ResumeDataExt implementation for RequestGroup conversion
-// =========================================================================
-
-impl crate::engine::resume_data::ResumeDataExt for ResumeData {
-    async fn from_request_group(group: &RequestGroup) -> Result<Self, String> {
-        let gid = group.gid().to_hex_string();
-        let uris = group.uris();
-        let status = group.status().await;
-
-        // Convert status to string
-        let status_str = match status {
-            crate::request::request_group::DownloadStatus::Active => "active",
-            crate::request::request_group::DownloadStatus::Waiting => "waiting",
-            crate::request::request_group::DownloadStatus::Paused => "paused",
-            crate::request::request_group::DownloadStatus::Complete => "complete",
-            crate::request::request_group::DownloadStatus::Removed => "removed",
-            crate::request::request_group::DownloadStatus::Error(_) => "error",
-        }
-        .to_string();
-
-        // Build URI state list
-        let uri_states: Vec<crate::engine::resume_data::UriState> = uris
-            .iter()
-            .map(|uri| crate::engine::resume_data::UriState {
-                uri: uri.clone(),
-                tried: true,
-                used: status == crate::request::request_group::DownloadStatus::Active,
-                last_result: None,
-                speed_bytes_per_sec: None,
-            })
-            .collect();
-
-        // Get progress information
-        let total_length = group.get_total_length_atomic();
-        let completed_length = group.get_completed_length();
-
-        // Get output path from options
-        let output_path = group
-            .options()
-            .out
-            .as_ref()
-            .or_else(|| group.options().dir.as_ref())
-            .map(|p| {
-                if let Some(out) = group.options().out.as_ref() {
-                    if let Some(dir) = group.options().dir.as_ref() {
-                        format!("{}/{}", dir, out)
-                    } else {
-                        out.clone()
-                    }
-                } else {
-                    p.clone()
-                }
-            });
-
-        Ok(ResumeData {
-            gid,
-            uris: uri_states,
-            total_length,
-            completed_length,
-            bitfield: group.get_bt_bitfield().await.unwrap_or_default(),
-            status: status_str,
-            error_message: None,
-            last_download_time: 0,
-            created_at: 0,
-            output_path,
-            checksum: None,
-            bt_info_hash: None,
-            bt_saved_metadata_path: None,
-        })
-    }
-}
-
-// =========================================================================
 // Tests
 // =========================================================================
 
@@ -1017,13 +944,18 @@ mod tests {
             }],
             total_length: 1024,
             completed_length: 512,
+            uploaded_length: 0,
             bitfield: vec![],
+            num_pieces: None,
+            piece_length: None,
             status: "paused".to_string(),
             error_message: None,
             last_download_time: 0,
             created_at: 0,
             output_path: Some("/downloads/valid-file.bin".to_string()),
             checksum: None,
+            options: std::collections::HashMap::new(),
+            resume_offset: Some(512),
             bt_info_hash: None,
             bt_saved_metadata_path: None,
         };

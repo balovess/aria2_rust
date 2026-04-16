@@ -86,7 +86,7 @@ fn test_e2e_checksum_from_type_string_parsing() {
         ("adler32", HashType::Adler32),
     ];
     for (str_repr, expected) in &cases {
-        let ht = HashType::from_str(str_repr).expect(&format!("{} 应被解析", str_repr));
+        let ht = HashType::from_str(str_repr).unwrap_or_else(|| panic!("{} 应被解析", str_repr));
         assert_eq!(ht, *expected);
     }
 }

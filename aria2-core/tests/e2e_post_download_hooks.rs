@@ -229,17 +229,19 @@ mod tests {
         );
 
         // Verify execution order
-        let log = execution_log.lock().unwrap();
-        assert_eq!(
-            *log,
-            vec![
-                "MoveHook:start",
-                "MoveHook:end",
-                "FinalMoveHook:start",
-                "FinalMoveHook:end",
-            ],
-            "Hooks should execute in sequential order"
-        );
+        {
+            let log = execution_log.lock().unwrap();
+            assert_eq!(
+                *log,
+                vec![
+                    "MoveHook:start",
+                    "MoveHook:end",
+                    "FinalMoveHook:start",
+                    "FinalMoveHook:end",
+                ],
+                "Hooks should execute in sequential order"
+            );
+        } // lock dropped before await below
 
         // Verify data integrity after all moves
         let content = tokio::fs::read_to_string(&final_file)

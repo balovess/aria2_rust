@@ -714,7 +714,7 @@ async fn concurrent_same_filename_collision() {
             );
 
             // Verify the single file contains valid data from ONE source (not corrupted)
-            let filepath = dir.path().join(&collision_files[0]);
+            let filepath = dir.path().join(collision_files[0]);
             if filepath.exists() {
                 let content = std::fs::read(&filepath).unwrap_or_default();
                 let is_valid_v1 = content == data_v1;

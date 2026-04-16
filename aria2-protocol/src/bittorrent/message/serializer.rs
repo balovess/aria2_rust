@@ -160,7 +160,8 @@ mod tests {
         let bytes = serialize_have(42);
         assert_eq!(bytes.len(), 9);
         assert_eq!(bytes[4], 4);
-        assert_eq!(&bytes[5..9], (42u32).to_be_bytes().as_ref());
+        let expected: &[u8] = &(42u32).to_be_bytes();
+        assert_eq!(&bytes[5..9], expected);
     }
 
     #[test]
@@ -168,9 +169,12 @@ mod tests {
         let bytes = serialize_request(10, 20, 30);
         assert_eq!(bytes.len(), 17);
         assert_eq!(bytes[4], 6);
-        assert_eq!(&bytes[5..9], (10u32).to_be_bytes().as_ref());
-        assert_eq!(&bytes[9..13], (20u32).to_be_bytes().as_ref());
-        assert_eq!(&bytes[13..17], (30u32).to_be_bytes().as_ref());
+        let expected_idx: &[u8] = &(10u32).to_be_bytes();
+        let expected_begin: &[u8] = &(20u32).to_be_bytes();
+        let expected_len: &[u8] = &(30u32).to_be_bytes();
+        assert_eq!(&bytes[5..9], expected_idx);
+        assert_eq!(&bytes[9..13], expected_begin);
+        assert_eq!(&bytes[13..17], expected_len);
     }
 
     #[test]
@@ -179,8 +183,10 @@ mod tests {
         let bytes = serialize_piece(5, 100, data.to_vec());
         assert_eq!(bytes.len(), 13 + data.len());
         assert_eq!(bytes[4], 7);
-        assert_eq!(&bytes[5..9], (5u32).to_be_bytes().as_ref());
-        assert_eq!(&bytes[9..13], (100u32).to_be_bytes().as_ref());
+        let expected_piece_idx: &[u8] = &(5u32).to_be_bytes();
+        let expected_piece_begin: &[u8] = &(100u32).to_be_bytes();
+        assert_eq!(&bytes[5..9], expected_piece_idx);
+        assert_eq!(&bytes[9..13], expected_piece_begin);
         assert_eq!(&bytes[13..], b"block_data");
     }
 
@@ -195,7 +201,7 @@ mod tests {
     #[test]
     fn test_create_standard_requests() {
         let reqs = create_standard_requests(0, 50000, 0);
-        let expected_count = (50000 + DEFAULT_REQUEST_LENGTH - 1) / DEFAULT_REQUEST_LENGTH;
+        let expected_count = 50000_u32.div_ceil(DEFAULT_REQUEST_LENGTH);
         assert_eq!(reqs.len(), expected_count as usize);
 
         let last_req = reqs.last().unwrap();

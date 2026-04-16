@@ -140,7 +140,7 @@ fn test_skey_computation() {
 
     // 验证 SKEY = SHA-1(info_hash || shared_secret)
     let mut hasher = Sha1::new();
-    hasher.update(&info_hash);
+    hasher.update(info_hash);
     hasher.update(&fake_shared_secret);
     let expected_skey = hasher.finalize();
 

@@ -18,11 +18,15 @@ fn create_gzip_data(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-/// 创建 BZip2 压缩数据（用于测试）
-fn create_bzip2_data(data: &[u8]) -> Vec<u8> {
-    let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
-    encoder.write_all(data).unwrap();
-    encoder.finish().unwrap()
+/// Pre-computed BZip2 compressed test data (pure Rust, no C dependency needed)
+/// Original: "BZip2 compression test data for verification."
+fn bzip2_test_data() -> Vec<u8> {
+    hex::decode(
+        "425a6839314159265359d1dfd3620000039f8040011000100000102f23dd002\
+                 000314c98990646113d469a0d036a4e1b7e1eb5d9df8e872cabd535e9962e96\
+                 057870104680f8bb9229c284868efe9b10",
+    )
+    .unwrap()
 }
 
 // ==================== GZipDecoder 测试 ====================
@@ -373,7 +377,7 @@ fn test_multiple_content_encodings() {
 
     // 目前只支持 gzip，deflate 会输出 warning 但不添加过滤器
     assert!(
-        chain.len() >= 1,
+        !chain.is_empty(),
         "Should at least handle supported encodings"
     );
 }
@@ -383,7 +387,7 @@ fn test_multiple_content_encodings() {
 #[test]
 fn test_bzip2_decompress_basic() {
     let original = b"BZip2 compression test data for verification.";
-    let compressed = create_bzip2_data(original);
+    let compressed = bzip2_test_data();
 
     let mut decoder = BZip2Decoder::new();
     let result = decoder

@@ -226,7 +226,7 @@ mod tests {
         stat.update_speed(2000, true);
         let avg = stat.get_avg_speed();
         assert!(avg > 0);
-        assert!(avg >= 350 && avg <= 1400);
+        assert!((350..=1400).contains(&avg));
     }
 
     #[test]

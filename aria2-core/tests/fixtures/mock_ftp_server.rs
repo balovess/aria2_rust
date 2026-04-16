@@ -8,6 +8,7 @@ const SMALL_CONTENT: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
 const MEDIUM_PATTERN: u8 = 0xAB;
 const LARGE_PATTERN: u8 = 0xCD;
 
+#[derive(Default)]
 struct FtpSession {
     logged_in: bool,
     passive_listener: Option<TcpListener>,
@@ -15,19 +16,6 @@ struct FtpSession {
     data_port: Option<u16>,
     binary_mode: bool,
     rest_offset: u64,
-}
-
-impl Default for FtpSession {
-    fn default() -> Self {
-        Self {
-            logged_in: false,
-            passive_listener: None,
-            data_host: None,
-            data_port: None,
-            binary_mode: false,
-            rest_offset: 0,
-        }
-    }
 }
 
 pub struct MockFtpServer {
@@ -102,7 +90,7 @@ impl MockFtpServer {
 
             let response = {
                 let mut sess = session.lock().await;
-                Self::process_command(&verb_upper, args, &mut sess).await
+                Self::process_command(verb_upper, args, &mut sess).await
             };
 
             let write_stream = reader.get_mut();
@@ -126,7 +114,7 @@ impl MockFtpServer {
         if !sess.logged_in {
             return Some("530 Not logged in\r\n".into());
         }
-        if verb == "TYPE" || (verb == "TYPE" && args == "I") {
+        if verb == "TYPE" {
             sess.binary_mode = true;
             return Some("200 Type set to I\r\n".into());
         }

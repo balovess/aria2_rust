@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn test_failover_across_tiers() {
         let mut announce_list = AnnounceList::new(
-            &vec![
+            &[
                 vec!["http://tier1-tracker.com/announce".to_string()],
                 vec!["http://tier2-tracker.com/announce".to_string()],
             ],
@@ -654,7 +654,7 @@ mod tests {
     fn test_reliability_scoring() {
         let mut entry1 = TrackerEntry::new("http://good.tracker/announce".to_string());
         let mut entry2 = TrackerEntry::new("http://bad.tracker/announce".to_string());
-        let mut entry3 = TrackerEntry::new("http://unknown.tracker/announce".to_string());
+        let entry3 = TrackerEntry::new("http://unknown.tracker/announce".to_string());
 
         // Simulate good tracker with many successes
         for _ in 0..10 {

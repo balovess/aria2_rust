@@ -89,13 +89,14 @@ impl MockBtPeerServer {
         stream.flush().await.ok();
 
         let num_pieces = piece_data.len() as u32;
-        let bf_len = ((num_pieces + 7) / 8) as usize;
+        let bf_len = num_pieces.div_ceil(8) as usize;
         let mut bitfield = vec![0xFFu8; bf_len];
         let last_byte_bits = (num_pieces % 8) as u8;
-        if last_byte_bits > 0 && last_byte_bits < 8 {
-            if let Some(last) = bitfield.last_mut() {
-                *last = !((1 << last_byte_bits) - 1);
-            }
+        if last_byte_bits > 0
+            && last_byte_bits < 8
+            && let Some(last) = bitfield.last_mut()
+        {
+            *last = !((1 << last_byte_bits) - 1);
         }
 
         let msg_bitfield = build_message(5, &bitfield);
@@ -159,17 +160,15 @@ impl MockBtPeerServer {
                     }
                 }
                 Some(20) => {
-                    if let Some(meta) = torrent_metadata {
-                        if payload.len() > 1 {
-                            if let Some(ext_dict) = parse_bencode_from_slice(&payload[1..]) {
-                                if has_key(&ext_dict, b"m") || has_key(&ext_dict, b"msg_type") {
-                                    let ext_resp = handle_extension_message(&ext_dict, meta);
-                                    if let Some(resp) = ext_resp {
-                                        stream.write_all(&resp).await.ok();
-                                        stream.flush().await.ok();
-                                    }
-                                }
-                            }
+                    if let Some(meta) = torrent_metadata
+                        && payload.len() > 1
+                        && let Some(ext_dict) = parse_bencode_from_slice(&payload[1..])
+                        && (has_key(&ext_dict, b"m") || has_key(&ext_dict, b"msg_type"))
+                    {
+                        let ext_resp = handle_extension_message(&ext_dict, meta);
+                        if let Some(resp) = ext_resp {
+                            stream.write_all(&resp).await.ok();
+                            stream.flush().await.ok();
                         }
                     }
                 }
@@ -309,7 +308,7 @@ fn handle_extension_message(
     {
         let piece_size = 16 * 1024;
         let total_size = metadata.len() as u64;
-        let num_pieces = ((total_size + piece_size as u64 - 1) / piece_size as u64) as u32;
+        let num_pieces = total_size.div_ceil(piece_size as u64) as u32;
 
         let mut responses = Vec::new();
         for i in 0..num_pieces {

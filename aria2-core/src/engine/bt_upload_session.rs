@@ -354,7 +354,7 @@ mod tests {
     fn test_in_memory_provider_last_piece_smaller() {
         let total_size = 260u32;
         let piece_len = 100u32;
-        let num_pieces = (total_size + piece_len - 1) / piece_len;
+        let num_pieces = total_size.div_ceil(piece_len);
         let mut provider = InMemoryPieceProvider::new(piece_len, num_pieces);
 
         provider.set_all_from_pattern(|_, idx| idx as u8);

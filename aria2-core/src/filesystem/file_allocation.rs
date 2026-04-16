@@ -428,7 +428,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let test_size: u64 = 1024 * 100; // 100KB
 
-        let strategies = vec!["prealloc", "falloc", "trunc"];
+        let strategies = ["prealloc", "falloc", "trunc"];
 
         for (i, strategy) in strategies.iter().enumerate() {
             let path = dir.path().join(format!("test_strategy_{}.bin", i));
@@ -467,19 +467,22 @@ mod tests {
         .await
         .unwrap();
 
-        let calls = progress_calls.lock().unwrap();
-        // Should have at least start(0) and end(total) calls
-        assert!(
-            calls.len() >= 2,
-            "expected at least 2 progress calls, got {}",
-            calls.len()
-        );
-        assert_eq!(calls.first().unwrap().0, 0); // Start: 0 bytes
-        assert_eq!(
-            calls.last().unwrap().0,
-            150 * 1024 * 1024 // End: full size
-        );
-        assert_eq!(calls.last().unwrap().1, 150 * 1024 * 1024);
+        {
+            // Lock scope - must be dropped before await below
+            let calls = progress_calls.lock().unwrap();
+            // Should have at least start(0) and end(total) calls
+            assert!(
+                calls.len() >= 2,
+                "expected at least 2 progress calls, got {}",
+                calls.len()
+            );
+            assert_eq!(calls.first().unwrap().0, 0); // Start: 0 bytes
+            assert_eq!(
+                calls.last().unwrap().0,
+                150 * 1024 * 1024 // End: full size
+            );
+            assert_eq!(calls.last().unwrap().1, 150 * 1024 * 1024);
+        } // lock dropped here
 
         // Verify file was actually created correctly
         let metadata = tokio::fs::metadata(&path).await.unwrap();

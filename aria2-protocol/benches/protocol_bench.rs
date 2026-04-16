@@ -20,7 +20,7 @@ fn bench_bencode_encode_dict(c: &mut Criterion) {
 }
 
 fn bench_bencode_encode_list(c: &mut Criterion) {
-    let items: Vec<BencodeValue> = (0..50).map(|i| BencodeValue::Int(i)).collect();
+    let items: Vec<BencodeValue> = (0..50).map(BencodeValue::Int).collect();
     c.bench_with_input(
         BenchmarkId::new("bencode_encode_list_50_items", 50),
         &items,

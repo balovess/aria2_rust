@@ -43,8 +43,10 @@ rand = "0.8"
 num-bigint-dig = "0.8"
 num-traits = "0.2"
 getrandom = "0.2"
-ssh2 = "0.9"
+russh = { version = "0.59", features = ["ring"] }
+aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags = "2.4"
+dirs = "5"
 
 [features]
 default = []

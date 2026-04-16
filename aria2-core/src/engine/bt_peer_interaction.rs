@@ -291,12 +291,14 @@ mod tests {
 
     #[test]
     fn test_constants_are_reasonable() {
-        assert!(PEER_CONNECTION_DELAY_MS >= 10);
-        assert!(PEER_CONNECTION_DELAY_MS <= 1000);
-        assert!(MAX_UNCHOKE_WAIT_ATTEMPTS >= 10);
-        assert!(MAX_UNCHOKE_WAIT_ATTEMPTS <= 100);
-        assert!(PEER_MESSAGE_TIMEOUT_SECS >= 1);
-        assert!(PEER_MESSAGE_TIMEOUT_SECS <= 30);
+        const _: () = {
+            assert!(PEER_CONNECTION_DELAY_MS >= 10);
+            assert!(PEER_CONNECTION_DELAY_MS <= 1000);
+            assert!(MAX_UNCHOKE_WAIT_ATTEMPTS >= 10);
+            assert!(MAX_UNCHOKE_WAIT_ATTEMPTS <= 100);
+            assert!(PEER_MESSAGE_TIMEOUT_SECS >= 1);
+            assert!(PEER_MESSAGE_TIMEOUT_SECS <= 30);
+        };
     }
 
     #[test]

@@ -156,7 +156,7 @@ impl MockTorrentBuilder {
         };
 
         let num_pieces = if total_size > 0 && self.piece_length > 0 {
-            ((total_size + self.piece_length as u64 - 1) / self.piece_length as u64) as usize
+            total_size.div_ceil(self.piece_length as u64) as usize
         } else {
             1
         };
@@ -233,8 +233,10 @@ impl MockTorrentBuilder {
         for i in 0..completed_pieces.min(total_pieces) {
             let start = i * self.piece_length as usize;
             let end = (start + self.piece_length as usize).min(total_size);
-            for j in start..end {
-                expected_data[j] = data_pattern;
+            for (j, item) in expected_data.iter_mut().enumerate() {
+                if j >= start && j < end {
+                    *item = data_pattern;
+                }
             }
         }
 

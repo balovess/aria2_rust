@@ -8,7 +8,7 @@ pub fn build_test_torrent(
     tracker_url: &str,
 ) -> Vec<u8> {
     let file_data = generate_file_data(total_size);
-    let num_pieces = ((total_size + piece_length as u64 - 1) / piece_length as u64) as usize;
+    let num_pieces = total_size.div_ceil(piece_length as u64) as usize;
     let mut pieces_hash = Vec::with_capacity(num_pieces * 20);
 
     for i in 0..num_pieces {
@@ -27,12 +27,10 @@ pub fn build_test_torrent(
     let info_key = b"info";
     let info_val = bencode_dict(&info_dict);
 
-    let torrent = bencode_dict(&[
+    bencode_dict(&[
         (announce_key.to_vec(), announce_val),
         (info_key.to_vec(), info_val),
-    ]);
-
-    torrent
+    ])
 }
 
 pub fn generate_file_data(size: u64) -> Vec<u8> {

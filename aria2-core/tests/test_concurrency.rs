@@ -33,8 +33,9 @@ async fn test_config_manager_concurrent_read_write() {
         handles.push(tokio::spawn(async move {
             if i % 2 == 0 {
                 let mut m = mgr_clone.write().await;
-                let _ =
+                let _fut =
                     m.set_global_option("split", aria2_core::config::OptionValue::Int(i as i64));
+                drop(_fut); // Explicitly drop the future to avoid clippy warning
             } else {
                 let m = mgr_clone.read().await;
                 let _ = m.get_global_i64("split").await;

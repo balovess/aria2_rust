@@ -54,18 +54,15 @@ impl MockDhtServer {
                         match result {
                             Ok((len, src)) => {
                                 if len == 0 { continue; }
-                                match DhtMessage::decode(&buf[..len]) {
-                                    Ok(msg) => {
-                                        let mut recv = received.lock().await;
-                                        recv.push(msg.clone());
-                                        drop(recv);
+                                if let Ok(msg) = DhtMessage::decode(&buf[..len]) {
+                                    let mut recv = received.lock().await;
+                                    recv.push(msg.clone());
+                                    drop(recv);
 
-                                        let resp = Self::build_response(&msg, &expectations).await;
-                                        if let Some(data) = resp {
-                                            let _ = sock.send_to(&data, src).await;
-                                        }
+                                    let resp = Self::build_response(&msg, &expectations).await;
+                                    if let Some(data) = resp {
+                                        let _ = sock.send_to(&data, src).await;
                                     }
-                                    Err(_) => {}
                                 }
                             }
                             Err(_) => break,
@@ -88,29 +85,27 @@ impl MockDhtServer {
                 let method = msg.q.as_ref()?.0.as_str();
                 let exp_map = expectations.lock().await;
 
-                if method == DhtQueryMethod::PING {
-                    if let Some(exp) = exp_map.get("ping") {
-                        if let Some(ref resp) = exp.response {
-                            return resp.encode().ok();
-                        }
-                        return Some(Self::pong_response(&msg.t).encode().ok()?);
+                if method == DhtQueryMethod::PING
+                    && let Some(exp) = exp_map.get("ping")
+                {
+                    if let Some(ref resp) = exp.response {
+                        return resp.encode().ok();
                     }
+                    return Self::pong_response(&msg.t).encode().ok();
                 }
 
-                if method == DhtQueryMethod::GET_PEERS {
-                    if let Some(exp) = exp_map.get("get_peers") {
-                        return Some(
-                            Self::get_peers_response(&msg.t, &exp.peers, &exp.nodes)
-                                .encode()
-                                .ok()?,
-                        );
-                    }
+                if method == DhtQueryMethod::GET_PEERS
+                    && let Some(exp) = exp_map.get("get_peers")
+                {
+                    return Self::get_peers_response(&msg.t, &exp.peers, &exp.nodes)
+                        .encode()
+                        .ok();
                 }
 
-                if method == DhtQueryMethod::FIND_NODE {
-                    if let Some(exp) = exp_map.get("find_node") {
-                        return Some(Self::find_node_response(&msg.t, &exp.nodes).encode().ok()?);
-                    }
+                if method == DhtQueryMethod::FIND_NODE
+                    && let Some(exp) = exp_map.get("find_node")
+                {
+                    return Self::find_node_response(&msg.t, &exp.nodes).encode().ok();
                 }
 
                 if method == DhtQueryMethod::ANNOUNCE_PEER {

@@ -1483,7 +1483,7 @@ mod tests {
         let needed = vec![0u32, 1, 2, 3, 4, 5];
         let peer_bf = vec![0b11111100]; // Peer has pieces 0-5
 
-        let mut already_sent = HashSet::new();
+        let already_sent = HashSet::new();
         let fast_set = BtDownloadCommand::calculate_fast_set(&needed, &peer_bf, &already_sent);
 
         assert_eq!(fast_set.len(), 6); // All pieces should be selected (<10 limit)
@@ -1497,7 +1497,7 @@ mod tests {
         let needed: Vec<u32> = (0..15).collect();
         let peer_bf = vec![0xFF, 0xFF]; // Peer has first 16 pieces
 
-        let mut already_sent = HashSet::new();
+        let already_sent = HashSet::new();
         let fast_set = BtDownloadCommand::calculate_fast_set(&needed, &peer_bf, &already_sent);
 
         assert_eq!(fast_set.len(), 10); // Should cap at MAX_ALLOWED_FAST_PER_PEER
@@ -1525,7 +1525,7 @@ mod tests {
         let needed = vec![0u32, 1, 2, 3, 4];
         let peer_bf = vec![0b00011000]; // bitfield byte: bits 3 and 4 set (pieces 3,4)
 
-        let mut already_sent = HashSet::new();
+        let already_sent = HashSet::new();
         let fast_set = BtDownloadCommand::calculate_fast_set(&needed, &peer_bf, &already_sent);
 
         assert_eq!(fast_set.len(), 2); // Only pieces that peer has

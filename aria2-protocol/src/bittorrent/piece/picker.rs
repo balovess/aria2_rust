@@ -468,7 +468,7 @@ mod tests {
     }
 
     fn make_bitfield(pieces: usize, indices: &[usize]) -> Vec<u8> {
-        let len = (pieces + 7) / 8;
+        let len = pieces.div_ceil(8);
         let mut bf = vec![0u8; len];
         for &idx in indices {
             if idx < pieces {
