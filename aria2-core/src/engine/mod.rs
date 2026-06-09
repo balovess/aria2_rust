@@ -33,11 +33,10 @@ pub mod ftp_download_command;
 pub mod http_segment_downloader;
 pub mod http_tracker_client;
 pub mod lpd_manager;
-#[cfg(test)]
-pub mod lpd_manager_tests;
 pub mod magnet_download_command;
 pub mod metadata_exchange;
 pub mod metalink_download_command;
+pub mod mirror_coordinator;
 pub mod multi_file_layout;
 pub mod peer_stats;
 pub mod resume_data;

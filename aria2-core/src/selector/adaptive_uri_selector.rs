@@ -26,6 +26,7 @@ fn extract_host(uri: &str) -> Option<String> {
 
 pub struct AdaptiveUriSelector {
     stat_man: Arc<ServerStatMan>,
+    uris: Vec<String>,
     nb_server_toevaluate: AtomicI32,
     nb_connections: AtomicI32,
 }
@@ -34,9 +35,56 @@ impl AdaptiveUriSelector {
     pub fn new(stat_man: Arc<ServerStatMan>) -> Self {
         Self {
             stat_man,
+            uris: Vec::new(),
             nb_server_toevaluate: AtomicI32::new(DEFAULT_NB_SERVER_TO_EVALUATE),
             nb_connections: AtomicI32::new(DEFAULT_NB_CONNECTIONS),
         }
+    }
+
+    /// Create an AdaptiveUriSelector with a known list of URIs.
+    ///
+    /// This constructor stores the URI list internally, enabling
+    /// `report_failure` and `report_success` to work correctly
+    /// by looking up hosts from URI indices.
+    ///
+    /// # Arguments
+    ///
+    /// * `stat_man` - Shared server statistics manager
+    /// * `uris` - List of candidate URIs (mirrors)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use aria2_core::selector::server_stat_man::ServerStatMan;
+    /// use aria2_core::selector::adaptive_uri_selector::AdaptiveUriSelector;
+    ///
+    /// let stat_man = Arc::new(ServerStatMan::new());
+    /// let uris = vec![
+    ///     "http://mirror1.com/file".to_string(),
+    ///     "http://mirror2.com/file".to_string(),
+    /// ];
+    /// let selector = AdaptiveUriSelector::new_with_uris(stat_man, uris);
+    /// ```
+    pub fn new_with_uris(stat_man: Arc<ServerStatMan>, uris: Vec<String>) -> Self {
+        Self {
+            stat_man,
+            uris,
+            nb_server_toevaluate: AtomicI32::new(DEFAULT_NB_SERVER_TO_EVALUATE),
+            nb_connections: AtomicI32::new(DEFAULT_NB_CONNECTIONS),
+        }
+    }
+
+    /// Set the URI list after construction.
+    ///
+    /// This is useful when the URI list is not known at construction time.
+    pub fn set_uris(&mut self, uris: Vec<String>) {
+        self.uris = uris;
+    }
+
+    /// Get the stored URI list.
+    pub fn get_uris(&self) -> &[String] {
+        &self.uris
     }
 
     pub fn set_nb_connections(&self, n: i32) {
@@ -172,6 +220,86 @@ impl AdaptiveUriSelector {
     pub fn stat_man(&self) -> &Arc<ServerStatMan> {
         &self.stat_man
     }
+
+    /// Report a successful download from a specific URI.
+    ///
+    /// This updates the server statistics with the measured download speed,
+    /// which affects future mirror selection decisions.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri_idx` - Index of the URI in the stored URI list
+    /// * `speed` - Measured download speed in bytes per second
+    /// * `is_multi` - Whether this was a multi-connection download
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use aria2_core::selector::server_stat_man::ServerStatMan;
+    /// use aria2_core::selector::adaptive_uri_selector::AdaptiveUriSelector;
+    ///
+    /// let stat_man = Arc::new(ServerStatMan::new());
+    /// let uris = vec!["http://fast.mirror.com/file".to_string()];
+    /// let selector = AdaptiveUriSelector::new_with_uris(stat_man, uris);
+    ///
+    /// // Report 1 MB/s download speed
+    /// selector.report_success(0, 1_000_000, false);
+    /// ```
+    pub fn report_success(&self, uri_idx: usize, speed: u64, is_multi: bool) {
+        if let Some(uri) = self.uris.get(uri_idx) {
+            if let Some(host) = extract_host(uri) {
+                self.stat_man.update(&host, speed, is_multi);
+                // Reset failure count on success
+                if let Some(stat) = self.stat_man.find_stat(&host) {
+                    // Success resets the error status
+                    stat.reset_status();
+                }
+            }
+        }
+    }
+
+    /// Report a failed download attempt from a specific URI.
+    ///
+    /// This marks the server as failed in the statistics manager,
+    /// which will affect future mirror selection (the server may be
+    /// temporarily deprioritized or disabled depending on failure count).
+    ///
+    /// # Arguments
+    ///
+    /// * `uri_idx` - Index of the URI in the stored URI list
+    /// * `error_code` - HTTP error code (e.g., 500, 503) or 0 for network errors
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use aria2_core::selector::server_stat_man::ServerStatMan;
+    /// use aria2_core::selector::adaptive_uri_selector::AdaptiveUriSelector;
+    ///
+    /// let stat_man = Arc::new(ServerStatMan::new());
+    /// let uris = vec!["http://failing.mirror.com/file".to_string()];
+    /// let selector = AdaptiveUriSelector::new_with_uris(stat_man, uris);
+    ///
+    /// // Report HTTP 503 error
+    /// selector.report_failure_with_code(0, 503);
+    /// ```
+    pub fn report_failure_with_code(&self, uri_idx: usize, error_code: u16) {
+        if let Some(uri) = self.uris.get(uri_idx) {
+            if let Some(host) = extract_host(uri) {
+                // Ensure stat exists before marking failure
+                self.stat_man.get_or_create(&host);
+                self.stat_man.mark_failure(&host, error_code);
+            }
+        }
+    }
+
+    /// Report a failed download attempt with default error code (500).
+    ///
+    /// This is a convenience method that calls `report_failure_with_code(uri_idx, 500)`.
+    pub fn report_failure_default(&self, uri_idx: usize) {
+        self.report_failure_with_code(uri_idx, 500);
+    }
 }
 
 impl UriSelector for AdaptiveUriSelector {
@@ -191,10 +319,7 @@ impl UriSelector for AdaptiveUriSelector {
     }
 
     fn report_failure(&mut self, uri_idx: usize) {
-        // Note: AdaptiveUriSelector doesn't store uris directly, so we use a workaround
-        // In production, this would need access to the URI list or be called differently
-        // For now, we'll implement a version that works with the trait signature
-        let _ = uri_idx; // Placeholder - in real usage, this would look up the URI
+        self.report_failure_with_code(uri_idx, 500);
     }
 }
 
@@ -511,5 +636,132 @@ mod tests {
             test_stat.is_available(),
             "Server should become available after cooldown expires"
         );
+    }
+
+    // ======================================================================
+    // Tests for new_with_uris and report_success/report_failure_with_code
+    // ======================================================================
+
+    #[test]
+    fn test_new_with_uris() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec![
+            "http://mirror1.com/file".to_string(),
+            "http://mirror2.com/file".to_string(),
+        ];
+        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris.clone());
+
+        assert_eq!(sel.get_uris().len(), 2);
+        assert_eq!(sel.get_uris()[0], "http://mirror1.com/file");
+    }
+
+    #[test]
+    fn test_report_success_updates_speed() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec!["http://fast.mirror.com/file".to_string()];
+        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
+
+        // Report success with 1 MB/s speed
+        sel.report_success(0, 1_000_000, false);
+
+        let stat = man.find_stat("fast.mirror.com").unwrap();
+        assert!(stat.get_download_speed() > 0);
+        assert!(stat.get_single_avg_speed() > 0);
+    }
+
+    #[test]
+    fn test_report_success_multi_connection() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec!["http://multi.mirror.com/file".to_string()];
+        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
+
+        // Report success with multi-connection flag
+        sel.report_success(0, 2_000_000, true);
+
+        let stat = man.find_stat("multi.mirror.com").unwrap();
+        assert!(stat.get_multi_avg_speed() > 0);
+    }
+
+    #[test]
+    fn test_report_failure_with_code() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec!["http://failing.mirror.com/file".to_string()];
+        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
+
+        // Report failure with HTTP 503
+        sel.report_failure_with_code(0, 503);
+
+        let stat = man.find_stat("failing.mirror.com").unwrap();
+        assert_eq!(stat.get_consecutive_failures(), 1);
+        assert_eq!(stat.get_last_error_code(), 503);
+    }
+
+    #[test]
+    fn test_report_failure_default_code() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec!["http://error.mirror.com/file".to_string()];
+        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
+
+        sel.report_failure_default(0);
+
+        let stat = man.find_stat("error.mirror.com").unwrap();
+        assert_eq!(stat.get_last_error_code(), 500);
+    }
+
+    #[test]
+    fn test_report_failure_via_trait() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec!["http://trait.mirror.com/file".to_string()];
+        let mut sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
+
+        // Call via trait method
+        sel.report_failure(0);
+
+        let stat = man.find_stat("trait.mirror.com").unwrap();
+        assert_eq!(stat.get_consecutive_failures(), 1);
+    }
+
+    #[test]
+    fn test_report_success_resets_error_status() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec!["http://recovering.mirror.com/file".to_string()];
+        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
+
+        // First report failure
+        sel.report_failure_with_code(0, 500);
+        let stat = man.find_stat("recovering.mirror.com").unwrap();
+        stat.set_error();
+        assert!(!stat.is_ok());
+
+        // Then report success
+        sel.report_success(0, 1_000_000, false);
+        assert!(stat.is_ok(), "Success should reset error status");
+    }
+
+    #[test]
+    fn test_set_uris_after_construction() {
+        let man = Arc::new(ServerStatMan::new());
+        let mut sel = AdaptiveUriSelector::new(Arc::clone(&man));
+
+        assert!(sel.get_uris().is_empty());
+
+        let uris = vec!["http://late.mirror.com/file".to_string()];
+        sel.set_uris(uris);
+
+        assert_eq!(sel.get_uris().len(), 1);
+    }
+
+    #[test]
+    fn test_report_failure_out_of_bounds() {
+        let man = Arc::new(ServerStatMan::new());
+        let uris = vec!["http://only.mirror.com/file".to_string()];
+        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
+
+        // Index out of bounds should not panic
+        sel.report_failure_with_code(999, 500);
+        sel.report_success(999, 1000, false);
+
+        // Only one stat should exist
+        assert_eq!(man.count(), 0);
     }
 }
