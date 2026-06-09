@@ -68,6 +68,7 @@ pub struct MirrorCoordinator {
     /// Server statistics manager for tracking mirror performance.
     stat_man: Arc<ServerStatMan>,
     /// URI selector for intelligent mirror selection.
+    #[allow(dead_code)]
     selector: Box<dyn UriSelector>,
     /// Segment manager for download state tracking.
     segment_manager: ConcurrentSegmentManager,

@@ -638,9 +638,27 @@ mod tests {
     #[test]
     fn test_shutdown_flag() {
         assert!(!is_shutdown_requested());
-        SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+        #[cfg(unix)]
+        {
+            SHUTDOWN_REQUESTED
+                .get_or_init(|| Arc::new(AtomicBool::new(false)))
+                .store(true, Ordering::Relaxed);
+        }
+        #[cfg(not(unix))]
+        {
+            SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+        }
         assert!(is_shutdown_requested());
-        SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
+        #[cfg(unix)]
+        {
+            SHUTDOWN_REQUESTED
+                .get_or_init(|| Arc::new(AtomicBool::new(false)))
+                .store(false, Ordering::Relaxed);
+        }
+        #[cfg(not(unix))]
+        {
+            SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
+        }
         assert!(!is_shutdown_requested());
     }
 }
