@@ -458,15 +458,16 @@ impl PostDownloadHook for TouchHook {
                 ))
             })?;
 
-            // 使用 utime 设置时间
+            // Use utimensat to set timestamps with nanosecond precision
+            let duration = now.duration_since(UNIX_EPOCH).unwrap_or_default();
             let times: [libc::timespec; 2] = [
                 libc::timespec {
-                    tv_sec: now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as _,
-                    tv_nsec: 0,
+                    tv_sec: duration.as_secs() as _,
+                    tv_nsec: duration.subsec_nanos() as _,
                 },
                 libc::timespec {
-                    tv_sec: now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as _,
-                    tv_nsec: 0,
+                    tv_sec: duration.as_secs() as _,
+                    tv_nsec: duration.subsec_nanos() as _,
                 },
             ];
 

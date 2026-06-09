@@ -151,11 +151,15 @@ pub fn check_disk_space(path: &Path, required_bytes: u64) -> std::result::Result
         };
 
         if ret != 0 {
-            return Err(format!(
-                "Cannot stat filesystem '{}': {}",
-                check_path.display(),
+            // Failed to get disk space info, log warning but don't block
+            // This matches Windows behavior where GetDiskFreeSpaceExW failure is non-fatal
+            tracing::warn!(
+                path = %check_path.display(),
+                required = required_bytes,
+                "statvfs failed, skipping disk space check: {}",
                 std::io::Error::last_os_error()
-            ));
+            );
+            return Ok(());
         }
 
         // Available blocks × block size = available bytes
@@ -291,10 +295,15 @@ pub fn check_disk_space_typed(
         };
 
         if ret != 0 {
-            return Err(DiskError::IoError(format!(
-                "Cannot stat filesystem: {}",
+            // Failed to get disk space info, log warning but don't block
+            // This matches Windows behavior where GetDiskFreeSpaceExW failure is non-fatal
+            tracing::warn!(
+                path = %check_path.display(),
+                required = required_bytes,
+                "statvfs failed, skipping disk space check: {}",
                 std::io::Error::last_os_error()
-            )));
+            );
+            return Ok(());
         }
 
         let available = stat.f_bavail as u64 * stat.f_frsize as u64;

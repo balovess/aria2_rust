@@ -233,8 +233,8 @@ impl<'a> SftpTransfer<'a> {
     /// Download a remote file to a local path with full progress tracking.
     ///
     /// # Protocol Flow
-    /// ```
-    /// LSTAT(remote_path)          -- verify it's a regular file, get size
+    /// ```text
+    /// LSTAT(remote_path)          -- verify it is a regular file, get size
     /// OPEN(remote_path, READ)     -- get file handle
     /// CREATE/TRUNCATE(local_path) -- prepare local file (or seek for resume)
     /// LOOP:
