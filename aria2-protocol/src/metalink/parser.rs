@@ -205,13 +205,13 @@ impl MetalinkFile {
 
     pub fn get_preferred_url(&self) -> Option<&UrlEntry> {
         let mut sorted: Vec<&UrlEntry> = self.urls.iter().collect();
-        sorted.sort_by(|a, b| a.priority.cmp(&b.priority));
+        sorted.sort_by_key(|a| a.priority);
         sorted.into_iter().next()
     }
 
     pub fn get_sorted_urls(&self) -> Vec<&UrlEntry> {
         let mut sorted: Vec<&UrlEntry> = self.urls.iter().collect();
-        sorted.sort_by(|a, b| a.priority.cmp(&b.priority));
+        sorted.sort_by_key(|a| a.priority);
         sorted
     }
 
