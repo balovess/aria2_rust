@@ -76,16 +76,20 @@ export class HttpTransport implements Transport {
         signal: controller.signal,
       });
 
-      if (!response.ok) {
-        throw new ConnectionError(`HTTP ${response.status}: ${response.statusText}`);
+      // Try to parse response body even for non-200 status
+      // aria2 may return HTTP 400 with JSON-RPC error in body
+      let data: JsonRpcResponse;
+      try {
+        data = (await response.json()) as JsonRpcResponse;
+      } catch {
+        // If we can't parse JSON, throw ConnectionError for non-200 status
+        if (!response.ok) {
+          throw new ConnectionError(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        throw new ConnectionError('Invalid JSON response');
       }
 
-      const data = (await response.json()) as JsonRpcResponse;
-
       if (data.error) {
-        if (data.error.code === 1) {
-          throw new RpcError(data.error.message, data.error.code);
-        }
         throw new RpcError(data.error.message, data.error.code);
       }
 
