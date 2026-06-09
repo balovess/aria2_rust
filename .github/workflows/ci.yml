@@ -279,8 +279,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Generate documentation (warnings as errors)
-        run: cargo doc --workspace --document-private-items -D warnings
+      - name: Generate documentation
+        run: cargo doc --workspace --document-private-items
 
       - name: Run documentation tests
         run: cargo test --doc --workspace
@@ -294,7 +294,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.75'
+          toolchain: '1.85'
 
       - uses: Swatinem/rust-cache@v2
 

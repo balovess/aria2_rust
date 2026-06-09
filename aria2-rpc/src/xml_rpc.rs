@@ -396,10 +396,10 @@ pub fn parse_request(data: &[u8]) -> Result<XmlRpcRequest, XmlRpcError> {
                     }
                     "params" => in_params = true,
                     "value" => { /* wrapper tag, inner type will be handled next */ }
-                    "int" | "string" | "boolean" | "double" | "array" | "struct" | "nil" => {
-                        if in_params {
-                            params.push(parse_value(e)?);
-                        }
+                    "int" | "string" | "boolean" | "double" | "array" | "struct" | "nil"
+                        if in_params =>
+                    {
+                        params.push(parse_value(e)?);
                     }
                     _ => {}
                 }

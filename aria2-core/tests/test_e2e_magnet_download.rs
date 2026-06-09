@@ -192,8 +192,8 @@ async fn test_dht_client_discover_peers_via_mock() {
         result.err()
     );
     let discovered = result.unwrap();
-    assert!(
-        discovered.nodes_contacted >= 0,
+    // nodes_contacted is u32, always >= 0, so we just log the count
+    tracing::info!(
         "DHT discovery completed with {} nodes",
         discovered.nodes_contacted
     );

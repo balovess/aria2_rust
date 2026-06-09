@@ -24,7 +24,7 @@ fn get_binary_path() -> PathBuf {
 }
 
 /// Helper to wait for a file to be created.
-fn wait_for_file(path: &PathBuf, timeout: Duration) -> bool {
+fn wait_for_file(path: &std::path::Path, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         if path.exists() {
@@ -125,10 +125,10 @@ fn is_daemon_in_args(args: &[String]) -> bool {
         if arg == "--daemon" || arg == "-D" {
             return true;
         }
-        if let Some(opt) = arg.strip_prefix("--") {
-            if opt == "daemon" || opt.starts_with("daemon=") {
-                return true;
-            }
+        if let Some(opt) = arg.strip_prefix("--")
+            && (opt == "daemon" || opt.starts_with("daemon="))
+        {
+            return true;
         }
     }
     false
