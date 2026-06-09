@@ -321,7 +321,7 @@ jobs:
         run: cargo build --release --package aria2
 
       - name: Run daemon unit tests
-        run: cargo test --package aria2 --lib daemon::
+        run: "cargo test --package aria2 --lib daemon::"
 
       - name: Run daemon integration tests (Unix)
         if: runner.os != 'Windows'
