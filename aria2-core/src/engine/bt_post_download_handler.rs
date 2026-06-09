@@ -449,11 +449,8 @@ impl PostDownloadHook for TouchHook {
         // 使用 filetime crate 或标准库设置时间
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            use std::os::unix::fs::PermissionsExt;
-
             // 获取现有权限以保持不变
-            let metadata = tokio::fs::metadata(path).await.map_err(|e| {
+            let _metadata = tokio::fs::metadata(path).await.map_err(|e| {
                 Aria2Error::Io(format!(
                     "Failed to get metadata for {}: {}",
                     path.display(),

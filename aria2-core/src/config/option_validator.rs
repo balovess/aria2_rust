@@ -461,7 +461,7 @@ impl OptionValidator for PathValidator {
                         if check_path.exists() {
                             // Use metadata to check permissions (simplified check)
                             match std::fs::metadata(check_path) {
-                                Ok(_meta) => {
+                                Ok(meta) => {
                                     // If we can read metadata, assume we can at least check
                                     // Full permission checks would require platform-specific code
                                     #[cfg(unix)]
@@ -481,6 +481,7 @@ impl OptionValidator for PathValidator {
                                     {
                                         // On Windows, just check if path exists for now
                                         // Full permission checks would require WinAPI
+                                        let _ = &meta;
                                     }
                                 }
                                 Err(e) => {
@@ -978,11 +979,13 @@ mod tests {
     fn test_path_validator_existing_path() {
         // Test with /tmp (should exist on most systems)
         let validator = PathValidator::new(true, false);
-        let _result = validator.validate("dir", &Value::String("/tmp".into()));
 
         // /tmp should exist on Unix-like systems
         #[cfg(unix)]
-        assert!(result.is_ok());
+        {
+            let result = validator.validate("dir", &Value::String("/tmp".into()));
+            assert!(result.is_ok());
+        }
 
         // On Windows, use temp directory
         #[cfg(windows)]

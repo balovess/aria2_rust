@@ -144,6 +144,7 @@ impl DiskAdaptor for DirectDiskAdaptor {
 
     #[cfg(unix)]
     fn unix_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        use std::os::fd::AsRawFd;
         self.file.as_ref().map(|f| f.as_raw_fd())
     }
 }

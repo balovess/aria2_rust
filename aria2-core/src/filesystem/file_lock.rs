@@ -20,7 +20,6 @@
 ///
 /// // Lock is released automatically when `lock` goes out of scope
 /// ```
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -118,6 +117,7 @@ impl FileLock {
     /// Windows implementation: .lock marker file with exclusive create.
     #[cfg(windows)]
     fn acquire_windows(path: &Path) -> Result<Self, String> {
+        use std::io::Write;
         // Use a clearly separate lock file name to avoid ambiguity with
         // with_extension() behavior on dotted filenames like ".aria2.lock"
         let lock_path = if let Some(parent) = path.parent() {
@@ -187,6 +187,7 @@ impl FileLock {
     pub fn release(self) {
         #[cfg(unix)]
         {
+            use std::os::fd::AsRawFd;
             if let Some(f) = self.file {
                 let fd = f.as_raw_fd();
                 let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
@@ -271,6 +272,7 @@ impl Drop for FileLock {
         // Release lock on drop (same logic as release but consuming self is not possible in Drop)
         #[cfg(unix)]
         {
+            use std::os::fd::AsRawFd;
             if let Some(ref f) = self.file {
                 let fd = f.as_raw_fd();
                 let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };

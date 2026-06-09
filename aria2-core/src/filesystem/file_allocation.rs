@@ -176,8 +176,7 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = tokio::fs::metadata(parent)
+        let _metadata = tokio::fs::metadata(parent)
             .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
