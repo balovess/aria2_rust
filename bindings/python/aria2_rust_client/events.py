@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import List, Optional, Self
+from typing import List, Optional
+
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 from .errors import ConnectionError, TimeoutError
 from .types import DownloadEvent, EventType
