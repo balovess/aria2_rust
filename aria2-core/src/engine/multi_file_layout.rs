@@ -113,7 +113,12 @@ impl MultiFileLayout {
                     ((end_byte - 1) % pl + 1) as u32
                 };
 
-                let abs_path = base_dir.join(entry.path.join("\\"));
+                // Build path using proper path separators
+                let mut path_buf = base_dir.to_path_buf();
+                for component in &entry.path {
+                    path_buf.push(component);
+                }
+                let abs_path = path_buf;
                 debug!(
                     "File[{}]: path={:?}, bytes=[{}..{}), pieces=[{}..{}] offsets=[{}..{})",
                     i,
@@ -396,7 +401,8 @@ mod tests {
     #[test]
     fn test_create_directories() {
         let info = make_multi_file_info_dict();
-        let base = Path::new("d:/Code/aria2_rust/test_dirs");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base = temp_dir.path();
         let layout = MultiFileLayout::from_info_dict(&info, base).unwrap();
 
         let result = layout.create_directories();
@@ -410,7 +416,7 @@ mod tests {
         assert!(dir2.exists());
         assert!(dir3.exists());
 
-        let _ = std::fs::remove_dir_all(base);
+        // temp_dir is automatically cleaned up when dropped
     }
 
     #[test]

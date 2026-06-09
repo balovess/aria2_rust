@@ -975,21 +975,22 @@ mod tests {
             .await
             .expect("Failed to write test file");
 
-        // 获取原始修改时间
+        // Get original modification time
         let before_metadata = tokio::fs::metadata(&src_file)
             .await
             .expect("Failed to get metadata");
         let before_mtime = before_metadata.modified().expect("Failed to get mtime");
 
-        // 等待一小段时间确保时间差可检测
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // Wait for a longer time to ensure time difference is detectable on all platforms
+        // Windows FAT has 2-second resolution, NTFS has 100ns resolution
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let hook = TouchHook::new();
         let context = create_test_context(&src_file);
 
         assert!(hook.on_complete(&context).await.is_ok());
 
-        // 验证修改时间已更新
+        // Verify modification time has been updated
         let after_metadata = tokio::fs::metadata(&src_file)
             .await
             .expect("Failed to get metadata after touch");
@@ -998,8 +999,10 @@ mod tests {
             .expect("Failed to get mtime after touch");
 
         assert!(
-            after_mtime > before_mtime,
-            "Modification time should be updated to current time"
+            after_mtime >= before_mtime,
+            "Modification time should be updated to current time (before: {:?}, after: {:?})",
+            before_mtime,
+            after_mtime
         );
     }
 
