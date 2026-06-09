@@ -300,3 +300,127 @@ jobs:
 
       - name: Check compilation with MSRV
         run: cargo check --workspace --all-targets
+
+  daemon-test:
+    name: Daemon Mode Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --package aria2
+
+      - name: Run daemon unit tests
+        run: cargo test --package aria2 --lib daemon::
+
+      - name: Run daemon integration tests (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          echo "=== Testing daemon mode on Unix ==="
+          # Test 1: Start daemon with PID file
+          ./target/release/aria2c --daemon --pid-file=/tmp/aria2c-test.pid --enable-rpc --rpc-listen-port=6999 &
+          sleep 2
+          
+          # Verify PID file exists
+          if [ -f /tmp/aria2c-test.pid ]; then
+            PID=$(cat /tmp/aria2c-test.pid)
+            echo "Daemon started with PID: $PID"
+            
+            # Verify process is running
+            if kill -0 $PID 2>/dev/null; then
+              echo "✅ Daemon process is running"
+            else
+              echo "❌ Daemon process is NOT running"
+              exit 1
+            fi
+            
+            # Stop daemon
+            kill $PID
+            sleep 1
+            echo "✅ Daemon stopped successfully"
+          else
+            echo "❌ PID file not created"
+            exit 1
+          fi
+
+      - name: Run daemon integration tests (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Write-Host "=== Testing daemon mode on Windows ==="
+          
+          # Test 1: Start daemon with PID file
+          $pidFile = "$env:TEMP\aria2c-test.pid"
+          $logFile = "$env:TEMP\aria2c-test.log"
+          
+          Start-Process -FilePath ".\target\release\aria2c.exe" `
+            -ArgumentList "--daemon", "--pid-file=$pidFile", "--log=$logFile", "--enable-rpc", "--rpc-listen-port=6999" `
+            -NoNewWindow
+          
+          Start-Sleep -Seconds 3
+          
+          # Verify PID file exists
+          if (Test-Path $pidFile) {
+            $pid = Get-Content $pidFile
+            Write-Host "Daemon started with PID: $pid"
+            
+            # Verify process is running
+            $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            if ($process) {
+              Write-Host "✅ Daemon process is running"
+              
+              # Stop daemon
+              Stop-Process -Id $pid -Force
+              Start-Sleep -Seconds 1
+              Write-Host "✅ Daemon stopped successfully"
+            } else {
+              Write-Host "❌ Daemon process is NOT running"
+              exit 1
+            }
+          } else {
+            Write-Host "❌ PID file not created"
+            exit 1
+          }
+
+      - name: Test duplicate daemon prevention
+        if: runner.os == 'Linux'
+        run: |
+          echo "=== Testing duplicate daemon prevention ==="
+          
+          # Start first daemon
+          ./target/release/aria2c --daemon --pid-file=/tmp/aria2c-dup.pid --enable-rpc --rpc-listen-port=7000 &
+          sleep 2
+          
+          if [ -f /tmp/aria2c-dup.pid ]; then
+            PID1=$(cat /tmp/aria2c-dup.pid)
+            echo "First daemon started with PID: $PID1"
+            
+            # Try to start second daemon with same PID file
+            ./target/release/aria2c --daemon --pid-file=/tmp/aria2c-dup.pid --enable-rpc --rpc-listen-port=7001
+            EXIT_CODE=$?
+            
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "✅ Second instance exited cleanly (detected existing daemon)"
+            else
+              echo "❌ Second instance failed with exit code: $EXIT_CODE"
+            fi
+            
+            # Verify only one daemon is running
+            if kill -0 $PID1 2>/dev/null; then
+              echo "✅ Original daemon still running"
+              kill $PID1
+            fi
+          else
+            echo "❌ First daemon PID file not created"
+            exit 1
+          fi
