@@ -1,7 +1,51 @@
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const EMA_ALPHA: f64 = 0.7;
+
+/// Serializable snapshot of ServerStat for persistence.
+///
+/// This struct contains all the persistent fields of ServerStat in a
+/// serde-compatible format (no atomic types). Used for saving and loading
+/// server performance statistics across restarts.
+///
+/// # Example
+///
+/// ```
+/// use aria2_core::selector::server_stat::{ServerStat, ServerStatSnapshot};
+///
+/// let stat = ServerStat::new("mirror.example.com");
+/// stat.update_speed(5000, false);
+///
+/// let snapshot = stat.to_snapshot();
+/// let restored = ServerStat::from_snapshot(&snapshot);
+///
+/// assert_eq!(restored.host, stat.host);
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerStatSnapshot {
+    /// Server hostname (e.g., "mirror1.example.com")
+    pub host: String,
+    /// Current download speed in bytes/sec
+    pub download_speed: u64,
+    /// Exponential moving average of single-connection download speed
+    pub single_connection_avg_speed: u64,
+    /// Exponential moving average of multi-connection download speed
+    pub multi_connection_avg_speed: u64,
+    /// Unix timestamp of last update
+    pub last_updated: u64,
+    /// Server status: 0 = OK, 1 = Error
+    pub status: u32,
+    /// Usage counter (number of times this server was selected)
+    pub counter: u32,
+    /// Unix timestamp of last error (None if never failed)
+    pub last_error_time: Option<u64>,
+    /// HTTP error code of last error (0 if never failed)
+    pub last_error_code: u16,
+    /// Number of consecutive failures (reset on success)
+    pub consecutive_failures: u32,
+}
 
 #[derive(Debug)]
 pub struct ServerStat {
@@ -175,6 +219,96 @@ impl ServerStat {
         self.last_error_time = Some(SystemTime::now());
         self.last_error_code = Some(error_code);
         self.consecutive_failures += 1;
+    }
+
+    // ==================== Persistence Methods ====================
+
+    /// Convert to a serializable snapshot for persistence.
+    ///
+    /// Extracts all atomic values into a plain struct suitable for
+    /// JSON serialization. The snapshot captures the current state
+    /// of all performance metrics and error tracking.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use aria2_core::selector::server_stat::ServerStat;
+    ///
+    /// let stat = ServerStat::new("fast.mirror.com");
+    /// stat.update_speed(10000, false);
+    /// stat.increment_counter();
+    ///
+    /// let snapshot = stat.to_snapshot();
+    /// assert_eq!(snapshot.host, "fast.mirror.com");
+    /// assert_eq!(snapshot.counter, 1);
+    /// ```
+    pub fn to_snapshot(&self) -> ServerStatSnapshot {
+        ServerStatSnapshot {
+            host: self.host.clone(),
+            download_speed: self.download_speed.load(Ordering::Relaxed),
+            single_connection_avg_speed: self.single_connection_avg_speed.load(Ordering::Relaxed),
+            multi_connection_avg_speed: self.multi_connection_avg_speed.load(Ordering::Relaxed),
+            last_updated: self.last_updated.load(Ordering::Relaxed),
+            status: self.status.load(Ordering::Relaxed),
+            counter: self.counter.load(Ordering::Relaxed),
+            last_error_time: self.last_error_time.and_then(|t| {
+                t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+            }),
+            last_error_code: self.last_error_code.unwrap_or(0),
+            consecutive_failures: self.consecutive_failures,
+        }
+    }
+
+    /// Restore from a serialized snapshot.
+    ///
+    /// Creates a new ServerStat instance with all fields initialized
+    /// from the snapshot data. Atomic fields are set to the snapshot values.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot` - The serialized server statistics to restore from
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use aria2_core::selector::server_stat::{ServerStat, ServerStatSnapshot};
+    ///
+    /// let snapshot = ServerStatSnapshot {
+    ///     host: "restored.mirror.com".to_string(),
+    ///     download_speed: 5000,
+    ///     single_connection_avg_speed: 4500,
+    ///     multi_connection_avg_speed: 8000,
+    ///     last_updated: 1700000000,
+    ///     status: 0,
+    ///     counter: 10,
+    ///     last_error_time: None,
+    ///     last_error_code: 0,
+    ///     consecutive_failures: 0,
+    /// };
+    ///
+    /// let stat = ServerStat::from_snapshot(&snapshot);
+    /// assert_eq!(stat.host, "restored.mirror.com");
+    /// assert_eq!(stat.get_counter(), 10);
+    /// ```
+    pub fn from_snapshot(snapshot: &ServerStatSnapshot) -> Self {
+        Self {
+            host: snapshot.host.clone(),
+            download_speed: AtomicU64::new(snapshot.download_speed),
+            single_connection_avg_speed: AtomicU64::new(snapshot.single_connection_avg_speed),
+            multi_connection_avg_speed: AtomicU64::new(snapshot.multi_connection_avg_speed),
+            last_updated: AtomicU64::new(snapshot.last_updated),
+            status: AtomicU32::new(snapshot.status),
+            counter: AtomicU32::new(snapshot.counter),
+            last_error_time: snapshot.last_error_time.and_then(|ts| {
+                UNIX_EPOCH.checked_add(std::time::Duration::from_secs(ts))
+            }),
+            last_error_code: if snapshot.last_error_code > 0 {
+                Some(snapshot.last_error_code)
+            } else {
+                None
+            },
+            consecutive_failures: snapshot.consecutive_failures,
+        }
     }
 }
 
@@ -354,5 +488,121 @@ mod tests {
         stat.set_failure_info(503);
         assert_eq!(stat.get_consecutive_failures(), 2);
         assert_eq!(stat.get_last_error_code(), 503);
+    }
+
+    // ======================================================================
+    // Tests for Persistence (Snapshot Roundtrip)
+    // ======================================================================
+
+    #[test]
+    fn test_snapshot_roundtrip_basic() {
+        let stat = ServerStat::new("snapshot.test");
+        stat.update_speed(5000, false);
+        stat.update_speed(10000, true);
+        stat.increment_counter();
+        stat.increment_counter();
+
+        let snapshot = stat.to_snapshot();
+        let restored = ServerStat::from_snapshot(&snapshot);
+
+        assert_eq!(restored.host, "snapshot.test");
+        assert_eq!(restored.get_download_speed(), 10000);
+        assert_eq!(restored.get_counter(), 2);
+        assert!(restored.get_single_avg_speed() > 0);
+        assert!(restored.get_multi_avg_speed() > 0);
+    }
+
+    #[test]
+    fn test_snapshot_roundtrip_with_failures() {
+        let mut stat = ServerStat::new("failed.snapshot.test");
+        stat.update_speed(3000, false);
+        stat.set_failure_info(500);
+        stat.set_failure_info(503);
+
+        let snapshot = stat.to_snapshot();
+        assert_eq!(snapshot.consecutive_failures, 2);
+        assert_eq!(snapshot.last_error_code, 503);
+        assert!(snapshot.last_error_time.is_some());
+
+        let restored = ServerStat::from_snapshot(&snapshot);
+        assert_eq!(restored.get_consecutive_failures(), 2);
+        assert_eq!(restored.get_last_error_code(), 503);
+        assert!(restored.get_last_error_time() > 0);
+    }
+
+    #[test]
+    fn test_snapshot_preserves_all_fields() {
+        let mut stat = ServerStat::new("complete.snapshot.test");
+        stat.update_speed(12345, false);
+        stat.update_speed(67890, true);
+        for _ in 0..5 {
+            stat.increment_counter();
+        }
+        stat.set_error();
+        stat.set_failure_info(502);
+
+        let snapshot = stat.to_snapshot();
+
+        // Verify all fields are captured
+        assert_eq!(snapshot.host, "complete.snapshot.test");
+        assert_eq!(snapshot.download_speed, 67890);
+        assert!(snapshot.single_connection_avg_speed > 0);
+        assert!(snapshot.multi_connection_avg_speed > 0);
+        assert!(snapshot.last_updated > 0);
+        assert_eq!(snapshot.status, 1); // Error status
+        assert_eq!(snapshot.counter, 5);
+        assert!(snapshot.last_error_time.is_some());
+        assert_eq!(snapshot.last_error_code, 502);
+        assert_eq!(snapshot.consecutive_failures, 1);
+
+        // Verify restoration preserves all fields
+        let restored = ServerStat::from_snapshot(&snapshot);
+        assert_eq!(restored.host, snapshot.host);
+        assert_eq!(restored.get_download_speed(), snapshot.download_speed);
+        assert_eq!(restored.get_single_avg_speed(), snapshot.single_connection_avg_speed);
+        assert_eq!(restored.get_multi_avg_speed(), snapshot.multi_connection_avg_speed);
+        assert_eq!(restored.get_counter(), snapshot.counter);
+        assert!(!restored.is_ok()); // Should have error status
+    }
+
+    #[test]
+    fn test_snapshot_json_serialization() {
+        let stat = ServerStat::new("json.test");
+        stat.update_speed(10000, false);
+        stat.increment_counter();
+
+        let snapshot = stat.to_snapshot();
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&snapshot).expect("Should serialize to JSON");
+        assert!(json.contains("json.test"));
+        assert!(json.contains("10000"));
+
+        // Deserialize from JSON
+        let deserialized: ServerStatSnapshot =
+            serde_json::from_str(&json).expect("Should deserialize from JSON");
+        assert_eq!(deserialized.host, "json.test");
+        assert_eq!(deserialized.download_speed, 10000);
+        assert_eq!(deserialized.counter, 1);
+    }
+
+    #[test]
+    fn test_snapshot_zero_values() {
+        let stat = ServerStat::new("zero.test");
+        // No updates - all values should be zero/default
+
+        let snapshot = stat.to_snapshot();
+        assert_eq!(snapshot.download_speed, 0);
+        assert_eq!(snapshot.single_connection_avg_speed, 0);
+        assert_eq!(snapshot.multi_connection_avg_speed, 0);
+        assert_eq!(snapshot.counter, 0);
+        assert_eq!(snapshot.status, 0);
+        assert!(snapshot.last_error_time.is_none());
+        assert_eq!(snapshot.last_error_code, 0);
+        assert_eq!(snapshot.consecutive_failures, 0);
+
+        let restored = ServerStat::from_snapshot(&snapshot);
+        assert_eq!(restored.get_download_speed(), 0);
+        assert!(restored.is_ok());
     }
 }

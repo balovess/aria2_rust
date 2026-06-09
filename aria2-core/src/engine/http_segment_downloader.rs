@@ -304,10 +304,7 @@ mod tests {
             .await
         {
             Ok(supports) => {
-                eprintln!(
-                    "[WARN] Unexpected success for invalid host, supports={:?}",
-                    supports
-                );
+                eprintln!("[WARN] Unexpected success for invalid host, supports={:?}", supports);
             }
             Err(e) => {
                 println!("Expected network error for invalid host: {:?}", e);

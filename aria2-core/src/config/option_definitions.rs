@@ -718,5 +718,19 @@ impl super::OptionRegistry {
                 .desc("Force save state on every change")
                 .category(OptionCategory::Advanced),
         );
+
+        // --- Server Statistics Persistence ---
+        self.register(
+            OptionDef::new("server-stat-file", OptionType::Path)
+                .desc("Path to save/load server performance statistics")
+                .category(OptionCategory::Advanced),
+        );
+        self.register(
+            OptionDef::new("save-server-stat-interval", OptionType::Integer)
+                .default(OptionValue::Int(0))
+                .range(0, 86400)
+                .desc("Auto-save interval for server stats in seconds (0 = disabled)")
+                .category(OptionCategory::Advanced),
+        );
     }
 }

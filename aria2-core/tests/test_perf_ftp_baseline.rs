@@ -33,7 +33,11 @@ async fn test_perf_ftp_small_file() {
 
     let start = Instant::now();
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.execute()).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        cmd.execute(),
+    )
+    .await;
 
     let elapsed = start.elapsed();
     match result {
