@@ -20,6 +20,12 @@ tokio.workspace = true
 tracing.workspace = true
 colored = "2.0"
 serde_json.workspace = true
+thiserror.workspace = true
+
+# Unix-specific dependencies for daemon mode
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

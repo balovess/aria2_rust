@@ -20,6 +20,10 @@ use aria2_core::session::active_session::ActiveSessionManager;
 use aria2_core::validation::protocol_detector::{DetectedInput, InputType, detect};
 use tracing::{Level, debug, error, info, warn};
 
+#[path = "daemon.rs"]
+mod daemon;
+use daemon::{DaemonConfig, Daemonizer, PidFileManager};
+
 /// Top-level application runtime for aria2-rust CLI.
 ///
 /// `App` encapsulates the complete download lifecycle:
@@ -698,11 +702,12 @@ impl App {
     /// This is the main entry point that:
     /// 1. Handles `--help` / `--version` flags
     /// 2. Loads config from env → file → CLI args (4-source merge)
-    /// 3. Initializes the download engine
-    /// 4. **Restores session from input-file (if configured)**
-    /// 5. Adds download tasks from positional URIs
-    /// 6. Runs the engine event loop
-    /// 7. **Saves session on shutdown (if configured)**
+    /// 3. **Handles daemon mode if `--daemon` is specified**
+    /// 4. Initializes the download engine
+    /// 5. **Restores session from input-file (if configured)**
+    /// 6. Adds download tasks from positional URIs
+    /// 7. Runs the engine event loop
+    /// 8. **Saves session on shutdown (if configured)**
     ///
     /// Returns exit code: `0` = success, `1` = error.
     pub async fn run(&mut self, args: &[String]) -> i32 {
@@ -719,6 +724,53 @@ impl App {
         if let Err(e) = self.load_args(args).await {
             eprintln!("{}", format!("参数解析错误: {}", e).red());
             return 1;
+        }
+
+        // Check daemon mode early - must happen before any output
+        let daemon_mode = self.get_opt_bool("daemon").await.unwrap_or(false);
+        let pid_file = self.get_opt_str("pid-file").await.map(PathBuf::from);
+
+        if daemon_mode {
+            // Check if daemon is already running
+            if let Some(ref path) = pid_file {
+                let pid_mgr = PidFileManager::new(path.clone());
+                if let Some(existing_pid) = pid_mgr.check_existing() {
+                    eprintln!(
+                        "{}",
+                        format!("Daemon already running with PID: {}", existing_pid).yellow()
+                    );
+                    return 0;
+                }
+            }
+
+            // Perform daemonization
+            let log_path = self.get_opt_str("log").await.map(PathBuf::from);
+
+            let daemon_config = DaemonConfig {
+                pid_file: pid_file.clone(),
+                stdout_file: log_path.clone(),
+                stderr_file: log_path,
+                chdir_to_root: false,
+                close_fds: true,
+            };
+
+            let daemonizer = Daemonizer::new(daemon_config);
+            if let Err(e) = daemonizer.daemonize() {
+                eprintln!("{}", format!("Failed to daemonize: {}", e).red());
+                return 1;
+            }
+
+            // After daemonization, we are in the child process
+            // Re-initialize logging for the daemon process
+            let log_level = if self.get_opt_bool("verbose").await.unwrap_or(false) {
+                Level::DEBUG
+            } else {
+                Level::INFO
+            };
+            let log_path = self.get_opt_str("log").await;
+            init_logging(log_level, log_path.as_deref());
+
+            info!("Daemon started successfully");
         }
 
         let log_level = if self.get_opt_bool("verbose").await.unwrap_or(false) {
@@ -751,12 +803,24 @@ impl App {
         let man = self.request_man.read().await;
         let has_restored_tasks = man.count().await > 0;
 
+        // In daemon mode, we need RPC enabled to control the daemon
+        let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
+
         if !has_restored_tasks && self.detected_inputs.is_empty() {
-            eprintln!(
-                "{}",
-                "错误: 请提供下载URI或torrent文件路径，或使用 --input-file 恢复之前的下载".red()
-            );
-            return 1;
+            if daemon_mode {
+                if !rpc_enabled {
+                    warn!("Daemon mode requires --enable-rpc when no downloads are specified");
+                    info!("Starting daemon with RPC server for remote control");
+                }
+                // In daemon mode with RPC, we can start without downloads
+                info!("Starting daemon in RPC-only mode");
+            } else {
+                eprintln!(
+                    "{}",
+                    "错误: 请提供下载URI或torrent文件路径，或使用 --input-file 恢复之前的下载".red()
+                );
+                return 1;
+            }
         }
 
         // 步骤 5: 添加命令行指定的下载任务
@@ -936,6 +1000,7 @@ impl App {
             'L' => Some("log-level"),
             'n' => Some("dry-run"),
             'S' => Some("summary-interval"),
+            'D' => Some("daemon"),
             // HttpFtp — timeouts & retries
             't' => Some("timeout"),
             'T' => Some("connect-timeout"),
@@ -968,7 +1033,7 @@ impl App {
             'G' => Some("seed-time"),
             'B' => Some("bt-max-peers"),
             'h' => Some("listen-port"),
-            'D' => Some("enable-dht"),
+            // 'D' is already used for daemon above
             'X' => Some("bt-force-encryption"),
             'M' => Some("follow-torrent"),
             // RPC

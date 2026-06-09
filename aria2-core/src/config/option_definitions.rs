@@ -236,6 +236,20 @@ impl super::OptionRegistry {
                 .desc("Dry run (check only, no download)")
                 .category(OptionCategory::General),
         );
+
+        // --- Daemon Mode ---
+        self.register(
+            OptionDef::new("daemon", OptionType::Boolean)
+                .short('D')
+                .default(OptionValue::Bool(false))
+                .desc("Run as a background daemon (detached process)")
+                .category(OptionCategory::General),
+        );
+        self.register(
+            OptionDef::new("pid-file", OptionType::Path)
+                .desc("Path to PID file for daemon process management")
+                .category(OptionCategory::General),
+        );
     }
 }
 
