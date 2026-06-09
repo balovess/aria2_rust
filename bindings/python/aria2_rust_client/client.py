@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, Dict, List, Optional, Self
+from typing import Any, Dict, List, Optional
+
+from typing_extensions import Self
 
 from .errors import Aria2Error
 from .events import EventSubscriber

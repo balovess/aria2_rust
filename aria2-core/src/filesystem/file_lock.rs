@@ -188,7 +188,7 @@ impl FileLock {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
-            if let Some(f) = self.file {
+            if let Some(f) = &self.file {
                 let fd = f.as_raw_fd();
                 let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
                 tracing::debug!(
@@ -292,6 +292,15 @@ impl Drop for FileLock {
                 "Lock file auto-removed on drop (Windows)"
             );
         }
+    }
+}
+
+impl std::fmt::Debug for FileLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileLock")
+            .field("path", &self.path)
+            .field("is_held", &self.is_held())
+            .finish()
     }
 }
 

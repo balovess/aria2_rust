@@ -1,11 +1,21 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Aria2Client } from '../../src/client.js';
 import { RpcError, ConnectionError, TimeoutError } from '../../src/errors.js';
-import { skipIfNoBinary } from './helpers.js';
+import { skipIfNoBinary, startAria2Server } from './helpers.js';
 
 describe.skipIf(skipIfNoBinary())('Error Handling E2E', () => {
+  let aria2Server: { url: string; stop: () => Promise<void> };
+
+  beforeAll(async () => {
+    aria2Server = await startAria2Server();
+  });
+
+  afterAll(async () => {
+    await aria2Server.stop();
+  });
+
   it('invalid GID throws RpcError', async () => {
-    const client = new Aria2Client('http://localhost:6800/jsonrpc');
+    const client = new Aria2Client(aria2Server.url);
     await expect(client.tellStatus('invalid_gid')).rejects.toThrow(RpcError);
     await client.close();
   });
@@ -17,7 +27,7 @@ describe.skipIf(skipIfNoBinary())('Error Handling E2E', () => {
   });
 
   it('timeout throws TimeoutError', async () => {
-    const client = new Aria2Client('http://localhost:6800/jsonrpc', { timeout: 1 });
+    const client = new Aria2Client(aria2Server.url, { timeout: 1 });
     try {
       await client.getVersion();
       expect.unreachable('Should have thrown');
