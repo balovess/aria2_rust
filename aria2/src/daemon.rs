@@ -32,6 +32,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
@@ -157,9 +159,6 @@ impl Daemonizer {
     /// Unix-specific daemonization using double-fork technique.
     #[cfg(unix)]
     fn daemonize_unix(&self) -> DaemonResult<()> {
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::io::AsRawFd;
-
         // Step 1: First fork
         let pid = unsafe { libc::fork() };
         if pid < 0 {
