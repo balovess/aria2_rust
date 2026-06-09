@@ -177,6 +177,11 @@ impl ServerStat {
         now.saturating_sub(last) < duration_secs
     }
 
+    /// Get the last update timestamp as unix timestamp (0 if never updated).
+    pub fn get_last_updated(&self) -> u64 {
+        self.last_updated.load(Ordering::Relaxed)
+    }
+
     fn touch(&self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

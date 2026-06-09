@@ -5,6 +5,9 @@ use tracing::{debug, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 
+// Re-export score_source for backward compatibility
+pub use crate::selector::source_scorer::{score_source_raw as score_source, score_source_raw};
+
 pub struct HttpSegmentDownloader {
     client: reqwest::Client,
 }
@@ -84,18 +87,6 @@ impl ConnectionLimiter {
         }
         self.per_host_limit - current
     }
-}
-
-/// Score a source based on recent speed measurements.
-/// Lower score = better source (tried first).
-pub fn score_source(avg_speed_bps: f64, failure_count: u32, last_success_age_secs: u64) -> f64 {
-    if avg_speed_bps <= 0.0 && failure_count > 0 {
-        return f64::MAX; // dead source
-    }
-    let speed_score = -avg_speed_bps.ln_1p(); // higher speed → lower (better) score
-    let penalty = (failure_count as f64) * 100.0; // each failure adds penalty
-    let age_bonus = (last_success_age_secs as f64 / 60.0).min(10.0); // recent success bonus
-    speed_score + penalty - age_bonus
 }
 
 impl HttpSegmentDownloader {
@@ -269,15 +260,17 @@ mod tests {
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 2048];
-            stream.read_exact(&mut buf).await.unwrap();
+            // Use read() instead of read_exact() to avoid blocking on exact byte count
+            let _n = stream.read(&mut buf).await.unwrap();
             stream.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
         });
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let url = format!("http://{}", addr);
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
         let dl = HttpSegmentDownloader::new(&client);
@@ -285,7 +278,8 @@ mod tests {
         let result = dl.download_range(&url, 99999, 100, None).await;
         assert!(result.is_err(), "416 should be an error");
 
-        server_handle.await.ok();
+        // Wait for server with timeout
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
     }
 
     #[tokio::test]
