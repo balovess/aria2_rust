@@ -17,6 +17,9 @@
 use tokio::io::AsyncSeekExt;
 use tracing::{debug, info, warn};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use super::file_ops::{FileAttributes, OpenFlags, SftpFileOps};
 use super::session::SftpSession;
 
