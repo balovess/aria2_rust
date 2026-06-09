@@ -33,15 +33,28 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tracing::{debug, info, warn};
 
 /// Global flag indicating shutdown was requested via signal.
+#[cfg(unix)]
+static SHUTDOWN_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+#[cfg(not(unix))]
 #[allow(dead_code)]
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Check if shutdown was requested via signal.
+#[cfg(unix)]
+pub fn is_shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED
+        .get()
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
 #[allow(dead_code)]
 pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
@@ -293,12 +306,15 @@ impl Daemonizer {
         use signal_hook::flag;
         use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 
+        // Initialize the shutdown flag once
+        let shutdown_flag = SHUTDOWN_REQUESTED.get_or_init(|| Arc::new(AtomicBool::new(false)));
+
         // Register signal handlers
-        flag::register(SIGTERM, Arc::new(&SHUTDOWN_REQUESTED))
+        flag::register(SIGTERM, shutdown_flag.clone())
             .map_err(|e| DaemonError::SignalSetup(format!("SIGTERM handler: {}", e)))?;
-        flag::register(SIGINT, Arc::new(&SHUTDOWN_REQUESTED))
+        flag::register(SIGINT, shutdown_flag.clone())
             .map_err(|e| DaemonError::SignalSetup(format!("SIGINT handler: {}", e)))?;
-        flag::register(SIGHUP, Arc::new(&SHUTDOWN_REQUESTED))
+        flag::register(SIGHUP, shutdown_flag.clone())
             .map_err(|e| DaemonError::SignalSetup(format!("SIGHUP handler: {}", e)))?;
 
         debug!("Signal handlers registered for SIGTERM, SIGINT, SIGHUP");
