@@ -175,7 +175,6 @@ impl BtProgressManager {
     /// 当文件写入失败时返回错误
     pub fn save_progress(&self, info_hash: &[u8; 20], progress: &BtProgress) -> Result<()> {
         let file_path = self.get_progress_file_path(info_hash);
-        let tmp_path = file_path.with_extension("aria2.tmp");
 
         debug!(
             path = %file_path.display(),
@@ -183,7 +182,23 @@ impl BtProgressManager {
             "保存 BT 进度"
         );
 
-        // 写入临时文件
+        // 写入临时文件 - use unique temp file name to avoid race conditions in concurrent writes
+        let tmp_path = {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let thread_id = std::thread::current().id();
+            // Use thread ID hash + timestamp for uniqueness
+            let unique_suffix = format!(
+                "{:x}.tmp.{}",
+                timestamp,
+                // Format thread ID as a simple hash
+                format!("{:?}", thread_id).chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>()
+            );
+            file_path.with_extension(unique_suffix)
+        };
+
         let content = self.serialize_progress(progress);
         {
             let mut file = fs::File::create(&tmp_path)

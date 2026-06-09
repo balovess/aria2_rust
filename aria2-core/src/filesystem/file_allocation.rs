@@ -135,9 +135,9 @@ async fn preallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()>
 /// - **macOS**: macOS doesn't have fallocate/posix_fallocate.
 ///   Uses set_len() which calls ftruncate under the hood.
 async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
-        // Try to use posix_fallocate64 for true preallocation on Unix
+        // Try to use posix_fallocate64 for true preallocation on Linux
         if let Some(fd) = adaptor.unix_raw_fd() {
             unsafe {
                 let ret = libc::posix_fallocate64(fd, 0, length as i64);
@@ -152,6 +152,13 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
             // Fall back to set_len if no raw fd available
             adaptor.truncate(length).await
         }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // On macOS and other Unix systems, posix_fallocate is not available
+        // Use ftruncate via set_len which is the standard approach
+        adaptor.truncate(length).await
     }
 
     #[cfg(not(unix))]
@@ -174,7 +181,7 @@ async fn truncate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
 pub async fn get_available_space(path: &Path) -> Result<u64> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         let _metadata = tokio::fs::metadata(parent)
             .await
@@ -183,6 +190,31 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
         let statvfs_result = unsafe {
             let mut stat: libc::statvfs64 = std::mem::zeroed();
             let ret = libc::statvfs64(
+                parent.to_str().unwrap_or(".").as_ptr() as *const i8,
+                &mut stat,
+            );
+            (ret, stat)
+        };
+
+        if statvfs_result.0 == 0 {
+            let stat = statvfs_result.1;
+            Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+        } else {
+            Err(Aria2Error::Io("Failed to get disk space".to_string()))
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // On macOS and other Unix systems, use statvfs (not statvfs64)
+        // macOS statvfs already handles large files
+        let _metadata = tokio::fs::metadata(parent)
+            .await
+            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+
+        let statvfs_result = unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            let ret = libc::statvfs(
                 parent.to_str().unwrap_or(".").as_ptr() as *const i8,
                 &mut stat,
             );
