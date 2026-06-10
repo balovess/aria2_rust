@@ -46,6 +46,7 @@ zeroize = "1.8"
 hex = "0.4"
 ring = "0.17"
 rc4 = "0.2"
+once_cell = "1.19"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

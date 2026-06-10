@@ -16,6 +16,7 @@ use crate::filesystem::disk_writer::{
 };
 use crate::filesystem::file_allocation;
 use crate::filesystem::resume_helper::{ResumeHelper, ResumeState};
+use crate::http::client_pool;
 use crate::http::cookie::Cookie;
 use crate::http::cookie_storage::CookieStorage;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
@@ -25,10 +26,12 @@ use crate::selector::adaptive_uri_selector::AdaptiveUriSelector;
 use crate::selector::server_stat_man::ServerStatMan;
 
 const CONCURRENT_MIN_FILE_SIZE: u64 = 1024 * 1024;
+/// Progress update interval in bytes - update progress every 256KB to reduce lock contention
+const PROGRESS_UPDATE_BYTES: u64 = 256 * 1024;
 
 pub struct DownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
-    client: reqwest::Client,
+    client: Arc<reqwest::Client>,
     output_path: std::path::PathBuf,
     started: bool,
     completed: bool,
@@ -63,62 +66,150 @@ impl DownloadCommand {
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
-            .user_agent("aria2-rust/1.0")
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .pool_max_idle_per_host(8)
-            .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
-            .tcp_keepalive(Some(std::time::Duration::from_secs(60)));
+        // Use global client if no proxy configuration, otherwise create custom client
+        let client = if options.http_proxy.is_none() && options.all_proxy.is_none() {
+            // No proxy configuration - use shared global client for better performance
+            client_pool::get_global_client()
+        } else {
+            // Proxy configuration present - create custom client
+            let mut builder = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(120))
+                .user_agent("aria2-rust/1.0")
+                .redirect(reqwest::redirect::Policy::limited(5))
+                .pool_max_idle_per_host(8)
+                .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+                .tcp_keepalive(Some(std::time::Duration::from_secs(60)));
 
-        if let Some(ref proxy) = options.http_proxy
-            && let Ok(proxy_url) = proxy.parse::<reqwest::Url>()
-            && let Ok(p) = reqwest::Proxy::all(proxy_url.to_string())
-        {
-            builder = builder.proxy(p);
-        }
+            if let Some(ref proxy) = options.http_proxy
+                && let Ok(proxy_url) = proxy.parse::<reqwest::Url>()
+                && let Ok(p) = reqwest::Proxy::all(proxy_url.to_string())
+            {
+                builder = builder.proxy(p);
+            }
 
-        // Apply all-proxy (global proxy for all protocols)
-        // Priority: protocol-specific proxy > all-proxy
-        if options.http_proxy.is_none()
-            && let Some(ref all_proxy) = options.all_proxy
-        {
-            match ProxyUrl::parse(all_proxy) {
-                Ok(parsed) => {
-                    match parsed.protocol {
-                        crate::http::socks_connector::ProxyProtocol::Http
-                        | crate::http::socks_connector::ProxyProtocol::Https => {
-                            if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
-                                builder = builder.proxy(p);
+            // Apply all-proxy (global proxy for all protocols)
+            // Priority: protocol-specific proxy > all-proxy
+            if options.http_proxy.is_none()
+                && let Some(ref all_proxy) = options.all_proxy
+            {
+                match ProxyUrl::parse(all_proxy) {
+                    Ok(parsed) => {
+                        match parsed.protocol {
+                            crate::http::socks_connector::ProxyProtocol::Http
+                            | crate::http::socks_connector::ProxyProtocol::Https => {
+                                if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
+                                    builder = builder.proxy(p);
+                                }
+                            }
+                            _ => {
+                                // SOCKS proxies require a custom connector.
+                                // For now, log a note that SOCKS integration is available
+                                // via the SocksConnector trait but requires manual TcpStream wrapping.
+                                tracing::info!(
+                                    "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
+                                    all_proxy
+                                );
                             }
                         }
-                        _ => {
-                            // SOCKS proxies require a custom connector.
-                            // For now, log a note that SOCKS integration is available
-                            // via the SocksConnector trait but requires manual TcpStream wrapping.
-                            tracing::info!(
-                                "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
-                                all_proxy
-                            );
-                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, e);
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, e);
+            }
+
+            let client = builder.build().map_err(|e| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                    "Failed to build HTTP client: {}",
+                    e
+                )))
+            })?;
+
+            Arc::new(client)
+        };
+
+        let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
+        info!("DownloadCommand 创建: {} -> {}", uri, path.display());
+
+        let cookie_file = options.cookie_file.clone();
+        let cookie_storage = Arc::new(CookieStorage::new());
+
+        if let Some(ref cf) = cookie_file {
+            let p = std::path::Path::new(cf);
+            if p.exists() {
+                match cookie_storage.load_file(p) {
+                    Ok(n) => info!("从文件加载了 {} 个 Cookie: {}", n, cf),
+                    Err(e) => warn!("加载 Cookie 文件失败 {}: {}", cf, e),
                 }
             }
         }
 
-        let client = builder.build().map_err(|e| {
-            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "Failed to build HTTP client: {}",
-                e
-            )))
-        })?;
+        if let Some(ref cookies_str) = options.cookies {
+            let domain = Self::extract_host(uri);
+            for pair in cookies_str.split(';') {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    continue;
+                }
+                if let Some((name, value)) = pair.split_once('=') {
+                    let name = name.trim();
+                    let value = value.trim();
+                    if !name.is_empty() {
+                        cookie_storage.add(Cookie::new(name, value, &domain));
+                    }
+                }
+            }
+            if !cookie_storage.is_empty() {
+                info!("手动设置了 {} 个 Cookie", cookie_storage.count());
+            }
+        }
+
+        Ok(Self {
+            group: Arc::new(tokio::sync::RwLock::new(group)),
+            client,
+            output_path: path,
+            started: false,
+            completed: false,
+            completed_bytes: 0,
+            continue_enabled: true,
+            file_allocation: "prealloc".to_string(),
+            cookie_storage,
+            cookie_file,
+            no_proxy_matcher: options
+                .no_proxy
+                .as_ref()
+                .map(|np| NoProxyMatcher::from_env_value(np)),
+            stat_man: Arc::new(ServerStatMan::new()),
+        })
+    }
+
+    /// Create a DownloadCommand with a custom HTTP client.
+    ///
+    /// Use this when you want to share an HTTP client across multiple downloads
+    /// for better connection reuse and memory efficiency.
+    pub fn new_with_client(
+        gid: GroupId,
+        uri: &str,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+        client: Arc<reqwest::Client>,
+    ) -> Result<Self> {
+        let dir = output_dir
+            .map(|d| d.to_string())
+            .or_else(|| options.dir.clone())
+            .unwrap_or_else(|| ".".to_string());
+
+        let filename = output_name
+            .map(|n| n.to_string())
+            .or_else(|| Self::extract_filename(uri))
+            .unwrap_or_else(|| "download".to_string());
+
+        let path = std::path::PathBuf::from(&dir).join(&filename);
 
         let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
-        info!("DownloadCommand 创建: {} -> {}", uri, path.display());
+        info!("DownloadCommand 创建 (共享客户端): {} -> {}", uri, path.display());
 
         let cookie_file = options.cookie_file.clone();
         let cookie_storage = Arc::new(CookieStorage::new());
@@ -329,6 +420,7 @@ impl DownloadCommand {
         let mut stream = response.bytes_stream();
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
+        let mut last_progress_update = 0u64; // Track last progress update for batch updates
 
         while let Some(chunk) = stream.next().await {
             let data: bytes::Bytes = chunk.map_err(|e| {
@@ -339,13 +431,16 @@ impl DownloadCommand {
             writer.write(&data).await?;
             self.completed_bytes += data.len() as u64;
 
-            {
+            // Batch progress updates to reduce lock contention
+            // Only update progress every PROGRESS_UPDATE_BYTES (256KB)
+            if self.completed_bytes - last_progress_update >= PROGRESS_UPDATE_BYTES {
                 let g = self.group.write().await;
                 g.update_progress(self.completed_bytes).await;
                 // Export to atomic fields for session persistence
                 g.set_completed_length(self.completed_bytes);
-                g.set_download_speed_cached(0); // Will be updated below
+                last_progress_update = self.completed_bytes;
 
+                // Speed update still happens every 500ms
                 let elapsed = last_speed_update.elapsed();
                 if elapsed.as_millis() >= 500 {
                     let delta = self.completed_bytes - last_completed;
@@ -397,6 +492,7 @@ impl DownloadCommand {
         let split = options.split.unwrap_or(1) as usize;
         let max_conn = options.max_connection_per_server.unwrap_or(4) as usize;
         let seg_size = total_length / split as u64;
+        let mut last_progress_update = 0u64; // Track last progress update for batch updates
 
         info!(
             "并发下载启动: split={}, max_conn={}, segment_size={} bytes, total={}",
@@ -482,10 +578,14 @@ impl DownloadCommand {
                                 manager.complete_segment(seg_idx, data.clone());
                                 self.completed_bytes += data.len() as u64;
 
-                                let g = self.group.write().await;
-                                g.update_progress(self.completed_bytes).await;
-                                // Export to atomic fields for session persistence
-                                g.set_completed_length(self.completed_bytes);
+                                // Batch progress updates to reduce lock contention
+                                if self.completed_bytes - last_progress_update >= PROGRESS_UPDATE_BYTES {
+                                    let g = self.group.write().await;
+                                    g.update_progress(self.completed_bytes).await;
+                                    // Export to atomic fields for session persistence
+                                    g.set_completed_length(self.completed_bytes);
+                                    last_progress_update = self.completed_bytes;
+                                }
                             }
                             Ok(Err(e)) => {
                                 warn!("段 {} 下载失败: {}", seg_idx, e);
@@ -704,6 +804,7 @@ impl DownloadCommand {
         let mut writer = CachedDiskWriter::new(&self.output_path, Some(total_length), None);
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
+        let mut last_progress_update = 0u64; // Track last progress update for batch updates
 
         while coordinator.has_pending_segments() || !coordinator.is_complete() {
             // Select mirror and segment
@@ -778,10 +879,12 @@ impl DownloadCommand {
                     }
                 };
 
-                {
+                // Batch progress updates to reduce lock contention
+                if self.completed_bytes - last_progress_update >= PROGRESS_UPDATE_BYTES {
                     let g = self.group.write().await;
                     g.update_progress(self.completed_bytes).await;
                     g.set_completed_length(self.completed_bytes);
+                    last_progress_update = self.completed_bytes;
 
                     // Update speed periodically
                     let elapsed = last_speed_update.elapsed();

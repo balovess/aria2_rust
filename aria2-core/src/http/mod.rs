@@ -1,3 +1,4 @@
+pub mod client_pool;
 pub mod conditional_get;
 pub mod connection;
 pub mod cookie;

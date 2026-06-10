@@ -151,6 +151,7 @@ dependencies = [
  "hyper 0.14.32",
  "libc",
  "md5",
+ "once_cell",
  "rand 0.8.5",
  "rc4",
  "regex",
