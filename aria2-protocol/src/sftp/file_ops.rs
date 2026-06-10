@@ -398,9 +398,9 @@ impl SftpFileHandle {
 
         match resp {
             super::packet::SftpPacket::Attrs { attrs, .. } => Ok(FileAttributes::from(&attrs)),
-            super::packet::SftpPacket::Status {
-                code, message: _, ..
-            } => Err(FileOpError::from_status_code(code, "FSTAT", "<handle>")),
+            super::packet::SftpPacket::Status { code, .. } => {
+                Err(FileOpError::from_status_code(code, "FSTAT", "<handle>"))
+            }
             other => Err(FileOpError::Protocol {
                 code: other.packet_type() as u32,
                 operation: "FSTAT".to_string(),
@@ -430,9 +430,9 @@ impl SftpFileHandle {
 
         match resp {
             super::packet::SftpPacket::Status { code: 0, .. } => Ok(()),
-            super::packet::SftpPacket::Status {
-                code, message: _, ..
-            } => Err(FileOpError::from_status_code(code, "FSETSTAT", "<handle>")),
+            super::packet::SftpPacket::Status { code, .. } => {
+                Err(FileOpError::from_status_code(code, "FSETSTAT", "<handle>"))
+            }
             other => Err(FileOpError::Protocol {
                 code: other.packet_type() as u32,
                 operation: "FSETSTAT".to_string(),
@@ -474,9 +474,9 @@ impl SftpFileHandle {
                 // EOF means no more data -- return empty buffer
                 Ok(Vec::new())
             }
-            super::packet::SftpPacket::Status {
-                code, message: _, ..
-            } => Err(FileOpError::from_status_code(code, "READ", "<handle>")),
+            super::packet::SftpPacket::Status { code, .. } => {
+                Err(FileOpError::from_status_code(code, "READ", "<handle>"))
+            }
             other => Err(FileOpError::Protocol {
                 code: other.packet_type() as u32,
                 operation: "READ".to_string(),
@@ -514,9 +514,9 @@ impl SftpFileHandle {
 
         match resp {
             super::packet::SftpPacket::Status { code: 0, .. } => Ok(data.len() as u64),
-            super::packet::SftpPacket::Status {
-                code, message: _, ..
-            } => Err(FileOpError::from_status_code(code, "WRITE", "<handle>")),
+            super::packet::SftpPacket::Status { code, .. } => {
+                Err(FileOpError::from_status_code(code, "WRITE", "<handle>"))
+            }
             other => Err(FileOpError::Protocol {
                 code: other.packet_type() as u32,
                 operation: "WRITE".to_string(),

@@ -257,13 +257,10 @@ impl PieceDataProvider for FileBackedPieceProvider {
                 let bytes_available_in_file = file_end - current_global;
                 let bytes_to_read = remaining.min(bytes_available_in_file) as u32;
 
-                if let Some(data) = read_op(file_path.clone(), file_offset, bytes_to_read) {
-                    result.extend_from_slice(&data);
-                    current_global += data.len() as u64;
-                    remaining -= data.len() as u64;
-                } else {
-                    return None;
-                }
+                let data = read_op(file_path.clone(), file_offset, bytes_to_read)?;
+                result.extend_from_slice(&data);
+                current_global += data.len() as u64;
+                remaining -= data.len() as u64;
             }
 
             Some(result)

@@ -275,107 +275,107 @@ impl SessionEntry {
             // After URIs have been seen, treat KEY=VALUE lines as properties
             // even without leading space (for compatibility with hand-written
             // session files that omit the leading space on property lines).
-            if seen_uri {
-                if let Some((key, value)) = line.split_once('=') {
-                    let key = key.trim().to_string();
-                    let value = value.to_string();
-                    match key.as_str() {
-                        "GID" => {
-                            if let Ok(gid) = u64::from_str_radix(&value, 16) {
-                                entry.gid = gid;
-                            }
+            if seen_uri
+                && let Some((key, value)) = line.split_once('=')
+            {
+                let key = key.trim().to_string();
+                let value = value.to_string();
+                match key.as_str() {
+                    "GID" => {
+                        if let Ok(gid) = u64::from_str_radix(&value, 16) {
+                            entry.gid = gid;
                         }
-                        "PAUSE" => {
-                            if value == "true" {
-                                entry.paused = true;
-                            }
+                    }
+                    "PAUSE" => {
+                        if value == "true" {
+                            entry.paused = true;
                         }
-                        "TOTAL_LENGTH" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.total_length = v;
-                            }
+                    }
+                    "TOTAL_LENGTH" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            entry.total_length = v;
                         }
-                        "COMPLETED_LENGTH" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.completed_length = v;
-                            }
+                    }
+                    "COMPLETED_LENGTH" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            entry.completed_length = v;
                         }
-                        "UPLOAD_LENGTH" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.upload_length = v;
-                            }
+                    }
+                    "UPLOAD_LENGTH" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            entry.upload_length = v;
                         }
-                        "DOWNLOAD_SPEED" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                entry.download_speed = v;
-                            }
+                    }
+                    "DOWNLOAD_SPEED" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            entry.download_speed = v;
                         }
-                        "STATUS" => {
-                            if !value.is_empty() {
-                                entry.status = value;
-                            }
+                    }
+                    "STATUS" => {
+                        if !value.is_empty() {
+                            entry.status = value;
                         }
-                        "ERROR_CODE" => {
-                            if !value.is_empty() {
-                                if let Ok(code) = value.parse::<i32>() {
-                                    entry.error_code = Some(code);
-                                }
-                            } else {
-                                entry.error_code = None;
+                    }
+                    "ERROR_CODE" => {
+                        if !value.is_empty() {
+                            if let Ok(code) = value.parse::<i32>() {
+                                entry.error_code = Some(code);
                             }
+                        } else {
+                            entry.error_code = None;
                         }
-                        "BITFIELD" => {
-                            if !value.is_empty() {
-                                if let Ok(bytes) = decode_hex(&value) {
-                                    entry.bitfield = Some(bytes);
-                                } else {
-                                    entry.bitfield = None;
-                                }
+                    }
+                    "BITFIELD" => {
+                        if !value.is_empty() {
+                            if let Ok(bytes) = decode_hex(&value) {
+                                entry.bitfield = Some(bytes);
                             } else {
                                 entry.bitfield = None;
                             }
-                        }
-                        "NUM_PIECES" => {
-                            if let Ok(v) = value.parse::<u32>() {
-                                if v > 0 {
-                                    entry.num_pieces = Some(v);
-                                } else {
-                                    entry.num_pieces = None;
-                                }
-                            }
-                        }
-                        "PIECE_LENGTH" => {
-                            if let Ok(v) = value.parse::<u32>() {
-                                if v > 0 {
-                                    entry.piece_length = Some(v);
-                                } else {
-                                    entry.piece_length = None;
-                                }
-                            }
-                        }
-                        "INFO_HASH" => {
-                            if !value.is_empty() {
-                                entry.info_hash_hex = Some(value);
-                            } else {
-                                entry.info_hash_hex = None;
-                            }
-                        }
-                        "RESUME_OFFSET" => {
-                            if let Ok(v) = value.parse::<u64>() {
-                                if v > 0 {
-                                    entry.resume_offset = Some(v);
-                                } else {
-                                    entry.resume_offset = None;
-                                }
-                            }
-                        }
-                        _ => {
-                            // Unknown key - store in options map
-                            entry.options.insert(key, value);
+                        } else {
+                            entry.bitfield = None;
                         }
                     }
-                    continue;
+                    "NUM_PIECES" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            if v > 0 {
+                                entry.num_pieces = Some(v);
+                            } else {
+                                entry.num_pieces = None;
+                            }
+                        }
+                    }
+                    "PIECE_LENGTH" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            if v > 0 {
+                                entry.piece_length = Some(v);
+                            } else {
+                                entry.piece_length = None;
+                            }
+                        }
+                    }
+                    "INFO_HASH" => {
+                        if !value.is_empty() {
+                            entry.info_hash_hex = Some(value);
+                        } else {
+                            entry.info_hash_hex = None;
+                        }
+                    }
+                    "RESUME_OFFSET" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            if v > 0 {
+                                entry.resume_offset = Some(v);
+                            } else {
+                                entry.resume_offset = None;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Unknown key - store in options map
+                        entry.options.insert(key, value);
+                    }
                 }
+                continue;
             }
 
             // This must be the URI line (first line without leading space)

@@ -566,8 +566,7 @@ mod tests {
 
         // On both Unix and Windows, this should fail with insufficient space
         // or succeed if the check is skipped (very unlikely for exabytes)
-        if result.is_err() {
-            let error_msg = result.unwrap_err();
+        if let Err(error_msg) = result {
             assert!(
                 error_msg.to_lowercase().contains("insufficient")
                     || error_msg.to_lowercase().contains("space"),

@@ -575,7 +575,7 @@ impl LpdManager {
         let mut peers_map = self.peers.write().await;
         let mut removed = 0usize;
 
-        for (_hash, peers) in peers_map.iter_mut() {
+        for peers in peers_map.values_mut() {
             let before = peers.len();
             peers.retain(|p| !p.is_expired(max_age));
             removed += before - peers.len();

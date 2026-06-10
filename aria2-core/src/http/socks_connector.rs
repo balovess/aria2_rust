@@ -205,10 +205,10 @@ impl NoProxyMatcher {
         for entry in &self.entries {
             match entry {
                 NoProxyEntry::IpAddr(entry_ip) if *entry_ip == ip => return true,
-                NoProxyEntry::IpNetwork(network_addr, prefix_len) => {
-                    if Self::ip_in_network(ip, *network_addr, *prefix_len) {
-                        return true;
-                    }
+                NoProxyEntry::IpNetwork(network_addr, prefix_len)
+                    if Self::ip_in_network(ip, *network_addr, *prefix_len) =>
+                {
+                    return true;
                 }
                 _ => {}
             }

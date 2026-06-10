@@ -142,7 +142,7 @@ impl AdaptiveUriSelector {
             })
             .collect();
 
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let used_set: std::collections::HashSet<&str> =
             used_hosts.iter().map(|(_, h)| h.as_str()).collect();
@@ -247,14 +247,14 @@ impl AdaptiveUriSelector {
     /// selector.report_success(0, 1_000_000, false);
     /// ```
     pub fn report_success(&self, uri_idx: usize, speed: u64, is_multi: bool) {
-        if let Some(uri) = self.uris.get(uri_idx) {
-            if let Some(host) = extract_host(uri) {
-                self.stat_man.update(&host, speed, is_multi);
-                // Reset failure count on success
-                if let Some(stat) = self.stat_man.find_stat(&host) {
-                    // Success resets the error status
-                    stat.reset_status();
-                }
+        if let Some(uri) = self.uris.get(uri_idx)
+            && let Some(host) = extract_host(uri)
+        {
+            self.stat_man.update(&host, speed, is_multi);
+            // Reset failure count on success
+            if let Some(stat) = self.stat_man.find_stat(&host) {
+                // Success resets the error status
+                stat.reset_status();
             }
         }
     }
@@ -285,12 +285,12 @@ impl AdaptiveUriSelector {
     /// selector.report_failure_with_code(0, 503);
     /// ```
     pub fn report_failure_with_code(&self, uri_idx: usize, error_code: u16) {
-        if let Some(uri) = self.uris.get(uri_idx) {
-            if let Some(host) = extract_host(uri) {
-                // Ensure stat exists before marking failure
-                self.stat_man.get_or_create(&host);
-                self.stat_man.mark_failure(&host, error_code);
-            }
+        if let Some(uri) = self.uris.get(uri_idx)
+            && let Some(host) = extract_host(uri)
+        {
+            // Ensure stat exists before marking failure
+            self.stat_man.get_or_create(&host);
+            self.stat_man.mark_failure(&host, error_code);
         }
     }
 

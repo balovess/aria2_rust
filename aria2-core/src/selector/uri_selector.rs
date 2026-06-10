@@ -103,7 +103,7 @@ impl UriSelector for PriorityUriSelector {
 
         // Sort indices by priority descending
         let mut indexed: Vec<(usize, i32)> = self.priorities.iter().cloned().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.cmp(&a.1)); // descending
+        indexed.sort_by_key(|b| std::cmp::Reverse(b.1)); // descending
 
         // Among highest priority group, round-robin
         let top_priority = indexed.first().map(|&(_, p)| p)?;

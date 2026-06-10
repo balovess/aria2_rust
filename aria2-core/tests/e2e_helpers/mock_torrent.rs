@@ -263,11 +263,8 @@ fn find_bencode_end(data: &[u8]) -> Option<usize> {
                 match data[pos] {
                     b'i' => {
                         // Skip to end of integer
-                        if let Some(end) = data[pos..].iter().position(|&b| b == b'e') {
-                            pos += end + 1;
-                        } else {
-                            return None;
-                        }
+                        let end = data[pos..].iter().position(|&b| b == b'e')?;
+                        pos += end + 1;
                     }
                     b'l' | b'd' => {
                         depth += 1;

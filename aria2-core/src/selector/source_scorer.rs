@@ -141,8 +141,8 @@ pub fn is_better_source(stat_a: &ServerStat, stat_b: &ServerStat) -> bool {
 /// * `stats` - Mutable slice of ServerStat references to sort in-place
 pub fn sort_by_score(stats: &mut [&ServerStat]) {
     stats.sort_by(|a, b| {
-        let score_a = score_source(*a);
-        let score_b = score_source(*b);
+        let score_a = score_source(a);
+        let score_b = score_source(b);
         score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
     });
 }

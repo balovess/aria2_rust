@@ -223,7 +223,7 @@ impl DigestAuthResponse {
             // With QoP: HA1:nonce:nc:cnonce:qop:HA2
             hash_hex(&format!(
                 "{}:{}:{}:{}:{}:{}",
-                ha1, challenge.nonce, nc_str, &cnonce, qop, ha2
+                ha1, challenge.nonce, nc_str, cnonce, qop, ha2
             ))
         } else {
             // Without QoP: HA1:nonce:HA2

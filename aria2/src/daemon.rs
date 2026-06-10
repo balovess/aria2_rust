@@ -397,11 +397,11 @@ impl Daemonizer {
             let pid_str = format!("{}", pid);
 
             // Create parent directory if it doesn't exist
-            if let Some(parent) = path.parent() {
-                if !parent.exists() {
-                    fs::create_dir_all(parent)
-                        .map_err(|e| DaemonError::PidFileCreate(format!("Failed to create directory: {}", e)))?;
-                }
+            if let Some(parent) = path.parent()
+                && !parent.exists()
+            {
+                fs::create_dir_all(parent)
+                    .map_err(|e| DaemonError::PidFileCreate(format!("Failed to create directory: {}", e)))?;
             }
 
             // Write PID file
@@ -424,13 +424,13 @@ impl Daemonizer {
 impl Drop for Daemonizer {
     fn drop(&mut self) {
         // Clean up PID file on exit
-        if let Some(ref path) = self.config.pid_file {
-            if path.exists() {
-                if let Err(e) = fs::remove_file(path) {
-                    warn!("Failed to remove PID file {:?}: {}", path, e);
-                } else {
-                    debug!("Removed PID file {:?}", path);
-                }
+        if let Some(ref path) = self.config.pid_file
+            && path.exists()
+        {
+            if let Err(e) = fs::remove_file(path) {
+                warn!("Failed to remove PID file {:?}: {}", path, e);
+            } else {
+                debug!("Removed PID file {:?}", path);
             }
         }
     }
@@ -538,7 +538,7 @@ impl PidFileManager {
         let output = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .output()
-            .map_err(|e| DaemonError::Io(e))?;
+            .map_err(DaemonError::Io)?;
 
         if !output.status.success() {
             Err(DaemonError::DetachFailed(
@@ -563,10 +563,10 @@ pub fn is_daemon_mode(args: &[String]) -> bool {
         if arg == "--daemon" || arg == "-D" {
             return true;
         }
-        if let Some(opt) = arg.strip_prefix("--") {
-            if opt == "daemon" || opt.starts_with("daemon=") {
-                return true;
-            }
+        if let Some(opt) = arg.strip_prefix("--")
+            && (opt == "daemon" || opt.starts_with("daemon="))
+        {
+            return true;
         }
     }
     false

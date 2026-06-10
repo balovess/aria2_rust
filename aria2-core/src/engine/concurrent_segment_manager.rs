@@ -264,11 +264,8 @@ impl ConcurrentSegmentManager {
 
     pub fn fail_segment(&mut self, index: u32) -> Option<usize> {
         let (prev_mirror, new_retry) = {
-            if let Some(seg) = self.segments.get(index as usize) {
-                (seg.assigned_mirror, seg.retry_count + 1)
-            } else {
-                return None;
-            }
+            let seg = self.segments.get(index as usize)?;
+            (seg.assigned_mirror, seg.retry_count + 1)
         };
 
         if let Some(mi) = prev_mirror
@@ -332,11 +329,8 @@ impl ConcurrentSegmentManager {
 
         let mut result = Vec::with_capacity(self.total_size as usize);
         for seg in &self.segments {
-            if let Some(ref data) = seg.data {
-                result.extend_from_slice(data);
-            } else {
-                return None;
-            }
+            let data = seg.data.as_ref()?;
+            result.extend_from_slice(data);
         }
         Some(result)
     }
@@ -520,13 +514,13 @@ impl ConcurrentSegmentManager {
 
         // Fallback: find first available mirror
         for mirror_idx in 0..self.mirrors.len() {
-            if self.mirrors[mirror_idx].can_accept_more() {
-                if let Some(seg) = self.segments.get_mut(seg_index as usize) {
-                    seg.status = SegmentStatus::Downloading;
-                    seg.assigned_mirror = Some(mirror_idx);
-                    self.mirrors[mirror_idx].active_segments += 1;
-                    return Some((mirror_idx, (seg.index, seg.offset, seg.length)));
-                }
+            if self.mirrors[mirror_idx].can_accept_more()
+                && let Some(seg) = self.segments.get_mut(seg_index as usize)
+            {
+                seg.status = SegmentStatus::Downloading;
+                seg.assigned_mirror = Some(mirror_idx);
+                self.mirrors[mirror_idx].active_segments += 1;
+                return Some((mirror_idx, (seg.index, seg.offset, seg.length)));
             }
         }
 
@@ -567,15 +561,15 @@ impl ConcurrentSegmentManager {
 
         // Update server stats if available
         if success {
-            if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man) {
-                if let Some(url) = self.mirror_urls.get(idx) {
-                    let host = extract_host_from_url(url);
-                    stat_man.update(&host, bytes_per_sec, is_multi_connection);
+            if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
+                && let Some(url) = self.mirror_urls.get(idx)
+            {
+                let host = extract_host_from_url(url);
+                stat_man.update(&host, bytes_per_sec, is_multi_connection);
 
-                    // Reset failure count on success
-                    if let Some(stat) = stat_man.find_stat(&host) {
-                        stat.reset_status();
-                    }
+                // Reset failure count on success
+                if let Some(stat) = stat_man.find_stat(&host) {
+                    stat.reset_status();
                 }
             }
 
@@ -614,21 +608,21 @@ impl ConcurrentSegmentManager {
         let reassign = self.fail_segment(seg_idx);
 
         // Update server stats if available
-        if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man) {
-            if let Some(url) = self.mirror_urls.get(idx) {
-                let host = extract_host_from_url(url);
-                // Ensure stat exists before marking failure
-                stat_man.get_or_create(&host);
-                stat_man.mark_failure(&host, error_code);
+        if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
+            && let Some(url) = self.mirror_urls.get(idx)
+        {
+            let host = extract_host_from_url(url);
+            // Ensure stat exists before marking failure
+            stat_man.get_or_create(&host);
+            stat_man.mark_failure(&host, error_code);
 
-                // Check if mirror should be disabled
-                if let Some(stat) = stat_man.find_stat(&host) {
-                    if !stat.is_available() {
-                        // Mirror is in cooldown, disable it temporarily
-                        if let Some(m) = self.mirrors.get_mut(idx) {
-                            m.disabled = true;
-                        }
-                    }
+            // Check if mirror should be disabled
+            if let Some(stat) = stat_man.find_stat(&host)
+                && !stat.is_available()
+            {
+                // Mirror is in cooldown, disable it temporarily
+                if let Some(m) = self.mirrors.get_mut(idx) {
+                    m.disabled = true;
                 }
             }
         }
