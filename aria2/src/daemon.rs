@@ -47,6 +47,7 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Check if shutdown was requested via signal.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED
         .get()

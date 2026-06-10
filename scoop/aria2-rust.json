@@ -1,0 +1,41 @@
+{
+    "version": "0.1.0",
+    "description": "The ultra fast download utility - rewritten in Rust",
+    "homepage": "https://github.com/balovess/aria2_rust",
+    "license": "GPL-2.0-or-later",
+    "notes": [
+        "aria2-rust is now installed!",
+        "",
+        "Quick start:",
+        "  aria2c http://example.com/file.zip",
+        "",
+        "For more options:",
+        "  aria2c --help"
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/balovess/aria2_rust/releases/download/v0.1.0/aria2-x86_64-windows.zip",
+            "hash": "PLACEHOLDER_SHA256"
+        }
+    },
+    "bin": [
+        [
+            "aria2c.exe",
+            "aria2c"
+        ]
+    ],
+    "checkver": {
+        "github": "https://github.com/balovess/aria2_rust"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/balovess/aria2_rust/releases/download/v$version/aria2-x86_64-windows.zip"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256",
+            "regex": "$sha256"
+        }
+    }
+}

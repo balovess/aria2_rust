@@ -40,13 +40,59 @@
 
 ## Quick Start
 
-### Prerequisites
+### One-Line Installation (Recommended)
 
+**Linux / macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex
+```
+
+**Docker:**
+```bash
+docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
+```
+
+**Package Managers:**
+
+| Platform | Command |
+|----------|---------|
+| Homebrew (macOS/Linux) | `brew install ./homebrew/aria2-rust.rb` |
+| Scoop (Windows) | `scoop install ./scoop/aria2-rust.json` |
+| Cargo (from source) | `cargo install --path aria2` |
+
+### First Download
+
+After installation, start downloading immediately:
+
+```bash
+# Download a file
+aria2c http://example.com/file.zip
+
+# Download with multiple connections
+aria2c -x 16 -s 16 http://example.com/large.iso
+
+# Download a torrent
+aria2c file.torrent
+
+# Download with custom directory
+aria2c -d ~/downloads http://example.com/file.zip
+```
+
+### Build from Source
+
+<details>
+<summary>Click to expand build instructions</summary>
+
+**Prerequisites:**
 - [Rust](https://www.rust-lang.org/tools/install) 1.70+ (stable)
 - Windows / macOS / Linux
 
-### Build & Run
-
+**Build Commands:**
 ```bash
 # Clone the repository
 git clone https://github.com/balovess/aria2_rust.git
@@ -68,7 +114,33 @@ cargo run --release -- --help
 cargo run --release -- --version
 ```
 
+</details>
+
 ## Usage
+
+### Configuration Templates
+
+We provide ready-to-use configuration templates in `examples/configs/`:
+
+| Template | Description |
+|----------|-------------|
+| [minimal.conf](examples/configs/minimal.conf) | Minimal configuration for quick setup |
+| [basic.conf](examples/configs/basic.conf) | Basic configuration with common options |
+| [advanced.conf](examples/configs/advanced.conf) | Advanced configuration with RPC, proxy, etc. |
+| [bittorrent.conf](examples/configs/bittorrent.conf) | Optimized for BitTorrent downloads |
+
+**Usage:**
+```bash
+# Copy template to config directory
+mkdir -p ~/.aria2
+cp examples/configs/basic.conf ~/.aria2/aria2.conf
+
+# Edit as needed
+nano ~/.aria2/aria2.conf
+
+# Run with configuration
+aria2c --conf-path=~/.aria2/aria2.conf http://example.com/file.zip
+```
 
 ### Basic HTTP Download
 

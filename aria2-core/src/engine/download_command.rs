@@ -327,7 +327,6 @@ impl DownloadCommand {
         };
 
         let mut stream = response.bytes_stream();
-        let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
 
@@ -362,12 +361,15 @@ impl DownloadCommand {
 
         writer.finalize().await.ok();
 
+        // Calculate final speed using group's elapsed_time for consistency
         let final_speed = {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                (self.completed_bytes as f64 / elapsed) as u64
-            } else {
-                0
+            let g = self.group.read().await;
+            let elapsed = g.elapsed_time().await;
+            match elapsed {
+                Some(d) if d.as_secs_f64() > 0.0 => {
+                    (self.completed_bytes as f64 / d.as_secs_f64()) as u64
+                }
+                _ => 0,
             }
         };
         {
@@ -429,7 +431,6 @@ impl DownloadCommand {
             .filter(|&r| r > 0)
             .map(|r| RateLimiter::new(&RateLimiterConfig::new(Some(r), None)));
 
-        let start_time = Instant::now();
         let mut active_handles: std::collections::HashMap<
             u32,
             tokio::task::JoinHandle<std::result::Result<Vec<u8>, String>>,
@@ -525,12 +526,15 @@ impl DownloadCommand {
             )))
         })?;
 
+        // Calculate final speed using group's elapsed_time for consistency
         let final_speed = {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                (self.completed_bytes as f64 / elapsed) as u64
-            } else {
-                0
+            let g = self.group.read().await;
+            let elapsed = g.elapsed_time().await;
+            match elapsed {
+                Some(d) if d.as_secs_f64() > 0.0 => {
+                    (self.completed_bytes as f64 / d.as_secs_f64()) as u64
+                }
+                _ => 0,
             }
         };
         {
@@ -698,7 +702,6 @@ impl DownloadCommand {
         }
 
         let mut writer = CachedDiskWriter::new(&self.output_path, Some(total_length), None);
-        let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
 
@@ -816,13 +819,15 @@ impl DownloadCommand {
             )))
         })?;
 
-        // Calculate final speed
+        // Calculate final speed using group's elapsed_time for consistency
         let final_speed = {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                (self.completed_bytes as f64 / elapsed) as u64
-            } else {
-                0
+            let g = self.group.read().await;
+            let elapsed = g.elapsed_time().await;
+            match elapsed {
+                Some(d) if d.as_secs_f64() > 0.0 => {
+                    (self.completed_bytes as f64 / d.as_secs_f64()) as u64
+                }
+                _ => 0,
             }
         };
 

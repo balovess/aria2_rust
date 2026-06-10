@@ -1,0 +1,86 @@
+# aria2-rust Docker Compose Configuration
+#
+# Usage:
+#   docker-compose up -d          # Start in background
+#   docker-compose logs -f        # View logs
+#   docker-compose down           # Stop and remove
+#
+# For production use, copy this file and modify as needed.
+
+version: '3.8'
+
+services:
+  aria2:
+    image: ghcr.io/balovess/aria2-rust:latest
+    container_name: aria2
+    restart: unless-stopped
+    
+    # Ports
+    ports:
+      - "6800:6800"  # RPC port
+    
+    # Volumes
+    volumes:
+      - ./downloads:/downloads      # Download directory
+      - ./config:/config            # Configuration directory
+      - ./session:/session          # Session files (for resume)
+    
+    # Environment variables
+    environment:
+      - RPC_SECRET=${RPC_SECRET:-}  # RPC secret token (optional)
+      - TZ=Asia/Shanghai            # Timezone
+    
+    # Command line arguments
+    command:
+      - "--enable-rpc=true"
+      - "--rpc-listen-all=true"
+      - "--rpc-listen-port=6800"
+      - "--rpc-allow-origin-all=true"
+      - "--dir=/downloads"
+      - "--input-file=/session/session.txt"
+      - "--save-session=/session/session.txt"
+      - "--save-session-interval=60"
+      - "--max-concurrent-downloads=5"
+      - "--max-connection-per-server=16"
+      - "--min-split-size=1M"
+      - "--split=16"
+      - "--continue=true"
+      - "--auto-save-interval=60"
+      - "--file-allocation=prealloc"
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6800/jsonrpc"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Optional: Web UI (AriaNg)
+  # Uncomment to enable
+  # ariang:
+  #   image: p3terx/ariang:latest
+  #   container_name: ariang
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6880:6880"
+  #   depends_on:
+  #     - aria2
+
+# Named volumes (alternative to bind mounts)
+# volumes:
+#   downloads:
+#   config:
+#   session:
+
+# Network
+networks:
+  default:
+    name: aria2-network
