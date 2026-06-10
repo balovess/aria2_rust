@@ -30,7 +30,7 @@
     "autoupdate": {
         "architecture": {
             "64bit": {
-                "url": "https://github.com/balovess/aria2_rust/releases/download/v$version/aria2-x86_64-windows.zip"
+                "url": "https://github.com/balovess/aria2_rust/releases/download/v0.1.0/aria2-x86_64-windows.zip"
             }
         },
         "hash": {

@@ -19,6 +19,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Sync versions
+        run: |
+          chmod +x scripts/sync-version.sh
+          ./scripts/sync-version.sh
       - name: Run tests
         run: cargo test --workspace --all-targets
       - name: Clippy check

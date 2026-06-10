@@ -34,4 +34,22 @@ aria2-protocol = { path = "aria2-protocol" }
 aria2-core = { path = "aria2-core" }
 
 [workspace.metadata.release]
-allow-branch = ["main"]
+# Release workflow settings
+release = true
+publish = false  # We use GitHub Actions for publishing
+
+# Pre-release checks
+pre-release-hook = ["cargo", "test", "--workspace", "--all-targets"]
+
+# Git operations
+push = true
+tag = true
+tag-name = "v{{version}}"
+commit-message = "chore: release v{{version}}"
+
+# Allow release from main branch only
+allow-branch = ["main", "master"]
+
+# Consistent versioning across workspace
+consolidate-commits = true
+shared-version = true

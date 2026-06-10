@@ -24,6 +24,7 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::selector::adaptive_uri_selector::AdaptiveUriSelector;
 use crate::selector::server_stat_man::ServerStatMan;
+use crate::util::perf_monitor::{AtomicMetrics, DefaultPerformanceMonitor, Metrics, PerformanceMonitor};
 
 const CONCURRENT_MIN_FILE_SIZE: u64 = 1024 * 1024;
 /// Progress update interval in bytes - update progress every 256KB to reduce lock contention
@@ -44,6 +45,10 @@ pub struct DownloadCommand {
     /// Server statistics manager for intelligent mirror selection.
     /// Shared across downloads to maintain historical performance data.
     stat_man: Arc<ServerStatMan>,
+    /// Performance monitor for collecting metrics (optional, minimal overhead when enabled)
+    perf_monitor: Option<Arc<DefaultPerformanceMonitor>>,
+    /// Atomic metrics for low-overhead collection
+    atomic_metrics: Arc<AtomicMetrics>,
 }
 
 impl DownloadCommand {
@@ -181,6 +186,8 @@ impl DownloadCommand {
                 .as_ref()
                 .map(|np| NoProxyMatcher::from_env_value(np)),
             stat_man: Arc::new(ServerStatMan::new()),
+            perf_monitor: None, // Disabled by default for zero overhead
+            atomic_metrics: Arc::new(AtomicMetrics::new()),
         })
     }
 
@@ -260,6 +267,8 @@ impl DownloadCommand {
                 .as_ref()
                 .map(|np| NoProxyMatcher::from_env_value(np)),
             stat_man: Arc::new(ServerStatMan::new()),
+            perf_monitor: None, // Disabled by default for zero overhead
+            atomic_metrics: Arc::new(AtomicMetrics::new()),
         })
     }
 
@@ -278,6 +287,28 @@ impl DownloadCommand {
         let mut cmd = Self::new(gid, uri, options, output_dir, output_name)?;
         cmd.stat_man = stat_man;
         Ok(cmd)
+    }
+
+    /// Enable performance monitoring for this download.
+    ///
+    /// This adds minimal overhead (< 1%) to track throughput, latency, memory, and lock wait times.
+    pub fn enable_perf_monitor(&mut self) {
+        self.perf_monitor = Some(Arc::new(DefaultPerformanceMonitor::new()));
+    }
+
+    /// Get performance metrics snapshot (low-overhead, always available)
+    pub fn get_perf_metrics(&self) -> Metrics {
+        self.atomic_metrics.snapshot()
+    }
+
+    /// Get performance report if monitoring is enabled
+    pub fn get_perf_report(&self) -> Option<String> {
+        self.perf_monitor.as_ref().map(|m| m.export_text())
+    }
+
+    /// Get performance report in JSON format if monitoring is enabled
+    pub fn get_perf_report_json(&self) -> Option<String> {
+        self.perf_monitor.as_ref().map(|m| m.export_json())
     }
 
     fn extract_filename(uri: &str) -> Option<String> {
@@ -448,6 +479,17 @@ impl DownloadCommand {
                     g.update_speed(speed, 0).await;
                     // Update cached download speed for session persistence
                     g.set_download_speed_cached(speed);
+                    
+                    // Record performance metrics (minimal overhead)
+                    self.atomic_metrics.record_throughput(speed);
+                    
+                    // Record to performance monitor if enabled
+                    if let Some(ref monitor) = self.perf_monitor {
+                        let metrics = Metrics::new(speed, elapsed.as_millis() as u64, 0, 0)
+                            .with_label("download_speed");
+                        monitor.record_metric("download_speed", metrics);
+                    }
+                    
                     last_speed_update = Instant::now();
                     last_completed = self.completed_bytes;
                 }

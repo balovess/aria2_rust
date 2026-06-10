@@ -76,3 +76,7 @@ harness = false
 [[bench]]
 name = "p2_bench"
 harness = false
+
+[[bench]]
+name = "serialization_bench"
+harness = false
