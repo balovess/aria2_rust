@@ -205,10 +205,8 @@ impl Daemonizer {
         info!("Running as daemon with PID: {}", daemon_pid);
 
         // Step 5: Change working directory if requested
-        if self.config.chdir_to_root {
-            if std::env::set_current_dir("/").is_err() {
-                warn!("Failed to change directory to root, continuing anyway");
-            }
+        if self.config.chdir_to_root && std::env::set_current_dir("/").is_err() {
+            warn!("Failed to change directory to root, continuing anyway");
         }
 
         // Step 6: Redirect standard file descriptors
