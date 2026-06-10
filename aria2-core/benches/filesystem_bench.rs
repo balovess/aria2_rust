@@ -1,5 +1,5 @@
 use base64::Engine;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, Throughput};
 use std::io::Write;
 use tempfile::TempDir;
 
@@ -156,6 +156,155 @@ fn bench_hashmap_insert_lookup(c: &mut Criterion) {
     });
 }
 
+// ── Task 2: Striped locks performance benchmarks ─────────────────
+
+fn bench_striped_locks_concurrent_writes(c: &mut Criterion) {
+    use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
+    use tokio::runtime::Runtime;
+
+    let rt = Runtime::new().unwrap();
+    
+    let mut group = c.benchmark_group("striped_locks_concurrent");
+    
+    // Test with different numbers of concurrent writers
+    for num_threads in [4, 8, 16, 32].iter() {
+        group.throughput(Throughput::Elements(*num_threads as u64));
+        
+        group.bench_with_input(
+            BenchmarkId::new("concurrent_writes", num_threads),
+            num_threads,
+            |b, &num_threads| {
+                b.to_async(&rt).iter(|| async move {
+                    let dir = TempDir::new().unwrap();
+                    let path = dir.path().join("bench_striped.bin");
+                    
+                    // Initialize file with smaller size
+                    let mut writer = CachedDiskWriter::new(&path, Some(32 * 1024 * 1024), None);
+                    writer.open().await.unwrap();
+                    writer.close().await.unwrap();
+                    
+                    let mut handles = vec![];
+                    for thread_id in 0..num_threads {
+                        let path_clone = path.clone();
+                        
+                        handles.push(tokio::spawn(async move {
+                            let mut w = CachedDiskWriter::new(&path_clone, None, None);
+                            w.open().await.unwrap();
+                            
+                            // Write to different shards (1MB apart)
+                            for write_id in 0..100 {
+                                let offset = ((thread_id * 100 + write_id) as u64) * 8192;
+                                let data = vec![(thread_id + write_id) as u8; 8192];
+                                w.write_at(offset, &data).await.unwrap();
+                            }
+                            
+                            w.flush().await.unwrap();
+                            w.close().await.unwrap();
+                        }));
+                    }
+                    
+                    for handle in handles {
+                        handle.await.unwrap();
+                    }
+                    
+                    black_box(num_threads)
+                });
+            },
+        );
+    }
+    
+    group.finish();
+}
+
+fn bench_striped_vs_single_lock_comparison(c: &mut Criterion) {
+    use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
+    use aria2_core::filesystem::disk_adaptor::{DiskAdaptor, DirectDiskAdaptor};
+    use std::sync::Arc;
+    use tokio::runtime::Runtime;
+    use tokio::sync::Mutex;
+
+    let rt = Runtime::new().unwrap();
+    
+    let mut group = c.benchmark_group("striped_vs_single_lock");
+    
+    // Benchmark with striped locks (16 shards)
+    // Each thread opens its own file handle to the same file
+    group.bench_function("striped_16_shards", |b| {
+        b.to_async(&rt).iter(|| async {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("bench_striped.bin");
+            
+            // Initialize file with smaller size
+            let mut writer = CachedDiskWriter::new(&path, Some(16 * 1024 * 1024), None);
+            writer.open().await.unwrap();
+            writer.close().await.unwrap();
+            
+            let mut handles = vec![];
+            for i in 0..16 {
+                let path_clone = path.clone();
+                
+                handles.push(tokio::spawn(async move {
+                    let mut w = CachedDiskWriter::new(&path_clone, None, None);
+                    w.open().await.unwrap();
+                    
+                    // Write to different shards (1MB apart)
+                    let offset = (i as u64) * 1024 * 1024;
+                    let data = vec![i as u8; 4096];
+                    w.write_at(offset, &data).await.unwrap();
+                    
+                    w.flush().await.unwrap();
+                    w.close().await.unwrap();
+                }));
+            }
+            
+            for handle in handles {
+                handle.await.unwrap();
+            }
+        });
+    });
+    
+    // Benchmark with single lock
+    // Each thread opens its own file handle to the same file (same as striped)
+    group.bench_function("single_lock", |b| {
+        b.to_async(&rt).iter(|| async {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("bench_single.bin");
+            
+            // Initialize file
+            let adaptor = Arc::new(Mutex::new(DirectDiskAdaptor::new()));
+            {
+                let mut a = adaptor.lock().await;
+                a.open(&path).await.unwrap();
+                a.close().await.unwrap();
+            }
+            
+            let mut handles = vec![];
+            for i in 0..16 {
+                let path_clone = path.clone();
+                
+                handles.push(tokio::spawn(async move {
+                    // Each thread opens its own file handle
+                    let mut adaptor = DirectDiskAdaptor::new();
+                    adaptor.open(&path_clone).await.unwrap();
+                    
+                    let offset = (i as u64) * 1024 * 1024;
+                    let data = vec![i as u8; 4096];
+                    adaptor.write(offset, &data).await.unwrap();
+                    
+                    adaptor.flush().await.unwrap();
+                    adaptor.close().await.unwrap();
+                }));
+            }
+            
+            for handle in handles {
+                handle.await.unwrap();
+            }
+        });
+    });
+    
+    group.finish();
+}
+
 criterion_group!(
     filesystem_benches,
     bench_disk_write_sequential_10mb,
@@ -166,6 +315,8 @@ criterion_group!(
     bench_path_operations,
     bench_string_concat,
     bench_hashmap_insert_lookup,
+    bench_striped_locks_concurrent_writes,
+    bench_striped_vs_single_lock_comparison,
 );
 
 fn main() {

@@ -63,3 +63,11 @@ criterion.workspace = true
 [[bench]]
 name = "protocol_bench"
 harness = false
+
+[[bench]]
+name = "bitfield_bench"
+harness = false
+
+[[bench]]
+name = "sequential_picker_bench"
+harness = false

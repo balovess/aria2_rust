@@ -1,10 +1,12 @@
 use sha1::Digest;
 
+use super::bitfield::Bitfield;
+
 pub struct PieceManager {
     num_pieces: u32,
     piece_length: u32,
     total_size: u64,
-    completed: Vec<bool>,
+    completed: Bitfield,
     downloaded_bytes_per_piece: Vec<u64>,
     piece_hashes: Vec<[u8; 20]>,
 }
@@ -16,7 +18,7 @@ impl PieceManager {
             num_pieces,
             piece_length,
             total_size,
-            completed: vec![false; num_pieces as usize],
+            completed: Bitfield::new(num_pieces as usize),
             downloaded_bytes_per_piece: vec![0; num_pieces as usize],
             piece_hashes: hashes,
         }
@@ -36,7 +38,7 @@ impl PieceManager {
     }
 
     pub fn is_completed(&self, index: u32) -> bool {
-        (index as usize) < self.completed.len() && self.completed[index as usize]
+        self.completed.test(index as usize)
     }
 
     pub fn mark_piece_downloaded(&mut self, index: u32, bytes: u64) {
@@ -46,9 +48,7 @@ impl PieceManager {
     }
 
     pub fn mark_piece_complete(&mut self, index: u32) {
-        if (index as usize) < self.completed.len() {
-            self.completed[index as usize] = true;
-        }
+        self.completed.set(index as usize);
     }
 
     pub fn verify_piece_hash(&self, index: u32, data: &[u8]) -> bool {
@@ -61,7 +61,7 @@ impl PieceManager {
     }
 
     pub fn completed_pieces(&self) -> u32 {
-        self.completed.iter().filter(|&&c| c).count() as u32
+        self.completed.count_set() as u32
     }
 
     pub fn total_progress(&self) -> f64 {

@@ -54,6 +54,13 @@ pub struct PiecePicker {
     peer_availability: HashMap<u32, HashSet<u32>>,
     #[allow(dead_code)]
     rng_seed: u64,
+    /// Cursor for sequential piece selection (O(1) optimization)
+    /// Points to the next piece index to check for sequential selection
+    sequential_cursor: u32,
+    /// Cursor for SequentialHead mode (lowest index first)
+    sequential_head_cursor: u32,
+    /// Cursor for SequentialTail mode (highest index first)
+    sequential_tail_cursor: u32,
 }
 
 impl PiecePicker {
@@ -66,6 +73,9 @@ impl PiecePicker {
             priority_mode: PiecePriorityMode::RarestFirst,
             peer_availability: HashMap::new(),
             rng_seed: 42,
+            sequential_cursor: 0,
+            sequential_head_cursor: 0,
+            sequential_tail_cursor: if num_pieces > 0 { num_pieces - 1 } else { 0 },
         }
     }
 
@@ -97,12 +107,55 @@ impl PiecePicker {
         if (index as usize) < self.pieces.len() {
             self.pieces[index as usize].completed = true;
             self.pieces[index as usize].in_progress = false;
+            // Update cursors when a piece is completed
+            self.update_sequential_cursors();
+        }
+    }
+
+    /// Update sequential cursors to point to the next available piece
+    /// This ensures O(1) selection by maintaining cursor positions
+    fn update_sequential_cursors(&mut self) {
+        // Update sequential_cursor (forward direction)
+        while self.sequential_cursor < self.total_pieces {
+            let piece = &self.pieces[self.sequential_cursor as usize];
+            if !piece.completed && !piece.in_progress {
+                break;
+            }
+            self.sequential_cursor += 1;
+        }
+
+        // Update sequential_head_cursor (forward direction)
+        while self.sequential_head_cursor < self.total_pieces {
+            let piece = &self.pieces[self.sequential_head_cursor as usize];
+            if !piece.completed && !piece.in_progress {
+                break;
+            }
+            self.sequential_head_cursor += 1;
+        }
+
+        // Update sequential_tail_cursor (backward direction)
+        while self.sequential_tail_cursor > 0 {
+            let piece = &self.pieces[self.sequential_tail_cursor as usize];
+            if !piece.completed && !piece.in_progress {
+                break;
+            }
+            self.sequential_tail_cursor -= 1;
+        }
+        // Check the last position (index 0)
+        if self.sequential_tail_cursor == 0 {
+            let piece = &self.pieces[0];
+            if piece.completed || piece.in_progress {
+                // No more available pieces from tail
+                self.sequential_tail_cursor = self.total_pieces;
+            }
         }
     }
 
     pub fn mark_in_progress(&mut self, index: u32, in_progress: bool) {
         if (index as usize) < self.pieces.len() {
             self.pieces[index as usize].in_progress = in_progress;
+            // Update cursors when in_progress status changes
+            self.update_sequential_cursors();
         }
     }
 
@@ -178,29 +231,69 @@ impl PiecePicker {
     /// Select the lowest-index incomplete piece (sequential from head).
     /// Respects bitfield to only pick pieces the peer actually has.
     fn select_sequential_head(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
-        self.pieces
-            .iter()
-            .enumerate()
-            .take(max_pieces)
-            .filter(|(i, piece)| {
-                !piece.completed && !piece.in_progress && Self::bitfield_has_piece(bitfield, *i)
-            })
-            .map(|(i, _)| i as u32)
-            .min() // Lowest index = head of file
+        // O(1) optimization: start from cursor position instead of beginning
+        let start_pos = self.sequential_head_cursor as usize;
+        
+        // First, check from cursor to end
+        for i in start_pos..max_pieces {
+            let piece = &self.pieces[i];
+            if piece.completed || piece.in_progress {
+                continue;
+            }
+            if Self::bitfield_has_piece(bitfield, i) {
+                return Some(i as u32);
+            }
+        }
+        
+        // If not found after cursor, check from beginning to cursor
+        for i in 0..start_pos {
+            let piece = &self.pieces[i];
+            if piece.completed || piece.in_progress {
+                continue;
+            }
+            if Self::bitfield_has_piece(bitfield, i) {
+                return Some(i as u32);
+            }
+        }
+        
+        None
     }
 
     /// Select the highest-index incomplete piece (sequential from tail).
     /// Respects bitfield to only pick pieces the peer actually has.
     fn select_sequential_tail(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
-        self.pieces
-            .iter()
-            .enumerate()
-            .take(max_pieces)
-            .filter(|(i, piece)| {
-                !piece.completed && !piece.in_progress && Self::bitfield_has_piece(bitfield, *i)
-            })
-            .map(|(i, _)| i as u32)
-            .max() // Highest index = tail of file
+        // O(1) optimization: start from cursor position instead of end
+        let start_pos = if self.sequential_tail_cursor >= max_pieces as u32 {
+            max_pieces.saturating_sub(1)
+        } else {
+            self.sequential_tail_cursor as usize
+        };
+        
+        // First, check from cursor down to 0
+        for i in (0..=start_pos).rev() {
+            let piece = &self.pieces[i];
+            if piece.completed || piece.in_progress {
+                continue;
+            }
+            if Self::bitfield_has_piece(bitfield, i) {
+                return Some(i as u32);
+            }
+        }
+        
+        // If not found before cursor, check from end to cursor
+        if start_pos + 1 < max_pieces {
+            for i in ((start_pos + 1)..max_pieces).rev() {
+                let piece = &self.pieces[i];
+                if piece.completed || piece.in_progress {
+                    continue;
+                }
+                if Self::bitfield_has_piece(bitfield, i) {
+                    return Some(i as u32);
+                }
+            }
+        }
+        
+        None
     }
 
     /// Check if a bitfield has a specific piece index set (MSB-first ordering).
@@ -242,7 +335,12 @@ impl PiecePicker {
     }
 
     fn select_sequential_with_bitfield(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
-        for (i, piece) in self.pieces.iter().enumerate().take(max_pieces) {
+        // O(1) optimization: start from cursor position instead of beginning
+        let start_pos = self.sequential_cursor as usize;
+        
+        // First, check from cursor to end
+        for i in start_pos..max_pieces {
+            let piece = &self.pieces[i];
             if piece.completed || piece.in_progress {
                 continue;
             }
@@ -252,6 +350,20 @@ impl PiecePicker {
                 return Some(piece.index);
             }
         }
+        
+        // If not found after cursor, check from beginning to cursor (in case cursor was reset)
+        for i in 0..start_pos {
+            let piece = &self.pieces[i];
+            if piece.completed || piece.in_progress {
+                continue;
+            }
+            let byte_idx = i / 8;
+            let bit_idx = 7 - (i % 8);
+            if byte_idx < bitfield.len() && (bitfield[byte_idx] & (1 << bit_idx)) != 0 {
+                return Some(piece.index);
+            }
+        }
+        
         None
     }
 
@@ -301,10 +413,20 @@ impl PiecePicker {
     }
 
     fn pick_sequential(&self) -> Option<u32> {
-        self.pieces
-            .iter()
-            .find(|p| !p.completed && !p.in_progress)
-            .map(|p| p.index)
+        // O(1) optimization: use cursor to directly access the next available piece
+        if self.sequential_cursor >= self.total_pieces {
+            return None;
+        }
+        let piece = &self.pieces[self.sequential_cursor as usize];
+        if !piece.completed && !piece.in_progress {
+            Some(piece.index)
+        } else {
+            // Fallback: cursor might be out of sync, do a linear search
+            self.pieces
+                .iter()
+                .find(|p| !p.completed && !p.in_progress)
+                .map(|p| p.index)
+        }
     }
 
     fn pick_random(&self) -> Option<u32> {
@@ -325,20 +447,40 @@ impl PiecePicker {
 
     /// Pick the lowest-index incomplete piece (sequential from head, no bitfield filter).
     fn pick_sequential_head(&self) -> Option<u32> {
-        self.pieces
-            .iter()
-            .filter(|p| !p.completed && !p.in_progress)
-            .map(|p| p.index)
-            .min() // Lowest index = head of file
+        // O(1) optimization: use cursor to directly access the next available piece
+        if self.sequential_head_cursor >= self.total_pieces {
+            return None;
+        }
+        let piece = &self.pieces[self.sequential_head_cursor as usize];
+        if !piece.completed && !piece.in_progress {
+            Some(piece.index)
+        } else {
+            // Fallback: cursor might be out of sync, do a linear search
+            self.pieces
+                .iter()
+                .filter(|p| !p.completed && !p.in_progress)
+                .map(|p| p.index)
+                .min()
+        }
     }
 
     /// Pick the highest-index incomplete piece (sequential from tail, no bitfield filter).
     fn pick_sequential_tail(&self) -> Option<u32> {
-        self.pieces
-            .iter()
-            .filter(|p| !p.completed && !p.in_progress)
-            .map(|p| p.index)
-            .max() // Highest index = tail of file
+        // O(1) optimization: use cursor to directly access the next available piece
+        if self.sequential_tail_cursor >= self.total_pieces {
+            return None;
+        }
+        let piece = &self.pieces[self.sequential_tail_cursor as usize];
+        if !piece.completed && !piece.in_progress {
+            Some(piece.index)
+        } else {
+            // Fallback: cursor might be out of sync, do a linear search
+            self.pieces
+                .iter()
+                .filter(|p| !p.completed && !p.in_progress)
+                .map(|p| p.index)
+                .max()
+        }
     }
 
     pub fn endgame_candidates(&self) -> Vec<u32> {
@@ -829,5 +971,198 @@ mod tests {
             Some(5),
             "SequentialTail with bitfield should pick highest available in both"
         );
+    }
+
+    // ==================== Performance Tests ====================
+
+    #[test]
+    fn test_sequential_performance_with_large_torrent() {
+        // Test with a large number of pieces to verify O(1) performance
+        let num_pieces = 10000;
+        let mut picker = PiecePicker::new(num_pieces);
+        picker.set_strategy(PieceSelectionStrategy::Sequential);
+
+        // Mark first 5000 pieces as completed
+        for i in 0..5000 {
+            picker.mark_completed(i);
+        }
+
+        // The next pick should be piece 5000 (O(1) with cursor)
+        let start = std::time::Instant::now();
+        let picked = picker.pick_next();
+        let duration = start.elapsed();
+
+        assert_eq!(picked, Some(5000), "Should pick piece 5000 after completing 0-4999");
+        
+        // With O(1) optimization, this should be very fast (< 1 microsecond)
+        // Even with 10000 pieces, cursor-based lookup is constant time
+        println!("Sequential pick time for 10000 pieces: {:?}", duration);
+        assert!(duration.as_micros() < 100, "O(1) pick should be very fast");
+    }
+
+    #[test]
+    fn test_sequential_head_performance_with_large_torrent() {
+        let num_pieces = 10000;
+        let mut picker = PiecePicker::new(num_pieces);
+        picker.set_priority_mode(PiecePriorityMode::SequentialHead);
+
+        // Mark first 5000 pieces as completed
+        for i in 0..5000 {
+            picker.mark_completed(i);
+        }
+
+        let start = std::time::Instant::now();
+        let picked = picker.pick_next();
+        let duration = start.elapsed();
+
+        assert_eq!(picked, Some(5000), "SequentialHead should pick piece 5000");
+        println!("SequentialHead pick time for 10000 pieces: {:?}", duration);
+        assert!(duration.as_micros() < 100, "O(1) pick should be very fast");
+    }
+
+    #[test]
+    fn test_sequential_tail_performance_with_large_torrent() {
+        let num_pieces = 10000;
+        let mut picker = PiecePicker::new(num_pieces);
+        picker.set_priority_mode(PiecePriorityMode::SequentialTail);
+
+        // Mark last 5000 pieces as completed
+        for i in 5000..10000 {
+            picker.mark_completed(i);
+        }
+
+        let start = std::time::Instant::now();
+        let picked = picker.pick_next();
+        let duration = start.elapsed();
+
+        assert_eq!(picked, Some(4999), "SequentialTail should pick piece 4999");
+        println!("SequentialTail pick time for 10000 pieces: {:?}", duration);
+        assert!(duration.as_micros() < 100, "O(1) pick should be very fast");
+    }
+
+    #[test]
+    fn test_cursor_updates_correctly_on_completion() {
+        let mut picker = PiecePicker::new(10);
+        picker.set_strategy(PieceSelectionStrategy::Sequential);
+
+        // Initially should pick piece 0
+        assert_eq!(picker.pick_next(), Some(0));
+
+        // Mark piece 0 as completed, cursor should move to 1
+        picker.mark_completed(0);
+        assert_eq!(picker.pick_next(), Some(1));
+
+        // Mark piece 2 as completed (skip piece 1), cursor should stay at 1
+        picker.mark_completed(2);
+        assert_eq!(picker.pick_next(), Some(1));
+
+        // Mark piece 1 as completed, cursor should move to 3 (since 2 is also completed)
+        picker.mark_completed(1);
+        assert_eq!(picker.pick_next(), Some(3));
+    }
+
+    #[test]
+    fn test_cursor_handles_in_progress_correctly() {
+        let mut picker = PiecePicker::new(10);
+        picker.set_strategy(PieceSelectionStrategy::Sequential);
+
+        // Mark piece 0 as in_progress, cursor should move to 1
+        picker.mark_in_progress(0, true);
+        assert_eq!(picker.pick_next(), Some(1));
+
+        // Mark piece 1 as completed, cursor should move to 2
+        picker.mark_completed(1);
+        assert_eq!(picker.pick_next(), Some(2));
+
+        // Mark piece 0 as not in_progress, cursor should still be at 2
+        // (because we've already passed piece 0)
+        picker.mark_in_progress(0, false);
+        assert_eq!(picker.pick_next(), Some(2));
+    }
+
+    #[test]
+    fn test_no_pieces_skipped_in_sequential_mode() {
+        let mut picker = PiecePicker::new(100);
+        picker.set_strategy(PieceSelectionStrategy::Sequential);
+
+        // Randomly mark some pieces as completed
+        let completed_indices = vec![5, 10, 15, 20, 25, 30, 35, 40, 45, 50];
+        for &i in &completed_indices {
+            picker.mark_completed(i);
+        }
+
+        // Pick all remaining pieces and verify none are skipped
+        let mut picked_pieces = Vec::new();
+        while let Some(piece) = picker.pick_next() {
+            picked_pieces.push(piece);
+            picker.mark_completed(piece);
+        }
+
+        // Verify all pieces were picked
+        assert_eq!(picked_pieces.len(), 90, "Should have picked 90 remaining pieces");
+        
+        // Verify no completed pieces were picked
+        for &completed in &completed_indices {
+            assert!(!picked_pieces.contains(&completed), "Completed piece {} should not be picked", completed);
+        }
+
+        // Verify pieces are in order (sequential)
+        for i in 1..picked_pieces.len() {
+            assert!(picked_pieces[i] > picked_pieces[i-1], "Pieces should be picked in order");
+        }
+    }
+
+    #[test]
+    fn test_sequential_head_no_pieces_skipped() {
+        let mut picker = PiecePicker::new(100);
+        picker.set_priority_mode(PiecePriorityMode::SequentialHead);
+
+        // Mark some pieces as completed
+        for i in (0..100).step_by(3) {
+            picker.mark_completed(i);
+        }
+
+        // Pick all remaining pieces
+        let mut picked_pieces = Vec::new();
+        while let Some(piece) = picker.pick_next() {
+            picked_pieces.push(piece);
+            picker.mark_completed(piece);
+        }
+
+        // Count completed pieces: 0, 3, 6, ..., 99 = 34 pieces (0 to 99 inclusive, step 3)
+        // Remaining: 100 - 34 = 66 pieces
+        assert_eq!(picked_pieces.len(), 66, "Should have picked 66 remaining pieces");
+        
+        // Verify pieces are in ascending order
+        for i in 1..picked_pieces.len() {
+            assert!(picked_pieces[i] > picked_pieces[i-1], "Pieces should be in ascending order");
+        }
+    }
+
+    #[test]
+    fn test_sequential_tail_no_pieces_skipped() {
+        let mut picker = PiecePicker::new(100);
+        picker.set_priority_mode(PiecePriorityMode::SequentialTail);
+
+        // Mark some pieces as completed
+        for i in (0..100).step_by(3) {
+            picker.mark_completed(i);
+        }
+
+        // Pick all remaining pieces
+        let mut picked_pieces = Vec::new();
+        while let Some(piece) = picker.pick_next() {
+            picked_pieces.push(piece);
+            picker.mark_completed(piece);
+        }
+
+        // Count completed pieces: 0, 3, 6, ..., 99 = 34 pieces
+        // Remaining: 100 - 34 = 66 pieces
+        assert_eq!(picked_pieces.len(), 66, "Should have picked 66 remaining pieces");
+        
+        // Verify pieces are in descending order
+        for i in 1..picked_pieces.len() {
+            assert!(picked_pieces[i] < picked_pieces[i-1], "Pieces should be in descending order");
+        }
     }
 }

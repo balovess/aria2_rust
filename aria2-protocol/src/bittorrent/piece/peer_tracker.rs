@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use super::bitfield::Bitfield;
+
 pub struct PeerBitfieldEntry {
     pub peer_id: String,
-    pub have_pieces: Vec<bool>,
+    pub have_pieces: Bitfield,
     pub raw_bitfield: Vec<u8>,
     pub last_updated: Instant,
 }
@@ -33,24 +35,28 @@ impl PeerBitfieldTracker {
 
     pub fn update_peer_bitfield(&mut self, peer_id: &str, bitfield: &[u8]) {
         if let Some(existing) = self.peers.get_mut(peer_id) {
-            for (i, had) in existing.have_pieces.iter().enumerate() {
-                if *had && i < self.piece_peer_count.len() {
+            // Decrement counts for old pieces
+            for i in existing.have_pieces.iter_set() {
+                if i < self.piece_peer_count.len() {
                     self.piece_peer_count[i] = self.piece_peer_count[i].saturating_sub(1);
                 }
             }
-            let have = expand_bitfield(bitfield, self.total_pieces);
-            for (i, has) in have.iter().enumerate() {
-                if *has && i < self.piece_peer_count.len() {
+            
+            // Update with new bitfield
+            let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
+            for i in have.iter_set() {
+                if i < self.piece_peer_count.len() {
                     self.piece_peer_count[i] += 1;
                 }
             }
+            
             existing.have_pieces = have;
             existing.raw_bitfield = bitfield.to_vec();
             existing.last_updated = Instant::now();
         } else {
-            let have = expand_bitfield(bitfield, self.total_pieces);
-            for (i, has) in have.iter().enumerate() {
-                if *has && i < self.piece_peer_count.len() {
+            let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
+            for i in have.iter_set() {
+                if i < self.piece_peer_count.len() {
                     self.piece_peer_count[i] += 1;
                 }
             }
@@ -68,8 +74,8 @@ impl PeerBitfieldTracker {
 
     pub fn remove_peer(&mut self, peer_id: &str) {
         if let Some(entry) = self.peers.remove(peer_id) {
-            for (i, had) in entry.have_pieces.iter().enumerate() {
-                if *had && i < self.piece_peer_count.len() {
+            for i in entry.have_pieces.iter_set() {
+                if i < self.piece_peer_count.len() {
                     self.piece_peer_count[i] = self.piece_peer_count[i].saturating_sub(1);
                 }
             }
@@ -80,16 +86,15 @@ impl PeerBitfieldTracker {
         let idx = piece_index as usize;
         self.peers
             .iter()
-            .filter(|(_, e)| idx < e.have_pieces.len() && e.have_pieces[idx])
+            .filter(|(_, e)| e.have_pieces.test(idx))
             .map(|(id, _)| id.clone())
             .collect()
     }
 
     pub fn peer_has_piece(&self, peer_id: &str, piece_index: u32) -> bool {
-        let idx = piece_index as usize;
         self.peers
             .get(peer_id)
-            .map(|e| idx < e.have_pieces.len() && e.have_pieces[idx])
+            .map(|e| e.have_pieces.test(piece_index as usize))
             .unwrap_or(false)
     }
 
@@ -97,26 +102,20 @@ impl PeerBitfieldTracker {
         self.piece_peer_count.clone()
     }
 
-    pub fn should_enter_endgame(&self, threshold: u32, completed: &[bool]) -> bool {
-        let missing: usize = completed
-            .iter()
-            .take(self.total_pieces as usize)
-            .filter(|c| !**c)
-            .count();
+    pub fn should_enter_endgame(&self, threshold: u32, completed: &Bitfield) -> bool {
+        let missing = completed.count_clear();
         missing > 0 && missing as u32 <= threshold
     }
 
-    pub fn missing_pieces(&self, completed: &[bool]) -> Vec<u32> {
+    pub fn missing_pieces(&self, completed: &Bitfield) -> Vec<u32> {
         completed
-            .iter()
-            .enumerate()
+            .iter_clear()
             .take(self.total_pieces as usize)
-            .filter(|(_, c)| !**c)
-            .map(|(i, _)| i as u32)
+            .map(|i| i as u32)
             .collect()
     }
 
-    pub fn stats(&self, completed: Option<&[bool]>) -> PeerTrackerStats {
+    pub fn stats(&self, completed: Option<&Bitfield>) -> PeerTrackerStats {
         let total_have: usize = self.piece_peer_count.iter().sum();
         let avg = if self.peers.is_empty() {
             0.0
@@ -149,22 +148,6 @@ impl PeerBitfieldTracker {
     pub fn peer_count(&self) -> usize {
         self.peers.len()
     }
-}
-
-fn expand_bitfield(bitfield: &[u8], total_pieces: u32) -> Vec<bool> {
-    let mut result = vec![false; total_pieces as usize];
-    for (i, &byte) in bitfield.iter().enumerate() {
-        for bit in 0..8u32 {
-            let piece_idx = (i as u32) * 8 + (7 - bit);
-            if piece_idx >= total_pieces {
-                continue;
-            }
-            if byte & (1 << bit) != 0 {
-                result[piece_idx as usize] = true;
-            }
-        }
-    }
-    result
 }
 
 #[cfg(test)]
@@ -266,15 +249,21 @@ mod tests {
     #[test]
     fn test_should_enter_endgame_threshold() {
         let tracker = PeerBitfieldTracker::new(100);
-        let completed_all_false = vec![false; 100];
+        let completed_all_false = Bitfield::new(100);
 
         assert!(
             !tracker.should_enter_endgame(20, &completed_all_false),
             "100 missing > 20 threshold"
         );
 
-        let mut mostly_done = vec![true; 95];
-        mostly_done.resize(100, false);
+        let mut mostly_done = Bitfield::all_set(100);
+        // Clear 5 pieces
+        mostly_done.clear(95).unwrap();
+        mostly_done.clear(96).unwrap();
+        mostly_done.clear(97).unwrap();
+        mostly_done.clear(98).unwrap();
+        mostly_done.clear(99).unwrap();
+        
         assert!(
             tracker.should_enter_endgame(20, &mostly_done),
             "5 missing ≤ 20 → endgame"
@@ -284,7 +273,11 @@ mod tests {
     #[test]
     fn test_missing_pieces_excludes_completed() {
         let tracker = PeerBitfieldTracker::new(8);
-        let completed = vec![true, false, true, false, true, false, true, false];
+        let mut completed = Bitfield::new(8);
+        completed.set(0).unwrap();
+        completed.set(2).unwrap();
+        completed.set(4).unwrap();
+        completed.set(6).unwrap();
 
         let missing = tracker.missing_pieces(&completed);
         assert_eq!(missing, vec![1, 3, 5, 7]);
@@ -304,14 +297,16 @@ mod tests {
     #[test]
     fn test_empty_tracker_no_crash() {
         let tracker = PeerBitfieldTracker::new(50);
+        let completed = Bitfield::new(50);
+        
         assert_eq!(tracker.peer_count(), 0);
-        assert_eq!(tracker.missing_pieces(&[false; 50]).len(), 50);
+        assert_eq!(tracker.missing_pieces(&completed).len(), 50);
         assert!(tracker.peers_having_piece(0).is_empty());
         assert!(!tracker.peer_has_piece("nonexistent", 0));
         assert_eq!(tracker.get_peer_bitfield_raw("nope"), None);
         assert!(tracker.get_peer_bitfield_or_empty("nope").is_empty());
 
-        let stats = tracker.stats(Some(&[false; 50]));
+        let stats = tracker.stats(Some(&completed));
         assert_eq!(stats.peer_count, 0);
         assert!(!stats.is_endgame, "50 missing > 20 threshold");
     }
