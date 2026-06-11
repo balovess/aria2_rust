@@ -515,6 +515,14 @@ impl OptionHandler {
             bt_require_crypto: self.get("bt-require-crypto").as_bool(),
             enable_dht: self.get("enable-dht").as_bool(),
             dht_listen_port: get_usize("dht-listen-port"),
+            dht_entry_point: {
+                let v = self.get("dht-entry-point").as_str();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                }
+            },
             enable_public_trackers: self.get("enable-public-trackers").as_bool(),
             bt_piece_selection_strategy: self
                 .get("bt-piece-selection-strategy")

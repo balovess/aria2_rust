@@ -446,6 +446,13 @@ impl App {
             dht_listen_port: options
                 .get("dht-listen-port")
                 .and_then(|v| v.parse::<u16>().ok()),
+            dht_entry_point: options.get("dht-entry-point").and_then(|v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                }
+            }),
             enable_public_trackers: options
                 .get("enable-public-trackers")
                 .map(|v| v != "false")
@@ -552,6 +559,7 @@ impl App {
                 .get_opt_i64("dht-listen-port")
                 .await
                 .and_then(|v| if v > 0 { Some(v as u16) } else { None }),
+            dht_entry_point: None,
             enable_public_trackers: self
                 .get_opt_bool("enable-public-trackers")
                 .await

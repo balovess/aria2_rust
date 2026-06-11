@@ -3,12 +3,14 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+#[allow(dead_code)]
 pub struct MockTrackerServer {
     addr: SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     _peer_port: u16,
 }
 
+#[allow(dead_code)]
 impl MockTrackerServer {
     pub async fn start(peer_port: u16) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -90,6 +92,7 @@ impl MockTrackerServer {
     }
 }
 
+#[allow(dead_code)]
 fn build_tracker_response_bencode(peer_port: u16) -> Vec<u8> {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 

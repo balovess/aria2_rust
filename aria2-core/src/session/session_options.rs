@@ -108,6 +108,7 @@ mod tests {
             bt_require_crypto: false,
             enable_dht: true,
             dht_listen_port: Some(6881),
+            dht_entry_point: None,
             enable_public_trackers: true,
             bt_piece_selection_strategy: "rarest-first".to_string(),
             bt_endgame_threshold: 20,

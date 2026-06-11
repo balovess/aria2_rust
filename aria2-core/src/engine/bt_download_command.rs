@@ -88,11 +88,17 @@ pub struct BtDownloadCommand {
     // Web-seed (BEP 19 / HTTP fallback) integration
     /// URLs extracted from torrent's url-list field for HTTP piece download fallback
     pub(crate) web_seed_urls: Vec<String>,
+    /// Web seed manager for HTTP piece downloads (initialized on first use)
+    pub(crate) web_seed_manager: Option<crate::engine::bt_web_seed::WebSeedManager>,
 
     // File lock (J6): prevents concurrent aria2 instances from writing to same output dir
     /// Download path lock held for the lifetime of this command.
     /// Prevents other aria2 instances from writing to the same output directory.
     pub download_path_lock: Option<DownloadPathLock>,
+
+    // Seeding mode (Phase 16 - Complete BitTorrent seeding)
+    /// Seed manager for uploading after download completes
+    pub(crate) seed_manager: Option<super::bt_seed_manager::BtSeedManager>,
 }
 
 impl BtDownloadCommand {
@@ -244,10 +250,15 @@ impl BtDownloadCommand {
             tracker_state: TrackerState::new(),
 
             // Web-seed URLs (extracted from torrent url-list field)
-            web_seed_urls: crate::engine::bt_web_seed::parse_url_list_from_bytes(torrent_bytes),
+            web_seed_urls: meta.web_seeds.clone(),
+            // Web seed manager (initialized lazily when needed)
+            web_seed_manager: None,
 
             // Download path lock (J6)
             download_path_lock,
+
+            // Seeding mode
+            seed_manager: None,
         })
     }
 
@@ -626,4 +637,182 @@ impl BtDownloadCommand {
     pub fn get_peer_stats(&self, peer_idx: usize) -> Option<&crate::engine::peer_stats::PeerStats> {
         self.choking_algo.as_ref()?.get_peer(peer_idx)
     }
+
+    // ==================== Web Seed (BEP 19) Integration API ====================
+
+    /// Initialize the web seed manager if web seeds are configured.
+    ///
+    /// This should be called after the torrent metadata is parsed and before
+    /// the download loop starts.
+    ///
+    /// # Arguments
+    ///
+    /// * `piece_length` - Length of each piece in the torrent
+    /// * `total_length` - Total file length
+    pub fn init_web_seed_manager(&mut self, piece_length: u32, total_length: u64) {
+        if !self.web_seed_urls.is_empty() && self.web_seed_manager.is_none() {
+            info!(
+                count = self.web_seed_urls.len(),
+                "Initializing web seed manager with {} URL(s)",
+                self.web_seed_urls.len()
+            );
+            self.web_seed_manager = Some(crate::engine::bt_web_seed::WebSeedManager::new(
+                self.web_seed_urls.clone(),
+                piece_length,
+                total_length,
+            ));
+        }
+    }
+
+    /// Get a reference to the web seed manager.
+    pub fn get_web_seed_manager(&self) -> Option<&crate::engine::bt_web_seed::WebSeedManager> {
+        self.web_seed_manager.as_ref()
+    }
+
+    /// Get a mutable reference to the web seed manager.
+    pub fn get_web_seed_manager_mut(
+        &mut self,
+    ) -> Option<&mut crate::engine::bt_web_seed::WebSeedManager> {
+        self.web_seed_manager.as_mut()
+    }
+
+    /// Check if web seeds are available.
+    pub fn has_web_seeds(&self) -> bool {
+        !self.web_seed_urls.is_empty()
+    }
+
+    /// Get web seed download statistics.
+    pub fn web_seed_stats(&self) -> Option<&crate::engine::bt_web_seed::WebSeedStats> {
+        self.web_seed_manager.as_ref().map(|m| m.stats())
+    }
+
+    // ==================== Seeding Mode (Phase 16) API ====================
+
+    /// Check if download is complete and start seeding if enabled.
+    ///
+    /// This method should be called after the download loop completes.
+    /// It initializes the seed manager if:
+    /// - All pieces are complete
+    /// - Seeding is enabled (seed_ratio > 0 or seed_time > 0)
+    ///
+    /// # Arguments
+    ///
+    /// * `piece_picker` - Reference to the piece picker to check completion
+    /// * `meta` - Torrent metadata
+    /// * `connections` - Active peer connections to use for seeding
+    /// * `piece_provider` - Provider for piece data (from downloaded files)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` if seeding was started
+    /// * `Ok(false)` if seeding was not started (not complete or disabled)
+    pub fn check_and_start_seeding(
+        &mut self,
+        piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
+        meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+        connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
+        piece_provider: std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
+    ) -> Result<bool> {
+        // Check if download is complete
+        if !piece_picker.is_complete() {
+            debug!("Download not complete, skipping seeding");
+            return Ok(false);
+        }
+
+        // Check if seeding is enabled
+        if !self.seed_enabled {
+            info!("Seeding disabled, not starting seed manager");
+            return Ok(false);
+        }
+
+        // Initialize seed manager
+        use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
+        use crate::engine::bt_upload_session::BtSeedingConfig;
+
+        let seed_ratio = self.seed_ratio.unwrap_or(0.0);
+        let seed_time = self.seed_time.map(|d| d.as_secs());
+
+        let exit_condition = SeedExitCondition::with_time_and_ratio(
+            seed_time.unwrap_or(0),
+            seed_ratio,
+        );
+
+        let config = BtSeedingConfig {
+            max_upload_bytes_per_sec: None, // Will be set from options if needed
+            max_peers_to_unchoke: 4,
+            optimistic_unchoke_interval_secs: 30,
+        };
+
+        let total_downloaded = meta.total_size();
+
+        let seed_manager = BtSeedManager::new_with_info_hash(
+            meta.info_hash.bytes,
+            connections,
+            piece_provider,
+            config,
+            exit_condition,
+            total_downloaded,
+        );
+
+        self.seed_manager = Some(seed_manager);
+
+        info!(
+            "Seeding started: ratio={}, time={:?}, info_hash={}",
+            seed_ratio,
+            self.seed_time,
+            meta.info_hash.as_hex()
+        );
+
+        Ok(true)
+    }
+
+    /// Get a reference to the seed manager.
+    pub fn get_seed_manager(&self) -> Option<&super::bt_seed_manager::BtSeedManager> {
+        self.seed_manager.as_ref()
+    }
+
+    /// Get a mutable reference to the seed manager.
+    pub fn get_seed_manager_mut(&mut self) -> Option<&mut super::bt_seed_manager::BtSeedManager> {
+        self.seed_manager.as_mut()
+    }
+
+    /// Check if seeding is active.
+    pub fn is_seeding(&self) -> bool {
+        self.seed_manager.is_some()
+    }
+
+    /// Get seeding statistics.
+    ///
+    /// Returns `None` if not seeding.
+    pub fn get_seed_stats(&self) -> Option<SeedStats> {
+        self.seed_manager.as_ref().map(|mgr| {
+            let (total_uploaded, upload_speed) = mgr.get_upload_stats();
+            let total_downloaded = mgr.total_downloaded();
+            let ratio = if total_downloaded > 0 {
+                total_uploaded as f64 / total_downloaded as f64
+            } else {
+                0.0
+            };
+
+            SeedStats {
+                total_uploaded,
+                upload_speed,
+                ratio,
+                elapsed: mgr.seeding_duration(),
+            }
+        })
+    }
+}
+
+/// Seeding statistics for a completed download.
+#[derive(Debug, Clone)]
+pub struct SeedStats {
+    /// Total bytes uploaded during seeding
+    pub total_uploaded: u64,
+    /// Current upload speed in bytes/sec
+    pub upload_speed: u64,
+    /// Upload/download ratio
+    pub ratio: f64,
+    /// Time elapsed since seeding started
+    pub elapsed: std::time::Duration,
 }

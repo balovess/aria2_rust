@@ -139,6 +139,15 @@ pub struct DiscoveredPeers {
     pub nodes_contacted: usize,
 }
 
+/// Result of a get_peers query
+#[derive(Debug)]
+pub enum GetPeersResult {
+    /// Peers were found for the info_hash
+    Peers(Vec<SocketAddr>),
+    /// No peers found, but closer nodes were discovered
+    Nodes(Vec<DhtNode>),
+}
+
 /// Cache entry for nodes discovered during find_peers queries.
 /// Stores discovered peer addresses and the timestamp of discovery.
 struct NodeCacheEntry {
@@ -160,6 +169,8 @@ pub struct DhtClient {
     tx_manager: TransactionManager,
     /// Cache of discovered peers keyed by info_hash
     node_cache: HashMap<[u8; 20], NodeCacheEntry>,
+    /// Socket for sending/receiving DHT messages
+    socket: Option<DhtSocket>,
 }
 
 impl DhtClient {
@@ -175,7 +186,165 @@ impl DhtClient {
             routing_table,
             tx_manager: TransactionManager::new(),
             node_cache: HashMap::new(),
+            socket: None,
         }
+    }
+
+    /// Initialize the DHT client with a bound UDP socket
+    pub async fn initialize(&mut self) -> Result<(), String> {
+        if self.socket.is_none() {
+            self.socket = Some(DhtSocket::bind(0).await?);
+        }
+        Ok(())
+    }
+
+    /// Send a ping query to a DHT node and wait for response
+    pub async fn send_ping(&mut self, node: &DhtNode) -> Result<bool, String> {
+        let socket = self.get_socket().await?;
+        let tx_id = rand::random::<u32>();
+        let msg = DhtMessageBuilder::ping(tx_id, &self.config.self_id);
+        
+        let encoded = msg.encode()?;
+        socket.send_to(node.addr, &encoded).await?;
+        
+        let mut buf = [0u8; 4096];
+        match socket.recv_with_timeout(&mut buf, self.config.query_timeout).await {
+            Ok((len, _)) => {
+                if len == 0 {
+                    return Ok(false);
+                }
+                match DhtMessage::decode(&buf[..len]) {
+                    Ok(response) => {
+                        if response.is_response() {
+                            self.routing_table.mark_good(&node.id);
+                            Ok(true)
+                        } else {
+                            self.routing_table.mark_bad(&node.id);
+                            Ok(false)
+                        }
+                    }
+                    Err(_) => Ok(false),
+                }
+            }
+            Err(_) => {
+                self.routing_table.mark_bad(&node.id);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Send a find_node query to discover nodes closer to a target
+    pub async fn send_find_node(&mut self, target: &[u8; 20]) -> Result<Vec<DhtNode>, String> {
+        let socket = self.get_socket().await?;
+        let mut all_nodes = Vec::new();
+        
+        // Collect nodes to query first to avoid borrow conflicts
+        let nodes_to_query: Vec<DhtNode> = self.routing_table
+            .find_closest(target, self.config.max_concurrent_queries)
+            .into_iter()
+            .cloned()
+            .collect();
+        
+        for node in nodes_to_query {
+            let tx_id = rand::random::<u32>();
+            let msg = DhtMessageBuilder::find_node(tx_id, &self.config.self_id, target);
+            let encoded = msg.encode()?;
+            
+            socket.send_to(node.addr, &encoded).await?;
+            
+            let mut buf = [0u8; 4096];
+            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await {
+                if len > 0 {
+                    if let Ok(response) = DhtMessage::decode(&buf[..len]) {
+                        let new_nodes = extract_compact_nodes_from_response(&response);
+                        for (addr, nid) in new_nodes {
+                            let new_node = DhtNode::new(nid, addr);
+                            self.routing_table.insert(new_node.clone());
+                            all_nodes.push(new_node);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(all_nodes)
+    }
+
+    /// Send a get_peers query to discover peers for an info_hash
+    pub async fn send_get_peers(&mut self, info_hash: &[u8; 20]) -> Result<GetPeersResult, String> {
+        let socket = self.get_socket().await?;
+        let mut all_peers = Vec::new();
+        let mut all_nodes = Vec::new();
+        
+        // Collect nodes to query first to avoid borrow conflicts
+        let nodes_to_query: Vec<DhtNode> = self.routing_table
+            .find_closest(info_hash, self.config.max_concurrent_queries)
+            .into_iter()
+            .cloned()
+            .collect();
+        
+        for node in nodes_to_query {
+            let tx_id = rand::random::<u32>();
+            let msg = DhtMessageBuilder::get_peers(tx_id, &self.config.self_id, info_hash);
+            let encoded = msg.encode()?;
+            
+            socket.send_to(node.addr, &encoded).await?;
+            
+            let mut buf = [0u8; 4096];
+            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await {
+                if len > 0 {
+                    if let Ok(response) = DhtMessage::decode(&buf[..len]) {
+                        let peers = extract_compact_peers_from_response(&response);
+                        all_peers.extend(peers);
+                        
+                        let nodes = extract_compact_nodes_from_response(&response);
+                        for (addr, nid) in nodes {
+                            let new_node = DhtNode::new(nid, addr);
+                            self.routing_table.insert(new_node.clone());
+                            all_nodes.push(new_node);
+                        }
+                    }
+                }
+            }
+        }
+        
+        if !all_peers.is_empty() {
+            Ok(GetPeersResult::Peers(all_peers))
+        } else {
+            Ok(GetPeersResult::Nodes(all_nodes))
+        }
+    }
+
+    /// Send an announce_peer query to announce ourselves to the DHT network
+    pub async fn send_announce_peer(&mut self, info_hash: &[u8; 20], port: u16) -> Result<(), String> {
+        let socket = self.get_socket().await?;
+        
+        // Collect nodes to query first to avoid borrow conflicts
+        let nodes_to_query: Vec<DhtNode> = self.routing_table
+            .find_closest(info_hash, 8)
+            .into_iter()
+            .cloned()
+            .collect();
+        
+        for node in nodes_to_query {
+            // Generate a token for announce (in real implementation, this should come from previous get_peers response)
+            let token = format!("token_{}", rand::random::<u32>());
+            let tx_id = rand::random::<u32>();
+            let msg = DhtMessageBuilder::announce_peer(tx_id, &self.config.self_id, info_hash, port, &token);
+            let encoded = msg.encode()?;
+            
+            socket.send_to(node.addr, &encoded).await?;
+        }
+        
+        Ok(())
+    }
+
+    /// Get or create the UDP socket
+    async fn get_socket(&mut self) -> Result<DhtSocket, String> {
+        if self.socket.is_none() {
+            self.socket = Some(DhtSocket::bind(0).await?);
+        }
+        Ok(self.socket.as_ref().unwrap().clone())
     }
 
     pub async fn discover_peers(

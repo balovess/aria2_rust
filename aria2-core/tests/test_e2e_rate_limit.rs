@@ -23,6 +23,7 @@ fn _create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
         bt_require_crypto: false,
         enable_dht: false,
         dht_listen_port: None,
+        dht_entry_point: None,
         enable_public_trackers: false,
         bt_piece_selection_strategy: "rarest-first".to_string(),
         bt_endgame_threshold: 20,

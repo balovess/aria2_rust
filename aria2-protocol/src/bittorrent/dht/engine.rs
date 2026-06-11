@@ -164,6 +164,48 @@ impl DhtEngine {
         self.send_ping_to_all(&boot_nodes).await;
     }
 
+    /// Add custom bootstrap nodes to the routing table
+    pub async fn add_bootstrap_nodes(&self, nodes: &[std::net::SocketAddr]) {
+        debug!("DHT: Adding {} custom bootstrap nodes", nodes.len());
+        
+        for addr in nodes {
+            let mut id = [0u8; 20];
+            getrandom::getrandom(&mut id).ok();
+            let node = DhtNode::new(id, *addr);
+            self.routing_table.write().await.insert(node);
+        }
+        
+        // Send pings to discover their real node IDs
+        let nodes_to_ping: Vec<DhtNode> = nodes
+            .iter()
+            .map(|&addr| {
+                let mut id = [0u8; 20];
+                getrandom::getrandom(&mut id).ok();
+                DhtNode::new(id, addr)
+            })
+            .collect();
+        
+        self.send_ping_to_all(&nodes_to_ping).await;
+    }
+
+    /// Bootstrap the DHT with a list of known nodes
+    pub async fn bootstrap_with_nodes(&self, nodes: &[(std::net::SocketAddr, [u8; 20])]) {
+        debug!("DHT: Bootstrapping with {} known nodes", nodes.len());
+        
+        for (addr, id) in nodes {
+            let node = DhtNode::new(*id, *addr);
+            self.routing_table.write().await.insert(node);
+        }
+        
+        // Send pings to verify connectivity
+        let nodes_to_ping: Vec<DhtNode> = nodes
+            .iter()
+            .map(|(addr, id)| DhtNode::new(*id, *addr))
+            .collect();
+        
+        self.send_ping_to_all(&nodes_to_ping).await;
+    }
+
     async fn send_ping_to_all(&self, nodes: &[DhtNode]) {
         for node in nodes {
             let msg = DhtMessageBuilder::ping(self.next_tx_id(), &self.config.self_id);
@@ -441,6 +483,11 @@ impl DhtEngine {
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.socket.local_addr()
+    }
+
+    /// Add a node to the routing table (for custom bootstrap nodes)
+    pub async fn add_node(&self, node: DhtNode) {
+        self.routing_table.write().await.insert(node);
     }
 
     fn next_tx_id(&self) -> u32 {

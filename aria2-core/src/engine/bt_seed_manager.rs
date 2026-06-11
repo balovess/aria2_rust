@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 
 use super::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
 use super::choking_algorithm::{ChokeAction, ChokingAlgorithm};
@@ -12,6 +15,53 @@ use super::choking_algorithm::{ChokeAction, ChokingAlgorithm};
 /// When a peer sends `BAD_DATA_THRESHOLD` or more pieces with invalid hashes,
 /// they are permanently banned for the remainder of the session.
 pub const BAD_DATA_THRESHOLD: u32 = 3;
+
+/// Represents an active upload session with a peer.
+///
+/// Tracks upload statistics and session state for a single peer connection
+/// during the seeding phase.
+#[derive(Debug, Clone)]
+pub struct UploadSession {
+    /// Peer's socket address
+    pub peer_addr: SocketAddr,
+    /// Bytes uploaded to this peer in the current session
+    pub uploaded_bytes: u64,
+    /// Upload speed in bytes/sec (rolling average)
+    pub upload_speed: u64,
+    /// Last time data was uploaded to this peer
+    pub last_upload_time: Instant,
+    /// Whether this session is active
+    pub is_active: bool,
+}
+
+impl UploadSession {
+    /// Create a new upload session for a peer.
+    pub fn new(peer_addr: SocketAddr) -> Self {
+        Self {
+            peer_addr,
+            uploaded_bytes: 0,
+            upload_speed: 0,
+            last_upload_time: Instant::now(),
+            is_active: true,
+        }
+    }
+
+    /// Record bytes uploaded to this peer.
+    pub fn record_upload(&mut self, bytes: u64) {
+        self.uploaded_bytes += bytes;
+        self.last_upload_time = Instant::now();
+    }
+
+    /// Update the upload speed (rolling average).
+    pub fn update_speed(&mut self, speed: u64) {
+        self.upload_speed = speed;
+    }
+
+    /// Mark this session as inactive.
+    pub fn deactivate(&mut self) {
+        self.is_active = false;
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SeedExitCondition {
@@ -112,6 +162,8 @@ impl SeedExitCondition {
 }
 
 pub struct BtSeedManager {
+    /// Info hash of the torrent being seeded
+    info_hash: [u8; 20],
     sessions: Vec<BtUploadSession>,
     piece_data: Arc<dyn PieceDataProvider>,
     config: BtSeedingConfig,
@@ -124,9 +176,46 @@ pub struct BtSeedManager {
     /// Choking algorithm for tit-for-tat peer selection during seeding.
     /// When present, drives intelligent choke/unchoke decisions every rotation interval.
     pub choking_algo: Option<ChokingAlgorithm>,
+    
+    // Upload statistics (atomic for thread-safe access)
+    /// Total uploaded bytes (atomic for concurrent access)
+    uploaded_bytes_atomic: AtomicU64,
+    /// Current upload speed in bytes/sec
+    upload_speed_atomic: AtomicU64,
+    /// Last upload timestamp
+    last_upload_time: std::sync::Mutex<Instant>,
+    
+    // Seeding control
+    /// Target seed ratio (upload/download)
+    seed_ratio: f64,
+    /// Target seed duration
+    seed_time: Duration,
+    
+    // Active upload tracking
+    /// Map of peer address to upload session
+    active_uploads: HashMap<SocketAddr, UploadSession>,
+    /// Maximum number of concurrent uploads
+    max_uploads: usize,
+    
+    // Upload speed limiting
+    /// Maximum upload speed in bytes/sec (None = unlimited)
+    max_upload_speed: Option<u64>,
+    /// Timestamp of last speed throttle check
+    last_throttle_check: std::sync::Mutex<Instant>,
+    /// Bytes uploaded in current throttle window
+    throttle_window_bytes: AtomicU64,
 }
 
 impl BtSeedManager {
+    /// Create a new BtSeedManager with default settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `connections` - Peer connections to use for seeding
+    /// * `piece_data` - Provider for piece data
+    /// * `config` - Seeding configuration
+    /// * `exit_condition` - Conditions for exiting seeding
+    /// * `total_downloaded` - Total bytes downloaded (for ratio calculation)
     pub fn new(
         connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
         piece_data: Arc<dyn PieceDataProvider>,
@@ -162,7 +251,13 @@ impl BtSeedManager {
             .map(|conn| BtUploadSession::new(conn, &config))
             .collect();
 
+        let seed_ratio = exit_condition.seed_ratio.unwrap_or(0.0);
+        let seed_time = exit_condition.seed_time.unwrap_or(Duration::ZERO);
+        let max_uploads = config.max_peers_to_unchoke;
+        let max_upload_speed = config.max_upload_bytes_per_sec;
+
         Self {
+            info_hash: [0u8; 20], // Default, can be set via builder
             sessions,
             piece_data,
             config,
@@ -173,7 +268,258 @@ impl BtSeedManager {
             last_optimistic_unchoke: Instant::now(),
             optimistic_round: 0,
             choking_algo,
+            uploaded_bytes_atomic: AtomicU64::new(0),
+            upload_speed_atomic: AtomicU64::new(0),
+            last_upload_time: std::sync::Mutex::new(Instant::now()),
+            seed_ratio,
+            seed_time,
+            active_uploads: HashMap::new(),
+            max_uploads,
+            max_upload_speed,
+            last_throttle_check: std::sync::Mutex::new(Instant::now()),
+            throttle_window_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// Create a new BtSeedManager with explicit info_hash.
+    ///
+    /// This is the preferred constructor when the info_hash is known.
+    pub fn new_with_info_hash(
+        info_hash: [u8; 20],
+        connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
+        piece_data: Arc<dyn PieceDataProvider>,
+        config: BtSeedingConfig,
+        exit_condition: SeedExitCondition,
+        total_downloaded: u64,
+    ) -> Self {
+        let mut manager = Self::new(connections, piece_data, config, exit_condition, total_downloaded);
+        manager.info_hash = info_hash;
+        manager
+    }
+
+    /// Handle a piece request from a peer.
+    ///
+    /// This method reads the requested piece data from the piece provider
+    /// and returns it for sending to the peer.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer` - The peer's socket address
+    /// * `index` - The piece index
+    /// * `begin` - The offset within the piece
+    /// * `length` - The length of data to read
+    ///
+    /// # Returns
+    ///
+    /// The requested piece data, or an error if the piece is not available.
+    pub async fn handle_piece_request(
+        &mut self,
+        peer: SocketAddr,
+        index: u32,
+        begin: u32,
+        length: u32,
+    ) -> Result<Vec<u8>> {
+        // Apply upload speed throttling if configured
+        if let Some(max_speed) = self.max_upload_speed {
+            self.throttle_upload(max_speed, length as u64).await?;
+        }
+
+        // Get piece data from provider
+        let piece_data = self
+            .piece_data
+            .get_piece_data(index, begin, length)
+            .ok_or_else(|| {
+                Aria2Error::Recoverable(crate::error::RecoverableError::InvalidPieceIndex {
+                    index,
+                    max_index: self.piece_data.num_pieces(),
+                })
+            })?;
+
+        // Update upload statistics
+        self.uploaded_bytes_atomic
+            .fetch_add(piece_data.len() as u64, Ordering::Relaxed);
+        self.total_uploaded += piece_data.len() as u64;
+
+        // Update session tracking
+        if let Some(session) = self.active_uploads.get_mut(&peer) {
+            session.record_upload(piece_data.len() as u64);
+        } else {
+            let mut session = UploadSession::new(peer);
+            session.record_upload(piece_data.len() as u64);
+            self.active_uploads.insert(peer, session);
+        }
+
+        // Update last upload time
+        if let Ok(mut last) = self.last_upload_time.lock() {
+            *last = Instant::now();
+        }
+
+        debug!(
+            "Handled piece request: peer={}, index={}, offset={}, len={}, total_uploaded={}",
+            peer, index, begin, length, self.total_uploaded
+        );
+
+        Ok(piece_data)
+    }
+
+    /// Throttle upload speed to respect the configured maximum.
+    ///
+    /// Uses a token-bucket style algorithm with a 1-second window.
+    /// If the current window has exceeded the speed limit, sleeps until
+    /// the window resets.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_speed` - Maximum upload speed in bytes/sec
+    /// * `bytes_to_upload` - Number of bytes about to be uploaded
+    async fn throttle_upload(&self, max_speed: u64, bytes_to_upload: u64) -> Result<()> {
+        if max_speed == 0 {
+            return Ok(()); // No limit
+        }
+
+        let now = Instant::now();
+        let window_bytes = self.throttle_window_bytes.load(Ordering::Relaxed);
+
+        // Check if we need to reset the window (every 1 second)
+        let should_reset = if let Ok(last_check) = self.last_throttle_check.lock() {
+            now.duration_since(*last_check) >= Duration::from_secs(1)
+        } else {
+            false
+        };
+
+        if should_reset {
+            // Reset the window
+            self.throttle_window_bytes.store(0, Ordering::Relaxed);
+            if let Ok(mut last_check) = self.last_throttle_check.lock() {
+                *last_check = now;
+            }
+        }
+
+        // Check if we would exceed the limit
+        if window_bytes + bytes_to_upload > max_speed {
+            // Calculate how long to wait
+            let bytes_over = window_bytes + bytes_to_upload - max_speed;
+            let wait_secs = bytes_over as f64 / max_speed as f64;
+            let wait_duration = Duration::from_secs_f64(wait_secs.min(1.0));
+
+            debug!(
+                "Throttling upload: {} bytes over limit, waiting {:?}",
+                bytes_over, wait_duration
+            );
+
+            tokio::time::sleep(wait_duration).await;
+
+            // Reset window after waiting
+            self.throttle_window_bytes.store(0, Ordering::Relaxed);
+            if let Ok(mut last_check) = self.last_throttle_check.lock() {
+                *last_check = Instant::now();
+            }
+        }
+
+        // Track the bytes we're about to upload
+        self.throttle_window_bytes
+            .fetch_add(bytes_to_upload, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    /// Check if seeding should stop based on configured conditions.
+    ///
+    /// Returns `true` when either:
+    /// - The seed ratio has been reached (uploaded >= ratio * downloaded)
+    /// - The seed time has elapsed
+    ///
+    /// # Arguments
+    ///
+    /// * `downloaded_bytes` - Total bytes downloaded (for ratio calculation)
+    pub fn should_stop_seeding(&self, downloaded_bytes: u64) -> bool {
+        // Check seed ratio
+        if self.seed_ratio > 0.0 && downloaded_bytes > 0 {
+            let uploaded = self.uploaded_bytes_atomic.load(Ordering::Relaxed);
+            let ratio = uploaded as f64 / downloaded_bytes as f64;
+            if ratio >= self.seed_ratio {
+                info!(
+                    "Seed ratio reached: {:.2} >= {:.2} (uploaded={}, downloaded={})",
+                    ratio, self.seed_ratio, uploaded, downloaded_bytes
+                );
+                return true;
+            }
+        }
+
+        // Check seed time
+        if self.seed_time > Duration::ZERO {
+            let elapsed = self.seeding_start_time.elapsed();
+            if elapsed >= self.seed_time {
+                info!(
+                    "Seed time reached: {:?} >= {:?}",
+                    elapsed, self.seed_time
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Get upload statistics.
+    ///
+    /// Returns a tuple of (total_uploaded_bytes, current_upload_speed).
+    pub fn get_upload_stats(&self) -> (u64, u64) {
+        let uploaded = self.uploaded_bytes_atomic.load(Ordering::Relaxed);
+        let speed = self.upload_speed_atomic.load(Ordering::Relaxed);
+        (uploaded, speed)
+    }
+
+    /// Update the upload speed statistic.
+    ///
+    /// This should be called periodically to track the current upload rate.
+    pub fn update_upload_speed(&self, speed: u64) {
+        self.upload_speed_atomic.store(speed, Ordering::Relaxed);
+    }
+
+    /// Get the info hash of the torrent being seeded.
+    pub fn info_hash(&self) -> &[u8; 20] {
+        &self.info_hash
+    }
+
+    /// Set the info hash.
+    pub fn set_info_hash(&mut self, info_hash: [u8; 20]) {
+        self.info_hash = info_hash;
+    }
+
+    /// Get the number of active upload sessions.
+    pub fn num_active_uploads(&self) -> usize {
+        self.active_uploads.values().filter(|s| s.is_active).count()
+    }
+
+    /// Get the maximum number of concurrent uploads.
+    pub fn max_uploads(&self) -> usize {
+        self.max_uploads
+    }
+
+    /// Set the maximum number of concurrent uploads.
+    pub fn set_max_uploads(&mut self, max: usize) {
+        self.max_uploads = max;
+    }
+
+    /// Get the seed ratio target.
+    pub fn seed_ratio(&self) -> f64 {
+        self.seed_ratio
+    }
+
+    /// Get the seed time target.
+    pub fn seed_time(&self) -> Duration {
+        self.seed_time
+    }
+
+    /// Get a reference to active upload sessions.
+    pub fn active_uploads(&self) -> &HashMap<SocketAddr, UploadSession> {
+        &self.active_uploads
+    }
+
+    /// Get total downloaded bytes.
+    pub fn total_downloaded(&self) -> u64 {
+        self.total_downloaded
     }
 
     pub async fn run_seeding_loop(&mut self) -> Result<()> {
@@ -375,6 +721,48 @@ impl BtSeedManager {
     /// Get a mutable reference to the choking algorithm, if configured.
     pub fn choking_algo_mut(&mut self) -> Option<&mut ChokingAlgorithm> {
         self.choking_algo.as_mut()
+    }
+
+    // ------------------------------------------------------------------
+    // Upload speed limit API
+    // ------------------------------------------------------------------
+
+    /// Get the maximum upload speed limit (bytes/sec).
+    ///
+    /// Returns `None` if unlimited.
+    pub fn max_upload_speed(&self) -> Option<u64> {
+        self.max_upload_speed
+    }
+
+    /// Set the maximum upload speed limit (bytes/sec).
+    ///
+    /// Set to `None` or `Some(0)` for unlimited.
+    pub fn set_max_upload_speed(&mut self, speed: Option<u64>) {
+        self.max_upload_speed = speed.filter(|&s| s > 0);
+    }
+
+    /// Get the current upload speed (bytes/sec).
+    pub fn current_upload_speed(&self) -> u64 {
+        self.upload_speed_atomic.load(Ordering::Relaxed)
+    }
+
+    /// Calculate and update the current upload speed.
+    ///
+    /// This should be called periodically (e.g., every second) to track
+    /// the actual upload rate.
+    pub fn calculate_upload_speed(&self) -> u64 {
+        let now = Instant::now();
+        if let Ok(mut last_time) = self.last_upload_time.lock() {
+            let elapsed = now.duration_since(*last_time);
+            if elapsed >= Duration::from_secs(1) {
+                let uploaded = self.uploaded_bytes_atomic.load(Ordering::Relaxed);
+                let speed = uploaded / elapsed.as_secs().max(1);
+                self.upload_speed_atomic.store(speed, Ordering::Relaxed);
+                *last_time = now;
+                return speed;
+            }
+        }
+        self.upload_speed_atomic.load(Ordering::Relaxed)
     }
 }
 
@@ -679,5 +1067,385 @@ mod tests {
                 && !SeedExitCondition::check_seed_condition(500, 1000, 2.0),
             "Neither condition met, should continue seeding"
         );
+    }
+
+    // ==================================================================
+    // New tests for enhanced BtSeedManager
+    // ==================================================================
+
+    #[test]
+    fn test_upload_session_creation() {
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let session = UploadSession::new(addr);
+        assert_eq!(session.peer_addr, addr);
+        assert_eq!(session.uploaded_bytes, 0);
+        assert_eq!(session.upload_speed, 0);
+        assert!(session.is_active);
+    }
+
+    #[test]
+    fn test_upload_session_record_upload() {
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let mut session = UploadSession::new(addr);
+        session.record_upload(1024);
+        assert_eq!(session.uploaded_bytes, 1024);
+        session.record_upload(2048);
+        assert_eq!(session.uploaded_bytes, 3072);
+    }
+
+    #[test]
+    fn test_upload_session_update_speed() {
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let mut session = UploadSession::new(addr);
+        session.update_speed(50000);
+        assert_eq!(session.upload_speed, 50000);
+    }
+
+    #[test]
+    fn test_upload_session_deactivate() {
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let mut session = UploadSession::new(addr);
+        assert!(session.is_active);
+        session.deactivate();
+        assert!(!session.is_active);
+    }
+
+    #[test]
+    fn test_bt_seed_manager_get_upload_stats() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 500);
+        let (uploaded, speed) = manager.get_upload_stats();
+        // Initial stats should be 0 (atomic starts at 0)
+        assert_eq!(uploaded, 0);
+        assert_eq!(speed, 0);
+    }
+
+    #[test]
+    fn test_bt_seed_manager_update_upload_speed() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 500);
+        manager.update_upload_speed(100000);
+        let (_, speed) = manager.get_upload_stats();
+        assert_eq!(speed, 100000);
+    }
+
+    #[test]
+    fn test_bt_seed_manager_should_stop_seeding_ratio() {
+        let manager = make_test_manager(SeedExitCondition::with_ratio(1.0), 1000, 0);
+        
+        // Should not stop initially (uploaded = 0)
+        assert!(!manager.should_stop_seeding(1000));
+        
+        // Simulate uploading 500 bytes (ratio = 0.5)
+        manager.uploaded_bytes_atomic.store(500, Ordering::Relaxed);
+        assert!(!manager.should_stop_seeding(1000));
+        
+        // Simulate uploading 1000 bytes (ratio = 1.0)
+        manager.uploaded_bytes_atomic.store(1000, Ordering::Relaxed);
+        assert!(manager.should_stop_seeding(1000));
+        
+        // Simulate uploading 1500 bytes (ratio = 1.5)
+        manager.uploaded_bytes_atomic.store(1500, Ordering::Relaxed);
+        assert!(manager.should_stop_seeding(1000));
+    }
+
+    #[test]
+    fn test_bt_seed_manager_should_stop_seeding_time() {
+        let mut manager = make_test_manager(SeedExitCondition::with_time(1), 1000, 0);
+        
+        // Should not stop immediately
+        assert!(!manager.should_stop_seeding(1000));
+        
+        // Simulate time passing by modifying seeding_start_time
+        manager.seeding_start_time = Instant::now() - Duration::from_secs(2);
+        assert!(manager.should_stop_seeding(1000));
+    }
+
+    #[test]
+    fn test_bt_seed_manager_should_stop_seeding_infinite() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Should never stop with infinite seeding
+        assert!(!manager.should_stop_seeding(1000));
+        assert!(!manager.should_stop_seeding(0));
+    }
+
+    #[test]
+    fn test_bt_seed_manager_info_hash() {
+        let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Default info_hash should be all zeros
+        assert_eq!(manager.info_hash(), &[0u8; 20]);
+        
+        // Set a custom info_hash
+        let custom_hash = [0x12u8; 20];
+        manager.set_info_hash(custom_hash);
+        assert_eq!(manager.info_hash(), &custom_hash);
+    }
+
+    #[test]
+    fn test_bt_seed_manager_new_with_info_hash() {
+        let custom_hash = [0xABu8; 20];
+        let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
+        let config = BtSeedingConfig::default();
+        let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
+        
+        let manager = BtSeedManager::new_with_info_hash(
+            custom_hash,
+            conns,
+            provider,
+            config,
+            SeedExitCondition::infinite(),
+            1000,
+        );
+        
+        assert_eq!(manager.info_hash(), &custom_hash);
+    }
+
+    #[test]
+    fn test_bt_seed_manager_max_uploads() {
+        let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Default max_uploads should match config
+        assert_eq!(manager.max_uploads(), 4); // BtSeedingConfig::default().max_peers_to_unchoke
+        
+        // Set a new max
+        manager.set_max_uploads(8);
+        assert_eq!(manager.max_uploads(), 8);
+    }
+
+    #[test]
+    fn test_bt_seed_manager_seed_ratio_and_time() {
+        let manager = make_test_manager(SeedExitCondition::with_time_and_ratio(60, 2.0), 1000, 0);
+        
+        assert_eq!(manager.seed_ratio(), 2.0);
+        assert_eq!(manager.seed_time(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_bt_seed_manager_total_downloaded() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 5000, 0);
+        assert_eq!(manager.total_downloaded(), 5000);
+    }
+
+    #[test]
+    fn test_bt_seed_manager_num_active_uploads() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Initially no active uploads
+        assert_eq!(manager.num_active_uploads(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_bt_seed_manager_handle_piece_request() {
+        let mut provider = InMemoryPieceProvider::new(16384, 10);
+        // Set up some test data
+        provider.set_piece_data(0, vec![0xABu8; 16384]);
+        
+        let provider_arc = Arc::new(provider);
+        let config = BtSeedingConfig::default();
+        let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
+        
+        let mut manager = BtSeedManager::new(
+            conns,
+            provider_arc,
+            config,
+            SeedExitCondition::infinite(),
+            1000,
+        );
+        
+        let peer_addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        
+        // Request a piece
+        let result = manager.handle_piece_request(peer_addr, 0, 0, 1024).await;
+        assert!(result.is_ok());
+        
+        let data = result.unwrap();
+        assert_eq!(data.len(), 1024);
+        assert!(data.iter().all(|&b| b == 0xAB));
+        
+        // Check that upload stats were updated
+        let (uploaded, _) = manager.get_upload_stats();
+        assert_eq!(uploaded, 1024);
+        
+        // Check that active uploads were tracked
+        assert_eq!(manager.num_active_uploads(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_bt_seed_manager_handle_piece_request_invalid_piece() {
+        let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
+        let config = BtSeedingConfig::default();
+        let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
+        
+        let mut manager = BtSeedManager::new(
+            conns,
+            provider,
+            config,
+            SeedExitCondition::infinite(),
+            1000,
+        );
+        
+        let peer_addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        
+        // Request a piece that doesn't exist (piece 0 has no data)
+        let result = manager.handle_piece_request(peer_addr, 0, 0, 1024).await;
+        assert!(result.is_err());
+    }
+
+    // ==================================================================
+    // Upload speed throttling tests
+    // ==================================================================
+
+    #[test]
+    fn test_bt_seed_manager_max_upload_speed() {
+        let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Initially no limit
+        assert!(manager.max_upload_speed().is_none());
+        
+        // Set a limit
+        manager.set_max_upload_speed(Some(100000));
+        assert_eq!(manager.max_upload_speed(), Some(100000));
+        
+        // Set to 0 should be treated as unlimited
+        manager.set_max_upload_speed(Some(0));
+        assert!(manager.max_upload_speed().is_none());
+        
+        // Set to None should be unlimited
+        manager.set_max_upload_speed(None);
+        assert!(manager.max_upload_speed().is_none());
+    }
+
+    #[test]
+    fn test_bt_seed_manager_current_upload_speed() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Initially 0
+        assert_eq!(manager.current_upload_speed(), 0);
+        
+        // Update speed
+        manager.update_upload_speed(50000);
+        assert_eq!(manager.current_upload_speed(), 50000);
+    }
+
+    #[tokio::test]
+    async fn test_bt_seed_manager_throttle_upload_no_limit() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // No limit set, should return immediately
+        let result = manager.throttle_upload(0, 10000).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_bt_seed_manager_throttle_upload_within_limit() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Within limit, should not throttle
+        let result = manager.throttle_upload(100000, 1000).await;
+        assert!(result.is_ok());
+        
+        // Check that bytes were tracked
+        assert_eq!(manager.throttle_window_bytes.load(Ordering::Relaxed), 1000);
+    }
+
+    // ==================================================================
+    // Seeding statistics tests
+    // ==================================================================
+
+    #[test]
+    fn test_seed_stats_calculation() {
+        let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Simulate some uploads
+        manager.uploaded_bytes_atomic.store(500, Ordering::Relaxed);
+        manager.total_uploaded = 500;
+        
+        let (uploaded, _) = manager.get_upload_stats();
+        assert_eq!(uploaded, 500);
+        
+        // Calculate ratio
+        let ratio = uploaded as f64 / manager.total_downloaded as f64;
+        assert!((ratio - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_seed_stats_with_elapsed_time() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        let duration = manager.seeding_duration();
+        // Should be very small (just created)
+        assert!(duration.as_secs() < 1);
+    }
+
+    // ==================================================================
+    // Edge cases and stress tests
+    // ==================================================================
+
+    #[test]
+    fn test_seed_exit_condition_zero_ratio_is_infinite() {
+        // Ratio 0.0 should never trigger stop
+        let cond = SeedExitCondition::with_ratio(0.0);
+        assert!(cond.seed_ratio.is_none());
+    }
+
+    #[test]
+    fn test_seed_exit_condition_zero_time_is_infinite() {
+        // Time 0 should never trigger stop
+        let cond = SeedExitCondition::with_time(0);
+        assert!(cond.seed_time.is_none());
+    }
+
+    #[test]
+    fn test_seed_exit_condition_negative_ratio() {
+        // Negative ratio should be treated as infinite
+        let cond = SeedExitCondition::with_ratio(-1.0);
+        assert!(cond.seed_ratio.is_none());
+    }
+
+    #[test]
+    fn test_should_stop_seeding_with_both_conditions() {
+        // Test with both time and ratio set
+        let mut manager = make_test_manager(
+            SeedExitCondition::with_time_and_ratio(60, 1.0),
+            1000,
+            0,
+        );
+        
+        // Neither condition met yet
+        assert!(!manager.should_stop_seeding(1000));
+        
+        // Meet ratio condition
+        manager.uploaded_bytes_atomic.store(1000, Ordering::Relaxed);
+        assert!(manager.should_stop_seeding(1000));
+        
+        // Reset and meet time condition
+        manager.uploaded_bytes_atomic.store(0, Ordering::Relaxed);
+        manager.seeding_start_time = Instant::now() - Duration::from_secs(120);
+        assert!(manager.should_stop_seeding(1000));
+    }
+
+    #[test]
+    fn test_max_uploads_enforcement() {
+        let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Default max uploads
+        assert_eq!(manager.max_uploads(), 4);
+        
+        // Increase max uploads
+        manager.set_max_uploads(10);
+        assert_eq!(manager.max_uploads(), 10);
+        
+        // Decrease max uploads
+        manager.set_max_uploads(2);
+        assert_eq!(manager.max_uploads(), 2);
+    }
+
+    #[test]
+    fn test_active_uploads_tracking() {
+        let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
+        
+        // Initially no active uploads
+        assert_eq!(manager.num_active_uploads(), 0);
+        assert!(manager.active_uploads().is_empty());
     }
 }

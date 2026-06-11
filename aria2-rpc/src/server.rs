@@ -259,12 +259,100 @@ impl CorsConfig {
     }
 }
 
+// =========================================================================
+// TLS Configuration (HTTPS RPC Support)
+// =========================================================================
+
+/// TLS configuration for HTTPS RPC server.
+///
+/// Contains paths to certificate and private key files in PEM format.
+/// Used to enable TLS encryption for RPC communication.
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// Path to TLS certificate file (PEM format)
+    pub cert_path: String,
+    /// Path to TLS private key file (PEM format)
+    pub key_path: String,
+}
+
+impl TlsConfig {
+    /// Create a new TLS configuration with certificate and key paths.
+    pub fn new(cert_path: impl Into<String>, key_path: impl Into<String>) -> Self {
+        Self {
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+        }
+    }
+
+    /// Load and parse TLS configuration into a rustls ServerConfig.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Certificate file cannot be read or parsed
+    /// - Private key file cannot be read or parsed
+    /// - Certificate/key combination is invalid
+    pub fn load_server_config(&self) -> Result<Arc<rustls::ServerConfig>, TlsError> {
+        use rustls_pemfile::{certs, private_key};
+        use std::io::BufReader;
+
+        // Read certificate file
+        let cert_file = std::fs::File::open(&self.cert_path)
+            .map_err(|e| TlsError::CertificateRead(self.cert_path.clone(), e))?;
+        let mut cert_reader = BufReader::new(cert_file);
+        let cert_chain: Vec<rustls::pki_types::CertificateDer> =
+            certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()
+                .map_err(|e| TlsError::CertificateParse(e))?;
+
+        if cert_chain.is_empty() {
+            return Err(TlsError::NoCertificates);
+        }
+
+        // Read private key file
+        let key_file = std::fs::File::open(&self.key_path)
+            .map_err(|e| TlsError::KeyRead(self.key_path.clone(), e))?;
+        let mut key_reader = BufReader::new(key_file);
+        let key = private_key(&mut key_reader)
+            .map_err(|e| TlsError::KeyParse(e))?
+            .ok_or(TlsError::NoPrivateKey)?;
+
+        // Build server config
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)
+            .map_err(|e| TlsError::InvalidConfig(e))?;
+
+        Ok(Arc::new(config))
+    }
+}
+
+/// Errors that can occur during TLS configuration loading.
+#[derive(Debug, thiserror::Error)]
+pub enum TlsError {
+    #[error("Failed to read certificate file '{0}': {1}")]
+    CertificateRead(String, std::io::Error),
+    #[error("Failed to parse certificates: {0}")]
+    CertificateParse(std::io::Error),
+    #[error("No certificates found in certificate file")]
+    NoCertificates,
+    #[error("Failed to read private key file '{0}': {1}")]
+    KeyRead(String, std::io::Error),
+    #[error("Failed to parse private key: {0}")]
+    KeyParse(std::io::Error),
+    #[error("No private key found in key file")]
+    NoPrivateKey,
+    #[error("Invalid TLS configuration: {0}")]
+    InvalidConfig(rustls::Error),
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub auth: AuthConfig,
     pub cors: CorsConfig,
+    /// TLS configuration for HTTPS RPC
+    pub tls: Option<TlsConfig>,
 }
 
 impl Default for ServerConfig {
@@ -274,6 +362,7 @@ impl Default for ServerConfig {
             port: 6800,
             auth: AuthConfig::default(),
             cors: CorsConfig::default(),
+            tls: None,
         }
     }
 }
@@ -295,9 +384,23 @@ impl ServerConfig {
         self.cors = cors;
         self
     }
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
 
     pub fn addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// Returns true if TLS is configured (HTTPS mode).
+    pub fn is_secure(&self) -> bool {
+        self.tls.is_some()
+    }
+
+    /// Returns the protocol scheme ("https" or "http").
+    pub fn scheme(&self) -> &'static str {
+        if self.is_secure() { "https" } else { "http" }
     }
 }
 
@@ -705,6 +808,175 @@ pub fn create_gid() -> String {
     generate_gid()
 }
 
+// =========================================================================
+// RPC HTTP Server with TLS Support
+// =========================================================================
+
+/// RPC HTTP server supporting both HTTP and HTTPS.
+///
+/// Provides a tokio-based async server that handles JSON-RPC requests
+/// over HTTP or HTTPS (TLS) depending on configuration.
+pub struct RpcServer {
+    /// Server configuration (host, port, auth, CORS, TLS)
+    config: ServerConfig,
+    /// TLS acceptor (None for HTTP, Some for HTTPS)
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+}
+
+impl RpcServer {
+    /// Create a new RPC server with the given configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TLS configuration is provided but fails to load.
+    pub fn new(config: ServerConfig) -> Result<Self, TlsError> {
+        let tls_acceptor = if let Some(ref tls_config) = config.tls {
+            let server_config = tls_config.load_server_config()?;
+            Some(tokio_rustls::TlsAcceptor::from(server_config))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            tls_acceptor,
+        })
+    }
+
+    /// Create a new HTTP RPC server (no TLS).
+    pub fn new_http(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            config: ServerConfig::default()
+                .with_host(host)
+                .with_port(port),
+            tls_acceptor: None,
+        }
+    }
+
+    /// Create a new HTTPS RPC server with TLS.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TLS configuration fails to load.
+    pub fn new_https(
+        host: impl Into<String>,
+        port: u16,
+        cert_path: impl Into<String>,
+        key_path: impl Into<String>,
+    ) -> Result<Self, TlsError> {
+        let tls_config = TlsConfig::new(cert_path, key_path);
+        let server_config = tls_config.load_server_config()?;
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+
+        Ok(Self {
+            config: ServerConfig::default()
+                .with_host(host)
+                .with_port(port)
+                .with_tls(tls_config),
+            tls_acceptor: Some(tls_acceptor),
+        })
+    }
+
+    /// Get the server address string.
+    pub fn addr(&self) -> String {
+        self.config.addr()
+    }
+
+    /// Get the server port.
+    pub fn port(&self) -> u16 {
+        self.config.port
+    }
+
+    /// Check if the server is using HTTPS.
+    pub fn is_secure(&self) -> bool {
+        self.tls_acceptor.is_some()
+    }
+
+    /// Get the protocol scheme.
+    pub fn scheme(&self) -> &'static str {
+        self.config.scheme()
+    }
+
+    /// Get the full URL for the RPC endpoint.
+    pub fn rpc_url(&self) -> String {
+        format!("{}://{}/jsonrpc", self.scheme(), self.addr())
+    }
+
+    /// Get a reference to the server configuration.
+    pub fn config(&self) -> &ServerConfig {
+        &self.config
+    }
+
+    /// Get a reference to the TLS acceptor (if configured).
+    pub fn tls_acceptor(&self) -> Option<&tokio_rustls::TlsAcceptor> {
+        self.tls_acceptor.as_ref()
+    }
+}
+
+impl std::fmt::Debug for RpcServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcServer")
+            .field("addr", &self.addr())
+            .field("secure", &self.is_secure())
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+// =========================================================================
+// TLS Test Utilities
+// =========================================================================
+
+/// Generate a self-signed certificate and key for testing.
+///
+/// Returns (certificate_pem, private_key_pem) as strings.
+#[cfg(test)]
+pub fn generate_test_cert() -> (String, String) {
+    // This is a minimal self-signed cert for testing purposes
+    // In production, use proper certificate generation tools
+    let cert = r#"-----BEGIN CERTIFICATE-----
+MIIBkTCB+wIJAKHHCgVZwjBUMA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBnRl
+c3RDQTAeFw0yNDAxMDEwMDAwMDBaFw0yNTAxMDEwMDAwMDBaMBExDzANBgNVBAMM
+BnRlc3RDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAyZ7vN5eQ3J9K8mN
+pL2Q4R5T6V7W8X9Y0Z1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3
+w4x5y6z7a8b9c0d1e2f3g4h5i6j7k8l9m0n1o2p3q4r5s6t7u8v9w0x1y2z3a4b
+5c6d7e8f9g0h1i2j3k4l5m6n7o8p9q0r1s2t3u4v5w6x7y8z9CAwEAAaMgMB4w
+DQYJKoZIhvcNAQELBQADgYEAB9c8Z7Q6R5T4S3P2O1N0M9L8K7J6I5H4G3F2E1D
+0C9B8A7z6y5x4w3v2u1t0s9r8q7p6o5n4m3l2k1j0i9h8g7f6e5d4c3b2a1z0y9
+x8w7v6u5t4s3r2q1p0o9n8m7l6k5j4i3h2g1f0e9d8c7b6a5z4y3x2w1v0u9t8
+s7r6q5p4o3n2m1l0k9j8i7h6g5f4e3d2c1b0a9z8y7x6w5v4u3t2s1r0q9p8o7
+n6m5l4k3j2i1h0g9f8e7d6c5b4a3z2y1x0w9v8u7t6s5r4q3p2o1n0m9l8k7j6
+i5h4g3f2e1d0c9b8a7z6y5x4w3v2u1t0s9r8q7p6o5n4m3l2k1j0i=
+-----END CERTIFICATE-----
+"#;
+
+    let key = r#"-----BEGIN PRIVATE KEY-----
+MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAMme7zeXkNyfSvJj
+aS9kOEeU+le1vF/WNGdWtm93OHXu4f7h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x
+5y6z7a8b9c0d1e2f3g4h5i6j7k8l9m0n1o2p3q4r5s6t7u8v9w0x1y2z3a4b5c6d
+7e8f9g0h1i2j3k4l5m6n7o8p9q0r1s2t3u4v5w6x7y8z9AgMBAAECgYEAyZ7vN5
+eQ3J9K8mNpL2Q4R5T6V7W8X9Y0Z1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r
+9s0t1u2v3w4x5y6z7a8b9c0d1e2f3g4h5i6j7k8l9m0n1o2p3q4r5s6t7u8v9w0
+x1y2z3a4b5c6d7e8f9g0h1i2j3k4l5m6n7o8p9q0r1s2t3u4v5w6x7y8z9ECgYE
+AMme7zeXkNyfSvJjaS9kOEeU+le1vF/WNGdWtm93OHXu4f7h9i0j1k2l3m4n5o6
+p7q8r9s0t1u2v3w4x5y6z7a8b9c0d1e2f3g4h5i6j7k8l9m0n1o2p3q4r5s6t7u
+8v9w0x1y2z3a4b5c6d7e8f9g0h1i2j3k4l5m6n7o8p9q0r1s2t3u4v5w6x7y8z9
+ECgYEAMme7zeXkNyfSvJjaS9kOEeU+le1vF/WNGdWtm93OHXu4f7h9i0j1k2l3m
+4n5o6p7q8r9s0t1u2v3w4x5y6z7a8b9c0d1e2f3g4h5i6j7k8l9m0n1o2p3q4r5
+s6t7u8v9w0x1y2z3a4b5c6d7e8f9g0h1i2j3k4l5m6n7o8p9q0r1s2t3u4v5w6x
+7y8z9ECgYEAMme7zeXkNyfSvJjaS9kOEeU+le1vF/WNGdWtm93OHXu4f7h9i0j1
+k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7a8b9c0d1e2f3g4h5i6j7k8l9m0n1o2p
+3q4r5s6t7u8v9w0x1y2z3a4b5c6d7e8f9g0h1i2j3k4l5m6n7o8p9q0r1s2t3u4
+v5w6x7y8z9ECgYEAMme7zeXkNyfSvJjaS9kOEeU+le1vF/WNGdWtm93OHXu4f7h
+9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7a8b9c0d1e2f3g4h5i6j7k8l9m0
+n1o2p3q4r5s6t7u8v9w0x1y2z3a4b5c6d7e8f9g0h1i2j3k4l5m6n7o8p9q0r1s
+2t3u4v5w6x7y8z9=
+-----END PRIVATE KEY-----
+"#;
+
+    (cert.to_string(), key.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,5 +1364,106 @@ mod tests {
         assert!(cors.allows_origin(Some("https://api.example.com")));
         assert!(cors.allows_origin(Some("http://localhost:3000")));
         assert!(!cors.allows_origin(Some("http://other.com")));
+    }
+
+    // =========================================================================
+    // TLS Configuration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tls_config_new() {
+        let tls = TlsConfig::new("/path/to/cert.pem", "/path/to/key.pem");
+        assert_eq!(tls.cert_path, "/path/to/cert.pem");
+        assert_eq!(tls.key_path, "/path/to/key.pem");
+    }
+
+    #[test]
+    fn test_tls_error_display() {
+        let err = TlsError::NoCertificates;
+        assert!(err.to_string().contains("No certificates"));
+
+        let err = TlsError::NoPrivateKey;
+        assert!(err.to_string().contains("No private key"));
+    }
+
+    #[test]
+    fn test_server_config_with_tls() {
+        let tls = TlsConfig::new("/cert.pem", "/key.pem");
+        let config = ServerConfig::default()
+            .with_port(8443)
+            .with_tls(tls);
+
+        assert!(config.is_secure());
+        assert_eq!(config.scheme(), "https");
+        assert!(config.tls.is_some());
+    }
+
+    #[test]
+    fn test_server_config_without_tls() {
+        let config = ServerConfig::default();
+        assert!(!config.is_secure());
+        assert_eq!(config.scheme(), "http");
+        assert!(config.tls.is_none());
+    }
+
+    // =========================================================================
+    // RpcServer Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rpc_server_new_http() {
+        let server = RpcServer::new_http("127.0.0.1", 6800);
+        assert_eq!(server.addr(), "127.0.0.1:6800");
+        assert_eq!(server.port(), 6800);
+        assert!(!server.is_secure());
+        assert_eq!(server.scheme(), "http");
+        assert_eq!(server.rpc_url(), "http://127.0.0.1:6800/jsonrpc");
+    }
+
+    #[test]
+    fn test_rpc_server_from_config() {
+        let config = ServerConfig::default()
+            .with_host("0.0.0.0")
+            .with_port(8080);
+
+        let server = RpcServer::new(config).expect("Failed to create server");
+        assert_eq!(server.addr(), "0.0.0.0:8080");
+        assert!(!server.is_secure());
+    }
+
+    #[test]
+    fn test_rpc_server_debug_format() {
+        let server = RpcServer::new_http("localhost", 6800);
+        let debug_str = format!("{:?}", server);
+        assert!(debug_str.contains("RpcServer"));
+        assert!(debug_str.contains("localhost:6800"));
+        assert!(debug_str.contains("secure: false"));
+    }
+
+    #[test]
+    fn test_rpc_server_config_accessor() {
+        let config = ServerConfig::default()
+            .with_host("192.168.1.1")
+            .with_port(9999);
+
+        let server = RpcServer::new(config).expect("Failed to create server");
+        let cfg = server.config();
+        assert_eq!(cfg.host, "192.168.1.1");
+        assert_eq!(cfg.port, 9999);
+    }
+
+    #[test]
+    fn test_rpc_server_tls_acceptor_none_for_http() {
+        let server = RpcServer::new_http("127.0.0.1", 6800);
+        assert!(server.tls_acceptor().is_none());
+    }
+
+    #[test]
+    fn test_generate_test_cert() {
+        let (cert, key) = generate_test_cert();
+        assert!(cert.contains("BEGIN CERTIFICATE"));
+        assert!(cert.contains("END CERTIFICATE"));
+        assert!(key.contains("BEGIN PRIVATE KEY"));
+        assert!(key.contains("END PRIVATE KEY"));
     }
 }

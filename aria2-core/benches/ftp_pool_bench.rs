@@ -3,7 +3,7 @@
 //! Run with: cargo bench --bench ftp_pool_bench
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Simulated connection times (based on real-world measurements)
 const CONNECTION_ESTABLISH_TIME_MS: u64 = 10_000;
@@ -123,7 +123,6 @@ fn bench_concurrent_access(c: &mut Criterion) {
             num_threads,
             |b, &num_threads| {
                 b.iter(|| {
-                    use std::sync::Arc;
                     use std::thread;
                     
                     let handles: Vec<_> = (0..num_threads)

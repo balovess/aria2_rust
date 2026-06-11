@@ -294,6 +294,371 @@ pub fn parse_scrape_response(data: &[u8]) -> Result<Vec<ScrapeResult>, String> {
     Ok(results)
 }
 
+use std::collections::HashMap;
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use tracing::{debug, info};
+
+// --- UDP Tracker Client Implementation ---
+
+/// Connection ID cache entry with expiry
+#[derive(Debug, Clone)]
+struct ConnectionCache {
+    connection_id: u64,
+    expires_at: Instant,
+}
+
+impl ConnectionCache {
+    fn new(connection_id: u64) -> Self {
+        Self {
+            connection_id,
+            expires_at: Instant::now() + Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+}
+
+/// UDP Tracker Client implementing BEP 15
+pub struct UdpTrackerClient {
+    socket: UdpSocket,
+    tracker_addr: SocketAddr,
+    tracker_url: String,
+    connection_cache: Arc<Mutex<HashMap<SocketAddr, ConnectionCache>>>,
+}
+
+impl UdpTrackerClient {
+    /// Create a new UDP tracker client
+    ///
+    /// # Arguments
+    /// * `tracker_url` - UDP tracker URL in format "udp://host:port"
+    ///
+    /// # Errors
+    /// Returns error if URL parsing fails or socket creation fails
+    pub fn new(tracker_url: &str) -> Result<Self, String> {
+        // Parse UDP URL
+        let addr_str = tracker_url
+            .strip_prefix("udp://")
+            .ok_or_else(|| format!("Invalid UDP tracker URL: {}", tracker_url))?;
+
+        // Remove trailing path if present
+        let addr_str = addr_str.split('/').next().unwrap_or(addr_str);
+
+        // Resolve address
+        let addr: SocketAddr = addr_str
+            .parse()
+            .map_err(|e| format!("Failed to parse tracker address '{}': {}", addr_str, e))?;
+
+        // Create UDP socket bound to any available port
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .map_err(|e| format!("Failed to create UDP socket: {}", e))?;
+
+        // Set read timeout
+        socket
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .map_err(|e| format!("Failed to set socket timeout: {}", e))?;
+
+        Ok(Self {
+            socket,
+            tracker_addr: addr,
+            tracker_url: tracker_url.to_string(),
+            connection_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Generate a random transaction ID
+    fn generate_transaction_id() -> u32 {
+        use rand::Rng;
+        rand::thread_rng().r#gen()
+    }
+
+    /// Get cached connection ID or None if expired/not present
+    fn get_cached_connection_id(&self) -> Option<u64> {
+        let cache = self.connection_cache.lock().unwrap();
+        cache.get(&self.tracker_addr).and_then(|c| {
+            if c.is_expired() {
+                None
+            } else {
+                Some(c.connection_id)
+            }
+        })
+    }
+
+    /// Cache a connection ID
+    fn cache_connection_id(&self, connection_id: u64) {
+        let mut cache = self.connection_cache.lock().unwrap();
+        cache.insert(self.tracker_addr, ConnectionCache::new(connection_id));
+        debug!(
+            "Cached connection ID {:#016x} for {}",
+            connection_id, self.tracker_url
+        );
+    }
+
+    /// Send a request and receive response with exponential backoff retry
+    fn send_with_retry(&self, request: &[u8], max_retries: u8) -> Result<Vec<u8>, String> {
+        let mut timeout = Duration::from_secs(15);
+
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                info!(
+                    "Retrying UDP request to {} (attempt {}/{})",
+                    self.tracker_url,
+                    attempt + 1,
+                    max_retries
+                );
+            }
+
+            // Send request
+            self.socket
+                .send_to(request, self.tracker_addr)
+                .map_err(|e| format!("Failed to send UDP packet: {}", e))?;
+
+            // Receive response
+            let mut buf = vec![0u8; 2048];
+            match self.socket.recv_from(&mut buf) {
+                Ok((len, _addr)) => {
+                    buf.truncate(len);
+                    return Ok(buf);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Timeout, retry with exponential backoff
+                    timeout = std::cmp::min(timeout * 2, Duration::from_secs(120));
+                    std::thread::sleep(timeout);
+                    continue;
+                }
+                Err(e) => {
+                    return Err(format!("Failed to receive UDP packet: {}", e));
+                }
+            }
+        }
+
+        Err(format!(
+            "UDP request to {} failed after {} retries",
+            self.tracker_url, max_retries
+        ))
+    }
+
+    /// Connect to tracker and obtain connection ID
+    pub fn connect(&self) -> Result<u64, String> {
+        // Check cache first
+        if let Some(conn_id) = self.get_cached_connection_id() {
+            debug!("Using cached connection ID for {}", self.tracker_url);
+            return Ok(conn_id);
+        }
+
+        // Send connect request
+        let txn_id = Self::generate_transaction_id();
+        let request = build_connect_request(txn_id);
+
+        info!(
+            "Sending CONNECT to {} (txn_id={:#08x})",
+            self.tracker_url, txn_id
+        );
+
+        let response = self.send_with_retry(&request, 8)?;
+        let parsed = parse_connect_response(&response)?;
+
+        if parsed.transaction_id != txn_id {
+            return Err(format!(
+                "Transaction ID mismatch: expected {:#08x}, got {:#08x}",
+                txn_id, parsed.transaction_id
+            ));
+        }
+
+        // Cache the connection ID
+        self.cache_connection_id(parsed.connection_id);
+
+        info!(
+            "Received CONNECT response from {} (connection_id={:#016x})",
+            self.tracker_url, parsed.connection_id
+        );
+
+        Ok(parsed.connection_id)
+    }
+
+    /// Announce to tracker and get peer list
+    ///
+    /// # Arguments
+    /// * `info_hash` - 20-byte torrent info hash
+    /// * `peer_id` - 20-byte peer ID
+    /// * `port` - Port we're listening on
+    /// * `uploaded` - Bytes uploaded
+    /// * `downloaded` - Bytes downloaded
+    /// * `left` - Bytes remaining
+    /// * `event` - Event type (started, completed, stopped, none)
+    /// * `num_want` - Number of peers wanted (-1 for default)
+    pub fn announce(
+        &self,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        port: u16,
+        uploaded: u64,
+        downloaded: u64,
+        left: u64,
+        event: UdpEvent,
+        num_want: i32,
+    ) -> Result<AnnounceResponse, String> {
+        // Get connection ID
+        let conn_id = self.connect()?;
+
+        // Build announce request
+        let txn_id = Self::generate_transaction_id();
+        use rand::Rng;
+        let key = rand::thread_rng().r#gen::<u32>();
+
+        let request = build_announce_request(
+            conn_id,
+            txn_id,
+            info_hash,
+            peer_id,
+            downloaded as i64,
+            left as i64,
+            uploaded as i64,
+            event,
+            0, // IP (0 = default)
+            key,
+            num_want,
+            port,
+        );
+
+        info!(
+            "Sending ANNOUNCE to {} (txn_id={:#08x}, event={})",
+            self.tracker_url, txn_id, event
+        );
+
+        let response = self.send_with_retry(&request, 8)?;
+        let parsed = parse_announce_response(&response)?;
+
+        if parsed.transaction_id != txn_id {
+            return Err(format!(
+                "Transaction ID mismatch: expected {:#08x}, got {:#08x}",
+                txn_id, parsed.transaction_id
+            ));
+        }
+
+        info!(
+            "Received ANNOUNCE from {}: interval={}s, peers={}, seeders={}, leechers={}",
+            self.tracker_url,
+            parsed.interval,
+            parsed.peers.len(),
+            parsed.seeders,
+            parsed.leechers
+        );
+
+        Ok(parsed)
+    }
+
+    /// Scrape tracker for torrent statistics
+    ///
+    /// # Arguments
+    /// * `info_hashes` - List of 20-byte info hashes to query
+    pub fn scrape(&self, info_hashes: &[[u8; 20]]) -> Result<Vec<ScrapeResult>, String> {
+        if info_hashes.is_empty() {
+            return Err("No info hashes provided for scrape".to_string());
+        }
+
+        // Get connection ID
+        let conn_id = self.connect()?;
+
+        // Build scrape request
+        let txn_id = Self::generate_transaction_id();
+        let request = build_scrape_request(conn_id, txn_id, info_hashes);
+
+        info!(
+            "Sending SCRAPE to {} (txn_id={:#08x}, {} hashes)",
+            self.tracker_url,
+            txn_id,
+            info_hashes.len()
+        );
+
+        let response = self.send_with_retry(&request, 8)?;
+        let parsed = parse_scrape_response(&response)?;
+
+        info!(
+            "Received SCRAPE from {}: {} results",
+            self.tracker_url,
+            parsed.len()
+        );
+
+        Ok(parsed)
+    }
+
+    /// Get the tracker URL
+    pub fn tracker_url(&self) -> &str {
+        &self.tracker_url
+    }
+
+    /// Get the tracker address
+    pub fn tracker_addr(&self) -> SocketAddr {
+        self.tracker_addr
+    }
+}
+
+/// Async wrapper for UDP tracker client
+pub struct AsyncUdpTrackerClient {
+    inner: Arc<UdpTrackerClient>,
+}
+
+impl AsyncUdpTrackerClient {
+    /// Create a new async UDP tracker client
+    pub fn new(tracker_url: &str) -> Result<Self, String> {
+        Ok(Self {
+            inner: Arc::new(UdpTrackerClient::new(tracker_url)?),
+        })
+    }
+
+    /// Async announce
+    pub async fn announce(
+        &self,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        port: u16,
+        uploaded: u64,
+        downloaded: u64,
+        left: u64,
+        event: UdpEvent,
+        num_want: i32,
+    ) -> Result<AnnounceResponse, String> {
+        let inner = self.inner.clone();
+        let info_hash = *info_hash;
+        let peer_id = *peer_id;
+
+        tokio::task::spawn_blocking(move || {
+            inner.announce(
+                &info_hash,
+                &peer_id,
+                port,
+                uploaded,
+                downloaded,
+                left,
+                event,
+                num_want,
+            )
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+    }
+
+    /// Async scrape
+    pub async fn scrape(&self, info_hashes: &[[u8; 20]]) -> Result<Vec<ScrapeResult>, String> {
+        let inner = self.inner.clone();
+        let info_hashes = info_hashes.to_vec();
+
+        tokio::task::spawn_blocking(move || inner.scrape(&info_hashes))
+            .await
+            .map_err(|e| format!("Task join error: {}", e))?
+    }
+
+    /// Get tracker URL
+    pub fn tracker_url(&self) -> &str {
+        self.inner.tracker_url()
+    }
+}
+
 #[cfg(test)]
 fn random_txn_id() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};

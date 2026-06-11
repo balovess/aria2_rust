@@ -254,6 +254,38 @@ impl RpcEngine {
         }
     }
 
+    /// Handle `aria2.forcePause` - Force pause a download task.
+    ///
+    /// Unlike `aria2.pause`, this method immediately interrupts any ongoing
+    /// connections by cancelling the download operation's cancellation token.
+    ///
+    /// Parameters:
+    /// - [0]: GID of the task to force pause
+    ///
+    /// Returns: "OK" on success
+    pub async fn handle_force_pause(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
+        let gid: String = req.get_param(0)?;
+
+        let mut tasks_map = self.tasks.write().await;
+        match tasks_map.get_mut(&gid) {
+            Some(task_state) => {
+                // Mark as paused
+                task_state.status.status = DownloadStatus::Paused;
+
+                // Interrupt any ongoing connections by cancelling the token
+                if let Some(cancel_token) = &task_state.cancel_token {
+                    cancel_token.cancel();
+                }
+
+                Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!("OK"),
+                ))
+            }
+            None => Err(JsonRpcError::MethodNotFound(format!("GID {} not found", gid))),
+        }
+    }
+
     /// Handle `aria2.unpause` / `aria2.forceUnpause` - Resume a paused task.
     ///
     /// Parameters:
@@ -574,6 +606,30 @@ impl RpcEngine {
             }
         }
         JsonRpcResponse::success(serde_json::Value::Null, format!("OK. {} tasks paused.", count))
+    }
+
+    /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
+    ///
+    /// Unlike `aria2.pauseAll`, this method immediately interrupts any ongoing
+    /// connections by cancelling each download operation's cancellation token.
+    ///
+    /// Returns: "OK" on success
+    pub async fn handle_force_pause_all(&self) -> JsonRpcResponse {
+        let mut tasks_map = self.tasks.write().await;
+
+        for task_state in tasks_map.values_mut() {
+            if task_state.status.status == DownloadStatus::Active {
+                task_state.status.status = DownloadStatus::Paused;
+                if let Some(cancel_token) = &task_state.cancel_token {
+                    cancel_token.cancel();
+                }
+            }
+        }
+
+        JsonRpcResponse::success(
+            serde_json::Value::Null,
+            serde_json::json!("OK"),
+        )
     }
 
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.

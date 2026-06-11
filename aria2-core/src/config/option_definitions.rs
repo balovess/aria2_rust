@@ -527,8 +527,18 @@ impl super::OptionRegistry {
                 .category(OptionCategory::BitTorrent),
         );
         self.register(
+            OptionDef::new("dht-entry-point", OptionType::List)
+                .desc("DHT bootstrap nodes (host:port format, comma-separated)")
+                .category(OptionCategory::BitTorrent),
+        );
+        self.register(
+            OptionDef::new("dht-file-path", OptionType::Path)
+                .desc("Path to DHT routing table file for persistence")
+                .category(OptionCategory::BitTorrent),
+        );
+        self.register(
             OptionDef::new("dht-message-path", OptionType::Path)
-                .desc("DHT message cache path")
+                .desc("DHT message cache path (legacy, use dht-file-path instead)")
                 .category(OptionCategory::BitTorrent),
         );
         self.register(
@@ -641,6 +651,24 @@ impl super::OptionRegistry {
             OptionDef::new("rpc-cors-domain", OptionType::String)
                 .default(OptionValue::Str("*".into()))
                 .desc("CORS allowed domains for RPC (comma-separated, * for all)")
+                .category(OptionCategory::Rpc),
+        );
+
+        // --- HTTPS/TLS ---
+        self.register(
+            OptionDef::new("rpc-secure", OptionType::Boolean)
+                .default(OptionValue::Bool(false))
+                .desc("Enable HTTPS for RPC server")
+                .category(OptionCategory::Rpc),
+        );
+        self.register(
+            OptionDef::new("rpc-certificate", OptionType::Path)
+                .desc("Path to TLS certificate file (PEM format)")
+                .category(OptionCategory::Rpc),
+        );
+        self.register(
+            OptionDef::new("rpc-private-key", OptionType::Path)
+                .desc("Path to TLS private key file (PEM format)")
                 .category(OptionCategory::Rpc),
         );
     }

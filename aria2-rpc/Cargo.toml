@@ -16,6 +16,7 @@ include = ["src/**/*", "../README.md", "../LICENSE"]
 [dependencies]
 aria2-core.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -30,6 +31,11 @@ tungstenite = "0.20"
 base64 = "0.21"
 quick-xml = "0.31"
 rand = "0.8"
+
+# TLS/HTTPS support
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2.1"
 
 [dev-dependencies]
 tempfile = "3.8"

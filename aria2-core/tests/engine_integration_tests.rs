@@ -46,6 +46,7 @@ fn test_download_options(output_dir: &std::path::Path) -> DownloadOptions {
         bt_require_crypto: false,
         enable_dht: false,
         dht_listen_port: None,
+        dht_entry_point: None,
         http_proxy: None,
         dht_file_path: None,
         enable_public_trackers: false,

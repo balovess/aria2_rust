@@ -23,6 +23,55 @@ impl MseCryptoMethod {
     }
 }
 
+/// ARC4 (Alleged RC4) stream cipher implementation for MSE.
+/// This is a symmetric stream cipher where encryption and decryption are the same operation.
+#[derive(Debug, Clone)]
+pub struct Arc4Cipher {
+    s: [u8; 256],
+    i: u8,
+    j: u8,
+}
+
+impl Arc4Cipher {
+    /// Create a new ARC4 cipher instance with the given key.
+    pub fn new(key: &[u8]) -> Self {
+        let mut s = [0u8; 256];
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..256 {
+            s[i] = i as u8;
+        }
+
+        let mut j: usize = 0;
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..256 {
+            let si = s[i] as usize;
+            j = (j + si + key[i % key.len()] as usize) % 256;
+            s.swap(i, j);
+        }
+
+        Arc4Cipher { s, i: 0, j: 0 }
+    }
+
+    /// Encrypt data in-place using ARC4 stream cipher.
+    /// Note: ARC4 is symmetric, so encryption and decryption are the same operation.
+    pub fn encrypt(&mut self, data: &mut [u8]) {
+        for byte in data.iter_mut() {
+            self.i = self.i.wrapping_add(1);
+            self.j = self.j.wrapping_add(self.s[self.i as usize]);
+            self.s.swap(self.i as usize, self.j as usize);
+            let k =
+                self.s[(self.s[self.i as usize] as usize + self.s[self.j as usize] as usize) % 256];
+            *byte ^= k;
+        }
+    }
+
+    /// Decrypt data in-place using ARC4 stream cipher.
+    /// Note: ARC4 is symmetric, so this is the same as encrypt().
+    pub fn decrypt(&mut self, data: &mut [u8]) {
+        self.encrypt(data);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MseDerivedKeys {
     pub skey: [u8; 20],
@@ -202,6 +251,84 @@ impl Clone for MseCryptoState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_arc4_encrypt_decrypt_roundtrip() {
+        let key = b"test_key_123";
+        let mut cipher1 = Arc4Cipher::new(key);
+        let mut cipher2 = Arc4Cipher::new(key);
+
+        let original = b"Hello, BitTorrent MSE!";
+        let mut encrypted = original.to_vec();
+
+        cipher1.encrypt(&mut encrypted);
+        assert_ne!(
+            encrypted,
+            original.to_vec(),
+            "encrypted should differ from plaintext"
+        );
+
+        cipher2.decrypt(&mut encrypted);
+        assert_eq!(
+            encrypted,
+            original.to_vec(),
+            "decrypted should match original"
+        );
+    }
+
+    #[test]
+    fn test_arc4_symmetric() {
+        let key = b"symmetric_key";
+        let mut cipher = Arc4Cipher::new(key);
+
+        let original = b"test_data";
+        let mut data1 = original.to_vec();
+        let mut data2 = original.to_vec();
+
+        cipher.encrypt(&mut data1);
+        let mut cipher2 = Arc4Cipher::new(key);
+        cipher2.decrypt(&mut data2);
+
+        assert_eq!(data1, data2, "encrypt and decrypt should produce same result");
+    }
+
+    #[test]
+    fn test_arc4_different_keys_different_output() {
+        let mut cipher1 = Arc4Cipher::new(b"key1");
+        let mut cipher2 = Arc4Cipher::new(b"key2");
+
+        let original = b"same_plaintext";
+        let mut enc1 = original.to_vec();
+        let mut enc2 = original.to_vec();
+
+        cipher1.encrypt(&mut enc1);
+        cipher2.encrypt(&mut enc2);
+
+        assert_ne!(enc1, enc2, "different keys should produce different ciphertext");
+    }
+
+    #[test]
+    fn test_arc4_empty_data() {
+        let mut cipher = Arc4Cipher::new(b"key");
+        let mut empty: Vec<u8> = vec![];
+        cipher.encrypt(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_arc4_multiple_messages() {
+        let key = b"multi_msg_key";
+        let mut cipher1 = Arc4Cipher::new(key);
+        let mut cipher2 = Arc4Cipher::new(key);
+
+        let msgs: &[&[u8]] = &[b"first", b"second message", b"third longer msg"];
+        for msg in msgs {
+            let mut enc = msg.to_vec();
+            cipher1.encrypt(&mut enc);
+            cipher2.decrypt(&mut enc);
+            assert_eq!(enc, *msg);
+        }
+    }
 
     #[test]
     fn test_derive_keys_deterministic() {

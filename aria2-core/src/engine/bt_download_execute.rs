@@ -337,13 +337,40 @@ impl BtDownloadCommand {
         let enable_dht = { self.group.read().await.options().enable_dht };
         if enable_dht && self.dht_engine.is_none() {
             let dht_port = { self.group.read().await.options().dht_listen_port };
+            let dht_file_path = { self.group.read().await.options().dht_file_path.clone() };
+            let dht_entry_points = { self.group.read().await.options().dht_entry_point.clone() };
+            
+            // Parse custom bootstrap nodes if provided
+            let bootstrap_nodes: Vec<std::net::SocketAddr> = if let Some(ref entry_points) = dht_entry_points {
+                entry_points
+                    .iter()
+                    .filter_map(|ep| ep.parse::<std::net::SocketAddr>().ok())
+                    .collect()
+            } else {
+                vec![]
+            };
+            
             let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
                 port: dht_port.unwrap_or(0),
-                dht_file_path: self.group.read().await.options().dht_file_path.clone(),
+                dht_file_path,
                 ..Default::default()
             };
+            
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
+                    // Add custom bootstrap nodes to routing table
+                    if !bootstrap_nodes.is_empty() {
+                        for addr in &bootstrap_nodes {
+                            use aria2_protocol::bittorrent::dht::node::DhtNode;
+                            use rand::RngCore;
+                            let mut id = [0u8; 20];
+                            rand::thread_rng().fill_bytes(&mut id);
+                            let node = DhtNode::new(id, *addr);
+                            engine.add_node(node).await;
+                        }
+                        tracing::info!("[BT] Added {} custom DHT bootstrap nodes", bootstrap_nodes.len());
+                    }
+                    
                     self.dht_engine = Some(engine);
                     tracing::info!("[BT] DHT engine started");
                     self.dht_engine.as_ref().unwrap().start_maintenance_loop();

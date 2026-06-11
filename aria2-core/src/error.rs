@@ -43,6 +43,9 @@ pub enum RecoverableError {
 
     #[error("重试次数已用尽: {attempts}次")]
     MaxTriesReached { attempts: u32 },
+
+    #[error("无效的 piece 索引: {index} (最大: {max_index})")]
+    InvalidPieceIndex { index: u32, max_index: u32 },
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]

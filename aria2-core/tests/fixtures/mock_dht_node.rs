@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
+#[allow(dead_code)]
 pub struct MockDhtNode {
     addr: SocketAddr,
 }
 
+#[allow(dead_code)]
 impl MockDhtNode {
     pub async fn start(peers: Vec<SocketAddr>) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();

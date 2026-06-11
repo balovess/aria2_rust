@@ -1,6 +1,7 @@
 use tracing::{debug, warn};
 
 use super::response::{TrackerEvent, TrackerResponse};
+use super::udp_tracker_protocol::{AsyncUdpTrackerClient, AnnounceResponse, UdpEvent};
 
 #[allow(dead_code)]
 const DEFAULT_INTERVAL_SECS: u32 = 1800;
@@ -114,6 +115,12 @@ impl TrackerClient {
         tracker_url: &str,
         params: &TrackerAnnounceParams,
     ) -> Result<TrackerResponse, String> {
+        // Check if this is a UDP tracker
+        if tracker_url.starts_with("udp://") {
+            return self.announce_udp(tracker_url, params).await;
+        }
+
+        // HTTP/HTTPS tracker
         use crate::http::client::HttpClient;
         use crate::http::request::HttpRequest;
 
@@ -134,6 +141,68 @@ impl TrackerClient {
         }
 
         TrackerResponse::parse(&response.body).map_err(|e| format!("解析Tracker响应失败: {}", e))
+    }
+
+    /// Announce to a UDP tracker
+    async fn announce_udp(
+        &self,
+        tracker_url: &str,
+        params: &TrackerAnnounceParams,
+    ) -> Result<TrackerResponse, String> {
+        debug!("Using UDP tracker: {}", tracker_url);
+
+        let udp_client = AsyncUdpTrackerClient::new(tracker_url)?;
+
+        // Convert TrackerEvent to UdpEvent
+        let udp_event = match params.event {
+            Some(TrackerEvent::Started) => UdpEvent::Started,
+            Some(TrackerEvent::Completed) => UdpEvent::Completed,
+            Some(TrackerEvent::Stopped) => UdpEvent::Stopped,
+            None => UdpEvent::None,
+        };
+
+        let num_want = params.numwant.map(|n| n as i32).unwrap_or(-1);
+
+        let udp_response = udp_client
+            .announce(
+                &params.info_hash,
+                &params.peer_id,
+                params.port,
+                params.uploaded,
+                params.downloaded,
+                params.left,
+                udp_event,
+                num_want,
+            )
+            .await?;
+
+        // Convert UDP response to TrackerResponse
+        Ok(self.convert_udp_response(udp_response))
+    }
+
+    /// Convert UDP announce response to HTTP tracker response format
+    fn convert_udp_response(&self, udp_resp: AnnounceResponse) -> TrackerResponse {
+        use super::response::PeerInfo;
+
+        let peers = udp_resp
+            .peers
+            .into_iter()
+            .map(|(ip, port)| PeerInfo {
+                ip,
+                port,
+                peer_id: None,
+            })
+            .collect();
+
+        TrackerResponse {
+            interval: udp_resp.interval,
+            min_interval: None,
+            seeders: udp_resp.seeders,
+            leechers: udp_resp.leechers,
+            peers,
+            warning_message: None,
+            failure_reason: None,
+        }
     }
 }
 

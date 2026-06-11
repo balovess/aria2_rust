@@ -30,6 +30,8 @@ pub struct TorrentMeta {
     pub comment: Option<String>,
     pub created_by: Option<String>,
     pub encoding: Option<String>,
+    /// Web seed URLs from url-list field (BEP 19)
+    pub web_seeds: Vec<String>,
 }
 
 impl TorrentMeta {
@@ -57,12 +59,16 @@ impl TorrentMeta {
         let created_by = root.dict_get_str("created by").map(|s| s.to_string());
         let encoding = root.dict_get_str("encoding").map(|s| s.to_string());
 
+        // Parse url-list (BEP 19 Web Seeds)
+        let web_seeds = Self::parse_url_list(&root);
+
         let total_size = Self::compute_total_size(&info_dict);
         info!(
-            "Torrent解析完成: name={}, pieces={}, size={}",
+            "Torrent解析完成: name={}, pieces={}, size={}, web_seeds={}",
             info_dict.name,
             info_dict.pieces.len(),
-            total_size
+            total_size,
+            web_seeds.len()
         );
 
         Ok(Self {
@@ -74,6 +80,7 @@ impl TorrentMeta {
             comment,
             created_by,
             encoding,
+            web_seeds,
         })
     }
 
@@ -91,6 +98,30 @@ impl TorrentMeta {
                 .filter(|t| !t.is_empty())
                 .collect(),
             _ => Vec::new(),
+        }
+    }
+
+    /// Parse url-list field (BEP 19 Web Seeds)
+    ///
+    /// The url-list can be either:
+    /// - A single string (one URL)
+    /// - A list of strings (multiple fallback URLs)
+    fn parse_url_list(root: &BencodeValue) -> Vec<String> {
+        match root.dict_get(b"url-list") {
+            Some(BencodeValue::Bytes(url_bytes)) => {
+                // Single URL string
+                std::str::from_utf8(url_bytes)
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default()
+            }
+            Some(BencodeValue::List(items)) => {
+                // List of URL strings
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            }
+            _ => Vec::new(), // Missing or wrong type
         }
     }
 
@@ -367,5 +398,70 @@ mod tests {
         let t1 = TorrentMeta::parse(&data).unwrap();
         let t2 = TorrentMeta::parse(&data).unwrap();
         assert_eq!(t1.info_hash.as_hex(), t2.info_hash.as_hex());
+    }
+
+    #[test]
+    fn test_parse_web_seeds_single() {
+        let mut info = BTreeMap::new();
+        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test.bin".to_vec()));
+        info.insert(b"length".to_vec(), BencodeValue::Int(1024));
+        info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
+        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 40]));
+
+        let mut root = BTreeMap::new();
+        root.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
+        );
+        root.insert(
+            b"url-list".to_vec(),
+            BencodeValue::Bytes(b"http://webseed.example.com/file.bin".to_vec()),
+        );
+        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
+
+        let data = BencodeValue::Dict(root).encode();
+        let torrent = TorrentMeta::parse(&data).unwrap();
+
+        assert_eq!(torrent.web_seeds.len(), 1);
+        assert_eq!(torrent.web_seeds[0], "http://webseed.example.com/file.bin");
+    }
+
+    #[test]
+    fn test_parse_web_seeds_multiple() {
+        let mut info = BTreeMap::new();
+        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test.bin".to_vec()));
+        info.insert(b"length".to_vec(), BencodeValue::Int(2048));
+        info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
+        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 80]));
+
+        let mut root = BTreeMap::new();
+        root.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
+        );
+        root.insert(
+            b"url-list".to_vec(),
+            BencodeValue::List(vec![
+                BencodeValue::Bytes(b"http://seed1.example.com/file.bin".to_vec()),
+                BencodeValue::Bytes(b"http://seed2.example.com/file.bin".to_vec()),
+                BencodeValue::Bytes(b"https://seed3.example.com/file.bin".to_vec()),
+            ]),
+        );
+        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
+
+        let data = BencodeValue::Dict(root).encode();
+        let torrent = TorrentMeta::parse(&data).unwrap();
+
+        assert_eq!(torrent.web_seeds.len(), 3);
+        assert_eq!(torrent.web_seeds[0], "http://seed1.example.com/file.bin");
+        assert_eq!(torrent.web_seeds[1], "http://seed2.example.com/file.bin");
+        assert_eq!(torrent.web_seeds[2], "https://seed3.example.com/file.bin");
+    }
+
+    #[test]
+    fn test_parse_web_seeds_missing() {
+        let data = make_simple_torrent();
+        let torrent = TorrentMeta::parse(&data).unwrap();
+        assert!(torrent.web_seeds.is_empty());
     }
 }

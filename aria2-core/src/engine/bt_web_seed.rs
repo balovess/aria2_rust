@@ -8,9 +8,83 @@
 //!
 //! - [`WebSeedClient`] - Single HTTP endpoint for downloading pieces
 //! - [`WebSeedManager`] - Manages multiple web-seed URLs with fallback logic
+//! - [`WebSeedStats`] - Speed statistics for web-seed downloads
 //! - [`parse_url_list()`] - Extracts `url-list` from torrent metadata
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
+
+/// Speed statistics for web-seed downloads.
+///
+/// Tracks download speed separately from peer downloads.
+#[derive(Debug, Default)]
+pub struct WebSeedStats {
+    /// Total bytes downloaded from web seeds
+    pub total_bytes: AtomicU64,
+    /// Download start time (for speed calculation)
+    pub start_time: Option<Instant>,
+    /// Bytes downloaded in the current second (for real-time speed)
+    pub current_second_bytes: AtomicU64,
+    /// Timestamp of the current second window
+    pub current_second_start: Option<Instant>,
+}
+
+impl WebSeedStats {
+    /// Create a new WebSeedStats instance.
+    pub fn new() -> Self {
+        Self {
+            total_bytes: AtomicU64::new(0),
+            start_time: Some(Instant::now()),
+            current_second_bytes: AtomicU64::new(0),
+            current_second_start: Some(Instant::now()),
+        }
+    }
+
+    /// Record bytes downloaded from a web seed.
+    pub fn record_bytes(&self, bytes: u64) {
+        self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.current_second_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Get total bytes downloaded from web seeds.
+    pub fn total_bytes_downloaded(&self) -> u64 {
+        self.total_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Get average download speed in bytes/sec.
+    pub fn average_speed(&self) -> u64 {
+        if let Some(start) = self.start_time {
+            let elapsed = start.elapsed().as_secs();
+            if elapsed > 0 {
+                return self.total_bytes.load(Ordering::Relaxed) / elapsed;
+            }
+        }
+        0
+    }
+
+    /// Get current download speed in bytes/sec (real-time).
+    pub fn current_speed(&self) -> u64 {
+        if let Some(start) = self.current_second_start {
+            let elapsed = start.elapsed();
+            if elapsed >= Duration::from_secs(1) {
+                // Reset the window
+                let bytes = self.current_second_bytes.swap(0, Ordering::Relaxed);
+                let secs = elapsed.as_secs_f64();
+                return (bytes as f64 / secs) as u64;
+            }
+            // Within the same second, estimate based on current rate
+            let bytes = self.current_second_bytes.load(Ordering::Relaxed);
+            let secs = elapsed.as_secs_f64();
+            if secs > 0.0 {
+                return (bytes as f64 / secs) as u64;
+            }
+        }
+        0
+    }
+}
 
 /// HTTP client for downloading individual BT pieces from a single web-seed URL.
 ///
@@ -21,6 +95,10 @@ pub struct WebSeedClient {
     base_url: String,
     /// Reusable reqwest HTTP client with connection pooling
     client: reqwest::Client,
+    /// Pieces currently being requested (for concurrency control)
+    active_requests: Arc<std::sync::Mutex<HashSet<u32>>>,
+    /// Statistics for this web seed
+    stats: Arc<WebSeedStats>,
 }
 
 impl WebSeedClient {
@@ -50,7 +128,57 @@ impl WebSeedClient {
         Self {
             base_url: base_url.to_string(),
             client,
+            active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            stats: Arc::new(WebSeedStats::new()),
         }
+    }
+
+    /// Create a WebSeedClient with shared stats (for aggregated statistics).
+    pub fn with_shared_stats(base_url: &str, stats: Arc<WebSeedStats>) -> Self {
+        debug!(url = base_url, "Creating WebSeedClient with shared stats");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_max_idle_per_host(4)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        Self {
+            base_url: base_url.to_string(),
+            client,
+            active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            stats,
+        }
+    }
+
+    /// Check if a piece can be requested (not already active).
+    pub fn can_request(&self, piece_index: u32) -> bool {
+        let active = self.active_requests.lock().unwrap();
+        !active.contains(&piece_index)
+    }
+
+    /// Mark a piece as being requested.
+    pub fn mark_requesting(&self, piece_index: u32) {
+        let mut active = self.active_requests.lock().unwrap();
+        active.insert(piece_index);
+    }
+
+    /// Mark a piece as no longer being requested.
+    pub fn clear_request(&self, piece_index: u32) {
+        let mut active = self.active_requests.lock().unwrap();
+        active.remove(&piece_index);
+    }
+
+    /// Get the number of active requests.
+    pub fn active_request_count(&self) -> usize {
+        let active = self.active_requests.lock().unwrap();
+        active.len()
+    }
+
+    /// Get reference to the stats.
+    pub fn stats(&self) -> &WebSeedStats {
+        &self.stats
     }
 
     /// Download a specific piece range via HTTP GET with Range header.
@@ -110,6 +238,9 @@ impl WebSeedClient {
             .map_err(|e| format!("Failed to read response body: {}", e))?
             .to_vec();
 
+        // Record statistics
+        self.stats.record_bytes(data.len() as u64);
+
         if data.len() != length as usize {
             warn!(
                 expected = length,
@@ -120,6 +251,54 @@ impl WebSeedClient {
         }
 
         Ok(data)
+    }
+
+    /// Request a piece from this web seed with concurrency control.
+    ///
+    /// This method:
+    /// 1. Checks if the piece is already being requested
+    /// 2. Marks the piece as active
+    /// 3. Downloads the piece
+    /// 4. Clears the active flag
+    ///
+    /// # Arguments
+    ///
+    /// * `piece_index` - Index of the piece to download
+    /// * `piece_length` - Length of each piece
+    /// * `total_length` - Total file length (for calculating the last piece size)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<u8>)` - Piece data
+    /// * `Err(String)` - Error or "already active"
+    pub async fn request_piece(
+        &self,
+        piece_index: u32,
+        piece_length: u32,
+        total_length: u64,
+    ) -> Result<Vec<u8>, String> {
+        // Check if already requesting
+        if !self.can_request(piece_index) {
+            return Err(format!("Piece {} already being requested", piece_index));
+        }
+
+        // Mark as active
+        self.mark_requesting(piece_index);
+
+        // Calculate offset and length
+        let piece_offset = piece_index as u64 * piece_length as u64;
+        let remaining = total_length.saturating_sub(piece_offset);
+        let actual_length = std::cmp::min(piece_length as u64, remaining);
+
+        // Download
+        let result = self
+            .download_piece(piece_index, piece_length as u64, piece_offset, actual_length)
+            .await;
+
+        // Clear active flag
+        self.clear_request(piece_index);
+
+        result
     }
 
     /// Check whether this web-seed appears to be available.
@@ -143,6 +322,12 @@ impl WebSeedClient {
 pub struct WebSeedManager {
     /// Ordered list of web-seed clients
     clients: Vec<WebSeedClient>,
+    /// Shared statistics across all web seeds
+    stats: Arc<WebSeedStats>,
+    /// Piece length for calculating offsets
+    piece_length: u32,
+    /// Total file length
+    total_length: u64,
 }
 
 impl WebSeedManager {
@@ -151,29 +336,106 @@ impl WebSeedManager {
     /// # Arguments
     ///
     /// * `urls` - List of HTTP(S) URLs serving the torrent content
+    /// * `piece_length` - Length of each piece in the torrent
+    /// * `total_length` - Total file length
     ///
     /// # Example
     ///
     /// ```
     /// use aria2_core::engine::bt_web_seed::WebSeedManager;
-    /// let manager = WebSeedManager::new(vec![
-    ///     "http://mirror1.example.com/file.bin".to_string(),
-    ///     "http://mirror2.example.com/file.bin".to_string(),
-    /// ]);
+    /// let manager = WebSeedManager::new(
+    ///     vec![
+    ///         "http://mirror1.example.com/file.bin".to_string(),
+    ///         "http://mirror2.example.com/file.bin".to_string(),
+    ///     ],
+    ///     16384,  // piece_length
+    ///     1048576 // total_length
+    /// );
     /// ```
-    pub fn new(urls: Vec<String>) -> Self {
+    pub fn new(urls: Vec<String>, piece_length: u32, total_length: u64) -> Self {
         debug!(
             count = urls.len(),
             "Creating WebSeedManager with {} seed(s)",
             urls.len()
         );
 
+        let stats = Arc::new(WebSeedStats::new());
+
         let clients = urls
             .into_iter()
-            .map(|url| WebSeedClient::new(&url))
+            .map(|url| WebSeedClient::with_shared_stats(&url, stats.clone()))
             .collect();
 
-        Self { clients }
+        Self {
+            clients,
+            stats,
+            piece_length,
+            total_length,
+        }
+    }
+
+    /// Get the shared statistics.
+    pub fn stats(&self) -> &WebSeedStats {
+        &self.stats
+    }
+
+    /// Request a piece from any available web seed.
+    ///
+    /// This method uses the new `request_piece` API with concurrency control.
+    ///
+    /// # Arguments
+    ///
+    /// * `piece_index` - Index of the piece to download
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<u8>)` - Piece data from first successful web-seed
+    /// * `Err(String)` - All web-seeds failed
+    pub async fn request_piece(&self, piece_index: u32) -> Result<Vec<u8>, String> {
+        if self.clients.is_empty() {
+            return Err("No web-seeds configured".to_string());
+        }
+
+        let mut last_error = String::new();
+
+        for (i, client) in self.clients.iter().enumerate() {
+            if !client.is_available() || !client.can_request(piece_index) {
+                debug!(
+                    index = i,
+                    url = client.url(),
+                    "Skipping unavailable or busy web-seed"
+                );
+                continue;
+            }
+
+            match client
+                .request_piece(piece_index, self.piece_length, self.total_length)
+                .await
+            {
+                Ok(data) => {
+                    debug!(
+                        piece_index,
+                        seed_index = i,
+                        url = client.url(),
+                        size = data.len(),
+                        "Piece downloaded from web-seed"
+                    );
+                    return Ok(data);
+                }
+                Err(e) => {
+                    warn!(
+                        piece_index,
+                        seed_index = i,
+                        url = client.url(),
+                        error = %e,
+                        "Web-seed download failed, trying next"
+                    );
+                    last_error = format!("seed[{}]={}: {}", i, client.url(), e);
+                }
+            }
+        }
+
+        Err(format!("All web-seeds failed: {}", last_error))
     }
 
     /// Attempt to download a piece from any available web-seed.
@@ -282,20 +544,11 @@ impl WebSeedManager {
 /// ```ignore
 /// let urls = parse_url_list(&torrent_meta);
 /// if !urls.is_empty() {
-///     let manager = WebSeedManager::new(urls);
+///     let manager = WebSeedManager::new(urls, piece_length, total_length);
 /// }
 /// ```
-pub fn parse_url_list(
-    _meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
-) -> Vec<String> {
-    // We need to re-decode the raw torrent bytes to access url-list
-    // since TorrentMeta doesn't currently expose it as a field.
-    // For now, return empty and document that integration requires
-    // adding url-list extraction to TorrentMeta or passing raw bencode.
-
-    // Note: In production, url-list should be added as a field on TorrentMeta.
-    // This stub demonstrates the interface contract.
-    Vec::new()
+pub fn parse_url_list(meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta) -> Vec<String> {
+    meta.web_seeds.clone()
 }
 
 /// Parse url-list directly from raw bencoded torrent data.
@@ -460,7 +713,7 @@ mod tests {
             "http://seed2.example.com/file.iso".to_string(),
         ];
 
-        let manager = WebSeedManager::new(urls);
+        let manager = WebSeedManager::new(urls, 16384, 1048576);
 
         assert_eq!(manager.len(), 2);
         assert!(!manager.is_empty());
@@ -487,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_web_seed_manager_empty() {
-        let manager = WebSeedManager::new(Vec::new());
+        let manager = WebSeedManager::new(Vec::new(), 16384, 1048576);
 
         assert_eq!(manager.len(), 0);
         assert!(manager.is_empty());
@@ -527,5 +780,72 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0], "http://valid.example.com/file.bin");
         assert_eq!(urls[1], "http://also-valid.example.com/file.bin");
+    }
+
+    // ==================== WebSeedStats tests ====================
+
+    #[test]
+    fn test_web_seed_stats() {
+        let stats = WebSeedStats::new();
+
+        // Record some bytes
+        stats.record_bytes(1000);
+        stats.record_bytes(500);
+
+        assert_eq!(stats.total_bytes_downloaded(), 1500);
+    }
+
+    #[test]
+    fn test_web_seed_stats_average_speed() {
+        let stats = WebSeedStats::new();
+        stats.record_bytes(10000);
+
+        // Speed depends on elapsed time, just verify it doesn't panic
+        let _speed = stats.average_speed();
+    }
+
+    // ==================== Concurrency control tests ====================
+
+    #[test]
+    fn test_active_requests_tracking() {
+        let client = WebSeedClient::new("http://example.com/file.bin");
+
+        // Initially, all pieces can be requested
+        assert!(client.can_request(0));
+        assert!(client.can_request(1));
+        assert!(client.can_request(2));
+
+        // Mark piece 0 as active
+        client.mark_requesting(0);
+        assert!(!client.can_request(0)); // Now piece 0 is busy
+        assert!(client.can_request(1)); // Others still available
+        assert_eq!(client.active_request_count(), 1);
+
+        // Mark piece 1 as active
+        client.mark_requesting(1);
+        assert!(!client.can_request(0));
+        assert!(!client.can_request(1));
+        assert!(client.can_request(2));
+        assert_eq!(client.active_request_count(), 2);
+
+        // Clear piece 0
+        client.clear_request(0);
+        assert!(client.can_request(0)); // Piece 0 available again
+        assert!(!client.can_request(1)); // Piece 1 still busy
+        assert_eq!(client.active_request_count(), 1);
+    }
+
+    #[test]
+    fn test_web_seed_manager_stats() {
+        let urls = vec![
+            "http://seed1.example.com/file.bin".to_string(),
+            "http://seed2.example.com/file.bin".to_string(),
+        ];
+
+        let manager = WebSeedManager::new(urls, 16384, 1048576);
+
+        // Stats should be accessible
+        let stats = manager.stats();
+        assert_eq!(stats.total_bytes_downloaded(), 0);
     }
 }

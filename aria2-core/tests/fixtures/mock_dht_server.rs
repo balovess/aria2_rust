@@ -16,6 +16,7 @@ struct DhtExpectation {
     nodes: Vec<(SocketAddr, [u8; 20])>,
 }
 
+#[allow(dead_code)]
 pub struct MockDhtServer {
     socket: Arc<UdpSocket>,
     addr: SocketAddr,
@@ -24,6 +25,7 @@ pub struct MockDhtServer {
     received_messages: Arc<Mutex<Vec<DhtMessage>>>,
 }
 
+#[allow(dead_code)]
 impl MockDhtServer {
     pub async fn bind(port: u16) -> Result<Self, String> {
         let socket = UdpSocket::bind(format!("127.0.0.1:{}", port))

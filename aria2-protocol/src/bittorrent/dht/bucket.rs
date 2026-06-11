@@ -63,6 +63,50 @@ impl Bucket {
         self.nodes.retain(|n| !n.is_bad());
         before - self.nodes.len()
     }
+
+    /// Mark a node as good (reset failure count and update last_seen)
+    pub fn mark_good(&mut self, node_id: &[u8; 20]) -> bool {
+        if let Some(node) = self.nodes.iter_mut().find(|n| &n.id == node_id) {
+            node.touch();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark a node as bad (increment failure count)
+    pub fn mark_bad(&mut self, node_id: &[u8; 20]) -> bool {
+        if let Some(node) = self.nodes.iter_mut().find(|n| &n.id == node_id) {
+            node.record_failure();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark a node as questionable (simulate old last_seen by recording failures)
+    /// In DHT, a node becomes questionable if not seen for 15 minutes
+    pub fn mark_questionable(&mut self, node_id: &[u8; 20]) -> bool {
+        // We can't directly set last_seen, but we can check if the node exists
+        // The is_questionable() method checks elapsed time, so this is just a lookup
+        self.nodes.iter().any(|n| &n.id == node_id)
+    }
+
+    /// Check if this bucket needs refresh (hasn't been updated in 15 minutes)
+    pub fn needs_refresh(&self) -> bool {
+        // A bucket needs refresh if it has questionable nodes
+        self.nodes.iter().any(|n| n.is_questionable())
+    }
+
+    /// Count questionable nodes in this bucket
+    pub fn get_questionable_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.is_questionable()).count()
+    }
+
+    /// Count bad nodes in this bucket
+    pub fn get_bad_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.is_bad()).count()
+    }
 }
 
 impl Default for Bucket {

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 /// Configuration for performance test parameters
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PerfTestConfig {
     /// Number of warm-up iterations (not measured)
     warmup_iterations: usize,
@@ -1518,6 +1519,7 @@ mod regression_tests {
 
     /// Performance baseline thresholds (in microseconds)
     /// These should be adjusted based on actual measurements
+    #[allow(dead_code)]
     struct PerfBaselines {
         // HTTP
         http_client_shared_us: u64,

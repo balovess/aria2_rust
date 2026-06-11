@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use super::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use super::server::{
@@ -62,6 +63,8 @@ pub(super) struct TaskState {
     pub(super) connections: u16,
     /// Peer list for BitTorrent downloads
     pub(super) peers: Vec<PeerInfo>,
+    /// Cancellation token for forceful interruption of active downloads
+    pub(super) cancel_token: Option<CancellationToken>,
 }
 
 impl TaskState {
@@ -82,6 +85,7 @@ impl TaskState {
             upload_speed: 0,
             connections: 0,
             peers: vec![],
+            cancel_token: Some(CancellationToken::new()),
         }
     }
 
@@ -247,8 +251,12 @@ impl RpcEngine {
                 .handle_remove(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.pause" | "aria2.forcePause" => self
+            "aria2.pause" => self
                 .handle_pause(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.forcePause" => self
+                .handle_force_pause(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.unpause" | "aria2.forceUnpause" => self
@@ -310,6 +318,7 @@ impl RpcEngine {
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.pauseAll" => self.handle_pause_all().await,
+            "aria2.forcePauseAll" => self.handle_force_pause_all().await,
             "aria2.unpauseAll" => self.handle_unpause_all().await,
             "aria2.changeUri" => self
                 .handle_change_uri(req)

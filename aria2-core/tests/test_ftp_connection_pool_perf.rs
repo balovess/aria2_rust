@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use aria2_core::ftp::connection_pool::{FtpConnectionPool, PoolConfig, PoolStats};
+use aria2_core::ftp::connection_pool::{FtpConnectionPool, PoolConfig};
 
 /// Simulated connection establishment time (based on real-world measurements)
 /// FTP connection establishment typically takes 5-15 seconds including:
@@ -172,7 +172,6 @@ async fn test_pool_eviction_performance() {
 
 #[test]
 fn test_concurrent_access_simulation() {
-    use std::sync::Arc;
     use std::thread;
     
     println!("\n=== Concurrent Access Simulation ===");

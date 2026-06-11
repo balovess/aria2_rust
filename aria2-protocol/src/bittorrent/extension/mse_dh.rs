@@ -10,6 +10,90 @@ FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5A
 
 pub const DH_G: u64 = 2;
 
+/// MSE DH Key Exchange implementation following BEP 10 specification.
+/// Uses 1024-bit DH parameters from RFC 3526.
+#[derive(Debug, Clone)]
+pub struct MseDhKeyExchange {
+    /// Internal DH key pair (uses full-size keys for correct computation)
+    keypair: DhKeyPair,
+}
+
+impl MseDhKeyExchange {
+    /// Create a new DH key exchange instance with randomly generated keys.
+    pub fn new() -> Self {
+        MseDhKeyExchange {
+            keypair: DhKeyPair::generate(),
+        }
+    }
+
+    /// Generate the public key from the private key.
+    /// Returns a 96-byte array containing the public key.
+    /// Note: The actual public key may be up to 128 bytes, but we return
+    /// the last 96 bytes (most significant bytes) for compatibility.
+    pub fn generate_public_key(&self) -> [u8; 96] {
+        let mut result = [0u8; 96];
+        let pub_bytes = &self.keypair.public;
+        
+        // Take the last 96 bytes (most significant) or pad with zeros at the beginning
+        let offset = pub_bytes.len().saturating_sub(96);
+        let len = pub_bytes.len().saturating_sub(offset);
+        result[..len].copy_from_slice(&pub_bytes[offset..]);
+        
+        result
+    }
+
+    /// Get the full public key (for internal use).
+    #[allow(dead_code)]
+    fn full_public_key(&self) -> &[u8] {
+        &self.keypair.public
+    }
+
+    /// Compute the shared secret using the other party's public key.
+    /// Returns a 96-byte array containing the shared secret.
+    /// 
+    /// Note: This method expects the full public key from the other party,
+    /// not the truncated 96-byte version. Use `compute_shared_secret_full()` 
+    /// if you have the full public key.
+    pub fn compute_shared_secret(&self, other_public: &[u8; 96]) -> [u8; 96] {
+        // Pad the other public key to full size (prepend zeros if needed)
+        // This assumes the other public key was also truncated to 96 bytes
+        let mut other_pub_full = vec![0u8; 128 - 96];
+        other_pub_full.extend_from_slice(other_public);
+        
+        // Compute shared secret using the full-size implementation
+        let shared = self.keypair.compute_shared_secret(&other_pub_full);
+        
+        // Pad or truncate to 96 bytes
+        let mut result = [0u8; 96];
+        let offset = shared.len().saturating_sub(96);
+        let len = shared.len().saturating_sub(offset);
+        result[..len].copy_from_slice(&shared[offset..]);
+        
+        result
+    }
+
+    /// Compute the shared secret using the full public key from the other party.
+    /// This is the correct method to use for DH key exchange.
+    pub fn compute_shared_secret_full(&self, other_public_full: &[u8]) -> [u8; 96] {
+        // Compute shared secret using the full-size implementation
+        let shared = self.keypair.compute_shared_secret(other_public_full);
+        
+        // Pad or truncate to 96 bytes
+        let mut result = [0u8; 96];
+        let offset = shared.len().saturating_sub(96);
+        let len = shared.len().saturating_sub(offset);
+        result[..len].copy_from_slice(&shared[offset..]);
+        
+        result
+    }
+}
+
+impl Default for MseDhKeyExchange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DhKeyPair {
     pub private: Vec<u8>,
@@ -61,6 +145,55 @@ impl Default for DhKeyPair {
 mod tests {
     use super::*;
     use num_traits::One;
+
+    #[test]
+    fn test_mse_dh_key_exchange_new() {
+        let exchange = MseDhKeyExchange::new();
+        // Public key should not be all zeros
+        let public = exchange.generate_public_key();
+        assert_ne!(public, [0u8; 96]);
+    }
+
+    #[test]
+    fn test_mse_dh_generate_public_key() {
+        let exchange = MseDhKeyExchange::new();
+        let public = exchange.generate_public_key();
+        assert_eq!(public.len(), 96);
+        // Generate again should return the same key
+        let public2 = exchange.generate_public_key();
+        assert_eq!(public, public2);
+    }
+
+    #[test]
+    fn test_mse_dh_shared_secret_symmetry() {
+        let alice = MseDhKeyExchange::new();
+        let bob = MseDhKeyExchange::new();
+
+        // Use full public keys for correct DH computation
+        let alice_pub_full = alice.full_public_key();
+        let bob_pub_full = bob.full_public_key();
+
+        let s_ab = alice.compute_shared_secret_full(bob_pub_full);
+        let s_ba = bob.compute_shared_secret_full(alice_pub_full);
+
+        assert_eq!(s_ab, s_ba, "Shared secrets should be equal");
+        assert!(!s_ab.iter().all(|&b| b == 0), "Shared secret should not be all zeros");
+    }
+
+    #[test]
+    fn test_mse_dh_different_keys_different_secrets() {
+        let alice1 = MseDhKeyExchange::new();
+        let alice2 = MseDhKeyExchange::new();
+        let bob = MseDhKeyExchange::new();
+
+        let bob_pub_full = bob.full_public_key();
+        let s1 = alice1.compute_shared_secret_full(bob_pub_full);
+        let s2 = alice2.compute_shared_secret_full(bob_pub_full);
+
+        // Different private keys should produce different shared secrets (with high probability)
+        // Note: There's a tiny chance they could be equal, but it's negligible
+        assert_ne!(s1, s2, "Different keys should produce different secrets");
+    }
 
     #[test]
     fn test_generate_keypair() {
