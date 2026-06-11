@@ -253,16 +253,15 @@ impl DhtClient {
             socket.send_to(node.addr, &encoded).await?;
             
             let mut buf = [0u8; 4096];
-            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await {
-                if len > 0 {
-                    if let Ok(response) = DhtMessage::decode(&buf[..len]) {
-                        let new_nodes = extract_compact_nodes_from_response(&response);
-                        for (addr, nid) in new_nodes {
-                            let new_node = DhtNode::new(nid, addr);
-                            self.routing_table.insert(new_node.clone());
-                            all_nodes.push(new_node);
-                        }
-                    }
+            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await
+                && len > 0
+                && let Ok(response) = DhtMessage::decode(&buf[..len])
+            {
+                let new_nodes = extract_compact_nodes_from_response(&response);
+                for (addr, nid) in new_nodes {
+                    let new_node = DhtNode::new(nid, addr);
+                    self.routing_table.insert(new_node.clone());
+                    all_nodes.push(new_node);
                 }
             }
         }
@@ -291,19 +290,18 @@ impl DhtClient {
             socket.send_to(node.addr, &encoded).await?;
             
             let mut buf = [0u8; 4096];
-            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await {
-                if len > 0 {
-                    if let Ok(response) = DhtMessage::decode(&buf[..len]) {
-                        let peers = extract_compact_peers_from_response(&response);
-                        all_peers.extend(peers);
-                        
-                        let nodes = extract_compact_nodes_from_response(&response);
-                        for (addr, nid) in nodes {
-                            let new_node = DhtNode::new(nid, addr);
-                            self.routing_table.insert(new_node.clone());
-                            all_nodes.push(new_node);
-                        }
-                    }
+            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await
+                && len > 0
+                && let Ok(response) = DhtMessage::decode(&buf[..len])
+            {
+                let peers = extract_compact_peers_from_response(&response);
+                all_peers.extend(peers);
+
+                let nodes = extract_compact_nodes_from_response(&response);
+                for (addr, nid) in nodes {
+                    let new_node = DhtNode::new(nid, addr);
+                    self.routing_table.insert(new_node.clone());
+                    all_nodes.push(new_node);
                 }
             }
         }

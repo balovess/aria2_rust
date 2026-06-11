@@ -1,5 +1,5 @@
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
-    AsyncUdpTrackerClient, UdpAction, UdpEvent, UdpTrackerClient,
+    AnnounceParams, AsyncUdpTrackerClient, UdpAction, UdpEvent, UdpTrackerClient,
 };
 
 mod fixtures;
@@ -43,16 +43,16 @@ async fn test_udp_tracker_announce() {
     let peer_id = [0xCDu8; 20];
 
     // Announce
-    let result = client.announce(
-        &info_hash,
-        &peer_id,
-        6881,
-        0,
-        0,
-        1024 * 1024,
-        UdpEvent::Started,
-        -1,
-    );
+    let result = client.announce(&AnnounceParams {
+        info_hash: &info_hash,
+        peer_id: &peer_id,
+        port: 6881,
+        uploaded: 0,
+        downloaded: 0,
+        left: 1024 * 1024,
+        event: UdpEvent::Started,
+        num_want: -1,
+    });
 
     assert!(result.is_ok(), "Announce failed: {:?}", result.err());
 
@@ -118,16 +118,16 @@ async fn test_async_udp_tracker_announce() {
 
     // Async announce
     let result = client
-        .announce(
-            &info_hash,
-            &peer_id,
-            6881,
-            0,
-            0,
-            1024 * 1024,
-            UdpEvent::Started,
-            -1,
-        )
+        .announce(&AnnounceParams {
+            info_hash: &info_hash,
+            peer_id: &peer_id,
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: 1024 * 1024,
+            event: UdpEvent::Started,
+            num_want: -1,
+        })
         .await;
 
     assert!(result.is_ok(), "Async announce failed: {:?}", result.err());
@@ -153,29 +153,29 @@ async fn test_udp_tracker_connection_caching() {
     let info_hash = [0xABu8; 20];
     let peer_id = [0xCDu8; 20];
 
-    let result1 = client.announce(
-        &info_hash,
-        &peer_id,
-        6881,
-        0,
-        0,
-        1024 * 1024,
-        UdpEvent::Started,
-        -1,
-    );
+    let result1 = client.announce(&AnnounceParams {
+        info_hash: &info_hash,
+        peer_id: &peer_id,
+        port: 6881,
+        uploaded: 0,
+        downloaded: 0,
+        left: 1024 * 1024,
+        event: UdpEvent::Started,
+        num_want: -1,
+    });
     assert!(result1.is_ok());
 
     // Second announce - should use cached connection
-    let result2 = client.announce(
-        &info_hash,
-        &peer_id,
-        6881,
-        1024,
-        0,
-        512 * 1024,
-        UdpEvent::None,
-        -1,
-    );
+    let result2 = client.announce(&AnnounceParams {
+        info_hash: &info_hash,
+        peer_id: &peer_id,
+        port: 6881,
+        uploaded: 1024,
+        downloaded: 0,
+        left: 512 * 1024,
+        event: UdpEvent::None,
+        num_want: -1,
+    });
     assert!(result2.is_ok());
 
     println!("✓ UDP tracker connection caching test passed");
@@ -197,7 +197,16 @@ async fn test_udp_tracker_multiple_events() {
 
     // Test different events
     for event in [UdpEvent::Started, UdpEvent::None, UdpEvent::Completed, UdpEvent::Stopped] {
-        let result = client.announce(&info_hash, &peer_id, 6881, 0, 0, 1024 * 1024, event, -1);
+        let result = client.announce(&AnnounceParams {
+            info_hash: &info_hash,
+            peer_id: &peer_id,
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: 1024 * 1024,
+            event,
+            num_want: -1,
+        });
         assert!(
             result.is_ok(),
             "Announce with event {:?} failed: {:?}",

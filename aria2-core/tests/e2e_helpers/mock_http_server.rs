@@ -203,6 +203,16 @@ impl MockHttpServer {
         self.on_get(
             path.as_str(),
             move |req: &Request<Body>| -> Response<Body> {
+                // Handle empty body case
+                if body.is_empty() {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Accept-Ranges", "bytes")
+                        .header("Content-Length", 0)
+                        .body(Body::empty())
+                        .unwrap();
+                }
+
                 // Parse Range header
                 if let Some(range_header) = req.headers().get("Range")
                     && let Ok(range_str) = range_header.to_str()
@@ -212,8 +222,22 @@ impl MockHttpServer {
                         && let Some((start_str, end_str)) = range_part.split_once('-')
                     {
                         let start: u64 = start_str.parse().unwrap_or(0);
-                        let end: u64 = end_str.parse().unwrap_or(body.len() as u64 - 1);
+                        // Handle empty end_str (means "to end of file")
+                        let end: u64 = if end_str.is_empty() {
+                            body.len() as u64 - 1
+                        } else {
+                            end_str.parse().unwrap_or(body.len() as u64 - 1)
+                        };
                         let end = end.min(body.len() as u64 - 1);
+
+                        // Validate range
+                        if start > end || start as usize >= body.len() {
+                            return Response::builder()
+                                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                                .header("Content-Range", format!("bytes=*/{}", body.len()))
+                                .body(Body::empty())
+                                .unwrap();
+                        }
 
                         let slice = &body[start as usize..=end as usize];
                         return Response::builder()

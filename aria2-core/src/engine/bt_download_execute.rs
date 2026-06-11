@@ -184,6 +184,21 @@ impl Command for BtDownloadCommand {
             );
         }
 
+        // Initialize web seed manager if web seeds are available (BEP 19)
+        let web_seed_manager = if !self.web_seed_urls.is_empty() {
+            info!(
+                "[BT] Initializing web seed manager with {} URL(s)",
+                self.web_seed_urls.len()
+            );
+            Some(crate::engine::bt_web_seed::WebSeedManager::new(
+                self.web_seed_urls.clone(),
+                piece_length,
+                total_size,
+            ))
+        } else {
+            None
+        };
+
         // TODO: PEX Integration Point - After extension handshake and bitfield exchange:
         // For each active connection that supports ut_pex (check extension IDs from handshake):
         //   1. Call self.check_pex_support(local_ext_ids, remote_ext_ids) to verify mutual support
@@ -201,6 +216,7 @@ impl Command for BtDownloadCommand {
             piece_length,
             total_size,
             num_pieces,
+            web_seed_manager.as_ref(),
         )
         .await?;
 
@@ -573,6 +589,7 @@ impl BtDownloadCommand {
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
+        web_seed_manager: Option<&crate::engine::bt_web_seed::WebSeedManager>,
     ) -> Result<()> {
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
         let rate_limit = {
@@ -907,15 +924,68 @@ impl BtDownloadCommand {
             }
 
             if !piece_ok {
-                tracing::error!(
-                    "[BT] Piece {} failed after {} retries",
-                    next_piece_idx,
-                    MAX_RETRIES
-                );
-                return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                    "Piece {} download failed after {} retries",
-                    next_piece_idx, MAX_RETRIES
-                ))));
+                // Try Web Seeds as fallback (BEP 19)
+                if let Some(ws_mgr) = web_seed_manager {
+                    info!(
+                        "[BT] Piece {} failed from peers, trying web seeds...",
+                        next_piece_idx
+                    );
+
+                    match ws_mgr.request_piece(next_piece_idx as u32).await {
+                        Ok(web_seed_data) => {
+                            info!(
+                                "[BT] Piece {} downloaded from web seed ({} bytes)",
+                                next_piece_idx,
+                                web_seed_data.len()
+                            );
+                            // Verify hash
+                            if piece_manager.verify_piece_hash(next_piece_idx as u32, &web_seed_data) {
+                                tracing::info!("[BT] Piece {} from web seed verified OK", next_piece_idx);
+                                piece_manager.mark_piece_complete(next_piece_idx as u32);
+                                piece_picker.mark_completed(next_piece_idx as u32);
+
+                                if let Some(ref layout) = self.multi_file_layout {
+                                    write_piece_to_multi_files_coalesced(
+                                        layout,
+                                        next_piece_idx as u32,
+                                        &web_seed_data,
+                                        layout.piece_length(),
+                                    )
+                                    .await?;
+                                } else {
+                                    writer.write(&web_seed_data).await.ok();
+                                }
+
+                                self.completed_bytes += web_seed_data.len() as u64;
+                                piece_ok = true;
+                            } else {
+                                tracing::warn!(
+                                    "[BT] Piece {} from web seed failed hash verification",
+                                    next_piece_idx
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[BT] Web seed download failed for piece {}: {}",
+                                next_piece_idx,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                if !piece_ok {
+                    tracing::error!(
+                        "[BT] Piece {} failed after {} retries (peers and web seeds)",
+                        next_piece_idx,
+                        MAX_RETRIES
+                    );
+                    return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                        "Piece {} download failed after {} retries",
+                        next_piece_idx, MAX_RETRIES
+                    ))));
+                }
             }
 
             {

@@ -207,8 +207,8 @@ impl RoutingTable {
             id[byte_idx] ^= 1 << (7 - bit_idx);
             
             // Randomize lower bits
-            for i in (byte_idx + 1)..20 {
-                id[i] = rng.r#gen();
+            for byte in id.iter_mut().skip(byte_idx + 1) {
+                *byte = rng.r#gen();
             }
         }
         

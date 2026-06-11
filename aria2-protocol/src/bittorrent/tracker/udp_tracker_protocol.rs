@@ -331,6 +331,19 @@ pub struct UdpTrackerClient {
     connection_cache: Arc<Mutex<HashMap<SocketAddr, ConnectionCache>>>,
 }
 
+/// Parameters for announce request
+#[derive(Debug, Clone)]
+pub struct AnnounceParams<'a> {
+    pub info_hash: &'a [u8; 20],
+    pub peer_id: &'a [u8; 20],
+    pub port: u16,
+    pub uploaded: u64,
+    pub downloaded: u64,
+    pub left: u64,
+    pub event: UdpEvent,
+    pub num_want: i32,
+}
+
 impl UdpTrackerClient {
     /// Create a new UDP tracker client
     ///
@@ -483,24 +496,10 @@ impl UdpTrackerClient {
     /// Announce to tracker and get peer list
     ///
     /// # Arguments
-    /// * `info_hash` - 20-byte torrent info hash
-    /// * `peer_id` - 20-byte peer ID
-    /// * `port` - Port we're listening on
-    /// * `uploaded` - Bytes uploaded
-    /// * `downloaded` - Bytes downloaded
-    /// * `left` - Bytes remaining
-    /// * `event` - Event type (started, completed, stopped, none)
-    /// * `num_want` - Number of peers wanted (-1 for default)
+    /// * `params` - Announce parameters
     pub fn announce(
         &self,
-        info_hash: &[u8; 20],
-        peer_id: &[u8; 20],
-        port: u16,
-        uploaded: u64,
-        downloaded: u64,
-        left: u64,
-        event: UdpEvent,
-        num_want: i32,
+        params: &AnnounceParams<'_>,
     ) -> Result<AnnounceResponse, String> {
         // Get connection ID
         let conn_id = self.connect()?;
@@ -513,21 +512,21 @@ impl UdpTrackerClient {
         let request = build_announce_request(
             conn_id,
             txn_id,
-            info_hash,
-            peer_id,
-            downloaded as i64,
-            left as i64,
-            uploaded as i64,
-            event,
+            params.info_hash,
+            params.peer_id,
+            params.downloaded as i64,
+            params.left as i64,
+            params.uploaded as i64,
+            params.event,
             0, // IP (0 = default)
             key,
-            num_want,
-            port,
+            params.num_want,
+            params.port,
         );
 
         info!(
             "Sending ANNOUNCE to {} (txn_id={:#08x}, event={})",
-            self.tracker_url, txn_id, event
+            self.tracker_url, txn_id, params.event
         );
 
         let response = self.send_with_retry(&request, 8)?;
@@ -614,30 +613,29 @@ impl AsyncUdpTrackerClient {
     /// Async announce
     pub async fn announce(
         &self,
-        info_hash: &[u8; 20],
-        peer_id: &[u8; 20],
-        port: u16,
-        uploaded: u64,
-        downloaded: u64,
-        left: u64,
-        event: UdpEvent,
-        num_want: i32,
+        params: &AnnounceParams<'_>,
     ) -> Result<AnnounceResponse, String> {
         let inner = self.inner.clone();
-        let info_hash = *info_hash;
-        let peer_id = *peer_id;
+        let info_hash = *params.info_hash;
+        let peer_id = *params.peer_id;
+        let port = params.port;
+        let uploaded = params.uploaded;
+        let downloaded = params.downloaded;
+        let left = params.left;
+        let event = params.event;
+        let num_want = params.num_want;
 
         tokio::task::spawn_blocking(move || {
-            inner.announce(
-                &info_hash,
-                &peer_id,
+            inner.announce(&AnnounceParams {
+                info_hash: &info_hash,
+                peer_id: &peer_id,
                 port,
                 uploaded,
                 downloaded,
                 left,
                 event,
                 num_want,
-            )
+            })
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))?

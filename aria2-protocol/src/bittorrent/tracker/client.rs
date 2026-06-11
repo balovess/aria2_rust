@@ -1,7 +1,7 @@
 use tracing::{debug, warn};
 
 use super::response::{TrackerEvent, TrackerResponse};
-use super::udp_tracker_protocol::{AsyncUdpTrackerClient, AnnounceResponse, UdpEvent};
+use super::udp_tracker_protocol::{AnnounceParams, AsyncUdpTrackerClient, AnnounceResponse, UdpEvent};
 
 #[allow(dead_code)]
 const DEFAULT_INTERVAL_SECS: u32 = 1800;
@@ -164,16 +164,16 @@ impl TrackerClient {
         let num_want = params.numwant.map(|n| n as i32).unwrap_or(-1);
 
         let udp_response = udp_client
-            .announce(
-                &params.info_hash,
-                &params.peer_id,
-                params.port,
-                params.uploaded,
-                params.downloaded,
-                params.left,
-                udp_event,
+            .announce(&AnnounceParams {
+                info_hash: &params.info_hash,
+                peer_id: &params.peer_id,
+                port: params.port,
+                uploaded: params.uploaded,
+                downloaded: params.downloaded,
+                left: params.left,
+                event: udp_event,
                 num_want,
-            )
+            })
             .await?;
 
         // Convert UDP response to TrackerResponse
