@@ -36,6 +36,8 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         https_proxy: None,
         ftp_proxy: None,
         no_proxy: None,
+        enable_utp: false,
+        utp_listen_port: None,
     };
     DownloadCommand::new(
         GroupId::new(1),
@@ -92,8 +94,8 @@ fn test_concurrent_segment_manager_complete_all() {
     let mut manager =
         ConcurrentSegmentManager::new(200, vec!["http://example.com/med".to_string()], Some(100));
     manager.allocate_segments();
-    manager.complete_segment(0, vec![0u8; 100]);
-    manager.complete_segment(1, vec![0u8; 100]);
+    manager.complete_segment(0, bytes::Bytes::from(vec![0u8; 100]));
+    manager.complete_segment(1, bytes::Bytes::from(vec![0u8; 100]));
     assert!(manager.is_complete());
     assert_eq!(manager.completed_bytes(), 200);
     let assembled = manager.assemble().unwrap();
@@ -162,6 +164,8 @@ fn test_download_options_with_values() {
         https_proxy: None,
         ftp_proxy: None,
         no_proxy: None,
+        enable_utp: false,
+        utp_listen_port: None,
     };
     assert_eq!(opts.split, Some(16));
     assert_eq!(opts.max_connection_per_server, Some(8));

@@ -711,7 +711,7 @@ mod disk_io_tests {
             for _ in 0..config.warmup_iterations {
                 for i in 0..100 {
                     let offset = (i * block_size) as u64;
-                    let data = vec![i as u8; block_size];
+                    let data: bytes::Bytes = vec![i as u8; block_size].into();
                     cache.write(offset, data).await.unwrap();
                 }
             }
@@ -722,7 +722,7 @@ mod disk_io_tests {
                 let start = Instant::now();
                 for i in 0..100 {
                     let offset = (i * block_size) as u64;
-                    let data = vec![i as u8; block_size];
+                    let data: bytes::Bytes = vec![i as u8; block_size].into();
                     cache.write(offset, data).await.unwrap();
                 }
                 durations_write.push(start.elapsed());

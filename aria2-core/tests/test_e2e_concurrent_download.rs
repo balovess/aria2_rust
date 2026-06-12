@@ -243,10 +243,10 @@ fn test_segment_manager_fail_reassign() {
 fn test_segment_manager_assemble() {
     let mut mgr = ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
 
-    mgr.complete_segment(0, vec![0xAA; 100]);
+    mgr.complete_segment(0, bytes::Bytes::from(vec![0xAA; 100]));
     assert!((mgr.progress() - 50.0).abs() < 0.01);
 
-    mgr.complete_segment(1, vec![0xBB; 100]);
+    mgr.complete_segment(1, bytes::Bytes::from(vec![0xBB; 100]));
     assert!(mgr.is_complete());
     assert!((mgr.progress() - 100.0).abs() < 0.01);
 

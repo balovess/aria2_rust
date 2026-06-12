@@ -162,6 +162,12 @@ impl App {
                 .get_opt_str("bt-prioritize-piece")
                 .await
                 .unwrap_or_else(|| "rarest".to_string()),
+            // uTP (UDP Transport Protocol - BEP 29)
+            enable_utp: self.get_opt_bool("enable-utp").await.unwrap_or(false),
+            utp_listen_port: self
+                .get_opt_i64("utp-listen-port")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u16) } else { None }),
         };
 
         let mut engine_lock = self.engine.lock().await;

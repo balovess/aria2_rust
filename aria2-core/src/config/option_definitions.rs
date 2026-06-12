@@ -508,8 +508,27 @@ impl super::OptionRegistry {
         // --- DHT / LPD / PEX ---
         self.register(
             OptionDef::new("bt-enable-lpd", OptionType::Boolean)
-                .default(OptionValue::Bool(false))
+                .default(OptionValue::Bool(true))
                 .desc("Enable Local Peer Discovery")
+                .category(OptionCategory::BitTorrent),
+        );
+        self.register(
+            OptionDef::new("enable-lpd", OptionType::Boolean)
+                .default(OptionValue::Bool(true))
+                .desc("Enable Local Peer Discovery (alias for bt-enable-lpd)")
+                .category(OptionCategory::BitTorrent),
+        );
+        self.register(
+            OptionDef::new("lpd-listen-port", OptionType::Integer)
+                .default(OptionValue::Int(6771))
+                .range(1024, 65535)
+                .desc("UDP port for Local Peer Discovery")
+                .category(OptionCategory::BitTorrent),
+        );
+        self.register(
+            OptionDef::new("bt-enable-web-seed", OptionType::Boolean)
+                .default(OptionValue::Bool(true))
+                .desc("Enable web seed (HTTP/FTP seeding)")
                 .category(OptionCategory::BitTorrent),
         );
         self.register(
@@ -583,6 +602,24 @@ impl super::OptionRegistry {
             OptionDef::new("bt-prioritize-piece", OptionType::String)
                 .default(OptionValue::Str("rarest".into()))
                 .desc("Piece selection priority mode: 'rarest' (default), 'head' (sequential from start), 'tail' (sequential from end)")
+                .category(OptionCategory::BitTorrent),
+        );
+
+        // --- uTP (UDP Transport Protocol - BEP 29) ---
+        // Note: uTP is not implemented in the original C++ aria2. This is an experimental
+        // feature in aria2-rust that implements BEP 29 (http://www.bittorrent.org/beps/bep_0029.html).
+        // uTP provides congestion control over UDP, making BitTorrent friendlier to network traffic.
+        self.register(
+            OptionDef::new("enable-utp", OptionType::Boolean)
+                .default(OptionValue::Bool(false))
+                .desc("Enable uTP (UDP Transport Protocol, BEP 29). Experimental feature not in original aria2. Default: false")
+                .category(OptionCategory::BitTorrent),
+        );
+        self.register(
+            OptionDef::new("utp-listen-port", OptionType::Integer)
+                .default(OptionValue::Int(0))
+                .range(0, 65535)
+                .desc("UDP port for uTP connections. 0 = auto-assign. Experimental feature not in original aria2")
                 .category(OptionCategory::BitTorrent),
         );
     }

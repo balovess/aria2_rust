@@ -85,7 +85,7 @@ async fn test_cache_hit_rate_sequential() {
     let start = Instant::now();
     for i in 0..num_blocks {
         let offset = (i * block_size) as u64;
-        let data = vec![i as u8; block_size];
+        let data: bytes::Bytes = vec![i as u8; block_size].into();
         cache.write(offset, data).await.unwrap();
         stats.record_write();
     }
@@ -140,7 +140,7 @@ async fn test_cache_hit_rate_random_access() {
     let start = Instant::now();
     for i in 0..num_blocks {
         let offset = (i * block_size) as u64;
-        let data = vec![((i * 7) % 256) as u8; block_size];
+        let data: bytes::Bytes = vec![((i * 7) % 256) as u8; block_size].into();
         cache.write(offset, data).await.unwrap();
         stats.record_write();
     }
@@ -152,7 +152,7 @@ async fn test_cache_hit_rate_random_access() {
     // Write more to trigger eviction
     for i in num_blocks..(num_blocks + 50) {
         let offset = (i * block_size) as u64;
-        let data = vec![((i * 7) % 256) as u8; block_size];
+        let data: bytes::Bytes = vec![((i * 7) % 256) as u8; block_size].into();
         cache.write(offset, data).await.unwrap();
         stats.record_write();
     }
@@ -203,7 +203,7 @@ async fn test_cache_eviction_dirty_safety() {
     let start = Instant::now();
     for i in 0..num_blocks {
         let offset = (i * block_size) as u64;
-        let data = vec![i as u8; block_size];
+        let data: bytes::Bytes = vec![i as u8; block_size].into();
         cache.write(offset, data).await.unwrap();
         stats.record_write();
     }
@@ -799,7 +799,7 @@ async fn test_cache_performance(_dir: &tempfile::TempDir) -> Metrics {
     let start = Instant::now();
     for i in 0..num_blocks {
         let offset = (i * block_size) as u64;
-        let data = vec![i as u8; block_size];
+        let data: bytes::Bytes = vec![i as u8; block_size].into();
         cache.write(offset, data).await.unwrap();
     }
     let duration = start.elapsed();

@@ -259,6 +259,14 @@ impl App {
                 .get("bt-prioritize-piece")
                 .cloned()
                 .unwrap_or_else(|| "rarest".to_string()),
+            // uTP (UDP Transport Protocol - BEP 29)
+            enable_utp: options
+                .get("enable-utp")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            utp_listen_port: options
+                .get("utp-listen-port")
+                .and_then(|v| v.parse::<u16>().ok()),
         }
     }
 }

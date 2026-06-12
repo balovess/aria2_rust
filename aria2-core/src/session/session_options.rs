@@ -124,6 +124,8 @@ mod tests {
             bt_optimistic_unchoke_interval: Some(30),
             bt_snubbed_timeout: Some(60),
             bt_prioritize_piece: "rarest".to_string(),
+            enable_utp: false,
+            utp_listen_port: None,
         };
 
         let map = download_options_to_map(&opts);

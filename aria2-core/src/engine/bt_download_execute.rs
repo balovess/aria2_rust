@@ -13,7 +13,7 @@ use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
-use crate::engine::bt_piece_selector::{BtPieceSelector, build_bitfield_from_completed};
+use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::engine::bt_post_download_handler::{DownloadStatus, HookContext};
 use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
 use crate::engine::bt_tracker_comm::{announce_to_public_tracker, perform_http_tracker_announce};

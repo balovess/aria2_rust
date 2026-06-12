@@ -39,6 +39,8 @@ fn _create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
         https_proxy: None,
         ftp_proxy: None,
         no_proxy: None,
+        enable_utp: false,
+        utp_listen_port: None,
     };
     let group = RequestGroup::new(GroupId::new(1), vec![uri.to_string()], options);
     Arc::new(RwLock::new(group))

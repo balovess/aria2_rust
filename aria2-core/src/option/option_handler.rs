@@ -550,6 +550,8 @@ impl OptionHandler {
                 if v > 0 { Some(v as u64) } else { None }
             },
             bt_prioritize_piece: self.get("bt-prioritize-piece").as_str().to_string(),
+            enable_utp: self.get("enable-utp").as_bool(),
+            utp_listen_port: get_usize("utp-listen-port"),
         }
     }
 

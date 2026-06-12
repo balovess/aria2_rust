@@ -3,6 +3,7 @@ pub mod mock_bt_seeder;
 pub mod mock_dht_node;
 pub mod mock_dht_server;
 pub mod mock_ftp_server;
+pub mod mock_lpd_peer;
 pub mod mock_tracker;
 pub mod mock_udp_tracker;
 pub mod test_metalink_builder;

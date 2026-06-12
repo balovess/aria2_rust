@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Mock UDP Tracker server for testing
+#[allow(dead_code)]
 pub struct MockUdpTracker {
     socket: Arc<UdpSocket>,
     running: Arc<Mutex<bool>>,
@@ -12,6 +13,7 @@ pub struct MockUdpTracker {
     port: u16,
 }
 
+#[allow(dead_code)]
 impl MockUdpTracker {
     /// Create a new mock UDP tracker on a random port
     pub fn new() -> Result<Self, String> {

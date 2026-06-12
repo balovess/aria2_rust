@@ -127,6 +127,18 @@ pub struct DownloadOptions {
     /// Piece selection priority: "rarest" (default), "head" (sequential from start),
     /// "tail" (sequential from end).
     pub bt_prioritize_piece: String,
+
+    // ------------------------------------------------------------------
+    // uTP (UDP Transport Protocol - BEP 29)
+    // ------------------------------------------------------------------
+    /// Enable uTP (UDP Transport Protocol) for BitTorrent connections.
+    /// This implements BEP 29 and is an experimental feature not in original aria2.
+    /// Default: false.
+    pub enable_utp: bool,
+
+    /// UDP port for uTP connections. 0 = auto-assign.
+    /// Experimental feature not in original aria2.
+    pub utp_listen_port: Option<u16>,
 }
 
 pub struct RequestGroup {
