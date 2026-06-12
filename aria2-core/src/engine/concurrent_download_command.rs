@@ -363,7 +363,7 @@ impl ConcurrentDownloadCommand {
         offset: u64,
         length: u64,
         _seg_idx: u32,
-    ) -> std::result::Result<Vec<u8>, String> {
+    ) -> std::result::Result<bytes::Bytes, String> {
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
 
         let response = client
@@ -378,7 +378,8 @@ impl ConcurrentDownloadCommand {
             return Err(format!("HTTP error on segment: {}", status));
         }
 
-        let mut data = Vec::with_capacity(length as usize);
+        // Use BytesMut for efficient stream accumulation
+        let mut data = bytes::BytesMut::with_capacity(length as usize);
         let mut stream = response.bytes_stream();
 
         while let Some(chunk_result) = stream.next().await {
@@ -392,7 +393,8 @@ impl ConcurrentDownloadCommand {
             return Err("Empty segment data".to_string());
         }
 
-        Ok(data)
+        // Freeze to immutable Bytes (zero-cost)
+        Ok(data.freeze())
     }
 
     fn verify_hash(
@@ -463,7 +465,7 @@ impl ConcurrentDownloadCommand {
                             }
                         }
 
-                        manager.complete_segment(0, vec![]);
+                        manager.complete_segment(0, bytes::Bytes::new());
                         return Ok(());
                     }
                 }

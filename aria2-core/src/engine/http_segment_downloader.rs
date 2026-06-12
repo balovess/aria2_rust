@@ -129,9 +129,9 @@ impl HttpSegmentDownloader {
         offset: u64,
         length: u64,
         cookie_header: Option<&str>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<bytes::Bytes> {
         if length == 0 {
-            return Ok(Vec::new());
+            return Ok(bytes::Bytes::new());
         }
 
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
@@ -184,7 +184,8 @@ impl HttpSegmentDownloader {
             _ => {}
         }
 
-        let mut data = Vec::with_capacity(length as usize);
+        // Use BytesMut for efficient stream accumulation
+        let mut data = bytes::BytesMut::with_capacity(length as usize);
         let mut stream = response.bytes_stream();
 
         while let Some(chunk_result) = stream.next().await {
@@ -213,7 +214,8 @@ impl HttpSegmentDownloader {
             ));
         }
 
-        Ok(data)
+        // Freeze BytesMut to immutable Bytes (zero-cost conversion)
+        Ok(data.freeze())
     }
 }
 

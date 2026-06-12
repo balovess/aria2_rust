@@ -18,7 +18,7 @@ pub struct Segment {
     pub offset: u64,
     pub length: u64,
     pub status: SegmentStatus,
-    pub data: Option<Vec<u8>>,
+    pub data: Option<bytes::Bytes>,  // Zero-copy storage
     pub assigned_mirror: Option<usize>,
     pub retry_count: u32,
 }
@@ -243,7 +243,7 @@ impl ConcurrentSegmentManager {
         self.next_pending_segment_for_mirror(0)
     }
 
-    pub fn complete_segment(&mut self, index: u32, data: Vec<u8>) -> bool {
+    pub fn complete_segment(&mut self, index: u32, data: bytes::Bytes) -> bool {
         if let Some(seg) = self.segments.get_mut(index as usize) {
             seg.status = SegmentStatus::Done;
             seg.data = Some(data);
@@ -546,7 +546,7 @@ impl ConcurrentSegmentManager {
     pub fn report_segment_complete(
         &mut self,
         seg_idx: u32,
-        data: Vec<u8>,
+        data: bytes::Bytes,
         bytes_per_sec: u64,
         is_multi_connection: bool,
     ) -> bool {
@@ -725,11 +725,11 @@ mod tests {
         mgr.allocate_segments();
         assert_eq!(mgr.progress(), 0.0);
 
-        mgr.complete_segment(0, vec![0xAB; 100]);
+        mgr.complete_segment(0, bytes::Bytes::from(vec![0xAB; 100]));
         assert!(!mgr.is_complete());
         assert!((mgr.progress() - 50.0).abs() < 0.01);
 
-        mgr.complete_segment(1, vec![0xCD; 100]);
+        mgr.complete_segment(1, bytes::Bytes::from(vec![0xCD; 100]));
         assert!(mgr.is_complete());
         assert!((mgr.progress() - 100.0).abs() < 0.01);
 
@@ -913,7 +913,7 @@ mod tests {
         mgr.allocate_segments();
 
         // Report completion with 1 MB/s speed
-        let success = mgr.report_segment_complete(0, vec![0xAB; 100], 1_000_000, false);
+        let success = mgr.report_segment_complete(0, bytes::Bytes::from(vec![0xAB; 100]), 1_000_000, false);
         assert!(success);
 
         // Check that stats were updated

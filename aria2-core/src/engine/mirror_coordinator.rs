@@ -172,7 +172,7 @@ impl MirrorCoordinator {
         &mut self,
         mirror_idx: usize,
         seg_idx: u32,
-        data: Vec<u8>,
+        data: bytes::Bytes,
         bytes_per_sec: u64,
     ) -> bool {
         let is_multi = self.segment_manager.mirror_active_segments(mirror_idx) > 1;
@@ -449,7 +449,7 @@ mod tests {
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
 
         // Report completion
-        let success = coord.on_segment_complete(mirror_idx, seg_idx, vec![0xAB; 500_000], 1_000_000);
+        let success = coord.on_segment_complete(mirror_idx, seg_idx, bytes::Bytes::from(vec![0xAB; 500_000]), 1_000_000);
         assert!(success);
 
         // Check progress
@@ -493,12 +493,12 @@ mod tests {
 
         // Complete first segment
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(mirror_idx, seg_idx, vec![0xAB; 500_000], 1_000_000);
+        coord.on_segment_complete(mirror_idx, seg_idx, bytes::Bytes::from(vec![0xAB; 500_000]), 1_000_000);
         assert!((coord.progress() - 50.0).abs() < 0.01);
 
         // Complete second segment
         let (mirror_idx2, _, (seg_idx2, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(mirror_idx2, seg_idx2, vec![0xCD; 500_000], 1_000_000);
+        coord.on_segment_complete(mirror_idx2, seg_idx2, bytes::Bytes::from(vec![0xCD; 500_000]), 1_000_000);
         assert!((coord.progress() - 100.0).abs() < 0.01);
         assert!(coord.is_complete());
     }
@@ -512,10 +512,10 @@ mod tests {
 
         // Complete all segments
         let (m1, _, (s1, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(m1, s1, vec![0xAB; 500_000], 1_000_000);
+        coord.on_segment_complete(m1, s1, bytes::Bytes::from(vec![0xAB; 500_000]), 1_000_000);
 
         let (m2, _, (s2, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(m2, s2, vec![0xCD; 500_000], 1_000_000);
+        coord.on_segment_complete(m2, s2, bytes::Bytes::from(vec![0xCD; 500_000]), 1_000_000);
 
         // Now should be able to assemble
         let data = coord.assemble().unwrap();
@@ -660,7 +660,7 @@ mod tests {
 
         // Select and complete segment from fast mirror
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
-        let success = coord.on_segment_complete(mirror_idx, seg_idx, vec![0xAB; 500_000], 2_000_000);
+        let success = coord.on_segment_complete(mirror_idx, seg_idx, bytes::Bytes::from(vec![0xAB; 500_000]), 2_000_000);
         assert!(success);
 
         // After completion, the coordinator should have updated stats

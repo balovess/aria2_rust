@@ -571,7 +571,7 @@ impl DownloadCommand {
 
         let mut active_handles: std::collections::HashMap<
             u32,
-            tokio::task::JoinHandle<std::result::Result<Vec<u8>, String>>,
+            tokio::task::JoinHandle<std::result::Result<bytes::Bytes, String>>,
         > = std::collections::HashMap::new();
 
         loop {
@@ -617,8 +617,9 @@ impl DownloadCommand {
                                 } else {
                                     writer.write_at(0, &data).await.ok();
                                 }
-                                manager.complete_segment(seg_idx, data.clone());
-                                self.completed_bytes += data.len() as u64;
+                                let data_len = data.len();
+                                manager.complete_segment(seg_idx, data);
+                                self.completed_bytes += data_len as u64;
 
                                 // Batch progress updates to reduce lock contention
                                 if self.completed_bytes - last_progress_update >= PROGRESS_UPDATE_BYTES {
@@ -896,7 +897,7 @@ impl DownloadCommand {
                         })?;
 
                         // Report success to coordinator for speed feedback
-                        coordinator.on_segment_complete(mirror_idx, seg_idx, data.clone(), speed);
+                        coordinator.on_segment_complete(mirror_idx, seg_idx, data, speed);
                     }
                     Err(e) => {
                         warn!("段 {} 下载失败 (mirror={}): {}", seg_idx, mirror_idx, e);

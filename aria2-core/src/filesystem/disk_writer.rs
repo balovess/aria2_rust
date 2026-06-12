@@ -114,6 +114,12 @@ const DEFAULT_DIRECT_WRITE_THRESHOLD: usize = 256 * 1024;
 pub trait SeekableDiskWriter: Send + Sync {
     async fn open(&mut self) -> Result<()>;
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
+    /// Zero-copy write method accepting `bytes::Bytes` directly.
+    /// This avoids the intermediate copy when the caller already has Bytes.
+    async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
+        // Default implementation: delegate to write_at with slice
+        self.write_at(offset, &data).await
+    }
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize>;
     async fn truncate(&mut self, length: u64) -> Result<()>;
     async fn flush(&mut self) -> Result<()>;
@@ -236,10 +242,63 @@ impl SeekableDiskWriter for CachedDiskWriter {
             let mut adaptor = self.adaptor.lock().await;
             adaptor.write(offset, data).await?;
         } else if let Some(ref cache) = self.cache {
-            cache.write(offset, data.to_vec()).await?;
+            // Zero-copy: convert slice to Bytes for cache write
+            cache.write(offset, bytes::Bytes::copy_from_slice(data)).await?;
         } else {
             let mut adaptor = self.adaptor.lock().await;
             adaptor.write(offset, data).await?;
+        }
+
+        // Task I3: Track write size for adaptive threshold
+        self.write_history.push_back(write_len);
+        self.write_count += 1;
+
+        // Adapt threshold every 100 writes
+        if self.write_count.is_multiple_of(100) && self.write_history.len() >= 10 {
+            let mut sorted: Vec<usize> = self.write_history.iter().copied().collect();
+            sorted.sort_unstable();
+            let p90_idx = (sorted.len() as f64 * 0.9) as usize;
+            let p90 = sorted
+                .get(p90_idx.min(sorted.len() - 1))
+                .copied()
+                .unwrap_or(DEFAULT_DIRECT_WRITE_THRESHOLD);
+            // Clamp between 64KB and 4MB
+            self.direct_write_threshold = p90.clamp(64 * 1024, 4 * 1024 * 1024);
+            debug!(
+                "Adaptive direct_write_threshold adjusted to {} bytes (p90={})",
+                self.direct_write_threshold, p90
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Zero-copy write: accepts Bytes directly and passes to cache without intermediate copy.
+    async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
+        self.open().await?;
+
+        // Task I2: Rate limiting — non-blocking try_acquire
+        if let Some(ref limiter) = self.rate_limiter
+            && !limiter.try_acquire_download(data.len() as u64).await
+        {
+            debug!(
+                "Rate limit exceeded for {} bytes at offset {}, writing without throttling",
+                data.len(),
+                offset
+            );
+        }
+
+        let write_len = data.len();
+
+        if data.len() >= self.direct_write_threshold {
+            let mut adaptor = self.adaptor.lock().await;
+            adaptor.write(offset, &data).await?;
+        } else if let Some(ref cache) = self.cache {
+            // Zero-copy: pass Bytes directly to cache, no intermediate Vec needed
+            cache.write(offset, data).await?;
+        } else {
+            let mut adaptor = self.adaptor.lock().await;
+            adaptor.write(offset, &data).await?;
         }
 
         // Task I3: Track write size for adaptive threshold
