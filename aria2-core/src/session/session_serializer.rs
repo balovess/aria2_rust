@@ -115,6 +115,11 @@ pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
 
             // Get BT bitfield if available (async operation)
             let bitfield = group.get_bt_bitfield().await;
+            
+            // Get BT metadata fields (Task 5: session persistence enhancement)
+            let num_pieces = group.get_bt_num_pieces();
+            let piece_length = group.get_bt_piece_length();
+            let info_hash_hex = group.get_bt_info_hash_hex_async().await;
 
             Some(SessionEntry {
                 gid,
@@ -130,11 +135,11 @@ pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
                 status: status_str,
                 error_code,
 
-                // BT-specific fields (from RequestGroup if available)
+                // BT-specific fields (from RequestGroup)
                 bitfield,
-                num_pieces: None, // TODO: Could be stored in RequestGroup if needed
-                piece_length: None, // TODO: Could be stored in RequestGroup if needed
-                info_hash_hex: None, // TODO: Could be extracted from URI
+                num_pieces: if num_pieces > 0 { Some(num_pieces) } else { None },
+                piece_length: if piece_length > 0 { Some(piece_length) } else { None },
+                info_hash_hex,
 
                 // Resume offset (use completed_length as reasonable default)
                 resume_offset: if completed_length > 0 {

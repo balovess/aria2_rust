@@ -826,12 +826,10 @@ impl BtDownloadCommand {
                             writer.write(&piece_data).await.ok();
                         }
 
+                        // Sync bitfield to RequestGroup for session persistence
                         {
-                            let bitfield =
-                                build_bitfield_from_completed(piece_manager.num_pieces(), |i| {
-                                    piece_manager.is_completed(i)
-                                });
-                            let g = self.group.write().await;
+                            let bitfield = piece_picker.export_bitfield();
+                            let g = self.group.read().await;
                             g.set_bt_bitfield(Some(bitfield)).await;
                         }
 
@@ -954,6 +952,13 @@ impl BtDownloadCommand {
                                     .await?;
                                 } else {
                                     writer.write(&web_seed_data).await.ok();
+                                }
+
+                                // Sync bitfield to RequestGroup for session persistence (Task 4)
+                                {
+                                    let bitfield = piece_picker.export_bitfield();
+                                    let g = self.group.read().await;
+                                    g.set_bt_bitfield(Some(bitfield)).await;
                                 }
 
                                 self.completed_bytes += web_seed_data.len() as u64;

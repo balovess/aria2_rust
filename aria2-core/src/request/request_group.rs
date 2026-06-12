@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -147,6 +147,15 @@ pub struct RequestGroup {
     pub uploaded_length: AtomicU64,
     pub download_speed_cached: AtomicU64,
     pub bt_bitfield: RwLock<Option<Vec<u8>>>,
+    
+    // BT metadata fields (for session persistence enhancement)
+    /// Number of pieces in the torrent (0 for non-BT downloads)
+    pub bt_num_pieces: AtomicU32,
+    /// Size of each piece in bytes (0 for non-BT downloads)
+    pub bt_piece_length: AtomicU32,
+    /// Info hash hex string for torrent identification (None for non-BT downloads)
+    /// Uses std::sync::RwLock instead of tokio::sync::RwLock for non-async access
+    pub bt_info_hash_hex: std::sync::RwLock<Option<String>>,
 }
 
 impl RequestGroup {
@@ -171,6 +180,11 @@ impl RequestGroup {
             uploaded_length: AtomicU64::new(0),
             download_speed_cached: AtomicU64::new(0),
             bt_bitfield: RwLock::new(None),
+            
+            // Initialize BT metadata fields (default to 0/None for non-BT downloads)
+            bt_num_pieces: AtomicU32::new(0),
+            bt_piece_length: AtomicU32::new(0),
+            bt_info_hash_hex: std::sync::RwLock::new(None),
         }
     }
 
@@ -383,6 +397,38 @@ impl RequestGroup {
         // knows where to resume from
         self.completed_length_atomic
             .store(offset, Ordering::Relaxed);
+    }
+    
+    // BT metadata methods (for session persistence enhancement)
+    
+    /// Set BT metadata fields (num_pieces, piece_length, info_hash_hex)
+    /// Called by BtDownloadCommand after parsing TorrentMeta
+    pub fn set_bt_metadata(&self, num_pieces: u32, piece_length: u32, info_hash_hex: String) {
+        self.bt_num_pieces.store(num_pieces, Ordering::Relaxed);
+        self.bt_piece_length.store(piece_length, Ordering::Relaxed);
+        // Use std::sync::RwLock for non-async access
+        *self.bt_info_hash_hex.write().unwrap() = Some(info_hash_hex);
+    }
+    
+    /// Get number of pieces (lock-free atomic read)
+    pub fn get_bt_num_pieces(&self) -> u32 {
+        self.bt_num_pieces.load(Ordering::Relaxed)
+    }
+    
+    /// Get piece length (lock-free atomic read)
+    pub fn get_bt_piece_length(&self) -> u32 {
+        self.bt_piece_length.load(Ordering::Relaxed)
+    }
+    
+    /// Get info hash hex string (async-compatible wrapper)
+    pub async fn get_bt_info_hash_hex_async(&self) -> Option<String> {
+        // std::sync::RwLock can be used in async context for short reads
+        self.bt_info_hash_hex.read().unwrap().clone()
+    }
+    
+    /// Get info hash hex string (blocking read for non-async contexts)
+    pub fn get_bt_info_hash_hex(&self) -> Option<String> {
+        self.bt_info_hash_hex.read().unwrap().clone()
     }
 }
 
@@ -672,5 +718,76 @@ mod tests {
         assert_eq!(cloned.bt_max_upload_slots, Some(6));
         assert_eq!(cloned.bt_optimistic_unchoke_interval, Some(20));
         assert_eq!(cloned.bt_snubbed_timeout, Some(90));
+    }
+    
+    // ==================== BT Metadata Tests ====================
+    
+    #[test]
+    fn test_bt_metadata_defaults() {
+        let group = RequestGroup::new(
+            GroupId::new(8),
+            vec!["http://example.com/file.zip".to_string()],
+            DownloadOptions::default(),
+        );
+        
+        // Non-BT downloads should have 0/None defaults
+        assert_eq!(group.get_bt_num_pieces(), 0, "bt_num_pieces should default to 0");
+        assert_eq!(group.get_bt_piece_length(), 0, "bt_piece_length should default to 0");
+        assert_eq!(group.get_bt_info_hash_hex(), None, "bt_info_hash_hex should default to None");
+    }
+    
+    #[test]
+    fn test_set_bt_metadata() {
+        let group = RequestGroup::new(
+            GroupId::new(9),
+            vec!["magnet:?xt=urn:btih:abc123def456".to_string()],
+            DownloadOptions::default(),
+        );
+        
+        // Set BT metadata
+        group.set_bt_metadata(100, 262144, "abc123def456789012345678901234567890abcd".to_string());
+        
+        // Verify values
+        assert_eq!(group.get_bt_num_pieces(), 100);
+        assert_eq!(group.get_bt_piece_length(), 262144); // 256KB
+        assert_eq!(
+            group.get_bt_info_hash_hex(),
+            Some("abc123def456789012345678901234567890abcd".to_string())
+        );
+    }
+    
+    #[test]
+    fn test_bt_metadata_update() {
+        let group = RequestGroup::new(
+            GroupId::new(10),
+            vec!["bt://test.torrent".to_string()],
+            DownloadOptions::default(),
+        );
+        
+        // Initial set
+        group.set_bt_metadata(50, 16384, "first_hash".to_string());
+        assert_eq!(group.get_bt_num_pieces(), 50);
+        
+        // Update with new values
+        group.set_bt_metadata(200, 524288, "updated_hash".to_string());
+        assert_eq!(group.get_bt_num_pieces(), 200);
+        assert_eq!(group.get_bt_piece_length(), 524288);
+        assert_eq!(group.get_bt_info_hash_hex(), Some("updated_hash".to_string()));
+    }
+    
+    #[tokio::test]
+    async fn test_bt_info_hash_hex_async() {
+        let group = RequestGroup::new(
+            GroupId::new(11),
+            vec!["magnet:?xt=urn:btih:test".to_string()],
+            DownloadOptions::default(),
+        );
+        
+        // Set via blocking method
+        group.set_bt_metadata(10, 1024, "async_test_hash".to_string());
+        
+        // Read via async method
+        let hash = group.get_bt_info_hash_hex_async().await;
+        assert_eq!(hash, Some("async_test_hash".to_string()));
     }
 }

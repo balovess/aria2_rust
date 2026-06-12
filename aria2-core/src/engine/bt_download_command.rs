@@ -126,6 +126,13 @@ impl BtDownloadCommand {
             vec![format!("bt://{}", meta.info_hash.as_hex())],
             options.clone(),
         );
+        
+        // Set BT metadata for session persistence (Task 3)
+        group.set_bt_metadata(
+            meta.num_pieces() as u32,
+            meta.info.piece_length,
+            meta.info_hash.as_hex(),
+        );
 
         let seed_time = options.seed_time.and_then(|t| {
             if t == 0 {
