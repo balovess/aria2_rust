@@ -1,0 +1,262 @@
+//! Top-level application runtime for aria2-rust CLI.
+//!
+//! `App` encapsulates the complete download lifecycle:
+//!
+//! 1. **Configuration** — `ConfigManager` with 4-source option merging
+//! 2. **Engine** — `DownloadEngine` event loop for command execution
+//! 3. **Request management** — `RequestGroupMan` for task lifecycle
+//! 4. **UI** — Progress display, status panel, and logging
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use aria2::app::App;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let exit_code = App::new()
+//!         .run(&["--dir=/downloads", "http://example.com/file.zip".into()])
+//!         .await;
+//!     std::process::exit(exit_code);
+//! }
+//! ```
+
+use colored::Colorize;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
+
+use aria2_core::config::ConfigManager;
+use aria2_core::init_logging;
+use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::validation::protocol_detector::DetectedInput;
+use tracing::{Level, info, warn};
+
+// Daemon support
+#[path = "../daemon.rs"]
+mod daemon;
+use daemon::{DaemonConfig, Daemonizer, PidFileManager};
+
+// Sub-modules
+mod cli;
+mod config;
+mod engine;
+mod rpc;
+mod session;
+#[cfg(test)]
+mod tests;
+
+/// Top-level application runtime for aria2-rust CLI.
+pub struct App {
+    pub config: Arc<RwLock<ConfigManager>>,
+    engine: Arc<Mutex<Option<aria2_core::engine::download_engine::DownloadEngine>>>,
+    request_man: Arc<RwLock<RequestGroupMan>>,
+    detected_inputs: Vec<DetectedInput>,
+}
+
+impl App {
+    /// Create a new `App` instance with default configuration.
+    pub fn new() -> Self {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let request_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+
+        Self {
+            config,
+            engine: Arc::new(Mutex::new(None)),
+            request_man,
+            detected_inputs: Vec::new(),
+        }
+    }
+
+    /// Run the complete application lifecycle.
+    ///
+    /// This is the main entry point that:
+    /// 1. Handles `--help` / `--version` flags
+    /// 2. Loads config from env → file → CLI args (4-source merge)
+    /// 3. **Handles daemon mode if `--daemon` is specified**
+    /// 4. Initializes the download engine
+    /// 5. **Restores session from input-file (if configured)**
+    /// 6. Adds download tasks from positional URIs
+    /// 7. Runs the engine event loop
+    /// 8. **Saves session on shutdown (if configured)**
+    ///
+    /// Returns exit code: `0` = success, `1` = error.
+    pub async fn run(&mut self, args: &[String]) -> i32 {
+        if self.print_help_or_version(args) {
+            return 0;
+        }
+
+        self.load_env().await;
+
+        if let Err(e) = self.load_config_file(None).await {
+            tracing::error!("加载配置文件失败: {}", e);
+        }
+
+        if let Err(e) = self.load_args(args).await {
+            eprintln!("{}", format!("参数解析错误: {}", e).red());
+            return 1;
+        }
+
+        // Check daemon mode early - must happen before any output
+        let daemon_mode = self.get_opt_bool("daemon").await.unwrap_or(false);
+        let pid_file = self.get_opt_str("pid-file").await.map(PathBuf::from);
+
+        if daemon_mode {
+            // Check if daemon is already running
+            if let Some(ref path) = pid_file {
+                let pid_mgr = PidFileManager::new(path.clone());
+                if let Some(existing_pid) = pid_mgr.check_existing() {
+                    eprintln!(
+                        "{}",
+                        format!("Daemon already running with PID: {}", existing_pid).yellow()
+                    );
+                    return 0;
+                }
+            }
+
+            // Perform daemonization
+            let log_path = self.get_opt_str("log").await.map(PathBuf::from);
+
+            let daemon_config = DaemonConfig {
+                pid_file: pid_file.clone(),
+                stdout_file: log_path.clone(),
+                stderr_file: log_path,
+                chdir_to_root: false,
+                close_fds: true,
+            };
+
+            let daemonizer = Daemonizer::new(daemon_config);
+            if let Err(e) = daemonizer.daemonize() {
+                eprintln!("{}", format!("Failed to daemonize: {}", e).red());
+                return 1;
+            }
+
+            // After daemonization, we are in the child process
+            // Re-initialize logging for the daemon process
+            let log_level = if self.get_opt_bool("verbose").await.unwrap_or(false) {
+                Level::DEBUG
+            } else {
+                Level::INFO
+            };
+            let log_path = self.get_opt_str("log").await;
+            init_logging(log_level, log_path.as_deref());
+
+            info!("Daemon started successfully");
+        }
+
+        let log_level = if self.get_opt_bool("verbose").await.unwrap_or(false) {
+            Level::DEBUG
+        } else {
+            Level::INFO
+        };
+        let log_path = self.get_opt_str("log").await;
+        init_logging(log_level, log_path.as_deref());
+
+        self.print_banner();
+
+        // Initialize engine (must be before session restore)
+        self.initialize_engine().await;
+
+        // Step 4: Restore incomplete downloads from session file
+        match self.restore_session().await {
+            Ok(count) => {
+                if count > 0 {
+                    info!("成功恢复 {} 个下载任务", count);
+                }
+            }
+            Err(e) => {
+                warn!("会话恢复失败（将继续执行）: {}", e);
+                // Restore failure doesn't block execution, just log warning
+            }
+        }
+
+        // Check if there are any inputs (restored tasks or CLI URIs)
+        let man = self.request_man.read().await;
+        let has_restored_tasks = man.count().await > 0;
+
+        // In daemon mode, we need RPC enabled to control the daemon
+        let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
+
+        if !has_restored_tasks && self.detected_inputs.is_empty() {
+            if daemon_mode {
+                if !rpc_enabled {
+                    warn!("Daemon mode requires --enable-rpc when no downloads are specified");
+                    info!("Starting daemon with RPC server for remote control");
+                }
+                // In daemon mode with RPC, we can start without downloads
+                info!("Starting daemon in RPC-only mode");
+            } else {
+                eprintln!(
+                    "{}",
+                    "错误: 请提供下载URI或torrent文件路径，或使用 --input-file 恢复之前的下载".red()
+                );
+                return 1;
+            }
+        }
+
+        // Step 5: Add CLI-specified download tasks
+        if !self.detected_inputs.is_empty() {
+            match self.add_downloads().await {
+                Ok(gids) => {
+                    info!("已添加 {} 个下载任务", gids.len());
+                    for gid in &gids {
+                        println!("  {} 任务 #{}", "#".cyan(), gid.to_string().yellow());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}", format!("添加任务失败: {}", e).red());
+                    return 1;
+                }
+            }
+        } else if has_restored_tasks {
+            info!("仅使用恢复的下载任务");
+        }
+
+        println!();
+
+        // Step 6: Start RPC server (if enabled)
+        let rpc_handle = if rpc_enabled {
+            match self.start_rpc_server().await {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    warn!("RPC 服务器启动失败: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Step 7: Run engine
+        let run_result = self.run_engine().await;
+
+        // Step 8: Shutdown RPC server
+        if let Some(handle) = rpc_handle {
+            handle.abort();
+            info!("RPC 服务器已关闭");
+        }
+
+        // Step 9: Save session on shutdown
+        if let Err(e) = self.save_session_on_shutdown().await {
+            warn!("关闭保存会话失败: {}", e);
+            // Save failure doesn't affect exit code
+        }
+
+        match run_result {
+            Ok(()) => {
+                println!("{}", "所有任务完成!".green().bold());
+                0
+            }
+            Err(e) => {
+                eprintln!("{}", format!("下载失败: {}", e).red());
+                1
+            }
+        }
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}

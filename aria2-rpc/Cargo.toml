@@ -27,6 +27,7 @@ bytes.workspace = true
 async-trait.workspace = true
 
 axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
 tungstenite = "0.20"
 base64 = "0.21"
 quick-xml = "0.31"

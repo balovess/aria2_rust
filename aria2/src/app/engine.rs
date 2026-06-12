@@ -1,0 +1,263 @@
+//! Download engine management
+//!
+//! This module handles the download engine lifecycle:
+//! - Engine initialization
+//! - Adding download tasks
+//! - Running the engine event loop
+
+use super::App;
+use aria2_core::engine::bt_download_command::BtDownloadCommand;
+use aria2_core::engine::command::Command;
+use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
+use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::validation::protocol_detector::InputType;
+use tracing::info;
+
+impl App {
+    /// Initialize the download engine.
+    pub async fn initialize_engine(&self) {
+        let tick_ms = self
+            .get_opt_i64("bt-request-peer-timeout")
+            .await
+            .unwrap_or(100) as u64;
+        let mut engine = DownloadEngine::new(tick_ms);
+
+        let save_session_path = self
+            .get_opt_str("save-session")
+            .await
+            .map(std::path::PathBuf::from);
+        let save_session_interval = self
+            .get_opt_i64("save-session-interval")
+            .await
+            .and_then(|v| {
+                if v > 0 {
+                    Some(std::time::Duration::from_secs(v as u64))
+                } else {
+                    None
+                }
+            });
+
+        if let Some(path) = save_session_path {
+            engine.set_save_session(path, save_session_interval, self.request_man.clone());
+        }
+
+        *self.engine.lock().await = Some(engine);
+        info!("引擎初始化完成");
+    }
+
+    /// Add download tasks from detected inputs.
+    pub async fn add_downloads(&self) -> std::result::Result<Vec<u64>, String> {
+        if self.detected_inputs.is_empty() {
+            return Err("No download inputs provided".to_string());
+        }
+
+        let dir = self.get_opt_str("dir").await;
+        let out = self.get_opt_str("out").await;
+        let dl_limit = self
+            .get_opt_i64("max-download-limit")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let ul_limit = self
+            .get_opt_i64("max-upload-limit")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
+
+        let split = self
+            .get_opt_i64("split")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u16) } else { None });
+        let max_conn = self
+            .get_opt_i64("max-connection-per-server")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u16) } else { None });
+        let seed_time = self
+            .get_opt_i64("seed-time")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let seed_ratio = self
+            .get_opt_str("seed-ratio")
+            .await
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|&r| r > 0.0);
+        let checksum = self.get_opt_str("checksum").await.and_then(|v| {
+            if let Some((algo, val)) = v.split_once('=') {
+                Some((algo.trim().to_string(), val.trim().to_string()))
+            } else {
+                None
+            }
+        });
+
+        let options = DownloadOptions {
+            split,
+            max_connection_per_server: max_conn,
+            max_download_limit: dl_limit,
+            max_upload_limit: ul_limit,
+            dir: dir.clone(),
+            out: out.clone(),
+            seed_time,
+            seed_ratio,
+            checksum,
+            cookie_file: self.get_opt_str("load-cookies").await,
+            cookies: self.get_opt_str("cookie").await,
+            bt_force_encrypt: self.get_opt_bool("bt-force-encrypt").await.unwrap_or(false),
+            bt_require_crypto: self
+                .get_opt_bool("bt-require-crypto")
+                .await
+                .unwrap_or(false),
+            enable_dht: self.get_opt_bool("enable-dht").await.unwrap_or(true),
+            dht_listen_port: self
+                .get_opt_i64("dht-listen-port")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u16) } else { None }),
+            dht_entry_point: None,
+            enable_public_trackers: self
+                .get_opt_bool("enable-public-trackers")
+                .await
+                .unwrap_or(true),
+            bt_piece_selection_strategy: self
+                .get_opt_str("bt-piece-selection-strategy")
+                .await
+                .unwrap_or("rarest-first".to_string()),
+            bt_endgame_threshold: self
+                .get_opt_i64("bt-endgame-threshold")
+                .await
+                .map(|v| if v > 0 { v as u32 } else { 20 })
+                .unwrap_or(20),
+            max_retries: self
+                .get_opt_i64("max-retries")
+                .await
+                .map(|v| if v >= 0 { v as u32 } else { 3 })
+                .unwrap_or(3),
+            retry_wait: self
+                .get_opt_i64("retry-wait")
+                .await
+                .map(|v| if v > 0 { v as u64 } else { 1 })
+                .unwrap_or(1),
+            http_proxy: self.get_opt_str("http-proxy").await,
+            all_proxy: self.get_opt_str("all-proxy").await,
+            https_proxy: self.get_opt_str("https-proxy").await,
+            ftp_proxy: self.get_opt_str("ftp-proxy").await,
+            no_proxy: self.get_opt_str("no-proxy").await,
+            dht_file_path: self.get_opt_str("dht-file-path").await,
+            // Choking algorithm configuration (opt-in)
+            bt_max_upload_slots: self
+                .get_opt_i64("bt-max-upload-slots")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
+            bt_optimistic_unchoke_interval: self
+                .get_opt_i64("bt-optimistic-unchoke-interval")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+            bt_snubbed_timeout: self
+                .get_opt_i64("bt-snubbed-timeout")
+                .await
+                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+            // G2: Piece selection priority mode
+            bt_prioritize_piece: self
+                .get_opt_str("bt-prioritize-piece")
+                .await
+                .unwrap_or_else(|| "rarest".to_string()),
+        };
+
+        let mut engine_lock = self.engine.lock().await;
+        let engine = engine_lock
+            .as_mut()
+            .ok_or_else(|| "Engine not initialized".to_string())?;
+
+        let global_dl = self
+            .get_opt_i64("max-overall-download-limit")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        let global_ul = self
+            .get_opt_i64("max-overall-upload-limit")
+            .await
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
+        if global_dl.is_some() || global_ul.is_some() {
+            use aria2_core::rate_limiter::RateLimiterConfig;
+            engine.set_global_rate_limiter(RateLimiterConfig::new(global_dl, global_ul));
+        }
+
+        let mut gids = Vec::new();
+
+        for (i, input) in self.detected_inputs.iter().enumerate() {
+            let gid = GroupId::new(i as u64 + 1);
+
+            let cmd: Box<dyn Command> = match &input.input_type {
+                InputType::HttpUrl => Box::new(
+                    DownloadCommand::new(gid, &input.raw, &options, dir.as_deref(), out.as_deref())
+                        .map_err(|e| format!("HTTP download command failed: {}", e))?,
+                ),
+                InputType::FtpUrl => Box::new(
+                    FtpDownloadCommand::new(
+                        gid,
+                        &input.raw,
+                        &options,
+                        dir.as_deref(),
+                        out.as_deref(),
+                    )
+                    .map_err(|e| format!("FTP download command failed: {}", e))?,
+                ),
+                InputType::SftpUrl => Box::new(
+                    SftpDownloadCommand::new(
+                        gid,
+                        &input.raw,
+                        &options,
+                        dir.as_deref(),
+                        out.as_deref(),
+                    )
+                    .map_err(|e| format!("SFTP download command failed: {}", e))?,
+                ),
+                InputType::TorrentFile => {
+                    let data = input
+                        .file_data
+                        .as_ref()
+                        .ok_or_else(|| "Torrent file data not available".to_string())?;
+                    Box::new(
+                        BtDownloadCommand::new(gid, data, &options, dir.as_deref())
+                            .map_err(|e| format!("BT download command failed: {}", e))?,
+                    )
+                }
+                InputType::MetalinkFile => {
+                    let data = input
+                        .file_data
+                        .as_ref()
+                        .ok_or_else(|| "Metalink file data not available".to_string())?;
+                    Box::new(
+                        MetalinkDownloadCommand::new(gid, data, &options, dir.as_deref())
+                            .map_err(|e| format!("Metalink download command failed: {}", e))?,
+                    )
+                }
+                InputType::MagnetLink => Box::new(
+                    MagnetDownloadCommand::new(gid, &input.raw, &options, dir.as_deref())
+                        .map_err(|e| format!("Magnet download command failed: {}", e))?,
+                ),
+            };
+
+            engine
+                .add_command(cmd)
+                .map_err(|e| format!("Failed to add command to engine: {}", e))?;
+            gids.push(gid.value());
+        }
+
+        Ok(gids)
+    }
+
+    /// Run the download engine event loop.
+    pub async fn run_engine(&self) -> std::result::Result<(), String> {
+        let mut engine_lock: tokio::sync::MutexGuard<'_, Option<DownloadEngine>> =
+            self.engine.lock().await;
+        if let Some(engine) = engine_lock.take() {
+            drop(engine_lock);
+            info!("启动下载引擎, 共 {} 个任务", self.detected_inputs.len());
+            let result: Result<(), _> = engine.run().await;
+            result.map_err(|e| format!("引擎运行错误: {}", e))
+        } else {
+            Err("引擎未初始化".to_string())
+        }
+    }
+}

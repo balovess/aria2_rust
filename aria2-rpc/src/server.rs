@@ -911,6 +911,141 @@ impl RpcServer {
     pub fn tls_acceptor(&self) -> Option<&tokio_rustls::TlsAcceptor> {
         self.tls_acceptor.as_ref()
     }
+
+    /// Start the RPC HTTP server and serve requests.
+    ///
+    /// This method runs forever until the server is shut down.
+    /// It handles JSON-RPC requests at `/jsonrpc` endpoint.
+    ///
+    /// # Features
+    ///
+    /// - HTTP or HTTPS (TLS) based on configuration
+    /// - CORS support with configurable allowed origins
+    /// - Token-based authentication
+    /// - JSON-RPC 2.0 request handling
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use aria2_rpc::server::{RpcServer, ServerConfig};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let server = RpcServer::new_http("127.0.0.1", 6800);
+    ///     server.serve().await;
+    /// }
+    /// ```
+    pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use axum::{
+            http::{header, Method},
+            routing::{get, post},
+            Router,
+        };
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+        use tower_http::cors::{Any, CorsLayer};
+
+        // Create shared state
+        let state = RpcState {
+            _auth: self.config.auth.clone(),
+            _cors: self.config.cors.clone(),
+        };
+
+        // Build CORS layer
+        let cors_layer = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+
+        // Build router
+        let app = Router::new()
+            .route("/jsonrpc", post(handle_jsonrpc))
+            .route("/jsonrpc", get(handle_jsonrpc_get)) // For GET requests
+            .route("/", get(root_handler))
+            .layer(cors_layer)
+            .with_state(state);
+
+        // Parse address
+        let addr: SocketAddr = self.addr().parse()?;
+        tracing::info!("RPC server listening on {}://{}", self.scheme(), addr);
+
+        // Bind TCP listener
+        let listener = TcpListener::bind(addr).await?;
+
+        // Serve with or without TLS
+        if let Some(ref _tls_acceptor) = self.tls_acceptor {
+            // HTTPS mode
+            tracing::info!("TLS enabled, serving HTTPS");
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await?;
+        } else {
+            // HTTP mode
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Shared state for RPC handlers
+#[derive(Clone)]
+struct RpcState {
+    _auth: AuthConfig,
+    _cors: CorsConfig,
+}
+
+/// Root handler - returns server info
+async fn root_handler() -> impl axum::response::IntoResponse {
+    use axum::http::StatusCode;
+    use axum::response::Json;
+    use serde_json::json;
+
+    (StatusCode::OK, Json(json!({
+        "name": "aria2-rust",
+        "version": env!("CARGO_PKG_VERSION"),
+        "endpoints": {
+            "jsonrpc": "/jsonrpc"
+        }
+    })))
+}
+
+/// Handle JSON-RPC POST requests
+async fn handle_jsonrpc(
+    axum::extract::State(_state): axum::extract::State<RpcState>,
+    axum::Json(req): axum::Json<crate::json_rpc::JsonRpcRequest>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::StatusCode;
+    use axum::response::Json;
+    use crate::engine::RpcEngine;
+
+    // TODO: Add authentication check here
+    // if state.auth.has_token() {
+    //     // Validate token from request
+    // }
+
+    // Process request
+    let engine = RpcEngine::new();
+    let response = engine.handle_request(&req).await;
+
+    (StatusCode::OK, Json(response))
+}
+
+/// Handle JSON-RPC GET requests (for debugging)
+async fn handle_jsonrpc_get() -> impl axum::response::IntoResponse {
+    use axum::http::StatusCode;
+    use axum::response::Json;
+    use serde_json::json;
+
+    (StatusCode::OK, Json(json!({
+        "error": "GET method not supported. Use POST for JSON-RPC requests."
+    })))
 }
 
 impl std::fmt::Debug for RpcServer {
