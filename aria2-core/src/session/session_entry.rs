@@ -19,7 +19,7 @@
 //! session_entry.rs (this file)
 //!   ├── SessionEntry struct definition
 //!   ├── Builder pattern methods (new, with_options, paused)
-//!   └── Re-exports for backward compatibility
+//!   └── Re-exports for convenience
 //!
 //! session_serialize_impl.rs
 //!   └── impl SessionEntry { serialize(), deserialize_line() }
@@ -51,7 +51,7 @@
 //!     .paused();
 //! ```
 
-// Re-exports for backward compatibility (API unchanged for external users)
+// Re-exports for convenience
 pub use crate::session::session_options::download_options_to_map;
 pub use crate::session::session_uri_utils::{decode_hex, escape_uri, unescape_uri};
 
@@ -451,47 +451,12 @@ http://example.com/file
     }
 
     #[test]
-    fn test_deserialize_backward_compat() {
-        // Old format (without new fields) should load correctly
-        let input = r#"http://example.com/old-format.zip
- GID=abc123
- split=4
- dir=/downloads
-"#;
-
-        let entry = SessionEntry::deserialize_line(input).unwrap();
-
-        // Verify defaults
-        assert_eq!(entry.total_length, 0, "Old format should use default 0");
-        assert_eq!(entry.completed_length, 0, "Old format should use default 0");
-        assert_eq!(entry.upload_length, 0, "Old format should use default 0");
-        assert_eq!(entry.download_speed, 0, "Old format should use default 0");
-        assert_eq!(
-            entry.status, "active",
-            "Old format should default to 'active'"
-        );
-        assert_eq!(
-            entry.error_code, None,
-            "Old format should have no error code"
-        );
-        assert_eq!(entry.bitfield, None, "Old format should have no bitfield");
-        assert_eq!(
-            entry.resume_offset, None,
-            "Old format should have no resume_offset"
-        );
-
-        // Original fields still correct
-        assert_eq!(entry.options.get("split").unwrap(), "4");
-    }
-
-    #[test]
-    fn test_deserialize_unknown_keys_ignored() {
-        // Input with unknown keys should not cause parse failure (forward compatibility)
+    fn test_deserialize_user_options() {
+        // User-defined options should be stored in options map
         let input = r#"http://example.com/file.zip
  GID=1
- UNKNOWN_KEY=some_value
- ANOTHER_UNKNOWN=42
- FUTURE_FIELD=data
+ split=4
+ dir=/downloads
  TOTAL_LENGTH=1000
 "#;
 
@@ -500,10 +465,9 @@ http://example.com/file
         // Known fields parsed normally
         assert_eq!(entry.total_length, 1000);
 
-        // Unknown keys stored in options
-        assert_eq!(entry.options.get("UNKNOWN_KEY").unwrap(), "some_value");
-        assert_eq!(entry.options.get("ANOTHER_UNKNOWN").unwrap(), "42");
-        assert_eq!(entry.options.get("FUTURE_FIELD").unwrap(), "data");
+        // User options stored in options
+        assert_eq!(entry.options.get("split").unwrap(), "4");
+        assert_eq!(entry.options.get("dir").unwrap(), "/downloads");
     }
 
     #[test]

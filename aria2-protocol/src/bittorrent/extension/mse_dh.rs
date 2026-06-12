@@ -29,7 +29,7 @@ impl MseDhKeyExchange {
     /// Generate the public key from the private key.
     /// Returns a 96-byte array containing the public key.
     /// Note: The actual public key may be up to 128 bytes, but we return
-    /// the last 96 bytes (most significant bytes) for compatibility.
+    /// the last 96 bytes (most significant bytes) for protocol compliance.
     pub fn generate_public_key(&self) -> [u8; 96] {
         let mut result = [0u8; 96];
         let pub_bytes = &self.keypair.public;

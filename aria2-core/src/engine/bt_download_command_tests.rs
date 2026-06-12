@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn test_download_command_backward_compat_no_choking_config() {
+    fn test_download_command_no_choking_config() {
         let mut cmd = create_test_command();
         assert!(cmd.choking_algo.is_none());
 

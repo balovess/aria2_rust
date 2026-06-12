@@ -902,8 +902,8 @@ mod tests {
     // ==================================================================
 
     #[test]
-    fn test_bt_seed_manager_without_choking_algo_backward_compat() {
-        // Verify that BtSeedManager works without choking_algo (backward compatibility)
+    fn test_bt_seed_manager_without_choking_algo() {
+        // Verify that BtSeedManager works without choking_algo
         let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 500);
         assert!(manager.choking_algo.is_none());
         assert!(manager.choking_algo().is_none());
@@ -959,7 +959,7 @@ mod tests {
 
     #[test]
     fn test_bt_seed_manager_new_with_none_algo() {
-        // new() should produce None for choking_algo (backward compat)
+        // new() should produce None for choking_algo by default
         let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
         let config = BtSeedingConfig::default();
         let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];

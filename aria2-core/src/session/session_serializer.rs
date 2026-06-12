@@ -51,7 +51,7 @@ use tokio::sync::RwLock;
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{DownloadStatus, RequestGroup};
 
-// Re-export core types from session_entry module for backward compatibility
+// Re-export core types from session_entry module
 pub use super::session_entry::{
     SessionEntry, decode_hex, download_options_to_map, escape_uri, unescape_uri,
 };
@@ -196,8 +196,7 @@ pub async fn serialize_groups(groups: &[Arc<RwLock<RequestGroup>>]) -> Result<St
 /// Deserializes session file text into a vector of SessionEntry objects
 ///
 /// Parses the entire contents of a session file and returns all valid
-/// entries found. Handles comments (#), blank lines, and forward-compatible
-/// unknown keys.
+/// entries found. Handles comments (#) and blank lines.
 ///
 /// # Arguments
 ///
@@ -217,9 +216,8 @@ pub async fn serialize_groups(groups: &[Arc<RwLock<RequestGroup>>]) -> Result<St
 /// # Error Handling
 ///
 /// - Empty lines and comments are silently skipped
-/// - Unknown keys are stored in the options map (forward compatibility)
 /// - Invalid values are ignored (with warnings logged)
-/// - Malformed hex strings cause bitfield to be set to None
+/// - Malformed hex strings cause bitfield to be ignored
 ///
 /// # Example
 ///
@@ -570,12 +568,12 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
     }
 
     #[test]
-    fn test_deserialize_preserves_unknown_options() {
-        // Test that unknown keys are preserved in options map (forward compatibility)
+    fn test_deserialize_preserves_user_options() {
+        // Test that user-defined options are preserved in options map
         let input = r#"http://example.com/file.zip
  GID=1
- CUSTOM_OPTION=value123
- FUTURE_FEATURE=enabled
+ split=4
+ dir=/downloads
  TOTAL_LENGTH=1000
 "#;
 
@@ -585,9 +583,9 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
         // Known field parsed correctly
         assert_eq!(entries[0].total_length, 1000);
 
-        // Unknown keys stored in options
-        assert_eq!(entries[0].options.get("CUSTOM_OPTION").unwrap(), "value123");
-        assert_eq!(entries[0].options.get("FUTURE_FEATURE").unwrap(), "enabled");
+        // User options stored in options
+        assert_eq!(entries[0].options.get("split").unwrap(), "4");
+        assert_eq!(entries[0].options.get("dir").unwrap(), "/downloads");
     }
 
     #[test]
@@ -656,31 +654,6 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
             restored_entries[1].options.get("seed-time").unwrap(),
             "3600"
         );
-    }
-
-    #[test]
-    fn test_backward_compatibility_old_format() {
-        // Ensure we can still load old format files without new fields
-        let old_format_input = r#"http://example.com/legacy-download.zip
- GID=oldformat123
- split=4
- dir=/old/path
-"#;
-
-        let entries = deserialize(old_format_input).unwrap();
-        assert_eq!(entries.len(), 1);
-
-        // Old format should have sensible defaults for new fields
-        assert_eq!(entries[0].total_length, 0);
-        assert_eq!(entries[0].completed_length, 0);
-        assert_eq!(entries[0].download_speed, 0);
-        assert_eq!(entries[0].status, "active");
-        assert_eq!(entries[0].error_code, None);
-        assert_eq!(entries[0].bitfield, None);
-
-        // But original fields should still work
-        assert_eq!(entries[0].options.get("split").unwrap(), "4");
-        assert_eq!(entries[0].options.get("dir").unwrap(), "/old/path");
     }
 
     #[test]

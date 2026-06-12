@@ -88,7 +88,7 @@ pub struct ConcurrentSegmentManager {
 impl ConcurrentSegmentManager {
     /// Create a new segment manager with basic round-robin mirror selection.
     ///
-    /// This is the legacy constructor that uses the built-in `MirrorState`
+    /// This is the basic constructor that uses the built-in `MirrorState`
     /// for mirror tracking. For intelligent mirror selection, use
     /// `new_with_selector()` instead.
     pub fn new(total_size: u64, urls: Vec<String>, segment_size: Option<u64>) -> Self {

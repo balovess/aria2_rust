@@ -192,7 +192,7 @@ impl App {
             'K' => Some("max-upload-limit"),
             'Z' => Some("disk-cache"),
             'Y' => Some("piece-length"),
-            // Legacy / aliases (preserve existing case-insensitive fallbacks)
+            // Aliases
             'v' => Some("verbose"),
             _ => None,
         }

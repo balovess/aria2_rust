@@ -66,7 +66,7 @@ pub async fn announce_to_public_tracker(
         info_hash,
         peer_id,
         total_size,
-        TrackerEvent::Started, // Default to Started for backward compatibility
+        TrackerEvent::Started, // Default event type
     )
     .await
 }

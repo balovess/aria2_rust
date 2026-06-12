@@ -73,8 +73,7 @@ pub fn score_source(stat: &ServerStat) -> f64 {
 
 /// Score a source using raw parameters (convenience function).
 ///
-/// This is a backward-compatible function for cases where ServerStat
-/// is not available. Prefer `score_source(&stat)` when possible.
+/// Use this when ServerStat is not available. Prefer `score_source(&stat)` when possible.
 ///
 /// # Arguments
 ///

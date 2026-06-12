@@ -411,7 +411,7 @@ pub async fn write_piece_to_multi_files(
 /// Prefer this function over [`write_piece_to_multi_files`] for production
 /// downloads where a piece may span many files or many small write
 /// operations would otherwise occur.  The original function is retained for
-/// backward compatibility and as a reference implementation.
+/// reference and as a simpler implementation.
 ///
 /// # Arguments
 /// * `layout`      – The multi-file layout defining file boundaries.

@@ -5,7 +5,7 @@
 //! supports loading from `.aria2rc` config files, applying CLI argument overrides,
 //! and converting to [`DownloadOptions`] for use by download commands.
 //!
-//! The design mirrors C++ aria2's `OptionHandler` class for compatibility.
+//! The design mirrors C++ aria2's `OptionHandler` class for reference.
 //!
 //! # Example
 //!

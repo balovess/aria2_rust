@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 
-// Re-export score_source for backward compatibility
+// Re-export score_source for convenience
 pub use crate::selector::source_scorer::{score_source_raw as score_source, score_source_raw};
 
 pub struct HttpSegmentDownloader {

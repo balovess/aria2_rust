@@ -15,7 +15,7 @@
 //!   ├── RestoreContext - State container for session restoration
 //!   └── impl ResumeData { serialize, deserialize, save, load }
 //!
-//! Compatibility:
+//! Integration:
 //!   - Works alongside existing BtProgressManager (BT-specific text format)
 //!   - Uses JSON for human-readable, debuggable output
 //!   - Supports both HTTP/FTP and BitTorrent downloads
@@ -1830,7 +1830,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Test Group 5: Existing tests (preserved for compatibility)
+    // Test Group 5: Existing tests
     // =====================================================================
 
     #[test]

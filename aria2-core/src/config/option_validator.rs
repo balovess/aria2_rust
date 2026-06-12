@@ -613,7 +613,7 @@ pub struct OptionDefinition {
     pub default_value: Value,
     /// Optional validator for runtime validation.
     ///
-    /// When `None`, no validation is performed (backward compatible).
+    /// When `None`, no validation is performed (default behavior).
     pub validator: Option<Box<dyn OptionValidator>>,
 }
 
@@ -639,7 +639,7 @@ impl OptionDefinition {
     /// Validate a value against this option's validator (if configured).
     ///
     /// Returns `Ok(())` if:
-    /// - No validator is configured (backward compatible), or
+    /// - No validator is configured (default behavior), or
     /// - The validator accepts the value
     ///
     /// Returns `Err(OptionError)` if validation fails.
@@ -1188,7 +1188,7 @@ mod tests {
         assert!(def.validate(&Value::from(0)).is_err());
         assert!(def.validate(&Value::from(100)).is_err());
 
-        // Option without validator (backward compatible)
+        // Option without validator (default behavior)
         let def_no_validator = OptionDefinition {
             name: "some-option",
             description: "An option without validation",

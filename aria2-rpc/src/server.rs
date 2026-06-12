@@ -629,7 +629,7 @@ pub enum UriStatus {
 /// URI information returned by `aria2.getUris`.
 ///
 /// Contains the URI string and its current status (used or waiting).
-/// Reuses [`UriEntry`] internally for compatibility.
+/// Reuses [`UriEntry`] internally for code reuse.
 pub type UriInfo = UriEntry;
 
 /// Server connection information for a specific file index.

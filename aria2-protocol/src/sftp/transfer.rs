@@ -39,14 +39,14 @@ const PROGRESS_REPORT_INTERVAL: u64 = 256 * 1024;
 /// Data transfer mode for text/binary handling.
 ///
 /// Note: SFTP always transfers data as binary streams. This enum exists
-/// for API compatibility with FTP transfer modes but has no effect on
+/// for API consistency with FTP transfer modes but has no effect on
 /// the actual wire protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransferMode {
     /// Binary mode - no line ending translation
     #[default]
     Binary,
-    /// Text mode (no-op in SFTP, preserved for compatibility)
+    /// Text mode (no-op in SFTP, for API consistency)
     Text,
 }
 

@@ -538,7 +538,7 @@ impl super::OptionRegistry {
         );
         self.register(
             OptionDef::new("dht-message-path", OptionType::Path)
-                .desc("DHT message cache path (legacy, use dht-file-path instead)")
+                .desc("DHT message cache path (deprecated, use dht-file-path instead)")
                 .category(OptionCategory::BitTorrent),
         );
         self.register(

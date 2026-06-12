@@ -54,7 +54,7 @@ impl<T: zeroize::Zeroize> Drop for Secret<T> {
 /// Supported digest hash algorithms as defined in RFC 7616.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum DigestAlgorithm {
-    /// MD5 algorithm (legacy, less secure but widely supported)
+    /// MD5 algorithm (less secure but widely supported)
     #[default]
     Md5,
     /// SHA-256 algorithm (recommended for new implementations)

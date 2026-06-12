@@ -1000,7 +1000,7 @@ impl RpcEngine {
     /// Handle `aria2.getPurgeDownloadResult` - Purge a specific GID from history.
     ///
     /// Removes a specified GID from the stopped/completed download history list.
-    /// If no GID is provided, purges all stopped results (backward compatible).
+    /// If no GID is provided, purges all stopped results (default behavior).
     ///
     /// Parameters:
     /// - [0] (optional): GID of the stopped task to purge
@@ -1033,7 +1033,7 @@ impl RpcEngine {
                 }
             }
             Err(_) => {
-                // No GID parameter — purge all (backward compatible)
+                // No GID parameter — purge all (default behavior)
                 let mut stopped = self.stopped_tasks.write().await;
                 stopped.clear();
                 Ok(JsonRpcResponse::success(

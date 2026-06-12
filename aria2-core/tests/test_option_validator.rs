@@ -355,7 +355,7 @@ mod standalone_option_validator_tests {
         assert!(def.validate(&json!(0)).is_err());
         assert!(def.validate(&json!(100)).is_err());
 
-        // Option without validator (backward compatible)
+        // Option without validator (default behavior)
         let def_no_validator = OptionDefinition {
             name: "some-option",
             description: "An option without validation",
@@ -363,7 +363,7 @@ mod standalone_option_validator_tests {
             validator: None,
         };
 
-        // Should always pass validation (backward compatible)
+        // Should always pass validation (default behavior)
         assert!(def_no_validator.validate(&json!(42)).is_ok());
         assert!(def_no_validator.validate(&json!("anything")).is_ok());
     }
