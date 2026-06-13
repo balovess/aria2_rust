@@ -6,7 +6,7 @@
 mod e2e_helpers;
 
 mod tests {
-    use crate::e2e_helpers::MockHttpServer;
+    use crate::e2e_helpers::mock_http_server::MockHttpServer;
     use crate::e2e_helpers::mock_http_server::RequestLog;
     use aria2_core::http::stream_filter::*;
     use hyper::{Body, Request, Response};

@@ -4,13 +4,8 @@
 //! edge cases in hash verification, mirror failover, authentication, rate limiting,
 //! disk space management, session persistence, and filename collision handling.
 
-mod fixtures {
-    pub mod mock_ftp_server;
-    pub mod test_metalink_builder;
-}
-mod e2e_helpers {
-    pub mod mock_http_server;
-}
+mod fixtures;
+mod e2e_helpers;
 
 use aria2_core::engine::command::Command;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;

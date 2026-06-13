@@ -1,7 +1,4 @@
-mod fixtures {
-    pub mod test_metalink_builder;
-    pub mod test_server;
-}
+mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};

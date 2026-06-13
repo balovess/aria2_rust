@@ -56,7 +56,8 @@ impl std::fmt::Display for TimerType {
 struct TimerEntry {
     /// Type of timer
     timer_type: TimerType,
-    /// Connection ID this timer belongs to
+    /// Connection ID this timer belongs to (for debugging)
+    #[allow(dead_code)]
     conn_id: u16,
     /// When the timer expires
     expires_at: Instant,
@@ -79,6 +80,7 @@ impl TimerEntry {
     }
 
     /// Check if the timer has expired
+    #[allow(dead_code)]
     fn is_expired(&self) -> bool {
         Instant::now() >= self.expires_at
     }

@@ -1,6 +1,4 @@
-mod fixtures {
-    pub mod test_server;
-}
+mod fixtures;
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use aria2_core::filesystem::file_allocation::{self, preallocate_file};

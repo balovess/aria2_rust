@@ -245,17 +245,8 @@ impl UtpSocket {
             return Err(UtpSocketError::SocketClosed);
         }
 
-        // Check if there's data in the buffer
-        let has_data = {
-            let conn = self.connections.get(&conn_id)
-                .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
-            let data = conn.recv_data();
-            !data.is_empty()
-        };
-
-        if !has_data {
-            self.process_incoming_packets()?;
-        }
+        // Process incoming packets first to potentially receive new data
+        self.process_incoming_packets()?;
 
         // Get data from connection
         let conn = self.connections.get_mut(&conn_id)
@@ -704,12 +695,12 @@ mod tests {
     fn test_socket_connection_not_found() {
         let mut socket = UtpSocket::bind_any().unwrap();
         
-        let result = socket.send(99999, &[1, 2, 3]);
-        assert!(matches!(result, Err(UtpSocketError::ConnectionNotFound(99999))));
+        let result = socket.send(60000, &[1, 2, 3]);
+        assert!(matches!(result, Err(UtpSocketError::ConnectionNotFound(60000))));
         
         let mut buf = [0u8; 100];
-        let result = socket.recv(99999, &mut buf);
-        assert!(matches!(result, Err(UtpSocketError::ConnectionNotFound(99999))));
+        let result = socket.recv(60000, &mut buf);
+        assert!(matches!(result, Err(UtpSocketError::ConnectionNotFound(60000))));
     }
 
     #[test]

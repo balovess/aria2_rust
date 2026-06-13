@@ -1,8 +1,4 @@
-mod fixtures {
-    pub mod mock_bt_peer;
-    pub mod mock_dht_node;
-    pub mod test_torrent_builder;
-}
+mod fixtures;
 use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
 use aria2_core::engine::metadata_exchange::{

@@ -1,6 +1,4 @@
-mod fixtures {
-    pub mod test_server;
-}
+mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};

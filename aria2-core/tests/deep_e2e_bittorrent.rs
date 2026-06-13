@@ -3,10 +3,7 @@
 //! Exercises BT progress persistence, post-download hooks, LPD peer discovery,
 //! MSE encrypted handshake, and tracker multi-peer distribution end-to-end.
 
-mod fixtures {
-    pub mod mock_bt_seeder;
-    pub mod mock_tracker;
-}
+mod fixtures;
 
 mod test_harness;
 

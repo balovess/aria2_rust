@@ -7,10 +7,6 @@
 
 mod e2e_helpers;
 
-mod fixtures {
-    // MockHttpServer re-exported via e2e_helpers below
-}
-
 use std::time::{Duration, Instant};
 
 // Import from aria2_core crate (external to integration test)
@@ -23,7 +19,7 @@ use aria2_core::rate_limiter::RateLimiterConfig;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
 // Re-export helpers from test harness module
-use e2e_helpers::MockHttpServer;
+use e2e_helpers::mock_http_server::MockHttpServer;
 
 // Import test harness utilities (need to check what's available)
 // Note: These may need adjustment based on actual module structure

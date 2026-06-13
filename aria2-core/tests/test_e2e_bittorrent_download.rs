@@ -1,8 +1,4 @@
-mod fixtures {
-    pub mod mock_bt_peer;
-    pub mod mock_tracker;
-    pub mod test_torrent_builder;
-}
+mod fixtures;
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};

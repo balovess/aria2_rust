@@ -5,9 +5,10 @@
 use aria2_rpc::server::{RpcServer, ServerConfig};
 
 /// Start a test server on a random port
+#[allow(dead_code)]
 async fn start_test_server() -> (RpcServer, u16) {
     // Use port 0 to get a random available port
-    let server = RpcServer::new_http("127.0.0.1", 0);
+    let _server = RpcServer::new_http("127.0.0.1", 0);
 
     // We need to bind to get the actual port
     // For testing, we'll use a fixed port range
@@ -18,6 +19,7 @@ async fn start_test_server() -> (RpcServer, u16) {
 }
 
 /// Find an available port for testing
+#[allow(dead_code)]
 async fn find_available_port() -> u16 {
     use tokio::net::TcpListener;
 

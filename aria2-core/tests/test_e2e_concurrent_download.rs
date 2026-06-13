@@ -1,7 +1,4 @@
-mod fixtures {
-    pub mod test_metalink_builder;
-    pub mod test_server;
-}
+mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::concurrent_download_command::ConcurrentDownloadCommand;
 use aria2_core::engine::concurrent_segment_manager::{ConcurrentSegmentManager, SegmentStatus};

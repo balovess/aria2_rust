@@ -7,9 +7,7 @@
 //! MockDhtServer for peer discovery, engine lifecycle, announce flow,
 //! multi-round lookups, and persistence save/load roundtrips.
 
-mod fixtures {
-    pub mod mock_dht_server;
-}
+mod fixtures;
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};

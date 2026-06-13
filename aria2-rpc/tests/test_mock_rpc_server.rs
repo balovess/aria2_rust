@@ -416,6 +416,7 @@ fn test_cors_preflight_handling() {
 
 /// Mock HTTP request for testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MockHttpRequest {
     method: String,
     path: String,
@@ -425,6 +426,7 @@ struct MockHttpRequest {
 
 /// Mock HTTP response for testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MockHttpResponse {
     status: u16,
     headers: std::collections::HashMap<String, String>,
@@ -490,7 +492,7 @@ impl MockRpcHandler {
         match rpc_req {
             Ok(rpc_req) => {
                 // Extract token from params (simplified)
-                let token = rpc_req
+                let _token = rpc_req
                     .params
                     .get(0)
                     .and_then(|v| v.as_str())

@@ -1,6 +1,4 @@
-mod fixtures {
-    pub mod mock_ftp_server;
-}
+mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};

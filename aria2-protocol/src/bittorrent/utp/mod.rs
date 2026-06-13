@@ -17,9 +17,7 @@ pub use congestion::{
 };
 pub use metrics::{BandwidthEstimator, DelayEstimator, RttEstimator};
 pub use packet::{PacketType, UtpPacket, UtpPacketError, UTP_HEADER_SIZE, UTP_VERSION};
-pub use socket::{
-    AsyncUtpSocket, ConnectionStats, ConnectionId, UtpSocket, UtpSocketError, UtpStream,
-};
+pub use socket::{AsyncUtpSocket, ConnectionStats, ConnectionId, UtpSocket, UtpSocketError};
 pub use timer::{
     IdleTimeoutDetector, KeepaliveManager, RetransmitScheduler, TimerManager, TimerType,
 };
