@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 
@@ -6,20 +8,207 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 pub(crate) enum InnerConnection {
     Plain(aria2_protocol::bittorrent::peer::connection::PeerConnection),
     Encrypted(aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection),
+    Utp(UtpPeerConnection),
+}
+
+/// uTP peer connection wrapper
+///
+/// Wraps a uTP stream for BitTorrent peer communication.
+/// Provides the same interface as TCP connections but uses UDP-based uTP protocol.
+pub struct UtpPeerConnection {
+    /// uTP socket reference (shared among multiple connections)
+    socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
+    /// Connection ID within the socket
+    conn_id: u16,
+    /// Info hash for the torrent
+    info_hash: [u8; 20],
+    /// Whether handshake is complete
+    handshake_complete: bool,
+    /// Receive buffer for partial messages
+    recv_buffer: Vec<u8>,
+}
+
+impl UtpPeerConnection {
+    /// Create a new uTP peer connection
+    pub fn new(
+        socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
+        conn_id: u16,
+        info_hash: [u8; 20],
+    ) -> Self {
+        Self {
+            socket,
+            conn_id,
+            info_hash,
+            handshake_complete: false,
+            recv_buffer: Vec::new(),
+        }
+    }
+
+    /// Connect to a remote peer via uTP
+    pub async fn connect(
+        addr: std::net::SocketAddr,
+        info_hash: &[u8; 20],
+    ) -> Result<Self> {
+        // Create a new uTP socket for this connection
+        let socket = aria2_protocol::bittorrent::utp::UtpSocket::bind_any()
+            .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
+        
+        let socket = Arc::new(Mutex::new(socket));
+        
+        // Initiate uTP connection
+        {
+            let mut sock = socket.lock().await;
+            let conn_id = sock.connect(addr)
+                .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
+            
+            Ok(Self {
+                socket,
+                conn_id,
+                info_hash: *info_hash,
+                handshake_complete: false,
+                recv_buffer: Vec::new(),
+            })
+        }
+    }
+
+    /// Get the connection ID
+    pub fn conn_id(&self) -> u16 {
+        self.conn_id
+    }
+
+    /// Check if connection is established
+    pub fn is_connected(&self) -> bool {
+        // This is a simplified check - in reality we'd need to check state
+        self.handshake_complete
+    }
+
+    /// Perform BitTorrent handshake over uTP
+    pub async fn perform_handshake(&mut self) -> Result<()> {
+        use aria2_protocol::bittorrent::message::handshake::HandshakeMessage;
+        
+        // Create handshake message
+        let handshake = HandshakeMessage::new(&self.info_hash);
+        let handshake_bytes = handshake.to_bytes();
+        
+        // Send handshake
+        {
+            let mut socket = self.socket.lock().await;
+            socket.send(self.conn_id, &handshake_bytes)
+                .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?;
+        }
+        
+        // Receive handshake response
+        let mut response_buf = vec![0u8; 68]; // Handshake is 68 bytes
+        let len = {
+            let mut socket = self.socket.lock().await;
+            socket.recv(self.conn_id, &mut response_buf)
+                .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?
+        };
+        
+        if len < 68 {
+            return Err(Aria2Error::Fatal(FatalError::Config("Handshake response too short".to_string())));
+        }
+        
+        // Parse handshake
+        let response = HandshakeMessage::from_bytes(&response_buf[..len])
+            .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
+        
+        // Verify info hash
+        if response.info_hash != self.info_hash {
+            return Err(Aria2Error::Fatal(FatalError::Config("Info hash mismatch".to_string())));
+        }
+        
+        self.handshake_complete = true;
+        Ok(())
+    }
+
+    /// Send a BitTorrent message
+    pub async fn send_message(&mut self, message: &[u8]) -> Result<()> {
+        let mut socket = self.socket.lock().await;
+        socket.send(self.conn_id, message)
+            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?;
+        Ok(())
+    }
+
+    /// Receive a BitTorrent message
+    pub async fn recv_message(&mut self) -> Result<Option<Vec<u8>>> {
+        // Try to receive data
+        let mut buf = vec![0u8; 4096];
+        let len = {
+            let mut socket = self.socket.lock().await;
+            match socket.recv(self.conn_id, &mut buf) {
+                Ok(0) => return Ok(None), // No data available
+                Ok(len) => len,
+                Err(e) => return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() })),
+            }
+        };
+        
+        // Append to receive buffer
+        self.recv_buffer.extend_from_slice(&buf[..len]);
+        
+        // Try to parse a complete message
+        if self.recv_buffer.len() >= 4 {
+            // Read message length (4 bytes, big-endian)
+            let msg_len = u32::from_be_bytes([
+                self.recv_buffer[0],
+                self.recv_buffer[1],
+                self.recv_buffer[2],
+                self.recv_buffer[3],
+            ]) as usize;
+            
+            // Check if we have the complete message
+            if self.recv_buffer.len() >= 4 + msg_len {
+                // Extract message
+                let message = self.recv_buffer[4..4 + msg_len].to_vec();
+                self.recv_buffer = self.recv_buffer[4 + msg_len..].to_vec();
+                return Ok(Some(message));
+            }
+        }
+        
+        Ok(None)
+    }
+
+    /// Close the connection
+    pub async fn close(&mut self) -> Result<()> {
+        let mut socket = self.socket.lock().await;
+        socket.close_connection(self.conn_id)
+            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?;
+        Ok(())
+    }
+
+    /// Get connection statistics
+    pub async fn stats(&self) -> Result<aria2_protocol::bittorrent::utp::ConnectionStats> {
+        let socket = self.socket.lock().await;
+        socket.connection_stats(self.conn_id)
+            .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))
+    }
 }
 
 /// Peer connection abstraction that supports both plain and encrypted (MSE) connections.
 ///
 /// This mirrors the original aria2 C++ architecture where connection management
 /// is separated from the download command logic (see BtRuntime in original).
+/// Now also supports uTP (UDP-based) connections per BEP 29.
 pub struct BtPeerConn {
     pub(crate) inner: InnerConnection,
     /// Set of piece indices for which the peer has sent an AllowedFast message.
     /// Pieces in this set can be requested even when the peer is choked.
     pub allowed_fast: HashSet<u32>,
+    /// Connection type (TCP or uTP)
+    pub connection_type: ConnectionType,
+}
+
+/// Type of peer connection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionType {
+    /// Standard TCP connection
+    Tcp,
+    /// uTP (UDP-based) connection
+    Utp,
 }
 
 impl BtPeerConn {
+    /// Connect via MSE (Message Stream Encryption) over TCP
     pub async fn connect_mse(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash: &[u8; 20],
@@ -29,11 +218,13 @@ impl BtPeerConn {
             Ok(conn) => Ok(Self {
                 inner: InnerConnection::Encrypted(conn),
                 allowed_fast: HashSet::new(),
+                connection_type: ConnectionType::Tcp,
             }),
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
         }
     }
 
+    /// Connect via plain TCP
     pub async fn connect_plain(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash: &[u8; 20],
@@ -44,9 +235,57 @@ impl BtPeerConn {
             Ok(conn) => Ok(Self {
                 inner: InnerConnection::Plain(conn),
                 allowed_fast: HashSet::new(),
+                connection_type: ConnectionType::Tcp,
             }),
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
         }
+    }
+
+    /// Connect via uTP (Micro Transport Protocol)
+    ///
+    /// uTP is a UDP-based transport protocol that provides:
+    /// - Reliable, ordered delivery
+    /// - LEDBAT congestion control (low priority, background traffic)
+    /// - Better performance on congested networks
+    /// - NAT traversal benefits
+    pub async fn connect_utp(
+        addr: std::net::SocketAddr,
+        info_hash: &[u8; 20],
+    ) -> Result<Self> {
+        let utp_conn = UtpPeerConnection::connect(addr, info_hash).await?;
+        
+        Ok(Self {
+            inner: InnerConnection::Utp(utp_conn),
+            allowed_fast: HashSet::new(),
+            connection_type: ConnectionType::Utp,
+        })
+    }
+
+    /// Create a uTP connection from an existing socket
+    ///
+    /// Used when accepting incoming uTP connections
+    pub fn from_utp_socket(
+        socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
+        conn_id: u16,
+        info_hash: &[u8; 20],
+    ) -> Self {
+        let utp_conn = UtpPeerConnection::new(socket, conn_id, *info_hash);
+        
+        Self {
+            inner: InnerConnection::Utp(utp_conn),
+            allowed_fast: HashSet::new(),
+            connection_type: ConnectionType::Utp,
+        }
+    }
+
+    /// Get the connection type
+    pub fn connection_type(&self) -> ConnectionType {
+        self.connection_type
+    }
+
+    /// Check if this is a uTP connection
+    pub fn is_utp(&self) -> bool {
+        self.connection_type == ConnectionType::Utp
     }
 
     /// Add a piece index to the AllowedFast set.
@@ -82,6 +321,12 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_unchoke().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                // uTP uses the same BitTorrent protocol messages
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::Unchoke;
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -93,6 +338,11 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_choke().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::Choke;
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -104,6 +354,11 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::Interested;
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -115,6 +370,11 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_not_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::NotInterested;
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -126,6 +386,11 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_have(piece_index).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::Have { piece_index };
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -140,6 +405,15 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_request(req).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::Request {
+                    index: req.index,
+                    begin: req.begin,
+                    length: req.length,
+                };
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -154,6 +428,15 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_cancel(req).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::Cancel {
+                    index: req.index,
+                    begin: req.begin,
+                    length: req.length,
+                };
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -165,6 +448,11 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.send_bitfield(bitfield).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                let msg = BtMessage::Bitfield { bitfield };
+                c.send_message(&msg.to_bytes()).await
+            }
         }
     }
 
@@ -178,6 +466,19 @@ impl BtPeerConn {
             InnerConnection::Encrypted(c) => c.read_message().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
+            InnerConnection::Utp(c) => {
+                // Receive raw message bytes
+                let msg_bytes = c.recv_message().await?;
+                if let Some(bytes) = msg_bytes {
+                    // Parse into BtMessage
+                    use aria2_protocol::bittorrent::message::types::BtMessage;
+                    BtMessage::from_bytes(&bytes)
+                        .map(Some)
+                        .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
@@ -185,6 +486,7 @@ impl BtPeerConn {
         match &self.inner {
             InnerConnection::Plain(c) => c.is_connected(),
             InnerConnection::Encrypted(c) => c.is_connected(),
+            InnerConnection::Utp(c) => c.is_connected(),
         }
     }
 
