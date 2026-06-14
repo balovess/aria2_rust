@@ -1,13 +1,21 @@
 use rand::Rng;
 
-const PEER_ID_PREFIX: &[u8] = b"-AR0001-";
+/// Peer ID prefix for aria2-rust following BEP 20 format
+/// Format: -AR2rs-XXXXXX (where XXXXXX is random alphanumeric)
+/// This identifies the client as aria2-rust implementation
+const PEER_ID_PREFIX: &[u8] = b"-AR2rs-";
 
 pub fn generate_peer_id() -> [u8; 20] {
     let mut id = [0u8; 20];
-    id[..8].copy_from_slice(PEER_ID_PREFIX);
+    id[..7].copy_from_slice(PEER_ID_PREFIX);
+    // Pad to 8 characters if needed (BEP 20 requires 8-char prefix)
+    id[7] = b'-';
     let mut rng = rand::thread_rng();
-    for id in &mut id[8..] {
-        *id = rng.gen_range(b'A'..=b'Z');
+    // Fill remaining 12 bytes with random alphanumeric characters
+    for slot in &mut id[8..] {
+        // Use alphanumeric characters (0-9, A-Z, a-z)
+        let charset: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        *slot = charset[rng.gen_range(0..charset.len())];
     }
     id
 }

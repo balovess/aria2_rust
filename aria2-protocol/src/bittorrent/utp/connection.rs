@@ -373,10 +373,12 @@ impl UtpConnection {
 
         // Update RTT estimate if we have a valid timestamp
         if packet.timestamp_microseconds > 0 {
-            // Calculate delay from timestamp difference
-            let delay = packet.timestamp_difference_microseconds;
-            // This would be used for LEDBAT congestion control
-            let _ = delay; // TODO: Integrate with delay estimator
+            // Calculate delay from timestamp difference and feed to LEDBAT
+            let delay_us = packet.timestamp_difference_microseconds as u64;
+            // Update LEDBAT delay measurements for congestion control
+            // This is crucial for proper LEDBAT operation - the delay-based
+            // congestion control needs accurate one-way delay measurements
+            self.congestion_controller.update_delay(delay_us);
         }
 
         match packet_type {

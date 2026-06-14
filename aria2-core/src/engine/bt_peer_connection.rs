@@ -85,9 +85,10 @@ impl UtpPeerConnection {
     /// Perform BitTorrent handshake over uTP
     pub async fn perform_handshake(&mut self) -> Result<()> {
         use aria2_protocol::bittorrent::message::handshake::Handshake;
+        use aria2_protocol::bittorrent::peer::id::generate_peer_id;
         
-        // Create handshake message
-        let peer_id = [0u8; 20]; // TODO: generate proper peer_id
+        // Generate proper peer_id following BEP 20 format (-AR0001- prefix)
+        let peer_id = generate_peer_id();
         let handshake = Handshake::new(&self.info_hash, &peer_id);
         let handshake_bytes = handshake.to_bytes();
         

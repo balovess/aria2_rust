@@ -236,7 +236,14 @@ impl LedbatController {
     }
 
     /// Update delay measurements
-    fn update_delay(&mut self, delay_us: u64) {
+    ///
+    /// This method can be called directly to feed delay measurements
+    /// to the LEDBAT controller, which is useful for integrating
+    /// delay data from received packets before ACK processing.
+    ///
+    /// # Arguments
+    /// * `delay_us` - One-way delay measurement in microseconds
+    pub fn update_delay(&mut self, delay_us: u64) {
         self.current_delay = delay_us;
 
         // Add to history
