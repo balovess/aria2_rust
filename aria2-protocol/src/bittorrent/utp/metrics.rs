@@ -307,10 +307,10 @@ impl BandwidthEstimator {
         self.bytes_in_window += bytes;
 
         // Check if window has elapsed
-        if let Some(start) = self.window_start {
-            if now.duration_since(start) >= self.window_duration {
-                self.finalize_window();
-            }
+        if let Some(start) = self.window_start
+            && now.duration_since(start) >= self.window_duration
+        {
+            self.finalize_window();
         }
     }
 

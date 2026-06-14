@@ -428,7 +428,7 @@ impl UtpSocket {
             TimerType::ConnectTimeout => {
                 let should_close = {
                     let conn = self.connections.get(&conn_id);
-                    conn.map_or(false, |c| c.state() == ConnectionState::SynSent)
+                    conn.is_some_and(|c| c.state() == ConnectionState::SynSent)
                 };
                 
                 if should_close {

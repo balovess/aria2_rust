@@ -58,9 +58,7 @@ impl WebSeedStats {
     pub fn average_speed(&self) -> u64 {
         if let Some(start) = self.start_time {
             let elapsed = start.elapsed().as_secs();
-            if elapsed > 0 {
-                return self.total_bytes.load(Ordering::Relaxed) / elapsed;
-            }
+            return self.total_bytes.load(Ordering::Relaxed).checked_div(elapsed).unwrap_or(0);
         }
         0
     }

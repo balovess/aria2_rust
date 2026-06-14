@@ -221,10 +221,10 @@ impl SessionEntry {
                 }
             }
             "ERROR_CODE" => {
-                if !value.is_empty() {
-                    if let Ok(code) = value.parse::<i32>() {
-                        entry.error_code = Some(code);
-                    }
+                if !value.is_empty()
+                    && let Ok(code) = value.parse::<i32>()
+                {
+                    entry.error_code = Some(code);
                 }
             }
             "BITFIELD" => {
@@ -237,17 +237,17 @@ impl SessionEntry {
                 }
             }
             "NUM_PIECES" => {
-                if let Ok(v) = value.parse::<u32>() {
-                    if v > 0 {
-                        entry.num_pieces = Some(v);
-                    }
+                if let Ok(v) = value.parse::<u32>()
+                    && v > 0
+                {
+                    entry.num_pieces = Some(v);
                 }
             }
             "PIECE_LENGTH" => {
-                if let Ok(v) = value.parse::<u32>() {
-                    if v > 0 {
-                        entry.piece_length = Some(v);
-                    }
+                if let Ok(v) = value.parse::<u32>()
+                    && v > 0
+                {
+                    entry.piece_length = Some(v);
                 }
             }
             "INFO_HASH" => {
@@ -256,10 +256,10 @@ impl SessionEntry {
                 }
             }
             "RESUME_OFFSET" => {
-                if let Ok(v) = value.parse::<u64>() {
-                    if v > 0 {
-                        entry.resume_offset = Some(v);
-                    }
+                if let Ok(v) = value.parse::<u64>()
+                    && v > 0
+                {
+                    entry.resume_offset = Some(v);
                 }
             }
             // User-defined options (not progress fields)

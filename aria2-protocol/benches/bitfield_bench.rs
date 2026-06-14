@@ -21,8 +21,8 @@ fn bench_bitfield_operations(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("vec_bool_set", size), size, |b, &size| {
             b.iter(|| {
                 let mut vec = vec![false; size];
-                for i in 0..size {
-                    vec[i] = true;
+                for item in vec.iter_mut().take(size) {
+                    *item = true;
                 }
                 black_box(vec)
             })
@@ -60,8 +60,8 @@ fn bench_bitfield_operations(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("vec_bool_test", size), size, |b, &size| {
             b.iter(|| {
                 let mut count = 0;
-                for i in 0..size {
-                    if vec_bool[i] {
+                for item in vec_bool.iter().take(size) {
+                    if *item {
                         count += 1;
                     }
                 }

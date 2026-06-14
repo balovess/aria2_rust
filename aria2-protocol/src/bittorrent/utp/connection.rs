@@ -12,9 +12,10 @@ use crate::bittorrent::utp::metrics::RttEstimator;
 use crate::bittorrent::utp::packet::{PacketType, UtpPacket};
 
 /// Connection state for uTP state machine
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ConnectionState {
     /// Connection is closed
+    #[default]
     Closed,
     /// SYN has been sent, waiting for SYN-ACK
     SynSent,
@@ -24,12 +25,6 @@ pub enum ConnectionState {
     FinWait,
     /// Connection is in the process of closing
     Closing,
-}
-
-impl Default for ConnectionState {
-    fn default() -> Self {
-        Self::Closed
-    }
 }
 
 impl std::fmt::Display for ConnectionState {
@@ -368,13 +363,12 @@ impl UtpConnection {
         if self.state != ConnectionState::Closed
             && packet_type != PacketType::StSyn
             && self.state != ConnectionState::SynSent
+            && packet.connection_id != self.local_connection_id
         {
-            if packet.connection_id != self.local_connection_id {
-                return Err(ConnectionError::ConnectionIdMismatch {
-                    expected: self.local_connection_id,
-                    actual: packet.connection_id,
-                });
-            }
+            return Err(ConnectionError::ConnectionIdMismatch {
+                expected: self.local_connection_id,
+                actual: packet.connection_id,
+            });
         }
 
         // Update RTT estimate if we have a valid timestamp
@@ -666,14 +660,15 @@ impl UtpConnection {
 
         // Check for retransmissions
         for seq_nr in self.send_queue.iter() {
-            if let Some(pending) = self.send_buffer.get_mut(seq_nr) {
-                if !pending.acknowledged && now.duration_since(pending.last_sent) >= rto {
-                    // Retransmit
-                    if let Ok(packet) = UtpPacket::from_bytes(&pending.data) {
-                        packets.push(packet);
-                        pending.transmissions += 1;
-                        pending.last_sent = now;
-                    }
+            if let Some(pending) = self.send_buffer.get_mut(seq_nr)
+                && !pending.acknowledged
+                && now.duration_since(pending.last_sent) >= rto
+            {
+                // Retransmit
+                if let Ok(packet) = UtpPacket::from_bytes(&pending.data) {
+                    packets.push(packet);
+                    pending.transmissions += 1;
+                    pending.last_sent = now;
                 }
             }
         }
@@ -1202,7 +1197,7 @@ mod tests {
         assert_eq!(data_packets.len(), 1);
 
         // Server receives data
-        let ack = server.on_packet_received(&data_packets.first().unwrap()).unwrap();
+        let ack = server.on_packet_received(data_packets.first().unwrap()).unwrap();
         assert_eq!(ack.len(), 1);
         assert_eq!(ack[0].packet_type().unwrap(), PacketType::StAck);
 

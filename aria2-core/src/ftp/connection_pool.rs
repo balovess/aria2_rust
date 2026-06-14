@@ -209,8 +209,10 @@ pub struct PoolStats {
 impl FtpConnectionPool {
     /// Create a new connection pool with default configuration
     pub fn new(max_connections: usize) -> Self {
-        let mut config = PoolConfig::default();
-        config.max_connections = max_connections;
+        let config = PoolConfig {
+            max_connections,
+            ..Default::default()
+        };
         Self::with_config(config)
     }
 

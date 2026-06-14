@@ -717,7 +717,7 @@ mod tests {
         controller.on_data_sent(u32::MAX / 2);
         controller.on_data_sent(u32::MAX / 2);
         // bytes_in_flight should saturate, not overflow
-        assert!(controller.get_bytes_in_flight() <= u32::MAX);
+        // Note: bytes_in_flight is u32, so it's always <= u32::MAX by definition
 
         // Test ACK with more bytes than in flight
         controller.on_ack_received(50_000, u32::MAX);

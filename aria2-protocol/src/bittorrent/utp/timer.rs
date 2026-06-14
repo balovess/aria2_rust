@@ -540,10 +540,10 @@ impl KeepaliveManager {
         let now = Instant::now();
 
         // Check if we've been idle for the keepalive interval
-        if let Some(last_activity) = self.last_activity {
-            if now.duration_since(last_activity) >= self.interval {
-                return true;
-            }
+        if let Some(last_activity) = self.last_activity
+            && now.duration_since(last_activity) >= self.interval
+        {
+            return true;
         }
 
         // Check if we haven't sent a keepalive recently

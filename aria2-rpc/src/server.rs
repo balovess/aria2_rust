@@ -302,7 +302,7 @@ impl TlsConfig {
         let mut cert_reader = BufReader::new(cert_file);
         let cert_chain: Vec<rustls::pki_types::CertificateDer> =
             certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()
-                .map_err(|e| TlsError::CertificateParse(e))?;
+                .map_err(TlsError::CertificateParse)?;
 
         if cert_chain.is_empty() {
             return Err(TlsError::NoCertificates);
@@ -313,14 +313,14 @@ impl TlsConfig {
             .map_err(|e| TlsError::KeyRead(self.key_path.clone(), e))?;
         let mut key_reader = BufReader::new(key_file);
         let key = private_key(&mut key_reader)
-            .map_err(|e| TlsError::KeyParse(e))?
+            .map_err(TlsError::KeyParse)?
             .ok_or(TlsError::NoPrivateKey)?;
 
         // Build server config
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)
-            .map_err(|e| TlsError::InvalidConfig(e))?;
+            .map_err(TlsError::InvalidConfig)?;
 
         Ok(Arc::new(config))
     }

@@ -152,8 +152,10 @@ async fn test_pool_stats_tracking() {
 
 #[tokio::test]
 async fn test_pool_eviction_performance() {
-    let mut config = PoolConfig::default();
-    config.max_connections = 3;
+    let config = PoolConfig {
+        max_connections: 3,
+        ..Default::default()
+    };
     let pool = FtpConnectionPool::with_config(config);
     
     println!("\n=== Pool Eviction Performance Test ===");
@@ -250,7 +252,7 @@ fn test_lru_eviction_efficiency() {
     // For simplicity, assume 50% cache hit rate
     let cache_hit_rate = 0.5;
     let hits = (total_requests as f64 * cache_hit_rate) as u64;
-    let misses = total_requests as u64 - hits;
+    let misses = total_requests - hits;
     
     let time_with = misses * CONNECTION_ESTABLISH_TIME_MS + hits * CONNECTION_REUSE_TIME_MS;
     

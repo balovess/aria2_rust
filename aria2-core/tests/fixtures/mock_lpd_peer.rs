@@ -273,11 +273,11 @@ impl MockLpdServer {
             }
         }
 
-        if !info_hash.is_empty() && port > 0 && token.is_some() {
-            Some(LpdAnnouncement {
+        if !info_hash.is_empty() && port > 0 {
+            token.map(|token| LpdAnnouncement {
                 info_hash,
                 port,
-                token: token.unwrap(),
+                token,
                 source_addr: source_ip,
             })
         } else {

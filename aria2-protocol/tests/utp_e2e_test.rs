@@ -780,8 +780,7 @@ fn test_utp_real_udp_sequence_numbers() {
     let conn_id = 12345;
 
     // Send packets with increasing sequence numbers
-    let mut expected_seq = 2;
-    for i in 0..3 {
+    for (expected_seq, i) in (2..).zip(0..3) {
         let payload = vec![i as u8; 50];
         let data = UtpPacket::data(conn_id, expected_seq, expected_seq - 1, payload);
         let data_bytes = data.to_bytes();
@@ -793,7 +792,6 @@ fn test_utp_real_udp_sequence_numbers() {
         let parsed = UtpPacket::from_bytes(&received).expect("Should parse");
 
         assert_eq!(parsed.seq_nr, expected_seq);
-        expected_seq += 1;
     }
 }
 
@@ -980,16 +978,13 @@ fn test_utp_packet_bit_torrent_context() {
     // Split into multiple uTP packets
     let chunk_size = 1000;
     let conn_id = 12345;
-    let mut seq = 2;
 
-    for chunk in piece_data.chunks(chunk_size) {
+    for (seq, chunk) in (2..).zip(piece_data.chunks(chunk_size)) {
         let packet = UtpPacket::data(conn_id, seq, seq - 1, chunk.to_vec());
 
         // Verify packet creation
         let bytes = packet.to_bytes();
         assert!(bytes.len() > 20);
-
-        seq += 1;
     }
 }
 
@@ -1089,7 +1084,7 @@ fn test_utp_connection_bit_torrent_piece_data() {
 
     // Verify data received
     let received = conn.recv_data();
-    assert!(received.len() > 0);
+    assert!(!received.is_empty());
 }
 
 // ===========================================================================

@@ -556,7 +556,7 @@ impl PiecePicker {
             return vec![];
         }
         
-        let num_bytes = (self.total_pieces as usize + 7) / 8;
+        let num_bytes = (self.total_pieces as usize).div_ceil(8);
         let mut bitfield = vec![0u8; num_bytes];
         
         for (i, piece) in self.pieces.iter().enumerate() {
@@ -581,10 +581,8 @@ impl PiecePicker {
         for (i, piece) in self.pieces.iter_mut().enumerate() {
             let byte_idx = i / 8;
             let bit_idx = 7 - (i % 8);  // MSB-first ordering
-            if byte_idx < bitfield.len() {
-                if (bitfield[byte_idx] & (1 << bit_idx)) != 0 {
-                    piece.completed = true;
-                }
+            if byte_idx < bitfield.len() && (bitfield[byte_idx] & (1 << bit_idx)) != 0 {
+                piece.completed = true;
             }
         }
     }

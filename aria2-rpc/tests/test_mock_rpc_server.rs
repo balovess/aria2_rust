@@ -717,7 +717,7 @@ fn test_batch_json_rpc_requests() {
     let engine = RpcEngine::new();
 
     // Create batch request
-    let requests = vec![
+    let requests = [
         JsonRpcRequest {
             version: Some("2.0".to_string()),
             method: "aria2.getVersion".to_string(),

@@ -55,7 +55,7 @@ impl Metrics {
         let latency_penalty = (self.latency as f64 / 100.0).min(25.0); // Max 25 points penalty
         let lock_penalty = (self.lock_wait_time as f64 / 100.0).min(25.0); // Max 25 points penalty
 
-        (throughput_score + 50.0 - latency_penalty - lock_penalty).max(0.0).min(100.0)
+        (throughput_score + 50.0 - latency_penalty - lock_penalty).clamp(0.0, 100.0)
     }
 }
 
@@ -192,7 +192,7 @@ impl PerformanceReport {
         let mut total_lock_wait = 0u64;
         let mut count = 0usize;
 
-        for (_, metric_list) in metrics.iter() {
+        for metric_list in metrics.values() {
             for m in metric_list.iter() {
                 total_throughput += m.throughput;
                 total_latency += m.latency;
@@ -282,21 +282,21 @@ impl PerformanceMonitor for DefaultPerformanceMonitor {
         let report = self.generate_report();
         let mut output = String::new();
 
-        output.push_str(&format!("Performance Report\n"));
-        output.push_str(&format!("==================\n"));
+        output.push_str("Performance Report\n");
+        output.push_str("==================\n");
         output.push_str(&format!("Generated at: {} ms\n", report.generated_at));
         output.push_str(&format!("Duration: {} ms\n\n", report.duration_ms));
 
-        output.push_str(&format!("Summary:\n"));
-        output.push_str(&format!("--------\n"));
+        output.push_str("Summary:\n");
+        output.push_str("--------\n");
         output.push_str(&format!("  Total samples: {}\n", report.summary.total_samples));
         output.push_str(&format!("  Avg throughput: {} bytes/sec\n", report.summary.avg_throughput));
         output.push_str(&format!("  Avg latency: {} ms\n", report.summary.avg_latency));
         output.push_str(&format!("  Avg memory usage: {} bytes\n", report.summary.avg_memory_usage));
         output.push_str(&format!("  Avg lock wait time: {} ms\n\n", report.summary.avg_lock_wait_time));
 
-        output.push_str(&format!("Detailed Metrics:\n"));
-        output.push_str(&format!("-----------------\n"));
+        output.push_str("Detailed Metrics:\n");
+        output.push_str("-----------------\n");
         for (label, metrics_list) in &report.metrics {
             output.push_str(&format!("\n[{}]\n", label));
             for (i, m) in metrics_list.iter().enumerate() {
