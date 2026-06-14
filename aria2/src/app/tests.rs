@@ -15,43 +15,44 @@ async fn test_input_file_loads_entries() {
     let session_file = temp_dir.path().join("test_session.txt");
 
     // Create a test session file with 3 entries
+    // Note: Property lines must have leading space prefix (aria2 session format)
     let session_content = r#"http://example.com/file1.zip
-GID=1
-TOTAL_LENGTH=1048576
-COMPLETED_LENGTH=524288
-STATUS=active
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=524288
+ GID=1
+ TOTAL_LENGTH=1048576
+ COMPLETED_LENGTH=524288
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=524288
 
 http://example.com/file2.iso
-GID=2
-split=4
-dir=/downloads
-TOTAL_LENGTH=10485760
-COMPLETED_LENGTH=0
-STATUS=waiting
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=
+ GID=2
+ split=4
+ dir=/downloads
+ TOTAL_LENGTH=10485760
+ COMPLETED_LENGTH=0
+ STATUS=waiting
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=
 
 ftp://server.com/bigfile.bin
-GID=3
-TOTAL_LENGTH=1073741824
-COMPLETED_LENGTH=536870912
-STATUS=paused
-ERROR_CODE=
-BITFIELD=fff00f
-NUM_PIECES=24
-PIECE_LENGTH=262144
-INFO_HASH=abc123def456
-RESUME_OFFSET=536870912
+ GID=3
+ TOTAL_LENGTH=1073741824
+ COMPLETED_LENGTH=536870912
+ STATUS=paused
+ ERROR_CODE=
+ BITFIELD=fff00f
+ NUM_PIECES=24
+ PIECE_LENGTH=262144
+ INFO_HASH=abc123def456
+ RESUME_OFFSET=536870912
 "#;
 
     // Write session file
@@ -99,53 +100,54 @@ async fn test_skip_completed_entries() {
     let session_file = temp_dir.path().join("test_complete_session.txt");
 
     // Create session file with completed entries
+    // Note: Property lines must have leading space prefix (aria2 session format)
     let session_content = r#"http://example.com/complete1.zip
-GID=1
-TOTAL_LENGTH=1048576
-COMPLETED_LENGTH=1048576
-STATUS=complete
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=1048576
+ GID=1
+ TOTAL_LENGTH=1048576
+ COMPLETED_LENGTH=1048576
+ STATUS=complete
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=1048576
 
 http://example.com/active2.zip
-GID=2
-TOTAL_LENGTH=2048576
-COMPLETED_LENGTH=1024288
-STATUS=active
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=1024288
+ GID=2
+ TOTAL_LENGTH=2048576
+ COMPLETED_LENGTH=1024288
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=1024288
 
 http://example.com/complete3.bin
-GID=3
-TOTAL_LENGTH=512
-COMPLETED_LENGTH=512
-STATUS=complete
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=512
+ GID=3
+ TOTAL_LENGTH=512
+ COMPLETED_LENGTH=512
+ STATUS=complete
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=512
 
 http://example.com/paused4.iso
-GID=4
-TOTAL_LENGTH=10485760
-COMPLETED_LENGTH=5242880
-STATUS=paused
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=5242880
+ GID=4
+ TOTAL_LENGTH=10485760
+ COMPLETED_LENGTH=5242880
+ STATUS=paused
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=5242880
 "#;
 
     tokio::fs::write(&session_file, session_content)
@@ -334,17 +336,18 @@ async fn test_bt_bitfield_preserved_on_restore() {
     let session_file = temp_dir.path().join("bt_session.txt");
 
     // Create session entry with BT bitfield
+    // Note: Property lines must have leading space prefix (aria2 session format)
     let session_content = r#"magnet:?xt=urn:btih:abc123def456
-GID=1
-TOTAL_LENGTH=104857600
-COMPLETED_LENGTH=52428800
-STATUS=active
-ERROR_CODE=
-BITFIELD=ffaabb
-NUM_PIECES=20
-PIECE_LENGTH=5242880
-INFO_HASH=abc123def456
-RESUME_OFFSET=52428800
+ GID=1
+ TOTAL_LENGTH=104857600
+ COMPLETED_LENGTH=52428800
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=ffaabb
+ NUM_PIECES=20
+ PIECE_LENGTH=5242880
+ INFO_HASH=abc123def456
+ RESUME_OFFSET=52428800
 "#;
 
     tokio::fs::write(&session_file, session_content)
@@ -415,29 +418,30 @@ async fn test_skip_entries_with_zero_progress() {
     let session_file = temp_dir.path().join("zero_progress_session.txt");
 
     // Create session file where all entries have no progress
+    // Note: Property lines must have leading space prefix (aria2 session format)
     let session_content = r#"http://example.com/new1.zip
-GID=1
-TOTAL_LENGTH=0
-COMPLETED_LENGTH=0
-STATUS=active
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=
+ GID=1
+ TOTAL_LENGTH=0
+ COMPLETED_LENGTH=0
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=
 
 http://example.com/new2.iso
-GID=2
-TOTAL_LENGTH=0
-COMPLETED_LENGTH=0
-STATUS=waiting
-ERROR_CODE=
-BITFIELD=
-NUM_PIECES=0
-PIECE_LENGTH=0
-INFO_HASH=
-RESUME_OFFSET=
+ GID=2
+ TOTAL_LENGTH=0
+ COMPLETED_LENGTH=0
+ STATUS=waiting
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=
 "#;
 
     tokio::fs::write(&session_file, session_content)
