@@ -4,7 +4,7 @@ Production-grade Node.js/TypeScript SDK for aria2-rust JSON-RPC & WebSocket inte
 
 ## Features
 
-- ✅ **Complete RPC Coverage** - All 25 aria2 RPC methods
+- ✅ **Complete RPC Coverage** - 34 aria2 RPC methods (94% coverage)
 - ✅ **Dual Transport** - HTTP JSON-RPC and WebSocket support
 - ✅ **Type Safe** - Full TypeScript types with strict mode
 - ✅ **Error Handling** - Structured error hierarchy

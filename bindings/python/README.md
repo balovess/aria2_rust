@@ -4,7 +4,7 @@ Python SDK for aria2-rust JSON-RPC & WebSocket interface. Production-grade clien
 
 ## Features
 
-- ✅ **Complete RPC Coverage** - All 25 aria2 RPC methods
+- ✅ **Complete RPC Coverage** - 34 aria2 RPC methods (94% coverage)
 - ✅ **Dual Transport** - HTTP JSON-RPC and WebSocket support
 - ✅ **Type Safe** - Full type annotations with mypy/pyright support
 - ✅ **Error Handling** - Structured exception hierarchy

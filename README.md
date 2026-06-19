@@ -29,10 +29,14 @@
   - ✅ MSE/PE encryption (BEP14 handshake)
   - ✅ Choking algorithms + seed-time/ratio support
   - ✅ RarestFirst piece selection
+  - ✅ uTP protocol (BEP 29) - Not in original aria2 C++
+  - ✅ Web Seeds (BEP 19)
+  - ✅ LPD (Local Peer Discovery)
+  - ✅ Complete seeding mode with upload support
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (25 methods + 7 events)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (34 methods + 7 events, 94% coverage)
 - **Configuration System**: ~95 core options with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -189,8 +193,8 @@ aria2c -i uris.txt
 
 ## Architecture
 
-Total Codebase: ~14,500+ lines Rust/TS  
-Test Suite: ~300+ tests passing
+Total Codebase: ~35,000+ lines Rust/TS  
+Test Suite: 1432+ tests passing
 
 The project is organized as a Cargo workspace with 4 crates:
 
@@ -353,7 +357,7 @@ cargo run --example simple_download -- http://example.com/test.bin
 | CLI arguments | ✅ Core | ~50 most-used options |
 | Configuration file (`aria2.conf`) | ✅ | Same syntax format |
 | Environment variables | ✅ | `ARIA2_*` prefix mapping |
-| JSON-RPC API | ✅ | 25 methods compatible |
+| JSON-RPC API | ✅ | 34 methods (94% coverage) |
 | XML-RPC API | ✅ | Full methodCall/response/fault support |
 | WebSocket events | ✅ | 7 event types |
 | URI list file (`-i`) | ✅ | Mirror + inline options |
@@ -369,10 +373,17 @@ cargo run --example simple_download -- http://example.com/test.bin
 | RarestFirst piece | ✅ Complete | Full implementation |
 | Endgame mode | ✅ Complete | Last-piece optimization |
 | DHT persistence | ✅ Complete | dht.dat serialization |
+| uTP Protocol | ✅ Complete | Not in original aria2 C++ |
+| Web Seeds | ✅ Complete | BEP 19 |
+| LPD | ✅ Complete | Local Peer Discovery |
+| Seeding Mode | ✅ Complete | Upload support |
 
 **Not yet implemented** (planned for future):
-- Real-time speed graph (TUI) - Phase 36
-- Full 300+ option coverage (currently ~95 core options) - Phase 37
+- `aria2.forceShutdown` RPC method
+- `system.listMethods/listNotifications`
+- HTTPS RPC support
+- IPv6 DHT
+- More CLI options (~132 missing)
 
 ## License
 

@@ -32,7 +32,7 @@
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（25 个方法 + 7 种事件）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（34 个方法 + 7 种事件，94% 覆盖率）
 - **配置系统**: \~95 个核心选项，支持命令行 / 配置文件 / 环境变量四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
@@ -297,11 +297,18 @@ cargo run --example simple_download -- http://example.com/test.bin
 | RarestFirst Piece   | ✅ 完整 | 完整实现                            |
 | Endgame 模式         | ✅ 完整 | 最后 piece 优化                     |
 | DHT 持久化           | ✅ 完整 | dht.dat 序列化                     |
+| uTP 协议             | ✅ 完整 | 原版 aria2 C++ 不支持               |
+| Web Seeds           | ✅ 完整 | BEP 19                           |
+| LPD                 | ✅ 完整 | 本地 Peer 发现                      |
+| 做种模式             | ✅ 完整 | 上传支持                           |
 
 **尚未实现**（计划中）：
 
-- 实时速度图表（TUI）- Phase 36
-- 完整 300+ 选项覆盖（目前 ~95 个核心选项）- Phase 37
+- `aria2.forceShutdown` RPC 方法
+- `system.listMethods/listNotifications`
+- HTTPS RPC 支持
+- IPv6 DHT
+- 更多 CLI 选项（约 132 个缺失）
 
 ## 许可证
 

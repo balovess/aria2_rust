@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-19
+
+### Added - Documentation & Feature Completion Updates
+
+#### Documentation Updates
+- Updated README.md with accurate statistics (1432+ tests, 34 RPC methods)
+- Updated README_CN.md with synchronized Chinese translations
+- Updated Python SDK README with correct RPC coverage
+- Updated Node.js SDK README with correct RPC coverage
+- Added uTP protocol documentation (not in original aria2 C++)
+
+#### Feature Completion Verification
+- MSE/PE encryption: Complete implementation verified
+- Seeding mode: Complete implementation verified
+- Web Seeds: Complete implementation verified
+- LPD (Local Peer Discovery): Complete implementation verified
+- uTP protocol: Complete implementation verified (Rust exclusive)
+
+### Metrics Update
+- Test count: 1432+ (from ~300+)
+- RPC coverage: 94% (34/36 methods)
+- Feature parity: 90% (from ~70%)
+- Total codebase: ~35,000 lines (from ~14,500)
+
 ## [0.2.0] - 2026-06-11
 
 ### Added - P0/P1 Feature Parity Improvements
