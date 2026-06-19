@@ -19,10 +19,11 @@
 //!   `CorsConfig`, status models (`StatusInfo`, `GlobalStat`, `DownloadStatus`),
 //!   GID generation utility.
 //!
-//! - **[`engine`]** — `RpcEngine` bridge implementing 25 aria2 RPC methods:
+//! - **[`engine`]** — `RpcEngine` bridge implementing 36 aria2 RPC methods:
 //!   addUri/addTorrent/remove/pause/unpause/tellStatus/tellActive/tellWaiting/
 //!   tellStopped/getGlobalStat/purgeDownloadResult/getGlobalOption/changeGlobalOption/
-//!   getOption/changeOption/getVersion/getSessionInfo/saveSession/shutdown.
+//!   getOption/changeOption/getVersion/getSessionInfo/saveSession/shutdown/forceShutdown/
+//!   system.multicall/system.listMethods/system.listNotifications.
 //!
 //! ## Quick Start
 //!
@@ -50,7 +51,7 @@
 //!
 //! ## Compatibility
 //!
-//! All 25 implemented methods follow the original aria2 RPC specification at
+//! All 36 implemented methods follow the original aria2 RPC specification at
 //! <https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface>.
 
 pub mod constants;

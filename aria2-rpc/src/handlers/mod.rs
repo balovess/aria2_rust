@@ -4,10 +4,12 @@
 //! - [`status`] — Status queries: tellActive, tellWaiting, tellStopped, getGlobalStat
 //! - [`options`] — Option management: getOption, changeOption, getGlobalOption, changeGlobalOption
 //! - [`bittorrent`] — BitTorrent-specific handlers: getPeers, pauseAll, unpauseAll, etc.
+//! - [`system`] — System methods: listMethods, listNotifications
 
 pub mod bittorrent;
 pub mod options;
 pub mod status;
+pub mod system;
 pub mod task;
 
 #[cfg(test)]

@@ -331,10 +331,26 @@ impl RpcEngine {
                 .handle_force_remove(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.shutdown" => self
+                .handle_shutdown(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "aria2.forceShutdown" => self
+                .handle_force_shutdown(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
             "aria2.getVersion" => self.handle_version(req),
             "aria2.getSessionInfo" => self.handle_session_info(req),
             "system.multicall" => self
                 .handle_multicall(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "system.listMethods" => self
+                .handle_list_methods(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+            "system.listNotifications" => self
+                .handle_list_notifications(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
             _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),

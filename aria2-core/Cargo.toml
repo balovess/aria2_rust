@@ -61,6 +61,7 @@ tokio-test = "0.4"
 criterion.workspace = true
 base64 = "0.21"
 hyper = { version = "0.14", features = ["server", "http1"] }
+aria2-rpc = { path = "../aria2-rpc" }
 
 [[bench]]
 name = "config_bench"

@@ -136,6 +136,7 @@ dependencies = [
  "adler32",
  "anyhow",
  "aria2-protocol",
+ "aria2-rpc",
  "async-trait",
  "atty",
  "base64",
