@@ -4,56 +4,13 @@
 //! On Windows, we test the detached process creation.
 //! On Unix, we test the double-fork daemonization.
 
+mod helpers;
+use helpers::{get_binary_path, is_process_running, stop_process, wait_for_file};
+
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 use std::thread;
-
-/// Helper to get the test binary path.
-fn get_binary_path() -> PathBuf {
-    let mut path = std::env::current_exe().expect("Failed to get current exe path");
-    path.pop(); // Remove test executable name
-    path.pop(); // Remove 'deps'
-    path.push("aria2c");
-    
-    #[cfg(windows)]
-    path.set_extension("exe");
-    
-    path
-}
-
-/// Helper to wait for a file to be created.
-fn wait_for_file(path: &std::path::Path, timeout: Duration) -> bool {
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if path.exists() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    false
-}
-
-/// Helper to check if a process is running.
-#[cfg(windows)]
-fn is_process_running(pid: u32) -> bool {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-        .output();
-    
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.contains(&pid.to_string())
-    } else {
-        false
-    }
-}
-
-#[cfg(unix)]
-fn is_process_running(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
+use std::time::Duration;
 
 /// Test: PID file manager can detect non-existent PID file.
 #[test]
@@ -206,19 +163,7 @@ fn test_daemon_start_with_pid_file() {
     assert!(is_process_running(pid), "Daemon process should be running");
     
     // Clean up: stop the daemon
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
-    }
-    
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .arg(pid.to_string())
-            .output();
-    }
+    stop_process(pid);
     
     // Wait for process to stop
     thread::sleep(Duration::from_secs(1));
@@ -271,19 +216,7 @@ fn test_daemon_prevent_duplicate() {
     let pid_str = fs::read_to_string(&pid_file).expect("Failed to read PID file");
     let pid: u32 = pid_str.trim().parse().expect("Failed to parse PID");
     
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
-    }
-    
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .arg(pid.to_string())
-            .output();
-    }
+    stop_process(pid);
 }
 
 /// Integration test: Daemon with custom log file.
@@ -322,17 +255,7 @@ fn test_daemon_with_log_file() {
     if pid_file.exists() {
         let pid_str = fs::read_to_string(&pid_file).unwrap_or_default();
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            #[cfg(windows)]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/F"])
-                    .output();
-            }
-            
-            #[cfg(unix)]
-            {
-                let _ = Command::new("kill").arg(pid.to_string()).output();
-            }
+            stop_process(pid);
         }
     }
 }

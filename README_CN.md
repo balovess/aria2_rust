@@ -274,6 +274,63 @@ cargo doc --workspace --no-deps
 cargo run --example simple_download -- http://example.com/test.bin
 ```
 
+## 测试
+
+### 运行测试
+
+```bash
+# 运行工作区所有测试
+cargo test --workspace
+
+# 运行特定 crate 的测试
+cargo test -p aria2-core
+
+# 运行测试并显示详细输出
+cargo test --workspace -- --nocapture
+
+# 运行特定测试类别
+cargo test "test_e2e"      # E2E 测试
+cargo test "test_stress"   # 压力测试
+cargo test "test_edge"     # 边缘情况测试
+cargo test "test_error"    # 错误路径测试
+```
+
+### 测试类别
+
+| 类别 | 前缀 | 描述 |
+|------|------|------|
+| 单元测试 | `test_` | 内联测试，测试单个函数 |
+| 集成测试 | `test_` | 模块交互测试 |
+| E2E 测试 | `test_e2e_` | 完整工作流程测试 |
+| 压力测试 | `test_stress_` | 高负载稳定性测试 |
+| 边缘情况测试 | `test_edge_` | 边界条件测试 |
+| 错误路径测试 | `test_error_` | 错误处理测试 |
+
+### 覆盖率报告
+
+```bash
+# 安装 cargo-tarpaulin (Linux/macOS)
+cargo install cargo-tarpaulin
+
+# 生成 HTML 覆盖率报告
+cargo tarpaulin --workspace --out Html --output-dir coverage/
+
+# 生成 LCOV 格式用于 CI
+cargo tarpaulin --workspace --out Lcov --output-dir coverage/
+```
+
+### 运行性能测试
+
+```bash
+# 运行所有性能测试
+cargo bench --workspace
+
+# 运行特定性能测试
+cargo bench --bench config_bench
+```
+
+详细测试指南请参阅 [docs/testing-guide.md](docs/testing-guide.md)。
+
 ## 与原版 aria2 的兼容性
 
 | 功能                  | 状态    | 说明                              |

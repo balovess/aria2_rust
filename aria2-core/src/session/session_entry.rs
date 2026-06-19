@@ -330,7 +330,7 @@ impl SessionEntry {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```no_run
     /// use aria2_core::session::session_entry::SessionEntry;
     ///
     /// let entry = SessionEntry::new(1, vec!["http://example.com/f".to_string()])

@@ -350,6 +350,63 @@ cargo doc --workspace --no-deps
 cargo run --example simple_download -- http://example.com/test.bin
 ```
 
+## Testing
+
+### Running Tests
+
+```bash
+# Run all tests in workspace
+cargo test --workspace
+
+# Run tests for specific crate
+cargo test -p aria2-core
+
+# Run tests with verbose output
+cargo test --workspace -- --nocapture
+
+# Run specific test category
+cargo test "test_e2e"      # E2E tests
+cargo test "test_stress"   # Stress tests
+cargo test "test_edge"     # Edge case tests
+cargo test "test_error"    # Error path tests
+```
+
+### Test Categories
+
+| Category | Prefix | Description |
+|----------|--------|-------------|
+| Unit Tests | `test_` | Inline tests for individual functions |
+| Integration Tests | `test_` | Module interaction tests |
+| E2E Tests | `test_e2e_` | Complete workflow tests |
+| Stress Tests | `test_stress_` | High-load stability tests |
+| Edge Case Tests | `test_edge_` | Boundary condition tests |
+| Error Path Tests | `test_error_` | Error handling tests |
+
+### Coverage Report
+
+```bash
+# Install cargo-tarpaulin (Linux/macOS)
+cargo install cargo-tarpaulin
+
+# Generate HTML coverage report
+cargo tarpaulin --workspace --out Html --output-dir coverage/
+
+# Generate LCOV format for CI
+cargo tarpaulin --workspace --out Lcov --output-dir coverage/
+```
+
+### Running Benchmarks
+
+```bash
+# Run all benchmarks
+cargo bench --workspace
+
+# Run specific benchmark
+cargo bench --bench config_bench
+```
+
+For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-guide.md).
+
 ## Compatibility with Original aria2
 
 | Feature | Status | Notes |

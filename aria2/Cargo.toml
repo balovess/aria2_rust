@@ -11,6 +11,18 @@ publish = false
 name = "aria2c"
 path = "src/main.rs"
 
+[[test]]
+name = "test_rpc_api_compatibility"
+path = "tests/regression/test_rpc_api_compatibility.rs"
+
+[[test]]
+name = "test_cli_options"
+path = "tests/regression/test_cli_options.rs"
+
+[[test]]
+name = "test_config_file"
+path = "tests/regression/test_config_file.rs"
+
 [dependencies]
 aria2-core = { path = "../aria2-core" }
 aria2-protocol = { path = "../aria2-protocol" }
@@ -29,6 +41,7 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+base64 = "0.22"
 
 [features]
 default = ["http", "bittorrent", "rpc"]

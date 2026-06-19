@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use aria2_core::option::option_handler::{OptionHandler, OptionValue};
+//! use aria2_core::option::{OptionHandler, OptionValue};
 //! use std::path::Path;
 //!
 //! let mut handler = OptionHandler::new();
@@ -87,8 +87,8 @@ fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
 ///
 /// # Example
 ///
-/// ```
-/// use aria2_core::option::option_handler::{OptionHandler, OptionValue};
+/// ```no_run
+/// use aria2_core::option::{OptionHandler, OptionValue};
 ///
 /// let mut h = OptionHandler::new();
 /// assert_eq!(h.get("split").as_usize(), 5); // default

@@ -42,6 +42,9 @@ rustls-pemfile = "2.1"
 tempfile = "3.8"
 criterion.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_Foundation", "Win32_System_Threading"] }
+
 [[bench]]
 name = "rpc_bench"
 harness = false

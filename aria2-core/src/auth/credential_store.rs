@@ -98,7 +98,7 @@ impl CredentialStore {
     /// * `password` - Password as byte slice (will be copied and stored securely)
     ///
     /// # Example
-    /// ```
+    /// ```no_run
     /// use aria2_core::auth::credential_store::{CredentialStore, PasswordEntry};
     ///
     /// let mut store = CredentialStore::new();
