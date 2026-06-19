@@ -136,120 +136,154 @@ impl super::OptionRegistry {
     /// Register general-purpose options: directory, output, logging, UI, session management.
     pub fn register_general_options(&mut self) {
         // --- Directory & Output ---
-        self.register(
-            OptionDef::new("dir", OptionType::Path)
-                .short('d')
-                .default(OptionValue::Str(".".into()))
-                .desc("Save directory")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("out", OptionType::String)
-                .short('o')
-                .desc("Output filename")
-                .category(OptionCategory::General),
-        );
+        self.register(OptionDef {
+            name: "dir".into(),
+            opt_type: OptionType::Path,
+            short_name: Some('d'),
+            default_value: OptionValue::Str(".".into()),
+            description: "Save directory".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "out".into(),
+            opt_type: OptionType::String,
+            short_name: Some('o'),
+            description: "Output filename".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
 
         // --- Logging ---
-        self.register(
-            OptionDef::new("log", OptionType::Path)
-                .short('l')
-                .default(OptionValue::Str("-".into()))
-                .desc("Log file path")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("log-level", OptionType::Enum)
-                .short('L')
-                .default(OptionValue::Str("info".into()))
-                .desc("Log level (debug/info/notice/warn/error)")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("console-log-level", OptionType::Enum)
-                .default(OptionValue::Str("notice".into()))
-                .desc("Console log level")
-                .category(OptionCategory::General),
-        );
+        self.register(OptionDef {
+            name: "log".into(),
+            opt_type: OptionType::Path,
+            short_name: Some('l'),
+            default_value: OptionValue::Str("-".into()),
+            description: "Log file path".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "log-level".into(),
+            opt_type: OptionType::Enum,
+            short_name: Some('L'),
+            default_value: OptionValue::Str("info".into()),
+            description: "Log level (debug/info/notice/warn/error)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "console-log-level".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str("notice".into()),
+            description: "Console log level".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
 
         // --- Progress & Intervals ---
-        self.register(
-            OptionDef::new("summary-interval", OptionType::Integer)
-                .short('S')
-                .default(OptionValue::Int(60))
-                .range(0, 3600)
-                .desc("Progress summary interval in seconds")
-                .category(OptionCategory::General),
-        );
+        self.register(OptionDef {
+            name: "summary-interval".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('S'),
+            default_value: OptionValue::Int(60),
+            min: Some(0),
+            max: Some(3600),
+            description: "Progress summary interval in seconds".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
 
         // --- Configuration Files ---
-        self.register(
-            OptionDef::new("conf-path", OptionType::Path)
-                .desc("Configuration file path")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("input-file", OptionType::Path)
-                .short('i')
-                .desc("URI input file")
-                .category(OptionCategory::General),
-        );
+        self.register(OptionDef {
+            name: "conf-path".into(),
+            opt_type: OptionType::Path,
+            description: "Configuration file path".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "input-file".into(),
+            opt_type: OptionType::Path,
+            short_name: Some('i'),
+            description: "URI input file".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
 
         // --- Session Management ---
-        self.register(
-            OptionDef::new("save-session", OptionType::Path)
-                .desc("Session save file")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("save-session-interval", OptionType::Integer)
-                .default(OptionValue::Int(0))
-                .desc("Auto-save session interval (0=disabled)")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("auto-save-interval", OptionType::Integer)
-                .default(OptionValue::Int(60))
-                .range(0, 600)
-                .desc("Auto-save interval")
-                .category(OptionCategory::General),
-        );
+        self.register(OptionDef {
+            name: "save-session".into(),
+            opt_type: OptionType::Path,
+            description: "Session save file".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "save-session-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(0),
+            description: "Auto-save session interval (0=disabled)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "auto-save-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(60),
+            min: Some(0),
+            max: Some(600),
+            description: "Auto-save interval".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
 
         // --- UI Behavior ---
-        self.register(
-            OptionDef::new("enable-color", OptionType::Boolean)
-                .default(OptionValue::Bool(true))
-                .desc("Enable colored output")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("quiet", OptionType::Boolean)
-                .short('q')
-                .default(OptionValue::Bool(false))
-                .desc("Quiet mode")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("dry-run", OptionType::Boolean)
-                .short('n')
-                .default(OptionValue::Bool(false))
-                .desc("Dry run (check only, no download)")
-                .category(OptionCategory::General),
-        );
+        self.register(OptionDef {
+            name: "enable-color".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Enable colored output".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "quiet".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('q'),
+            default_value: OptionValue::Bool(false),
+            description: "Quiet mode".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dry-run".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('n'),
+            default_value: OptionValue::Bool(false),
+            description: "Dry run (check only, no download)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
 
         // --- Daemon Mode ---
-        self.register(
-            OptionDef::new("daemon", OptionType::Boolean)
-                .short('D')
-                .default(OptionValue::Bool(false))
-                .desc("Run as a background daemon (detached process)")
-                .category(OptionCategory::General),
-        );
-        self.register(
-            OptionDef::new("pid-file", OptionType::Path)
-                .desc("Path to PID file for daemon process management")
-                .category(OptionCategory::General),
-        );
+        self.register(OptionDef {
+            name: "daemon".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('D'),
+            default_value: OptionValue::Bool(false),
+            description: "Run as a background daemon (detached process)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "pid-file".into(),
+            opt_type: OptionType::Path,
+            description: "Path to PID file for daemon process management".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
     }
 }
 
@@ -260,173 +294,225 @@ impl super::OptionRegistry {
     /// Register HTTP/FTP download options: proxies, headers, timeouts, connection management.
     pub fn register_http_ftp_options(&mut self) {
         // --- Proxy Settings ---
-        self.register(
-            OptionDef::new("all-proxy", OptionType::String)
-                .short('p')
-                .desc("Global proxy URL")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("http-proxy", OptionType::String)
-                .short('P')
-                .desc("HTTP proxy URL")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("https-proxy", OptionType::String)
-                .short('y')
-                .desc("HTTPS proxy URL")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("ftp-proxy", OptionType::String)
-                .short('F')
-                .desc("FTP proxy URL")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("no-proxy", OptionType::List)
-                .short('N')
-                .desc("Proxy exclusion list (comma-separated domains)")
-                .category(OptionCategory::HttpFtp),
-        );
+        self.register(OptionDef {
+            name: "all-proxy".into(),
+            opt_type: OptionType::String,
+            short_name: Some('p'),
+            description: "Global proxy URL".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "http-proxy".into(),
+            opt_type: OptionType::String,
+            short_name: Some('P'),
+            description: "HTTP proxy URL".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "https-proxy".into(),
+            opt_type: OptionType::String,
+            short_name: Some('y'),
+            description: "HTTPS proxy URL".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "ftp-proxy".into(),
+            opt_type: OptionType::String,
+            short_name: Some('F'),
+            description: "FTP proxy URL".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "no-proxy".into(),
+            opt_type: OptionType::List,
+            short_name: Some('N'),
+            description: "Proxy exclusion list (comma-separated domains)".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
 
         // --- HTTP Headers & Identity ---
-        self.register(
-            OptionDef::new("user-agent", OptionType::String)
-                .short('U')
-                .default(OptionValue::Str("aria2/1.37.0-Rust".into()))
-                .desc("User-Agent header")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("referer", OptionType::String)
-                .short('R')
-                .desc("Referer header")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("header", OptionType::List)
-                .short('H')
-                .desc("Custom headers (Header:Value pairs)")
-                .category(OptionCategory::HttpFtp),
-        );
+        self.register(OptionDef {
+            name: "user-agent".into(),
+            opt_type: OptionType::String,
+            short_name: Some('U'),
+            default_value: OptionValue::Str("aria2/1.37.0-Rust".into()),
+            description: "User-Agent header".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "referer".into(),
+            opt_type: OptionType::String,
+            short_name: Some('R'),
+            description: "Referer header".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "header".into(),
+            opt_type: OptionType::List,
+            short_name: Some('H'),
+            description: "Custom headers (Header:Value pairs)".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
 
         // --- Cookies ---
-        self.register(
-            OptionDef::new("load-cookies", OptionType::Path)
-                .short('C')
-                .desc("Cookie file to load")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("save-cookies", OptionType::Path)
-                .short('V')
-                .desc("Cookie file to save")
-                .category(OptionCategory::HttpFtp),
-        );
+        self.register(OptionDef {
+            name: "load-cookies".into(),
+            opt_type: OptionType::Path,
+            short_name: Some('C'),
+            description: "Cookie file to load".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "save-cookies".into(),
+            opt_type: OptionType::Path,
+            short_name: Some('V'),
+            description: "Cookie file to save".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
 
         // --- Timeouts & Retries ---
-        self.register(
-            OptionDef::new("connect-timeout", OptionType::Integer)
-                .short('T')
-                .default(OptionValue::Int(60))
-                .range(1, 600)
-                .desc("Connect timeout in seconds")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("timeout", OptionType::Integer)
-                .short('t')
-                .default(OptionValue::Int(60))
-                .range(1, 600)
-                .desc("I/O timeout in seconds")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("max-tries", OptionType::Integer)
-                .short('m')
-                .default(OptionValue::Int(5))
-                .range(0, 100)
-                .desc("Max retry attempts")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("retry-wait", OptionType::Integer)
-                .short('w')
-                .default(OptionValue::Int(0))
-                .range(0, 3600)
-                .desc("Retry wait time in seconds")
-                .category(OptionCategory::HttpFtp),
-        );
+        self.register(OptionDef {
+            name: "connect-timeout".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('T'),
+            default_value: OptionValue::Int(60),
+            min: Some(1),
+            max: Some(600),
+            description: "Connect timeout in seconds".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "timeout".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('t'),
+            default_value: OptionValue::Int(60),
+            min: Some(1),
+            max: Some(600),
+            description: "I/O timeout in seconds".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-tries".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('m'),
+            default_value: OptionValue::Int(5),
+            min: Some(0),
+            max: Some(100),
+            description: "Max retry attempts".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "retry-wait".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('w'),
+            default_value: OptionValue::Int(0),
+            min: Some(0),
+            max: Some(3600),
+            description: "Retry wait time in seconds".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
 
         // --- Connection Management ---
-        self.register(
-            OptionDef::new("split", OptionType::Integer)
-                .short('s')
-                .default(OptionValue::Int(5))
-                .range(1, 16)
-                .desc("Connections per download")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("min-split-size", OptionType::Size)
-                .short('k')
-                .default(OptionValue::Int((20 * 1024 * 1024) as i64))
-                .desc("Min split size")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("max-connection-per-server", OptionType::Integer)
-                .short('x')
-                .default(OptionValue::Int(1))
-                .range(1, 16)
-                .desc("Max connections per server")
-                .category(OptionCategory::HttpFtp),
-        );
+        self.register(OptionDef {
+            name: "split".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('s'),
+            default_value: OptionValue::Int(5),
+            min: Some(1),
+            max: Some(16),
+            description: "Connections per download".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "min-split-size".into(),
+            opt_type: OptionType::Size,
+            short_name: Some('k'),
+            default_value: OptionValue::Int((20 * 1024 * 1024) as i64),
+            description: "Min split size".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-connection-per-server".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('x'),
+            default_value: OptionValue::Int(1),
+            min: Some(1),
+            max: Some(16),
+            description: "Max connections per server".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
 
         // --- SSL/TLS ---
-        self.register(
-            OptionDef::new("check-certificate", OptionType::Boolean)
-                .short('b')
-                .default(OptionValue::Bool(true))
-                .desc("Verify SSL certificate")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("ca-certificate", OptionType::Path)
-                .short('E')
-                .desc("CA certificate file")
-                .category(OptionCategory::HttpFtp),
-        );
+        self.register(OptionDef {
+            name: "check-certificate".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('b'),
+            default_value: OptionValue::Bool(true),
+            description: "Verify SSL certificate".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "ca-certificate".into(),
+            opt_type: OptionType::Path,
+            short_name: Some('E'),
+            description: "CA certificate file".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
 
         // --- File Handling ---
-        self.register(
-            OptionDef::new("allow-overwrite", OptionType::Boolean)
-                .short('O')
-                .default(OptionValue::Bool(false))
-                .desc("Allow overwriting existing files")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("auto-file-renaming", OptionType::Boolean)
-                .default(OptionValue::Bool(true))
-                .desc("Auto rename conflicting files")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("continue", OptionType::Boolean)
-                .short('c')
-                .default(OptionValue::Bool(true))
-                .desc("Resume partial downloads")
-                .category(OptionCategory::HttpFtp),
-        );
-        self.register(
-            OptionDef::new("remote-time", OptionType::Boolean)
-                .default(OptionValue::Bool(true))
-                .desc("Use remote file timestamp")
-                .category(OptionCategory::HttpFtp),
-        );
+        self.register(OptionDef {
+            name: "allow-overwrite".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('O'),
+            default_value: OptionValue::Bool(false),
+            description: "Allow overwriting existing files".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "auto-file-renaming".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Auto rename conflicting files".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "continue".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('c'),
+            default_value: OptionValue::Bool(true),
+            description: "Resume partial downloads".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "remote-time".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Use remote file timestamp".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
     }
 }
 
@@ -437,191 +523,248 @@ impl super::OptionRegistry {
     /// Register BitTorrent-specific options: seeding, DHT, PEX, peer management.
     pub fn register_bt_options(&mut self) {
         // --- Seeding Settings ---
-        self.register(
-            OptionDef::new("seed-time", OptionType::Float)
-                .short('G')
-                .default(OptionValue::Float(0.0))
-                .desc("Seeding time in minutes (0=infinite)")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("seed-ratio", OptionType::Float)
-                .short('g')
-                .default(OptionValue::Float(1.0))
-                .desc("Share ratio threshold")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "seed-time".into(),
+            opt_type: OptionType::Float,
+            short_name: Some('G'),
+            default_value: OptionValue::Float(0.0),
+            description: "Seeding time in minutes (0=infinite)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "seed-ratio".into(),
+            opt_type: OptionType::Float,
+            short_name: Some('g'),
+            default_value: OptionValue::Float(1.0),
+            description: "Share ratio threshold".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- Peer Management ---
-        self.register(
-            OptionDef::new("bt-max-peers", OptionType::Integer)
-                .short('B')
-                .default(OptionValue::Int(55))
-                .range(0, 512)
-                .desc("Max peers per torrent")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("bt-request-peer-speed-limit", OptionType::Size)
-                .default(OptionValue::Int((50 * 1024) as i64))
-                .desc("Min peer speed to stay connected")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("bt-max-open-files", OptionType::Integer)
-                .default(OptionValue::Int(100))
-                .range(10, 4096)
-                .desc("Max open files for BT")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "bt-max-peers".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('B'),
+            default_value: OptionValue::Int(55),
+            min: Some(0),
+            max: Some(512),
+            description: "Max peers per torrent".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-request-peer-speed-limit".into(),
+            opt_type: OptionType::Size,
+            default_value: OptionValue::Int((50 * 1024) as i64),
+            description: "Min peer speed to stay connected".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-max-open-files".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(100),
+            min: Some(10),
+            max: Some(4096),
+            description: "Max open files for BT".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- Torrent Behavior ---
-        self.register(
-            OptionDef::new("bt-seed-unverified", OptionType::Boolean)
-                .default(OptionValue::Bool(false))
-                .desc("Seed without verifying hash")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("bt-save-metadata", OptionType::Boolean)
-                .short('M')
-                .default(OptionValue::Bool(false))
-                .desc("Save metadata as .torrent file")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "bt-seed-unverified".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Seed without verifying hash".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-save-metadata".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('M'),
+            default_value: OptionValue::Bool(false),
+            description: "Save metadata as .torrent file".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- Encryption ---
-        self.register(
-            OptionDef::new("bt-force-encryption", OptionType::Boolean)
-                .short('X')
-                .default(OptionValue::Bool(false))
-                .desc("Force BT encryption")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("bt-min-crypto-level", OptionType::Enum)
-                .default(OptionValue::Str("plain".into()))
-                .desc("Min crypto level (plain/arc4)")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "bt-force-encryption".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('X'),
+            default_value: OptionValue::Bool(false),
+            description: "Force BT encryption".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-min-crypto-level".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str("plain".into()),
+            description: "Min crypto level (plain/arc4)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- DHT / LPD / PEX ---
-        self.register(
-            OptionDef::new("bt-enable-lpd", OptionType::Boolean)
-                .default(OptionValue::Bool(true))
-                .desc("Enable Local Peer Discovery")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("enable-lpd", OptionType::Boolean)
-                .default(OptionValue::Bool(true))
-                .desc("Enable Local Peer Discovery (alias for bt-enable-lpd)")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("lpd-listen-port", OptionType::Integer)
-                .default(OptionValue::Int(6771))
-                .range(1024, 65535)
-                .desc("UDP port for Local Peer Discovery")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("bt-enable-web-seed", OptionType::Boolean)
-                .default(OptionValue::Bool(true))
-                .desc("Enable web seed (HTTP/FTP seeding)")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("enable-dht", OptionType::Boolean)
-                .short('D')
-                .default(OptionValue::Bool(true))
-                .desc("Enable DHT")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("dht-listen-port", OptionType::Integer)
-                .default(OptionValue::Int(6881))
-                .range(1024, 65535)
-                .desc("DHT listen port")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("dht-entry-point", OptionType::List)
-                .desc("DHT bootstrap nodes (host:port format, comma-separated)")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("dht-file-path", OptionType::Path)
-                .desc("Path to DHT routing table file for persistence")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("dht-message-path", OptionType::Path)
-                .desc("DHT message cache path (deprecated, use dht-file-path instead)")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("enable-peer-exchange", OptionType::Boolean)
-                .default(OptionValue::Bool(true))
-                .desc("Enable PEX")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "bt-enable-lpd".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Enable Local Peer Discovery".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "enable-lpd".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Enable Local Peer Discovery (alias for bt-enable-lpd)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "lpd-listen-port".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(6771),
+            min: Some(1024),
+            max: Some(65535),
+            description: "UDP port for Local Peer Discovery".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-enable-web-seed".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Enable web seed (HTTP/FTP seeding)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "enable-dht".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('D'),
+            default_value: OptionValue::Bool(true),
+            description: "Enable DHT".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-listen-port".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(6881),
+            min: Some(1024),
+            max: Some(65535),
+            description: "DHT listen port".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-entry-point".into(),
+            opt_type: OptionType::List,
+            description: "DHT bootstrap nodes (host:port format, comma-separated)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-file-path".into(),
+            opt_type: OptionType::Path,
+            description: "Path to DHT routing table file for persistence".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-message-path".into(),
+            opt_type: OptionType::Path,
+            description: "DHT message cache path (deprecated, use dht-file-path instead)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "enable-peer-exchange".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Enable PEX".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- Torrent Handling ---
-        self.register(
-            OptionDef::new("follow-torrent", OptionType::Enum)
-                .short('M')
-                .default(OptionValue::Str("true".into()))
-                .desc("Auto-handle .torrent (true/false/mem)")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "follow-torrent".into(),
+            opt_type: OptionType::Enum,
+            short_name: Some('M'),
+            default_value: OptionValue::Str("true".into()),
+            description: "Auto-handle .torrent (true/false/mem)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- Event Hooks ---
-        self.register(
-            OptionDef::new("on-bt-download-complete", OptionType::String)
-                .desc("Command on BT download complete")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("on-bt-download-error", OptionType::String)
-                .desc("Command on BT download error")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "on-bt-download-complete".into(),
+            opt_type: OptionType::String,
+            description: "Command on BT download complete".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "on-bt-download-error".into(),
+            opt_type: OptionType::String,
+            description: "Command on BT download error".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- Listening Port ---
-        self.register(
-            OptionDef::new("listen-port", OptionType::String)
-                .short('h')
-                .default(OptionValue::Str("6881-6999".into()))
-                .desc("Listening port range")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "listen-port".into(),
+            opt_type: OptionType::String,
+            short_name: Some('h'),
+            default_value: OptionValue::Str("6881-6999".into()),
+            description: "Listening port range".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- Piece Selection Priority (G2) ---
-        self.register(
-            OptionDef::new("bt-prioritize-piece", OptionType::String)
-                .default(OptionValue::Str("rarest".into()))
-                .desc("Piece selection priority mode: 'rarest' (default), 'head' (sequential from start), 'tail' (sequential from end)")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "bt-prioritize-piece".into(),
+            opt_type: OptionType::String,
+            default_value: OptionValue::Str("rarest".into()),
+            description: "Piece selection priority mode: 'rarest' (default), 'head' (sequential from start), 'tail' (sequential from end)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- uTP (UDP Transport Protocol - BEP 29) ---
         // Note: uTP is not implemented in the original C++ aria2. This is an experimental
         // feature in aria2-rust that implements BEP 29 (http://www.bittorrent.org/beps/bep_0029.html).
         // uTP provides congestion control over UDP, making BitTorrent friendlier to network traffic.
-        self.register(
-            OptionDef::new("enable-utp", OptionType::Boolean)
-                .default(OptionValue::Bool(false))
-                .desc("Enable uTP (UDP Transport Protocol, BEP 29). Experimental feature not in original aria2. Default: false")
-                .category(OptionCategory::BitTorrent),
-        );
-        self.register(
-            OptionDef::new("utp-listen-port", OptionType::Integer)
-                .default(OptionValue::Int(0))
-                .range(0, 65535)
-                .desc("UDP port for uTP connections. 0 = auto-assign. Experimental feature not in original aria2")
-                .category(OptionCategory::BitTorrent),
-        );
+        self.register(OptionDef {
+            name: "enable-utp".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Enable uTP (UDP Transport Protocol, BEP 29). Experimental feature not in original aria2. Default: false".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "utp-listen-port".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(0),
+            min: Some(0),
+            max: Some(65535),
+            description: "UDP port for uTP connections. 0 = auto-assign. Experimental feature not in original aria2".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
     }
 }
 
@@ -632,82 +775,107 @@ impl super::OptionRegistry {
     /// Register JSON-RPC/XML-RPC server options: listening, authentication, CORS.
     pub fn register_rpc_options(&mut self) {
         // --- Server Enable / Bind ---
-        self.register(
-            OptionDef::new("enable-rpc", OptionType::Boolean)
-                .short('e')
-                .default(OptionValue::Bool(false))
-                .desc("Enable JSON-RPC/XML-RPC server")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-listen-all", OptionType::Boolean)
-                .default(OptionValue::Bool(false))
-                .desc("Listen on all network interfaces")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-listen-port", OptionType::Integer)
-                .short('r')
-                .default(OptionValue::Int(6800))
-                .range(1024, 65535)
-                .desc("RPC server port")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-listen-address", OptionType::String)
-                .default(OptionValue::Str("127.0.0.1".into()))
-                .desc("RPC server bind address")
-                .category(OptionCategory::Rpc),
-        );
+        self.register(OptionDef {
+            name: "enable-rpc".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('e'),
+            default_value: OptionValue::Bool(false),
+            description: "Enable JSON-RPC/XML-RPC server".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-listen-all".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Listen on all network interfaces".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-listen-port".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('r'),
+            default_value: OptionValue::Int(6800),
+            min: Some(1024),
+            max: Some(65535),
+            description: "RPC server port".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-listen-address".into(),
+            opt_type: OptionType::String,
+            default_value: OptionValue::Str("127.0.0.1".into()),
+            description: "RPC server bind address".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
 
         // --- Authentication ---
-        self.register(
-            OptionDef::new("rpc-secret", OptionType::String)
-                .short('I')
-                .desc("RPC secret token for authorization")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-user", OptionType::String)
-                .desc("RPC Basic Auth username")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-passwd", OptionType::String)
-                .desc("RPC Basic Auth password")
-                .category(OptionCategory::Rpc),
-        );
+        self.register(OptionDef {
+            name: "rpc-secret".into(),
+            opt_type: OptionType::String,
+            short_name: Some('I'),
+            description: "RPC secret token for authorization".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-user".into(),
+            opt_type: OptionType::String,
+            description: "RPC Basic Auth username".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-passwd".into(),
+            opt_type: OptionType::String,
+            description: "RPC Basic Auth password".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
 
         // --- CORS ---
-        self.register(
-            OptionDef::new("rpc-allow-origin", OptionType::String)
-                .desc("CORS Allow-Origin value")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-cors-domain", OptionType::String)
-                .default(OptionValue::Str("*".into()))
-                .desc("CORS allowed domains for RPC (comma-separated, * for all)")
-                .category(OptionCategory::Rpc),
-        );
+        self.register(OptionDef {
+            name: "rpc-allow-origin".into(),
+            opt_type: OptionType::String,
+            description: "CORS Allow-Origin value".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-cors-domain".into(),
+            opt_type: OptionType::String,
+            default_value: OptionValue::Str("*".into()),
+            description: "CORS allowed domains for RPC (comma-separated, * for all)".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
 
         // --- HTTPS/TLS ---
-        self.register(
-            OptionDef::new("rpc-secure", OptionType::Boolean)
-                .default(OptionValue::Bool(false))
-                .desc("Enable HTTPS for RPC server")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-certificate", OptionType::Path)
-                .desc("Path to TLS certificate file (PEM format)")
-                .category(OptionCategory::Rpc),
-        );
-        self.register(
-            OptionDef::new("rpc-private-key", OptionType::Path)
-                .desc("Path to TLS private key file (PEM format)")
-                .category(OptionCategory::Rpc),
-        );
+        self.register(OptionDef {
+            name: "rpc-secure".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Enable HTTPS for RPC server".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-certificate".into(),
+            opt_type: OptionType::Path,
+            description: "Path to TLS certificate file (PEM format)".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "rpc-private-key".into(),
+            opt_type: OptionType::Path,
+            description: "Path to TLS private key file (PEM format)".into(),
+            category: OptionCategory::Rpc,
+            ..Default::default()
+        });
     }
 }
 
@@ -718,98 +886,125 @@ impl super::OptionRegistry {
     /// Register advanced/performance options: bandwidth limits, disk cache, file allocation.
     pub fn register_advanced_options(&mut self) {
         // --- File Allocation ---
-        self.register(
-            OptionDef::new("file-allocation", OptionType::Enum)
-                .short('f')
-                .default(OptionValue::Str("prealloc".into()))
-                .desc("File allocation method (none/prealloc/falloc/trunc)")
-                .category(OptionCategory::Advanced),
-        );
+        self.register(OptionDef {
+            name: "file-allocation".into(),
+            opt_type: OptionType::Enum,
+            short_name: Some('f'),
+            default_value: OptionValue::Str("prealloc".into()),
+            description: "File allocation method (none/prealloc/falloc/trunc)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
 
         // --- Concurrency ---
-        self.register(
-            OptionDef::new("max-concurrent-downloads", OptionType::Integer)
-                .short('j')
-                .default(OptionValue::Int(5))
-                .range(1, 256)
-                .desc("Max concurrent downloads")
-                .category(OptionCategory::Advanced),
-        );
+        self.register(OptionDef {
+            name: "max-concurrent-downloads".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('j'),
+            default_value: OptionValue::Int(5),
+            min: Some(1),
+            max: Some(256),
+            description: "Max concurrent downloads".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
 
         // --- Bandwidth Limits ---
-        self.register(
-            OptionDef::new("max-overall-download-limit", OptionType::Size)
-                .short('A')
-                .default(OptionValue::Int(0))
-                .desc("Overall download speed limit (0=unlimited)")
-                .category(OptionCategory::Advanced),
-        );
-        self.register(
-            OptionDef::new("max-download-limit", OptionType::Size)
-                .short('Q')
-                .default(OptionValue::Int(0))
-                .desc("Per-task download limit (0=unlimited)")
-                .category(OptionCategory::Advanced),
-        );
-        self.register(
-            OptionDef::new("max-overall-upload-limit", OptionType::Size)
-                .short('W')
-                .default(OptionValue::Int(0))
-                .desc("Overall upload speed limit (0=unlimited)")
-                .category(OptionCategory::Advanced),
-        );
-        self.register(
-            OptionDef::new("max-upload-limit", OptionType::Size)
-                .short('K')
-                .default(OptionValue::Int(0))
-                .desc("Per-task upload limit (0=unlimited)")
-                .category(OptionCategory::Advanced),
-        );
+        self.register(OptionDef {
+            name: "max-overall-download-limit".into(),
+            opt_type: OptionType::Size,
+            short_name: Some('A'),
+            default_value: OptionValue::Int(0),
+            description: "Overall download speed limit (0=unlimited)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-download-limit".into(),
+            opt_type: OptionType::Size,
+            short_name: Some('Q'),
+            default_value: OptionValue::Int(0),
+            description: "Per-task download limit (0=unlimited)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-overall-upload-limit".into(),
+            opt_type: OptionType::Size,
+            short_name: Some('W'),
+            default_value: OptionValue::Int(0),
+            description: "Overall upload speed limit (0=unlimited)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-upload-limit".into(),
+            opt_type: OptionType::Size,
+            short_name: Some('K'),
+            default_value: OptionValue::Int(0),
+            description: "Per-task upload limit (0=unlimited)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
 
         // --- BT Piece & Disk ---
-        self.register(
-            OptionDef::new("piece-length", OptionType::Size)
-                .short('Y')
-                .default(OptionValue::Int((1024 * 1024) as i64))
-                .desc("BT piece length")
-                .category(OptionCategory::Advanced),
-        );
-        self.register(
-            OptionDef::new("disk-cache", OptionType::Size)
-                .short('Z')
-                .default(OptionValue::Int(0))
-                .desc("Disk cache size (0=disabled)")
-                .category(OptionCategory::Advanced),
-        );
+        self.register(OptionDef {
+            name: "piece-length".into(),
+            opt_type: OptionType::Size,
+            short_name: Some('Y'),
+            default_value: OptionValue::Int((1024 * 1024) as i64),
+            description: "BT piece length".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "disk-cache".into(),
+            opt_type: OptionType::Size,
+            short_name: Some('Z'),
+            default_value: OptionValue::Int(0),
+            description: "Disk cache size (0=disabled)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
 
         // --- Auto-stop & Save ---
-        self.register(
-            OptionDef::new("stop", OptionType::Integer)
-                .short('z')
-                .default(OptionValue::Int(0))
-                .range(0, 86400)
-                .desc("Stop after N seconds of completion (0=never)")
-                .category(OptionCategory::Advanced),
-        );
-        self.register(
-            OptionDef::new("force-save", OptionType::Boolean)
-                .default(OptionValue::Bool(false))
-                .desc("Force save state on every change")
-                .category(OptionCategory::Advanced),
-        );
+        self.register(OptionDef {
+            name: "stop".into(),
+            opt_type: OptionType::Integer,
+            short_name: Some('z'),
+            default_value: OptionValue::Int(0),
+            min: Some(0),
+            max: Some(86400),
+            description: "Stop after N seconds of completion (0=never)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "force-save".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Force save state on every change".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
 
         // --- Server Statistics Persistence ---
-        self.register(
-            OptionDef::new("server-stat-file", OptionType::Path)
-                .desc("Path to save/load server performance statistics")
-                .category(OptionCategory::Advanced),
-        );
-        self.register(
-            OptionDef::new("save-server-stat-interval", OptionType::Integer)
-                .default(OptionValue::Int(0))
-                .range(0, 86400)
-                .desc("Auto-save interval for server stats in seconds (0 = disabled)")
-                .category(OptionCategory::Advanced),
-        );
+        self.register(OptionDef {
+            name: "server-stat-file".into(),
+            opt_type: OptionType::Path,
+            description: "Path to save/load server performance statistics".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "save-server-stat-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(0),
+            min: Some(0),
+            max: Some(86400),
+            description: "Auto-save interval for server stats in seconds (0 = disabled)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
     }
 }

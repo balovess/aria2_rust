@@ -31,7 +31,7 @@ fn bench_bitfield_set_unset(c: &mut Criterion) {
             let mut bf = Bitfield::new(100000);
             for i in 0..10000usize {
                 let _ = bf.set(i);
-                let _ = bf.unset(i);
+                let _ = bf.clear(i);
             }
             black_box(bf.len());
         });

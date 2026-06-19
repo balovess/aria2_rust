@@ -8,17 +8,19 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use crate::constants;
+
 /// EMA smoothing factor (alpha).
 ///
 /// Controls responsiveness vs. smoothness of speed estimates.
 /// 0.5 provides balanced behavior: responsive to changes while filtering noise.
-const EMA_ALPHA: f64 = 0.5;
+const EMA_ALPHA: f64 = constants::PEER_STATS_EMA_ALPHA;
 
 /// Threshold for banning peers that send too many invalid pieces.
 ///
 /// When a peer's `bad_data_count` reaches this value, they are permanently
 /// banned for the remainder of the session.
-pub const BAD_DATA_THRESHOLD: u32 = 3;
+pub const BAD_DATA_THRESHOLD: u32 = constants::PEER_STATS_BAD_DATA_THRESHOLD as u32;
 
 /// Per-peer statistics for BitTorrent choking algorithm decisions.
 ///

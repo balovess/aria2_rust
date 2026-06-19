@@ -66,32 +66,6 @@ impl HttpHeaderProcessor {
         String::from_utf8_lossy(&bytes).to_string()
     }
 
-    #[allow(dead_code)]
-    fn decode_percent(input: &str) -> String {
-        let mut result = String::with_capacity(input.len());
-        let mut bytes = input.bytes().peekable();
-
-        while let Some(b) = bytes.next() {
-            if b == b'%' {
-                let hex: Vec<u8> = bytes.by_ref().take(2).collect();
-                if hex.len() == 2 {
-                    let hex_str = unsafe { std::str::from_utf8_unchecked(&hex) };
-                    if let Ok(byte) = u8::from_str_radix(hex_str, 16) {
-                        result.push(byte as char);
-                        continue;
-                    }
-                }
-                result.push('%');
-                for h in hex {
-                    result.push(h as char);
-                }
-            } else {
-                result.push(b as char);
-            }
-        }
-        result
-    }
-
     pub fn sanitize_filename(filename: &str) -> String {
         let forbidden = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
         let mut result = String::with_capacity(filename.len());

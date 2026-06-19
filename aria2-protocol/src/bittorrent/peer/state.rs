@@ -104,13 +104,7 @@ impl PeerState {
 pub struct ChokeAlgorithm;
 
 impl ChokeAlgorithm {
-    #[allow(dead_code)]
-    const OPTIMISTIC_UNCHOKE_INTERVAL_SECS: u64 = 30;
-    #[allow(dead_code)]
-    const CHOKE_INTERVAL_SECS: u64 = 10;
     const MAX_UNCHOKED_LEECHERS: usize = 4;
-    #[allow(dead_code)]
-    const SPEED_CALC_WINDOW_SECS: f64 = 20.0;
 
     pub fn evaluate_choke(peers: &mut [&mut PeerState], is_seeder: bool) -> Vec<usize> {
         let mut unchoke_indices: Vec<usize> = (0..peers.len()).collect();

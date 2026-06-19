@@ -62,27 +62,27 @@ pub enum EventType {
 impl EventType {
     pub fn method_name(&self) -> &'static str {
         match self {
-            Self::DownloadStart => "aria2.onDownloadStart",
-            Self::DownloadPause => "aria2.onDownloadPause",
-            Self::DownloadStop => "aria2.onDownloadStop",
-            Self::DownloadComplete => "aria2.onDownloadComplete",
-            Self::DownloadError => "aria2.onDownloadError",
-            Self::BtDownloadComplete => "aria2.onBtDownloadComplete",
-            Self::BtDownloadError => "aria2.onBtDownloadError",
-            Self::DownloadResume => "aria2.onDownloadResume",
+            Self::DownloadStart => crate::constants::WS_EVENT_DOWNLOAD_START,
+            Self::DownloadPause => crate::constants::WS_EVENT_DOWNLOAD_PAUSE,
+            Self::DownloadStop => crate::constants::WS_EVENT_DOWNLOAD_STOP,
+            Self::DownloadComplete => crate::constants::WS_EVENT_DOWNLOAD_COMPLETE,
+            Self::DownloadError => crate::constants::WS_EVENT_DOWNLOAD_ERROR,
+            Self::BtDownloadComplete => crate::constants::WS_EVENT_BT_DOWNLOAD_COMPLETE,
+            Self::BtDownloadError => crate::constants::WS_EVENT_BT_DOWNLOAD_ERROR,
+            Self::DownloadResume => crate::constants::WS_EVENT_DOWNLOAD_RESUME,
         }
     }
 
     pub fn from_method(method: &str) -> Option<Self> {
         match method {
-            "aria2.onDownloadStart" => Some(Self::DownloadStart),
-            "aria2.onDownloadPause" => Some(Self::DownloadPause),
-            "aria2.onDownloadStop" => Some(Self::DownloadStop),
-            "aria2.onDownloadComplete" => Some(Self::DownloadComplete),
-            "aria2.onDownloadError" => Some(Self::DownloadError),
-            "aria2.onBtDownloadComplete" => Some(Self::BtDownloadComplete),
-            "aria2.onBtDownloadError" => Some(Self::BtDownloadError),
-            "aria2.onDownloadResume" => Some(Self::DownloadResume),
+            crate::constants::WS_EVENT_DOWNLOAD_START => Some(Self::DownloadStart),
+            crate::constants::WS_EVENT_DOWNLOAD_PAUSE => Some(Self::DownloadPause),
+            crate::constants::WS_EVENT_DOWNLOAD_STOP => Some(Self::DownloadStop),
+            crate::constants::WS_EVENT_DOWNLOAD_COMPLETE => Some(Self::DownloadComplete),
+            crate::constants::WS_EVENT_DOWNLOAD_ERROR => Some(Self::DownloadError),
+            crate::constants::WS_EVENT_BT_DOWNLOAD_COMPLETE => Some(Self::BtDownloadComplete),
+            crate::constants::WS_EVENT_BT_DOWNLOAD_ERROR => Some(Self::BtDownloadError),
+            crate::constants::WS_EVENT_DOWNLOAD_RESUME => Some(Self::DownloadResume),
             _ => None,
         }
     }
@@ -206,9 +206,9 @@ impl DownloadEvent {
 
 #[derive(Clone)]
 struct Subscriber {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Subscriber ID for debugging and connection management
     id: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Event filter; stored for per-subscriber event filtering
     filter: Option<Vec<EventType>>,
 }
 

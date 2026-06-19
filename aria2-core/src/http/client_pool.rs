@@ -12,13 +12,13 @@ use std::time::Duration;
 /// Global HTTP client instance for connection reuse.
 static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
     let client = Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(120))
-        .user_agent("aria2-rust/1.0")
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .pool_max_idle_per_host(16) // Increased from 8 for better concurrency
-        .pool_idle_timeout(Some(Duration::from_secs(300))) // Increased from 90s
-        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .connect_timeout(Duration::from_secs(crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(crate::constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS))
+        .user_agent(crate::constants::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(crate::constants::HTTP_DEFAULT_MAX_REDIRECTS))
+        .pool_max_idle_per_host(crate::constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(Some(Duration::from_secs(crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS)))
+        .tcp_keepalive(Some(Duration::from_secs(crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS)))
         .build()
         .expect("Failed to create global HTTP client");
 
@@ -46,11 +46,11 @@ pub fn create_custom_client(
     let client = Client::builder()
         .connect_timeout(connect_timeout)
         .timeout(timeout)
-        .user_agent("aria2-rust/1.0")
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent(crate::constants::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(crate::constants::HTTP_DEFAULT_MAX_REDIRECTS))
         .pool_max_idle_per_host(pool_max_idle_per_host)
-        .pool_idle_timeout(Some(Duration::from_secs(300)))
-        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .pool_idle_timeout(Some(Duration::from_secs(crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS)))
+        .tcp_keepalive(Some(Duration::from_secs(crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS)))
         .build()
         .expect("Failed to create custom HTTP client");
 

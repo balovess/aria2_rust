@@ -35,11 +35,11 @@ impl App {
 
         let session_path = PathBuf::from(&input_file);
         if !session_path.exists() {
-            info!("会话文件不存在，跳过恢复: {}", input_file);
+            info!("Session file does not exist, skipping restore: {}", input_file);
             return Ok(0);
         }
 
-        info!("正在从会话文件恢复下载任务: {}", input_file);
+        info!("Restoring download tasks from session file: {}", input_file);
 
         let mgr = ActiveSessionManager::new(
             session_path.clone(),
@@ -49,13 +49,13 @@ impl App {
         let entries = match mgr.load_session().await {
             Ok(entries) => entries,
             Err(e) => {
-                warn!("加载会话文件失败: {}", e);
+                warn!("Failed to load session file: {}", e);
                 return Err(e);
             }
         };
 
         if entries.is_empty() {
-            info!("会话文件为空或无可恢复条目");
+            info!("Session file is empty or has no recoverable entries");
             return Ok(0);
         }
 
@@ -64,13 +64,13 @@ impl App {
         for entry in &entries {
             // Skip completed entries
             if entry.status == "complete" {
-                debug!("跳过已完成条目: GID={:x}", entry.gid);
+                debug!("Skipping completed entry: GID={:x}", entry.gid);
                 continue;
             }
 
             // Skip entries without progress info
             if entry.completed_length == 0 && entry.total_length == 0 {
-                debug!("跳过无进度条目: GID={:x}, URIs={:?}", entry.gid, entry.uris);
+                debug!("Skipping entry with no progress: GID={:x}, URIs={:?}", entry.gid, entry.uris);
                 continue;
             }
 
@@ -78,7 +78,7 @@ impl App {
             let opts = Self::map_entry_to_download_options(&entry.options);
 
             info!(
-                "恢复下载任务: GID={:x}, URIs={:?}, 进度={}/{}",
+                "Restoring download task: GID={:x}, URIs={:?}, progress={}/{}",
                 entry.gid, entry.uris, entry.completed_length, entry.total_length
             );
 
@@ -88,7 +88,7 @@ impl App {
                 match man.add_group(entry.uris.clone(), opts).await {
                     Ok(gid) => {
                         restored_count += 1;
-                        info!("成功恢复任务 #{}", gid.value());
+                        info!("Successfully restored task #{}", gid.value());
 
                         // Store BT bitfield if present
                         if entry.bitfield.is_some()
@@ -97,21 +97,21 @@ impl App {
                             let group = group_lock.write().await;
                             *group.bt_bitfield.write().await = entry.bitfield.clone();
                             debug!(
-                                "已设置 BT bitfield for GID={}, bits={}",
+                                "Set BT bitfield for GID={}, bits={}",
                                 gid.value(),
                                 entry.bitfield.as_ref().map(|b| b.len()).unwrap_or(0)
                             );
                         }
                     }
                     Err(e) => {
-                        warn!("恢复任务失败 (GID={:x}): {}", entry.gid, e);
+                        warn!("Failed to restore task (GID={:x}): {}", entry.gid, e);
                     }
                 }
             }
         }
 
         info!(
-            "会话恢复完成: 共 {} 个条目, 恢复 {} 个任务",
+            "Session restore complete: {} entries total, {} tasks restored",
             entries.len(),
             restored_count
         );
@@ -130,19 +130,19 @@ impl App {
         let save_path = match self.get_opt_str("save-session").await {
             Some(path) => path,
             None => {
-                debug!("未配置 save-session，跳过关闭保存");
+                debug!("save-session not configured, skipping shutdown save");
                 return Ok(None);
             }
         };
 
-        info!("正在保存会话到: {}", save_path);
+        info!("Saving session to: {}", save_path);
 
         let session_path = PathBuf::from(&save_path);
         let interval = self
             .get_opt_i64("save-session-interval")
             .await
-            .unwrap_or(60)
-            .max(1); // At least 1 second
+            .unwrap_or(crate::constants::DEFAULT_SAVE_SESSION_INTERVAL_SECS as i64)
+            .max(crate::constants::MIN_SESSION_INTERVAL_SECS as i64); // At least 1 second
 
         let mgr = ActiveSessionManager::new(session_path, Duration::from_secs(interval as u64));
 
@@ -151,17 +151,17 @@ impl App {
         let groups = man.list_groups().await;
 
         if groups.is_empty() {
-            info!("没有活动下载任务，不保存会话");
+            info!("No active download tasks, skipping session save");
             return Ok(Some(0));
         }
 
         match mgr.save_session(&groups).await {
             Ok(n) => {
-                info!("成功保存 {} 个条目到 {}", n, save_path);
+                info!("Successfully saved {} entries to {}", n, save_path);
                 Ok(Some(n))
             }
             Err(e) => {
-                warn!("保存会话失败: {}", e);
+                warn!("Failed to save session: {}", e);
                 Err(e)
             }
         }
@@ -226,19 +226,19 @@ impl App {
             bt_piece_selection_strategy: options
                 .get("bt-piece-selection-strategy")
                 .cloned()
-                .unwrap_or_else(|| "rarest-first".to_string()),
+                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_STRATEGY.to_string()),
             bt_endgame_threshold: options
                 .get("bt-endgame-threshold")
                 .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(20),
+                .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
             max_retries: options
                 .get("max-retries")
                 .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(3),
+                .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
             retry_wait: options
                 .get("retry-wait")
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1),
+                .unwrap_or(crate::constants::DEFAULT_RETRY_WAIT_SECS),
             http_proxy: options.get("http-proxy").cloned(),
             all_proxy: options.get("all-proxy").cloned(),
             https_proxy: options.get("https-proxy").cloned(),
@@ -258,7 +258,7 @@ impl App {
             bt_prioritize_piece: options
                 .get("bt-prioritize-piece")
                 .cloned()
-                .unwrap_or_else(|| "rarest".to_string()),
+                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_PRIORITY.to_string()),
             // uTP (UDP Transport Protocol - BEP 29)
             enable_utp: options
                 .get("enable-utp")

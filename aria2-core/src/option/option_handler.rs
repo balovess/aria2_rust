@@ -22,103 +22,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::config::option::OptionValue;
 use crate::request::request_group::DownloadOptions;
 
-// ---------------------------------------------------------------------------
-// OptionValue enum -- runtime value container for all supported types
-// ---------------------------------------------------------------------------
-
-/// Runtime value of an option, supporting all aria2 option types.
-///
-/// Provides typed accessors (`as_bool`, `as_usize`, `as_i64`, `as_f64`,
-/// `as_str`, `as_str_vec`) that return the inner value or a sensible default.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum OptionValue {
-    /// Boolean flag (true/false).
-    Bool(bool),
-    /// Unsigned integer (used for sizes, counts, ports).
-    Usize(usize),
-    /// Signed 64-bit integer.
-    I64(i64),
-    /// Floating-point number (e.g., seed-ratio).
-    F64(f64),
-    /// String value (paths, URLs, names).
-    Str(String),
-    /// List of strings (headers, headers, etc.).
-    StrVec(Vec<String>),
-    /// Absent / unset value.
-    #[default]
-    None,
-}
-
-impl std::fmt::Display for OptionValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bool(b) => write!(f, "{}", b),
-            Self::Usize(n) => write!(f, "{}", n),
-            Self::I64(n) => write!(f, "{}", n),
-            Self::F64(v) => write!(f, "{}", v),
-            Self::Str(s) => write!(f, "{}", s),
-            Self::StrVec(items) => write!(f, "{}", items.join(",")),
-            Self::None => write!(f, ""),
-        }
-    }
-}
-
-impl OptionValue {
-    /// Return the inner boolean value, or `false` if this is not a `Bool`.
-    pub fn as_bool(&self) -> bool {
-        match self {
-            Self::Bool(v) => *v,
-            _ => false,
-        }
-    }
-
-    /// Return the inner usize value, or `0` if this is not a `Usize`.
-    pub fn as_usize(&self) -> usize {
-        match self {
-            Self::Usize(v) => *v,
-            _ => 0,
-        }
-    }
-
-    /// Return the inner i64 value, or `0` if this is not an `I64`.
-    pub fn as_i64(&self) -> i64 {
-        match self {
-            Self::I64(v) => *v,
-            _ => 0,
-        }
-    }
-
-    /// Return the inner f64 value, or `0.0` if this is not an `F64`.
-    pub fn as_f64(&self) -> f64 {
-        match self {
-            Self::F64(v) => *v,
-            _ => 0.0,
-        }
-    }
-
-    /// Return a reference to the inner string, or `""` if this is not a `Str`.
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Str(s) => s.as_str(),
-            _ => "",
-        }
-    }
-
-    /// Return a reference to the inner string vector, or an empty slice.
-    pub fn as_str_vec(&self) -> &[String] {
-        match self {
-            Self::StrVec(v) => v.as_slice(),
-            _ => &[],
-        }
-    }
-
-    /// Check whether this value is `None`.
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
-    }
-}
+// OptionValue is now defined in crate::config::option and re-exported
+// from crate::option for backward compatibility.
 
 // ---------------------------------------------------------------------------
 // Built-in defaults (C++ aria2 compatible)
@@ -152,7 +60,7 @@ fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
         ("bt-max-peers", OptionValue::Usize(128)),
         ("bt-request-peer-speed-limit", OptionValue::Usize(0)),
         ("seed-time", OptionValue::Usize(0)),
-        ("seed-ratio", OptionValue::F64(0.0)),
+        ("seed-ratio", OptionValue::Float(0.0)),
         ("rpc-listen-port", OptionValue::Usize(6800)),
         ("rpc-secret", OptionValue::Str(String::new())),
         ("quiet", OptionValue::Bool(false)),
@@ -322,9 +230,9 @@ impl OptionHandler {
     ///
     /// Detection rules:
     /// - `"true"` / `"false"` → [`OptionValue::Bool`]
-    /// - Numeric string without `.` → [`OptionValue::Usize`] (or [`OptionValue::I64`] if negative)
-    /// - Numeric string with `.` → [`OptionValue::F64`]
-    /// - `[...]` bracket notation → [`OptionValue::StrVec`]
+    /// - Numeric string without `.` → [`OptionValue::Usize`] (or [`OptionValue::Int`] if negative)
+    /// - Numeric string with `.` → [`OptionValue::Float`]
+    /// - `[...]` bracket notation → [`OptionValue::List`]
     /// - Quoted string → [`OptionValue::Str`] (quotes stripped)
     /// - Anything else → [`OptionValue::Str`]
     fn detect_value_type(value: &str) -> Option<OptionValue> {
@@ -362,7 +270,7 @@ impl OptionHandler {
                 })
                 .filter(|s| !s.is_empty())
                 .collect();
-            return Some(OptionValue::StrVec(items));
+            return Some(OptionValue::List(items));
         }
 
         // Quoted string: "value" or 'value'
@@ -376,7 +284,7 @@ impl OptionHandler {
         if let Some(neg) = trimmed.strip_prefix('-')
             && neg.parse::<i64>().is_ok()
         {
-            return Some(OptionValue::I64(-neg.parse::<i64>().unwrap()));
+            return Some(OptionValue::Int(-neg.parse::<i64>().unwrap()));
         }
 
         // Unsigned integer
@@ -386,7 +294,7 @@ impl OptionHandler {
 
         // Float
         if trimmed.parse::<f64>().is_ok() {
-            return Some(OptionValue::F64(trimmed.parse::<f64>().unwrap()));
+            return Some(OptionValue::Float(trimmed.parse::<f64>().unwrap()));
         }
 
         // Default: plain string
@@ -492,8 +400,7 @@ impl OptionHandler {
             if v > 0 { Some(v as u64) } else { None }
         };
         let get_str = |key: &str| -> Option<String> {
-            let v = self.get(key).as_str().to_string();
-            if v.is_empty() { None } else { Some(v) }
+            self.get(key).as_str().map(|s| s.to_string()).filter(|s| !s.is_empty())
         };
 
         DownloadOptions {
@@ -505,28 +412,29 @@ impl OptionHandler {
             out: get_str("out"),
             seed_time: get_u64("seed-time"),
             seed_ratio: {
-                let r = self.get("seed-ratio").as_f64();
+                let r = self.get("seed-ratio").as_f64().unwrap_or(0.0);
                 if r > 0.0 { Some(r) } else { None }
             },
             checksum: None,
             cookie_file: get_str("cookie-file"),
             cookies: get_str("cookies"),
-            bt_force_encrypt: self.get("bt-force-encrypt").as_bool(),
-            bt_require_crypto: self.get("bt-require-crypto").as_bool(),
-            enable_dht: self.get("enable-dht").as_bool(),
+            bt_force_encrypt: self.get("bt-force-encrypt").as_bool().unwrap_or(false),
+            bt_require_crypto: self.get("bt-require-crypto").as_bool().unwrap_or(false),
+            enable_dht: self.get("enable-dht").as_bool().unwrap_or(false),
             dht_listen_port: get_usize("dht-listen-port"),
             dht_entry_point: {
-                let v = self.get("dht-entry-point").as_str();
+                let v = self.get("dht-entry-point").as_str().unwrap_or("");
                 if v.is_empty() {
                     None
                 } else {
                     Some(v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
                 }
             },
-            enable_public_trackers: self.get("enable-public-trackers").as_bool(),
+            enable_public_trackers: self.get("enable-public-trackers").as_bool().unwrap_or(false),
             bt_piece_selection_strategy: self
                 .get("bt-piece-selection-strategy")
                 .as_str()
+                .unwrap_or("")
                 .to_string(),
             bt_endgame_threshold: self.get("bt-endgame-threshold").as_usize() as u32,
             max_retries: self.get("max-tries").as_usize() as u32,
@@ -549,8 +457,8 @@ impl OptionHandler {
                 let v = self.get("bt-snubbed-timeout").as_usize();
                 if v > 0 { Some(v as u64) } else { None }
             },
-            bt_prioritize_piece: self.get("bt-prioritize-piece").as_str().to_string(),
-            enable_utp: self.get("enable-utp").as_bool(),
+            bt_prioritize_piece: self.get("bt-prioritize-piece").as_str().unwrap_or("").to_string(),
+            enable_utp: self.get("enable-utp").as_bool().unwrap_or(false),
             utp_listen_port: get_usize("utp-listen-port"),
         }
     }
@@ -609,16 +517,16 @@ mod tests {
         assert!(handler.default_count() > 0);
 
         // Verify specific known defaults
-        assert_eq!(handler.get("dir").as_str(), ".");
+        assert_eq!(handler.get("dir").as_str().unwrap_or(""), ".");
         assert_eq!(handler.get("split").as_usize(), 5);
         assert_eq!(handler.get("max-concurrent-downloads").as_usize(), 5);
         assert_eq!(handler.get("max-connection-per-server").as_usize(), 16);
         assert_eq!(handler.get("min-split-size").as_usize(), 1_048_576);
-        assert!(handler.get("continue").as_bool());
-        assert!(!handler.get("quiet").as_bool());
-        assert_eq!(handler.get("seed-ratio").as_f64(), 0.0);
+        assert!(handler.get("continue").as_bool().unwrap_or(false));
+        assert!(!handler.get("quiet").as_bool().unwrap_or(false));
+        assert_eq!(handler.get("seed-ratio").as_f64().unwrap_or(0.0), 0.0);
         assert_eq!(handler.get("rpc-listen-port").as_usize(), 6800);
-        assert_eq!(handler.get("console-log-level").as_str(), "notice");
+        assert_eq!(handler.get("console-log-level").as_str().unwrap_or(""), "notice");
     }
 
     #[test]
@@ -627,20 +535,20 @@ mod tests {
 
         // Set and retrieve various types
         handler.set("dir", OptionValue::Str("/tmp/downloads".into()));
-        assert_eq!(handler.get("dir").as_str(), "/tmp/downloads");
+        assert_eq!(handler.get("dir").as_str().unwrap_or(""), "/tmp/downloads");
 
         handler.set("split", OptionValue::Usize(16));
         assert_eq!(handler.get("split").as_usize(), 16);
 
-        handler.set("seed-ratio", OptionValue::F64(2.5));
-        assert!((handler.get("seed-ratio").as_f64() - 2.5).abs() < f64::EPSILON);
+        handler.set("seed-ratio", OptionValue::Float(2.5));
+        assert!((handler.get("seed-ratio").as_f64().unwrap_or(0.0) - 2.5).abs() < f64::EPSILON);
 
         handler.set("quiet", OptionValue::Bool(true));
-        assert!(handler.get("quiet").as_bool());
+        assert!(handler.get("quiet").as_bool().unwrap_or(false));
 
         handler.set(
             "header",
-            OptionValue::StrVec(vec!["X-Custom: foo".into(), "X-Bar: baz".into()]),
+            OptionValue::List(vec!["X-Custom: foo".into(), "X-Bar: baz".into()]),
         );
         assert_eq!(handler.get("header").as_str_vec().len(), 2);
 
@@ -688,12 +596,12 @@ allow-overwrite=false
         );
 
         // Verify loaded values override defaults
-        assert_eq!(handler.get("dir").as_str(), "/home/user/downloads");
+        assert_eq!(handler.get("dir").as_str().unwrap_or(""), "/home/user/downloads");
         assert_eq!(handler.get("split").as_usize(), 16);
         assert_eq!(handler.get("max-connection-per-server").as_usize(), 8);
-        assert!(handler.get("quiet").as_bool());
-        assert!((handler.get("seed-ratio").as_f64() - 1.5).abs() < f64::EPSILON);
-        assert!(!handler.get("allow-overwrite").as_bool());
+        assert!(handler.get("quiet").as_bool().unwrap_or(false));
+        assert!((handler.get("seed-ratio").as_f64().unwrap_or(0.0) - 1.5).abs() < f64::EPSILON);
+        assert!(!handler.get("allow-overwrite").as_bool().unwrap_or(true));
 
         // Verify list parsing
         let list_val = handler.get("custom-list");
@@ -701,9 +609,9 @@ allow-overwrite=false
         assert_eq!(list_val.as_str_vec()[0], "header1");
 
         // Verify auto-detected types
-        assert!(handler.get("bool-flag").as_bool()); // yes -> true
+        assert!(handler.get("bool-flag").as_bool().unwrap_or(false)); // yes -> true
         assert_eq!(handler.get("number-key").as_usize(), 42);
-        let float_val = handler.get("float-key").as_f64();
+        let float_val = handler.get("float-key").as_f64().unwrap_or(0.0);
         assert!((float_val - 3.14).abs() < f64::EPSILON);
 
         // Defaults should still be intact for unmentioned keys
@@ -734,9 +642,9 @@ quiet=false
             .expect("Should load config");
 
         // Verify config values loaded
-        assert_eq!(handler.get("dir").as_str(), "/config/dir");
+        assert_eq!(handler.get("dir").as_str().unwrap_or(""), "/config/dir");
         assert_eq!(handler.get("split").as_usize(), 4);
-        assert!(!handler.get("quiet").as_bool());
+        assert!(!handler.get("quiet").as_bool().unwrap_or(false));
 
         // Now apply CLI args (should override config)
         let cli_args: Vec<String> = vec![
@@ -750,12 +658,12 @@ quiet=false
         handler.apply_args(&cli_args);
 
         // CLI args should win over config
-        assert_eq!(handler.get("dir").as_str(), "/cli/dir");
+        assert_eq!(handler.get("dir").as_str().unwrap_or(""), "/cli/dir");
         assert_eq!(handler.get("split").as_usize(), 12);
-        assert!(handler.get("quiet").as_bool()); // CLI flag overrides config
+        assert!(handler.get("quiet").as_bool().unwrap_or(false)); // CLI flag overrides config
         assert_eq!(handler.get("max-connection-per-server").as_usize(), 8);
-        assert!((handler.get("seed-ratio").as_f64() - 2.0).abs() < f64::EPSILON);
-        assert!(!handler.get("continue").as_bool()); // --no-continue
+        assert!((handler.get("seed-ratio").as_f64().unwrap_or(0.0) - 2.0).abs() < f64::EPSILON);
+        assert!(!handler.get("continue").as_bool().unwrap_or(true)); // --no-continue
 
         // Cleanup
         let _ = std::fs::remove_file(&config_path);
@@ -773,7 +681,7 @@ quiet=false
         handler.set("dir", OptionValue::Str("/data".to_string()));
         handler.set("out", OptionValue::Str("output.bin".to_string()));
         handler.set("seed-time", OptionValue::Usize(300));
-        handler.set("seed-ratio", OptionValue::F64(2.0));
+        handler.set("seed-ratio", OptionValue::Float(2.0));
 
         let opts = handler.to_download_options();
 
@@ -827,11 +735,12 @@ quiet=false
         );
         assert_eq!(
             OptionHandler::detect_value_type("-10"),
-            Some(OptionValue::I64(-10))
+            Some(OptionValue::Int(-10))
         );
         let detected = OptionHandler::detect_value_type("3.14159")
             .unwrap()
-            .as_f64();
+            .as_f64()
+            .unwrap_or(0.0);
         assert!((detected - 3.14159).abs() < 0.001); // use full precision to avoid lint
         assert_eq!(
             OptionHandler::detect_value_type("\"quoted string\""),
@@ -839,7 +748,7 @@ quiet=false
         );
         assert_eq!(
             OptionHandler::detect_value_type("['a','b','c']"),
-            Some(OptionValue::StrVec(vec![
+            Some(OptionValue::List(vec![
                 "a".into(),
                 "b".into(),
                 "c".into()
@@ -859,17 +768,17 @@ quiet=false
     fn test_option_value_display() {
         assert_eq!(OptionValue::Bool(true).to_string(), "true");
         assert_eq!(OptionValue::Usize(42).to_string(), "42");
-        assert_eq!(OptionValue::I64(-10).to_string(), "-10");
+        assert_eq!(OptionValue::Int(-10).to_string(), "-10");
         assert_eq!(
             format!("{:.2}", {
                 #[allow(clippy::approx_constant)]
-                OptionValue::F64(3.14).to_string().parse::<f64>().unwrap()
+                OptionValue::Float(3.14).to_string().parse::<f64>().unwrap()
             }),
             "3.14"
         ); // approximate
         assert_eq!(OptionValue::Str("hello".to_string()).to_string(), "hello");
         assert_eq!(
-            OptionValue::StrVec(vec!["a".into(), "b".into()]).to_string(),
+            OptionValue::List(vec!["a".into(), "b".into()]).to_string(),
             "a,b"
         );
         assert_eq!(OptionValue::None.to_string(), "");
@@ -885,7 +794,7 @@ quiet=false
         assert!(map.contains_key("dir"));
         assert!(map.contains_key("split"));
         assert!(map.contains_key("custom-key"));
-        assert_eq!(map.get("custom-key").unwrap().as_str(), "custom-value");
+        assert_eq!(map.get("custom-key").unwrap().as_str().unwrap_or(""), "custom-value");
         // Map size >= defaults count
         assert!(map.len() >= built_in_defaults().len());
     }

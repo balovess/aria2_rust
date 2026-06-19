@@ -20,8 +20,10 @@
 
 use tracing::{debug, info, warn};
 
+use crate::constants;
+
 /// Endgame mode threshold: enable when this many pieces remain
-pub const ENDGAME_THRESHOLD: u32 = 20;
+pub const ENDGAME_THRESHOLD: u32 = constants::BT_ENDGAME_THRESHOLD as u32;
 
 /// Piece selector configuration
 #[derive(Debug, Clone)]

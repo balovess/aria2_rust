@@ -185,12 +185,12 @@ pub fn extract_uris(positional: &[String]) -> Vec<String> {
     positional
         .iter()
         .filter(|arg| {
-            arg.starts_with("http://")
-                || arg.starts_with("https://")
-                || arg.starts_with("ftp://")
-                || arg.starts_with("ftps://")
-                || arg.ends_with(".torrent")
-                || arg.ends_with(".metalink")
+            arg.starts_with(crate::constants::URI_PREFIX_HTTP)
+                || arg.starts_with(crate::constants::URI_PREFIX_HTTPS)
+                || arg.starts_with(crate::constants::URI_PREFIX_FTP)
+                || arg.starts_with(crate::constants::URI_PREFIX_FTPS)
+                || arg.ends_with(crate::constants::FILE_EXT_TORRENT)
+                || arg.ends_with(crate::constants::FILE_EXT_METALINK)
         })
         .cloned()
         .collect()

@@ -7,6 +7,9 @@ use tracing::{debug, error, info, warn};
 
 use super::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::constants;
+use crate::dns::dns_cache::DnsCache;
+use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
@@ -26,6 +29,12 @@ pub struct DownloadEngine {
     save_session_interval: Option<Duration>,
     request_group_man: Option<Arc<RwLock<RequestGroupMan>>>,
     auto_save: Option<Arc<Mutex<AutoSaveSession>>>,
+    /// FTP connection pool for connection reuse across FTP downloads.
+    /// Created during engine initialization and passed down via dependency injection.
+    ftp_pool: Arc<FtpConnectionPool>,
+    /// DNS resolution cache for avoiding repeated lookups.
+    /// Created during engine initialization and passed down via dependency injection.
+    dns_cache: Arc<Mutex<DnsCache>>,
 }
 
 impl DownloadEngine {
@@ -52,6 +61,8 @@ impl DownloadEngine {
             save_session_interval: None,
             request_group_man: None,
             auto_save: None,
+            ftp_pool: Arc::new(FtpConnectionPool::new(constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS)),
+            dns_cache: Arc::new(Mutex::new(DnsCache::new())),
         };
 
         info!(
@@ -127,6 +138,16 @@ impl DownloadEngine {
 
     pub fn retry_policy(&self) -> &RetryPolicy {
         &self.retry_policy
+    }
+
+    /// Get a reference to the FTP connection pool for dependency injection.
+    pub fn ftp_pool(&self) -> &Arc<FtpConnectionPool> {
+        &self.ftp_pool
+    }
+
+    /// Get a reference to the DNS cache for dependency injection.
+    pub fn dns_cache(&self) -> &Arc<Mutex<DnsCache>> {
+        &self.dns_cache
     }
 
     pub async fn run(mut self) -> Result<()> {

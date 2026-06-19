@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
+use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
@@ -35,17 +36,6 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_protocol::sftp::connection::{HostKeyCheckingMode, SshConnection, SshError, SshOptions};
 use aria2_protocol::sftp::file_ops::{FileOpError, OpenFlags};
 use aria2_protocol::sftp::session::SftpSession;
-
-/// Default TCP connection timeout for SFTP downloads
-const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
-/// Default read operation timeout
-const DEFAULT_READ_TIMEOUT_SECS: u64 = 30;
-/// Default total command timeout (5 minutes)
-const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300;
-/// Size of each chunk when writing to disk via disk writer
-const DISK_WRITE_CHUNK_SIZE: usize = 64 * 1024; // 64KB
-/// Interval in milliseconds between speed calculations
-const SPEED_UPDATE_INTERVAL_MS: u128 = 500;
 
 // =============================================================================
 // SFTP Download Command
@@ -111,13 +101,13 @@ impl SftpDownloadCommand {
         let dir = output_dir
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
-            .unwrap_or_else(|| ".".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_OUTPUT_DIR.to_string());
 
         // Step 3: Determine output filename
         let filename = output_name
             .map(|n| n.to_string())
             .or_else(|| Self::extract_filename(&remote_path))
-            .unwrap_or_else(|| "download".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         // Step 4: Build full output path
         let path = std::path::PathBuf::from(&dir).join(&filename);
@@ -176,7 +166,7 @@ impl SftpDownloadCommand {
             None => {
                 // No username in URI; try environment variable
                 let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-                return Ok((user.to_string(), 22, user, None, "/".to_string()));
+                return Ok((user.to_string(), constants::SFTP_DEFAULT_PORT, user, None, "/".to_string()));
             }
         };
 
@@ -188,9 +178,9 @@ impl SftpDownloadCommand {
         let (host, port) = match rest.rfind(':') {
             Some(idx) => (
                 rest[..idx].to_string(),
-                rest[idx + 1..].parse::<u16>().unwrap_or(22),
+                rest[idx + 1..].parse::<u16>().unwrap_or(constants::SFTP_DEFAULT_PORT),
             ),
-            None => (rest.to_string(), 22),
+            None => (rest.to_string(), constants::SFTP_DEFAULT_PORT),
         };
 
         Ok((host, port, clean_user, password, sftp_path_decode(path)))
@@ -215,8 +205,8 @@ impl SftpDownloadCommand {
         let mut opts = SshOptions::new(&self.host, &self.username)
             .with_port(self.port)
             .with_timeouts(
-                Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS),
-                Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS),
+                Duration::from_secs(constants::SFTP_CONNECT_TIMEOUT_SECS),
+                Duration::from_secs(constants::SFTP_READ_TIMEOUT_SECS),
             )
             .with_host_key_mode(HostKeyCheckingMode::AcceptNew);
 
@@ -453,7 +443,7 @@ impl Command for SftpDownloadCommand {
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed: u64 = 0;
-        let _buf = vec![0u8; DISK_WRITE_CHUNK_SIZE];
+        let _buf = vec![0u8; constants::SFTP_DISK_WRITE_CHUNK_SIZE];
 
         info!("[SFTP-CMD] Starting transfer loop: {} bytes", total_length);
 
@@ -464,7 +454,7 @@ impl Command for SftpDownloadCommand {
             }
 
             // Calculate how much to read this iteration
-            let to_read = (DISK_WRITE_CHUNK_SIZE as u64).min(remaining) as usize;
+            let to_read = (constants::SFTP_DISK_WRITE_CHUNK_SIZE as u64).min(remaining) as usize;
 
             // Read chunk from remote file at current offset
             let data = match remote_file
@@ -511,7 +501,7 @@ impl Command for SftpDownloadCommand {
 
                 // Periodic speed calculation (every ~500ms)
                 let elapsed = last_speed_update.elapsed();
-                if elapsed.as_millis() >= SPEED_UPDATE_INTERVAL_MS {
+                if elapsed.as_millis() >= constants::SFTP_SPEED_UPDATE_INTERVAL_MS as u128 {
                     let delta = self.completed_bytes - last_completed;
                     let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
                     g.update_speed(speed, 0).await;
@@ -579,7 +569,7 @@ impl Command for SftpDownloadCommand {
 
     /// Return the timeout for this command.
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS))
+        Some(Duration::from_secs(constants::SFTP_COMMAND_TIMEOUT_SECS))
     }
 }
 
@@ -613,7 +603,7 @@ mod tests {
         assert_eq!(opts.password.as_deref(), Some("secretpass"));
         assert_eq!(
             opts.connect_timeout,
-            Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS)
+            Duration::from_secs(constants::SFTP_CONNECT_TIMEOUT_SECS)
         );
     }
 
@@ -704,11 +694,11 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_CONNECT_TIMEOUT_SECS, 15);
-        assert_eq!(DEFAULT_READ_TIMEOUT_SECS, 30);
-        assert_eq!(DEFAULT_COMMAND_TIMEOUT_SECS, 300);
-        assert_eq!(DISK_WRITE_CHUNK_SIZE, 65536); // 64KB
-        assert_eq!(SPEED_UPDATE_INTERVAL_MS, 500);
+        assert_eq!(constants::SFTP_CONNECT_TIMEOUT_SECS, 15);
+        assert_eq!(constants::SFTP_READ_TIMEOUT_SECS, 30);
+        assert_eq!(constants::SFTP_COMMAND_TIMEOUT_SECS, 300);
+        assert_eq!(constants::SFTP_DISK_WRITE_CHUNK_SIZE, 65536); // 64KB
+        assert_eq!(constants::SFTP_SPEED_UPDATE_INTERVAL_MS, 500);
     }
 
     /// Helper to create a test command instance

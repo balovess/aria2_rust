@@ -196,11 +196,11 @@ async fn engine_http_download_with_auth() {
         "No orphaned file should remain after auth failure"
     );
 
-    // Command status should indicate failure
+    // Command status should indicate not completed
     let status: CommandStatus = cmd.status();
     assert!(
-        matches!(status, CommandStatus::Pending | CommandStatus::Failed(_)),
-        "Command status should be Pending or Failed after 401, got {:?}",
+        matches!(status, CommandStatus::Pending),
+        "Command status should be Pending after 401, got {:?}",
         status
     );
 

@@ -1,15 +1,15 @@
 //! DNS Cache Module
 //!
 //! Provides DNS resolution caching with TTL support, negative caching for failed
-//! lookups (to prevent retry storms), IPv4/IPv6 preference sorting, and a global
-//! singleton for convenient access across the application.
+//! lookups (to prevent retry storms), and IPv4/IPv6 preference sorting.
 //!
 //! # Features
 //!
 //! - **TTL-based expiration**: Cached entries expire after a configurable time-to-live
 //! - **Negative caching**: Failed lookups are remembered to avoid immediate retries
 //! - **IPv4 preference**: Addresses can be sorted with IPv4 first (matching C++ aria2 behavior)
-//! - **Global singleton**: Thread-safe global cache accessible via `resolve_cached()`
+//! - **Dependency injection**: Cache instances are created during engine initialization
+//!   and passed down, avoiding global mutable state
 //!
 //! # Example
 //!
@@ -28,8 +28,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// A single cached DNS entry containing resolved addresses and metadata.
 ///
@@ -93,7 +92,8 @@ impl DnsEntry {
 /// # Thread Safety
 ///
 /// For use in async contexts, wrap with `tokio::sync::Mutex`.
-/// The global singleton uses `std::sync::Mutex` for simplicity.
+/// Instances should be created during engine initialization and passed
+/// down via dependency injection rather than using global singletons.
 pub struct DnsCache {
     /// Cache of successful DNS resolutions: hostname -> DnsEntry
     cache: HashMap<String, DnsEntry>,
@@ -189,7 +189,6 @@ impl DnsCache {
                     sorted.sort_by_key(|a| match a.ip() {
                         IpAddr::V4(_) => 0u8,
                         IpAddr::V6(_) => 1u8,
-                        _ => 2u8,
                     });
                 }
 
@@ -280,55 +279,51 @@ impl DnsCache {
     pub fn negative_ttl(&self) -> Duration {
         self.negative_ttl
     }
+
+    /// Manually record a failed lookup in the negative cache.
+    ///
+    /// This is useful for testing negative cache behavior without
+    /// depending on network DNS resolution.
+    pub fn record_failure(&mut self, hostname: &str) {
+        self.negative_entries.insert(hostname.to_string(), Instant::now());
+    }
+
+    /// Check cache only (no network resolution).
+    ///
+    /// Returns cached addresses if available, or an error if the entry
+    /// is in the negative cache or not cached at all. This is useful
+    /// for testing cache behavior without network dependencies.
+    pub fn resolve_no_network(
+        &mut self,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, String> {
+        // 1. Check positive cache first
+        if let Some(entry) = self.cache.get(hostname) {
+            if !entry.is_expired() {
+                return Ok(entry.all_addresses());
+            }
+        }
+
+        // 2. Check negative cache (recently failed lookup)
+        if let Some(failed_at) = self.negative_entries.get(hostname) {
+            if failed_at.elapsed() < self.negative_ttl {
+                return Err(format!(
+                    "DNS lookup recently failed for {} (retry after {:?})",
+                    hostname,
+                    self.negative_ttl.saturating_sub(failed_at.elapsed())
+                ));
+            }
+        }
+
+        Err(format!("No cached entry for {}:{}", hostname, port))
+    }
 }
 
 impl Default for DnsCache {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ==================== Global Singleton ====================
-
-/// Global DNS cache singleton, protected by a Mutex for thread-safe access.
-static GLOBAL_DNS_CACHE: std::sync::OnceLock<Mutex<DnsCache>> =
-    std::sync::OnceLock::new();
-
-/// Get or initialize the global DNS cache.
-fn get_global_cache() -> &'static Mutex<DnsCache> {
-    GLOBAL_DNS_CACHE.get_or_init(|| Mutex::new(DnsCache::new()))
-}
-
-/// Resolve a hostname using the global DNS cache (convenience function).
-///
-/// This is a simple wrapper around the global `DnsCache` singleton that
-/// provides easy access without needing to manage a cache instance.
-///
-/// # Arguments
-///
-/// * `hostname` - The hostname to resolve
-/// * `port` - The port number for resolved addresses
-///
-/// # Returns
-///
-/// Resolved socket addresses on success, or an error string on failure.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use aria2_core::dns::dns_cache::resolve_cached;
-///
-/// #[tokio::main]
-/// async fn main() {
-///     match resolve_cached("example.com", 80).await {
-///         Ok(addrs) => println!("Resolved: {:?}", addrs),
-///         Err(e) => eprintln!("Error: {}", e),
-///     }
-/// }
-/// ```
-pub async fn resolve_cached(hostname: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
-    let mut cache = get_global_cache().lock().unwrap();
-    cache.resolve(hostname, port).await
 }
 
 // ==================== Tests ====================
@@ -481,37 +476,27 @@ mod tests {
 
     /// Test J3.4 #2: Failed lookup blocks retry for negative_ttl duration.
     ///
-    /// We use a hostname that should fail DNS resolution (invalid TLD pattern)
-    /// and verify that subsequent attempts within the negative TTL window fail
-    /// immediately without actually attempting resolution again.
-    #[tokio::test]
-    async fn test_negative_cache_blocks_retry() {
+    /// We inject a negative cache entry directly (without network DNS)
+    /// and verify that subsequent attempts within the negative TTL window
+    /// fail immediately with the "recently failed" message.
+    #[test]
+    fn test_negative_cache_blocks_retry() {
         let mut cache = DnsCache::with_ttl(300, 2); // 2-second negative TTL
 
-        // Try resolving a hostname that should definitely fail
-        let result = cache.resolve("this-domain-definitely-does-not-exist.invalid", 80).await;
+        // Inject a negative cache entry directly (no network dependency)
+        cache.record_failure("test-host.invalid");
+
+        // Immediate retry should be blocked by negative cache
+        let result = cache.resolve_no_network("test-host.invalid", 80);
         assert!(
             result.is_err(),
-            "Resolution of invalid domain should fail"
+            "Lookup should be blocked by negative cache"
         );
         let err_msg = result.unwrap_err();
         assert!(
-            err_msg.contains("failed") || err_msg.contains("error") || err_msg.contains("not found"),
-            "Error should indicate failure: {}",
-            err_msg
-        );
-
-        // Immediate retry should be blocked by negative cache
-        let result2 = cache.resolve("this-domain-definitely-does-not-exist.invalid", 80).await;
-        assert!(
-            result2.is_err(),
-            "Second attempt should be blocked by negative cache"
-        );
-        let err_msg2 = result2.unwrap_err();
-        assert!(
-            err_msg2.contains("recently failed"),
+            err_msg.contains("recently failed"),
             "Error should mention recent failure: {}",
-            err_msg2
+            err_msg
         );
     }
 

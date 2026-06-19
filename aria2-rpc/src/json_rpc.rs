@@ -107,7 +107,7 @@ impl JsonRpcRequest {
             ));
         }
         if let Some(ref v) = self.version
-            && v != "2.0"
+            && v != JSONRPC_VERSION
         {
             return Err(JsonRpcError::InvalidRequest(format!(
                 "unsupported jsonrpc version: {}",

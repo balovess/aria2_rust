@@ -1,24 +1,41 @@
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 use crate::segment::Segment;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DownloadStatus {
+    #[default]
     Waiting,
     Active,
     Paused,
-    Error(Aria2Error),
+    #[serde(skip_serializing)]
+    Error(String),
     Complete,
     Removed,
 }
 
+impl fmt::Display for DownloadStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DownloadStatus::Waiting => write!(f, "waiting"),
+            DownloadStatus::Active => write!(f, "active"),
+            DownloadStatus::Paused => write!(f, "paused"),
+            DownloadStatus::Error(_) => write!(f, "error"),
+            DownloadStatus::Complete => write!(f, "complete"),
+            DownloadStatus::Removed => write!(f, "removed"),
+        }
+    }
+}
+
 impl DownloadStatus {
     pub fn is_active(&self) -> bool {
-        matches!(self, DownloadStatus::Active)
+        matches!(self, DownloadStatus::Active | DownloadStatus::Waiting)
     }
 
     pub fn is_completed(&self) -> bool {
@@ -27,6 +44,21 @@ impl DownloadStatus {
 
     pub fn is_paused(&self) -> bool {
         matches!(self, DownloadStatus::Paused)
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        !self.is_active() && !matches!(self, DownloadStatus::Removed)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DownloadStatus::Active => "active",
+            DownloadStatus::Waiting => "waiting",
+            DownloadStatus::Paused => "paused",
+            DownloadStatus::Error(_) => "error",
+            DownloadStatus::Complete => "complete",
+            DownloadStatus::Removed => "removed",
+        }
     }
 }
 
@@ -246,11 +278,11 @@ impl RequestGroup {
         Ok(())
     }
 
-    pub async fn error(&mut self, err: Aria2Error) -> Result<()> {
+    pub async fn error(&mut self, err: impl Into<String>) -> Result<()> {
         let mut status = self.status.write().await;
         let mut end_time = self.end_time.write().await;
 
-        *status = DownloadStatus::Error(err);
+        *status = DownloadStatus::Error(err.into());
         *end_time = Some(std::time::Instant::now());
 
         debug!("下载任务 #{} 发生错误", self.gid.value());

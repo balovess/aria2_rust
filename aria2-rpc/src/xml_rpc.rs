@@ -61,9 +61,9 @@ enum XmlRpcValueInner {
     Boolean(bool),
     String_(String),
     Double(f64),
-    #[allow(dead_code)]
+    #[allow(dead_code)] // XML-RPC spec type; not yet produced by any response
     DateTime(String),
-    #[allow(dead_code)]
+    #[allow(dead_code)] // XML-RPC spec type; not yet produced by any response
     Base64(Vec<u8>),
     Array(Vec<XmlRpcValue>),
     Struct(Vec<XmlRpcMember>),

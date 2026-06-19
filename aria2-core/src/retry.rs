@@ -1,72 +1,9 @@
 use crate::error::{Aria2Error, RecoverableError};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 use tracing::warn;
 
-#[derive(Debug, Clone)]
-pub struct RetryPolicy {
-    max_tries: u32,
-    retry_wait_base: Duration,
-    retry_wait_max: Duration,
-    max_retries_per_server: u32,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_tries: 5,
-            retry_wait_base: Duration::from_secs(5),
-            retry_wait_max: Duration::from_secs(300),
-            max_retries_per_server: u32::MAX,
-        }
-    }
-}
-
-impl RetryPolicy {
-    pub fn new(max_tries: u32, wait_base: Duration) -> Self {
-        Self {
-            max_tries,
-            retry_wait_base: wait_base,
-            ..Default::default()
-        }
-    }
-
-    pub fn with_max_wait(mut self, max: Duration) -> Self {
-        self.retry_wait_max = max;
-        self
-    }
-
-    pub fn with_max_per_server(mut self, n: u32) -> Self {
-        self.max_retries_per_server = n;
-        self
-    }
-
-    pub fn max_tries(&self) -> u32 {
-        self.max_tries
-    }
-
-    pub fn should_retry(&self, attempt: u32, error: &Aria2Error) -> bool {
-        if attempt + 1 >= self.max_tries {
-            return false;
-        }
-        matches!(error, Aria2Error::Recoverable(_))
-    }
-
-    pub fn wait_duration(&self, attempt: u32) -> Duration {
-        let secs = self
-            .retry_wait_base
-            .as_secs()
-            .saturating_mul(1 << attempt.min(20));
-        let dur = Duration::from_secs(secs);
-        if dur > self.retry_wait_max {
-            self.retry_wait_max
-        } else if dur < self.retry_wait_base {
-            self.retry_wait_base
-        } else {
-            dur
-        }
-    }
-}
+// Re-export unified RetryPolicy from engine::retry_policy
+pub use crate::engine::retry_policy::RetryPolicy;
 
 #[derive(Debug, Default)]
 pub struct RetryStats {

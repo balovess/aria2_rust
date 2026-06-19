@@ -5,7 +5,7 @@
 //!
 //! # Features
 //!
-//! - Formatted speed display (KB/s, MB/s)
+//! - Formatted speed display (KiB/s, MiB/s)
 //! - Progress bar rendering
 //! - Colorized status messages
 //! - Summary statistics formatting
@@ -19,69 +19,8 @@
 use colored::Colorize;
 use std::time::Duration;
 
-/// Format bytes into human-readable string
-///
-/// # Arguments
-/// * `bytes` - Number of bytes
-///
-/// # Returns
-/// * Formatted string (e.g., "1.23 MB", "456 KB")
-pub fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-/// Format download speed with unit
-///
-/// # Arguments
-/// * `bytes_per_second` - Download speed in bytes/sec
-///
-/// # Returns
-/// * Formatted speed string (e.g., "1.23 MB/s")
-pub fn format_speed(bytes_per_second: f64) -> String {
-    if bytes_per_second < 1024.0 {
-        format!("{:.2} B/s", bytes_per_second)
-    } else if bytes_per_second < 1024.0 * 1024.0 {
-        format!("{:.2} KB/s", bytes_per_second / 1024.0)
-    } else if bytes_per_second < 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.2} MB/s", bytes_per_second / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB/s", bytes_per_second / (1024.0 * 0x400_000u64 as f64))
-    }
-}
-
-/// Format duration in human-readable form
-///
-/// # Arguments
-/// * `duration` - Time duration
-///
-/// # Returns
-/// * Formatted duration string (e.g., "1h 23m 45s", "5m 30s")
-pub fn format_duration(duration: Duration) -> String {
-    let total_secs = duration.as_secs();
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{}h {}m {}s", hours, minutes, seconds)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    }
-}
+// Re-export shared formatting functions from aria2-core
+pub use aria2_core::util::format::{format_bytes, format_duration, format_speed};
 
 /// Render a simple text-based progress bar
 ///
@@ -139,7 +78,7 @@ pub fn print_download_entry(
         format_bytes(downloaded_size),
         format_bytes(total_size),
         format_speed(speed),
-        format_duration(elapsed)
+        format_duration(elapsed.as_secs())
     );
 }
 
@@ -170,7 +109,7 @@ pub fn print_final_stats(
     );
     println!(
         "  Total Time:      {}",
-        format_duration(total_time).white()
+        format_duration(total_time.as_secs()).white()
     );
     println!(
         "  Successful:      {}",
@@ -198,7 +137,7 @@ pub fn print_final_stats(
 
 /// Print an error message with red color
 pub fn print_error(message: &str) {
-    eprintln!("{} {}", "ERROR:".red().bold(), message.red());
+    eprintln!("{} {}", crate::constants::LABEL_ERROR.red().bold(), message.red());
 }
 
 /// Print a warning message with yellow color
@@ -208,7 +147,7 @@ pub fn print_warning(message: &str) {
 
 /// Print an info message with blue color
 pub fn print_info(message: &str) {
-    println!("{} {}", "INFO:".blue(), message.blue());
+    println!("{} {}", crate::constants::LABEL_INFO.blue(), message.blue());
 }
 
 #[cfg(test)]
@@ -222,17 +161,17 @@ mod tests {
 
     #[test]
     fn test_format_bytes_kb() {
-        assert_eq!(format_bytes(2048), "2.00 KB");
+        assert_eq!(format_bytes(2048), "2.00 KiB");
     }
 
     #[test]
     fn test_format_bytes_mb() {
-        assert_eq!(format_bytes(1048576), "1.00 MB");
+        assert_eq!(format_bytes(1048576), "1.00 MiB");
     }
 
     #[test]
     fn test_format_bytes_gb() {
-        assert_eq!(format_bytes(1073741824), "1.00 GB");
+        assert_eq!(format_bytes(1073741824), "1.00 GiB");
     }
 
     #[test]
@@ -244,24 +183,24 @@ mod tests {
     #[test]
     fn test_format_speed_kbps() {
         let result = format_speed(2048.0);
-        assert!(result.contains("KB/s"));
+        assert!(result.contains("KiB/s"));
     }
 
     #[test]
     fn test_format_duration_seconds() {
-        let result = format_duration(Duration::from_secs(45));
+        let result = format_duration(45);
         assert_eq!(result, "45s");
     }
 
     #[test]
     fn test_format_duration_minutes() {
-        let result = format_duration(Duration::from_secs(125));
+        let result = format_duration(125);
         assert_eq!(result, "2m 5s");
     }
 
     #[test]
     fn test_format_duration_hours() {
-        let result = format_duration(Duration::from_secs(3661));
+        let result = format_duration(3661);
         assert!(result.starts_with("1h"));
     }
 

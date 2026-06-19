@@ -52,7 +52,7 @@ pub struct PiecePicker {
     /// Priority mode for piece selection (RarestFirst / SequentialHead / SequentialTail)
     priority_mode: PiecePriorityMode,
     peer_availability: HashMap<u32, HashSet<u32>>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Seed for deterministic piece selection; must remain to support future reproducible/deterministic piece picking (e.g., for testing or reproducible downloads)
     rng_seed: u64,
     /// Cursor for sequential piece selection (O(1) optimization)
     /// Points to the next piece index to check for sequential selection

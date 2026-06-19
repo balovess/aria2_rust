@@ -47,10 +47,6 @@ impl Command for SaveSessionCommand {
     fn status(&self) -> CommandStatus {
         self.status.clone()
     }
-
-    fn priority(&self) -> u32 {
-        100
-    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! This crate provides the command-line interface components for aria2-rust,
 //! including the TUI progress bar system and display utilities.
 
+pub mod constants;
 pub mod daemon;
 pub mod ui;
 

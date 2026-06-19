@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::error::Aria2Error;
+
 /// Parsed WWW-Authenticate header for Digest auth challenge
 ///
 /// Represents a server's Digest authentication challenge as defined in RFC 2617.
@@ -69,11 +71,11 @@ impl DigestAuthChallenge {
     /// assert_eq!(challenge.realm, "test realm");
     /// assert_eq!(challenge.nonce, "dcd98b7102dd2f0e8b11d0f600bfb0c093");
     /// ```
-    pub fn parse(header_value: &str) -> Result<Self, String> {
+    pub fn parse(header_value: &str) -> Result<Self, Aria2Error> {
         // Extract after "Digest " prefix
         let digest_part = header_value
             .strip_prefix("Digest ")
-            .ok_or_else(|| "Not a Digest challenge: missing 'Digest ' prefix".to_string())?;
+            .ok_or_else(|| Aria2Error::Parse("Not a Digest challenge: missing 'Digest ' prefix".to_string()))?;
 
         // Split by comma to get key=value pairs, then parse each pair
         let mut params = HashMap::new();
@@ -94,7 +96,7 @@ impl DigestAuthChallenge {
         let nonce = params
             .get("nonce")
             .cloned()
-            .ok_or_else(|| "Missing required 'nonce' parameter in Digest challenge".to_string())?;
+            .ok_or_else(|| Aria2Error::Parse("Missing required 'nonce' parameter in Digest challenge".to_string()))?;
 
         Ok(DigestAuthChallenge {
             realm: params.get("realm").cloned().unwrap_or_default(),
@@ -294,7 +296,7 @@ mod tests {
         let header = r#"Digest realm="only realm""#;
         let result = DigestAuthChallenge::parse(header);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("nonce"));
+        assert!(result.unwrap_err().to_string().contains("nonce"));
     }
 
     #[test]
@@ -302,7 +304,7 @@ mod tests {
         let header = r#"Basic realm="test""#;
         let result = DigestAuthChallenge::parse(header);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Digest "));
+        assert!(result.unwrap_err().to_string().contains("Digest "));
     }
 
     #[test]

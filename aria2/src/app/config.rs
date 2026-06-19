@@ -33,13 +33,13 @@ impl App {
                     if i + 1 < args.len() && !args[i + 1].starts_with('-') {
                         conf.set_global_option(opt_name, OptionValue::Str(args[i + 1].clone()))
                             .await
-                            .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
+                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
                         i += 2;
                         continue;
                     } else {
                         conf.set_global_option(opt_name, OptionValue::Bool(true))
                             .await
-                            .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
+                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
                         i += 1;
                         continue;
                     }
@@ -65,27 +65,27 @@ impl App {
                     if opt_name.starts_with("no-") {
                         conf.set_global_option(actual_name, OptionValue::Bool(false))
                             .await
-                            .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
+                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
                     } else {
                         conf.set_global_option(actual_name, OptionValue::Str(val.to_string()))
                             .await
-                            .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
+                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
                     }
                 } else if opt_name.starts_with("no-") {
                     conf.set_global_option(actual_name, OptionValue::Bool(false))
                         .await
-                        .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
+                        .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
                 } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
                     conf.set_global_option(opt_name, OptionValue::Str(args[i + 1].clone()))
                         .await
-                        .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
+                        .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
                     i += 1;
                     i += 1;
                     continue;
                 } else {
                     conf.set_global_option(opt_name, OptionValue::Bool(true))
                         .await
-                        .map_err(|e| format!("选项 {} 错误: {}", opt_name, e))?;
+                        .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
                 }
 
                 i += 1;
@@ -100,7 +100,7 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        warn!("无法加载URI列表文件 {}: {}", path, e);
+                        warn!("Failed to load URI list file {}: {}", path, e);
                     }
                 }
                 i += 1;
@@ -124,7 +124,7 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    warn!("无法加载input-file {}: {}", path, e);
+                    warn!("Failed to load input-file {}: {}", path, e);
                 }
             }
         }
@@ -134,7 +134,7 @@ impl App {
             .filter_map(|uri| match detect(&uri) {
                 Ok(d) => Some(d),
                 Err(e) => {
-                    warn!("无法检测输入类型 '{}': {}", uri, e);
+                    warn!("Cannot detect input type '{}': {}", uri, e);
                     None
                 }
             })
@@ -163,7 +163,7 @@ impl App {
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| ".".to_string());
 
-            let candidate = format!("{}/.aria2/aria2.conf", home);
+            let candidate = format!("{}/{}/{}", home, crate::constants::CONFIG_DIR_NAME, crate::constants::CONFIG_FILE_NAME);
             if std::path::Path::new(&candidate).exists() {
                 candidate
             } else {

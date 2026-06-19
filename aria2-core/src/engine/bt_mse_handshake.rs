@@ -207,11 +207,12 @@ impl Default for MseCryptoContext {
     }
 }
 
-/// MSE 握手管理器
+/// MSE handshake manager
 pub struct MseHandshakeManager {
+    /// Handshake state machine.
+    /// Uses std::sync::Mutex because the lock is only held for short synchronous
+    /// reads/writes and never across .await points.
     state: Mutex<MseState>,
-    #[allow(dead_code)] // Reserved for crypto method preference in future handshake logic
-    preferred_crypto: CryptoMethod,
     local_dh_private_key: Option<EphemeralPrivateKey>,
     local_dh_pubkey: Vec<u8>,
     remote_dh_pubkey: Option<Vec<u8>>,
@@ -222,7 +223,7 @@ pub struct MseHandshakeManager {
 
 impl MseHandshakeManager {
     /// 创建新的 MSE 握手实例
-    pub fn new(info_hash: [u8; 20], preferred: CryptoMethod) -> Result<Self> {
+    pub fn new(info_hash: [u8; 20]) -> Result<Self> {
         let rng = SystemRandom::new();
 
         // 生成 X25519 密钥对
@@ -252,7 +253,6 @@ impl MseHandshakeManager {
 
         Ok(Self {
             state: Mutex::new(MseState::Idle),
-            preferred_crypto: preferred,
             local_dh_private_key: Some(private_key),
             local_dh_pubkey,
             remote_dh_pubkey: None,
@@ -512,12 +512,12 @@ impl MseHandshakeManager {
 
     /// 获取当前状态
     pub fn state(&self) -> MseState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 更新状态
     pub fn set_state(&self, state: MseState) {
-        *self.state.lock().unwrap() = state;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = state;
     }
 
     /// 获取本地 DH 公钥 (用于调试)

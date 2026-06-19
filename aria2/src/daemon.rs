@@ -42,12 +42,12 @@ use tracing::{debug, info, warn};
 static SHUTDOWN_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 #[cfg(not(unix))]
-#[allow(dead_code)]
+#[allow(dead_code)] // Stub for non-Unix platforms; Unix uses OnceLock<Arc<AtomicBool>> above
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Check if shutdown was requested via signal.
 #[cfg(unix)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Public API for checking shutdown state; used by external callers
 pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED
         .get()
@@ -98,7 +98,7 @@ pub type DaemonResult<T> = Result<T, DaemonError>;
 
 /// Errors that can occur during daemonization.
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Cross-platform error enum; some variants unused on certain platforms
 pub enum DaemonError {
     #[error("Failed to fork process: {0}")]
     ForkFailed(String),
@@ -549,7 +549,7 @@ impl PidFileManager {
     }
 
     #[cfg(not(any(unix, windows)))]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Public API stub for unsupported platforms
     pub fn stop(&self) -> DaemonResult<()> {
         Err(DaemonError::PlatformNotSupported)
     }
@@ -572,7 +572,7 @@ pub fn is_daemon_mode(args: &[String]) -> bool {
 }
 
 /// Extract PID file path from command line arguments.
-#[allow(dead_code)]
+#[allow(dead_code)] // Public utility; not yet wired into CLI main() but available for integration
 pub fn get_pid_file_path(args: &[String]) -> Option<PathBuf> {
     for i in 0..args.len() {
         let arg = &args[i];

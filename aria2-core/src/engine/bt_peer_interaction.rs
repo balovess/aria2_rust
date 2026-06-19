@@ -15,18 +15,19 @@
 
 use std::time::Duration;
 
+use crate::constants;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use tracing::{debug, error, info, warn};
 
 /// Delay between peer connection setup and message reading (milliseconds)
-pub const PEER_CONNECTION_DELAY_MS: u64 = 100;
+pub const PEER_CONNECTION_DELAY_MS: u64 = constants::BT_PEER_CONNECTION_DELAY_MS;
 
 /// Maximum attempts to wait for unchoke from a peer
-pub const MAX_UNCHOKE_WAIT_ATTEMPTS: u32 = 50;
+pub const MAX_UNCHOKE_WAIT_ATTEMPTS: u32 = constants::BT_MAX_UNCHOKE_WAIT_ATTEMPTS as u32;
 
 /// Timeout for each message read from peer (seconds)
-pub const PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
+pub const PEER_MESSAGE_TIMEOUT_SECS: u64 = constants::BT_PEER_MESSAGE_TIMEOUT_SECS;
 
 /// Result of peer connection attempt
 pub struct PeerConnectionResult {

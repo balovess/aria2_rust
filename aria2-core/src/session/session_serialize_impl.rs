@@ -29,8 +29,7 @@
 //! ```
 
 use crate::error::Result;
-use crate::session::session_entry::SessionEntry;
-use crate::session::session_uri_utils::{decode_hex, escape_uri, unescape_uri};
+use crate::session::session_entry::{SessionEntry, decode_hex, escape_uri, unescape_uri};
 
 impl SessionEntry {
     /// Serializes this entry to the session file format

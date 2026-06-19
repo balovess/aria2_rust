@@ -141,21 +141,6 @@ impl Default for AtomicMetrics {
     }
 }
 
-/// Performance monitor trait for collecting and reporting metrics
-pub trait PerformanceMonitor: Send + Sync {
-    /// Record a metric with the given label
-    fn record_metric(&self, label: &str, metrics: Metrics);
-
-    /// Generate a performance report
-    fn generate_report(&self) -> PerformanceReport;
-
-    /// Export metrics as JSON string
-    fn export_json(&self) -> String;
-
-    /// Export metrics as human-readable text
-    fn export_text(&self) -> String;
-}
-
 /// Performance report containing aggregated metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceReport {
@@ -227,13 +212,13 @@ pub struct ReportSummary {
     pub total_samples: usize,
 }
 
-/// Default performance monitor implementation
-pub struct DefaultPerformanceMonitor {
+/// Performance monitor for collecting and reporting metrics
+pub struct PerformanceMonitor {
     metrics: Arc<tokio::sync::RwLock<HashMap<String, Vec<Metrics>>>>,
     start_time: Instant,
 }
 
-impl DefaultPerformanceMonitor {
+impl PerformanceMonitor {
     /// Create a new performance monitor
     pub fn new() -> Self {
         Self {
@@ -248,14 +233,15 @@ impl DefaultPerformanceMonitor {
     }
 }
 
-impl Default for DefaultPerformanceMonitor {
+impl Default for PerformanceMonitor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PerformanceMonitor for DefaultPerformanceMonitor {
-    fn record_metric(&self, label: &str, metrics: Metrics) {
+impl PerformanceMonitor {
+    /// Record a metric with the given label
+    pub fn record_metric(&self, label: &str, metrics: Metrics) {
         // Use try_write to avoid blocking in hot paths
         // This is a trade-off: we might miss some metrics under high contention
         // but it ensures minimal overhead
@@ -264,7 +250,8 @@ impl PerformanceMonitor for DefaultPerformanceMonitor {
         }
     }
 
-    fn generate_report(&self) -> PerformanceReport {
+    /// Generate a performance report
+    pub fn generate_report(&self) -> PerformanceReport {
         // Use try_read to avoid blocking in async contexts
         // If we can't get the lock, return an empty report
         let metrics = self.metrics.try_read()
@@ -273,12 +260,14 @@ impl PerformanceMonitor for DefaultPerformanceMonitor {
         PerformanceReport::new(metrics, self.elapsed().as_millis() as u64)
     }
 
-    fn export_json(&self) -> String {
+    /// Export metrics as JSON string
+    pub fn export_json(&self) -> String {
         let report = self.generate_report();
         serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
     }
 
-    fn export_text(&self) -> String {
+    /// Export metrics as human-readable text
+    pub fn export_text(&self) -> String {
         let report = self.generate_report();
         let mut output = String::new();
 
@@ -313,12 +302,12 @@ impl PerformanceMonitor for DefaultPerformanceMonitor {
 pub struct ScopedTimer {
     label: String,
     start: Instant,
-    monitor: Arc<DefaultPerformanceMonitor>,
+    monitor: Arc<PerformanceMonitor>,
 }
 
 impl ScopedTimer {
     /// Create a new scoped timer
-    pub fn new(label: impl Into<String>, monitor: Arc<DefaultPerformanceMonitor>) -> Self {
+    pub fn new(label: impl Into<String>, monitor: Arc<PerformanceMonitor>) -> Self {
         Self {
             label: label.into(),
             start: Instant::now(),
@@ -405,7 +394,7 @@ mod tests {
 
     #[test]
     fn test_performance_monitor() {
-        let monitor = DefaultPerformanceMonitor::new();
+        let monitor = PerformanceMonitor::new();
         let m1 = Metrics::new(1000, 50, 1024, 10);
         let m2 = Metrics::new(2000, 30, 2048, 5);
 
@@ -421,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_export_json() {
-        let monitor = DefaultPerformanceMonitor::new();
+        let monitor = PerformanceMonitor::new();
         let m = Metrics::new(1000, 50, 1024, 10);
         monitor.record_metric("test", m);
 
@@ -432,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_export_text() {
-        let monitor = DefaultPerformanceMonitor::new();
+        let monitor = PerformanceMonitor::new();
         let m = Metrics::new(1000, 50, 1024, 10);
         monitor.record_metric("test", m);
 
@@ -444,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_scoped_timer() {
-        let monitor = Arc::new(DefaultPerformanceMonitor::new());
+        let monitor = Arc::new(PerformanceMonitor::new());
         {
             let _timer = ScopedTimer::new("operation", monitor.clone());
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -459,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_recording() {
-        let monitor = Arc::new(DefaultPerformanceMonitor::new());
+        let monitor = Arc::new(PerformanceMonitor::new());
         let mut handles = vec![];
 
         for i in 0..10 {

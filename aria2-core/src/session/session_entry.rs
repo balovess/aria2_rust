@@ -51,11 +51,115 @@
 //!     .paused();
 //! ```
 
-// Re-exports for convenience
-pub use crate::session::session_options::download_options_to_map;
-pub use crate::session::session_uri_utils::{decode_hex, escape_uri, unescape_uri};
-
 use std::collections::HashMap;
+
+use crate::error::{Aria2Error, Result};
+use crate::request::request_group::DownloadOptions;
+
+// =========================================================================
+// URI Utility Functions (consolidated from session_uri_utils.rs)
+// =========================================================================
+
+/// Escapes special characters in URIs for safe serialization.
+pub fn escape_uri(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+}
+
+/// Unescapes special characters previously escaped by [`escape_uri()`].
+pub fn unescape_uri(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                match next {
+                    't' => {
+                        result.push('\t');
+                        chars.next();
+                    }
+                    'n' => {
+                        result.push('\n');
+                        chars.next();
+                    }
+                    '\\' => {
+                        result.push('\\');
+                        chars.next();
+                    }
+                    _ => {
+                        result.push(c);
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Decodes a hexadecimal string to a byte vector.
+pub fn decode_hex(hex: &str) -> Result<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return Err(Aria2Error::Io(format!(
+            "Hex string has odd length: {}",
+            hex.len()
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+
+    for i in (0..hex.len()).step_by(2) {
+        let byte_str = &hex[i..i + 2];
+        let byte = u8::from_str_radix(byte_str, 16).map_err(|e| {
+            Aria2Error::Io(format!("Invalid hex character at position {}: {}", i, e))
+        })?;
+        bytes.push(byte);
+    }
+
+    Ok(bytes)
+}
+
+// =========================================================================
+// Options Conversion (consolidated from session_options.rs)
+// =========================================================================
+
+/// Converts DownloadOptions struct to a HashMap for serialization.
+pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+
+    if let Some(v) = opts.split {
+        map.insert("split".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.max_connection_per_server {
+        map.insert("max-connection-per-server".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.max_download_limit {
+        map.insert("max-download-limit".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.max_upload_limit {
+        map.insert("max-upload-limit".to_string(), v.to_string());
+    }
+    if let Some(ref v) = opts.dir {
+        map.insert("dir".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.out {
+        map.insert("out".to_string(), v.clone());
+    }
+    if let Some(v) = opts.seed_time {
+        map.insert("seed-time".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.seed_ratio {
+        map.insert("seed-ratio".to_string(), v.to_string());
+    }
+
+    map
+}
 
 /// Represents a single download task in a session file
 ///

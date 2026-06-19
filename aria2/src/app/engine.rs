@@ -47,7 +47,7 @@ impl App {
         }
 
         *self.engine.lock().await = Some(engine);
-        info!("引擎初始化完成");
+        info!("Engine initialization complete");
     }
 
     /// Add download tasks from detected inputs.
@@ -122,22 +122,22 @@ impl App {
             bt_piece_selection_strategy: self
                 .get_opt_str("bt-piece-selection-strategy")
                 .await
-                .unwrap_or("rarest-first".to_string()),
+                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_STRATEGY.to_string()),
             bt_endgame_threshold: self
                 .get_opt_i64("bt-endgame-threshold")
                 .await
-                .map(|v| if v > 0 { v as u32 } else { 20 })
-                .unwrap_or(20),
+                .map(|v| if v > 0 { v as u32 } else { crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32 })
+                .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
             max_retries: self
                 .get_opt_i64("max-retries")
                 .await
-                .map(|v| if v >= 0 { v as u32 } else { 3 })
-                .unwrap_or(3),
+                .map(|v| if v >= 0 { v as u32 } else { crate::constants::DEFAULT_MAX_RETRIES })
+                .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
             retry_wait: self
                 .get_opt_i64("retry-wait")
                 .await
-                .map(|v| if v > 0 { v as u64 } else { 1 })
-                .unwrap_or(1),
+                .map(|v| if v > 0 { v as u64 } else { crate::constants::DEFAULT_RETRY_WAIT_SECS })
+                .unwrap_or(crate::constants::DEFAULT_RETRY_WAIT_SECS),
             http_proxy: self.get_opt_str("http-proxy").await,
             all_proxy: self.get_opt_str("all-proxy").await,
             https_proxy: self.get_opt_str("https-proxy").await,
@@ -161,7 +161,7 @@ impl App {
             bt_prioritize_piece: self
                 .get_opt_str("bt-prioritize-piece")
                 .await
-                .unwrap_or_else(|| "rarest".to_string()),
+                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_PRIORITY.to_string()),
             // uTP (UDP Transport Protocol - BEP 29)
             enable_utp: self.get_opt_bool("enable-utp").await.unwrap_or(false),
             utp_listen_port: self
@@ -259,11 +259,11 @@ impl App {
             self.engine.lock().await;
         if let Some(engine) = engine_lock.take() {
             drop(engine_lock);
-            info!("启动下载引擎, 共 {} 个任务", self.detected_inputs.len());
+            info!("Starting download engine, {} tasks total", self.detected_inputs.len());
             let result: Result<(), _> = engine.run().await;
-            result.map_err(|e| format!("引擎运行错误: {}", e))
+            result.map_err(|e| format!("Engine runtime error: {}", e))
         } else {
-            Err("引擎未初始化".to_string())
+            Err("Engine not initialized".to_string())
         }
     }
 }

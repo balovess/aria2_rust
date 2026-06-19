@@ -33,10 +33,10 @@ use super::packet::{
 use super::session::SftpSession;
 
 /// Default buffer size for read operations (32 KB)
-#[allow(dead_code)]
+#[allow(dead_code)] // Referenced by test_buf_size_constants; will be used when SFTP read chunking is implemented
 const DEFAULT_READ_BUF_SIZE: usize = 32 * 1024;
 /// Default buffer size for write operations (32 KB)
-#[allow(dead_code)]
+#[allow(dead_code)] // Referenced by test_buf_size_constants; will be used when SFTP write chunking is implemented
 const DEFAULT_WRITE_BUF_SIZE: usize = 32 * 1024;
 
 // =============================================================================

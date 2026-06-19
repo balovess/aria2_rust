@@ -1,10 +1,9 @@
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use crate::constants;
 use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
     on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
@@ -46,8 +45,6 @@ pub struct BtDownloadCommand {
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
-    #[allow(dead_code)] // Reserved for peer bitfield tracking in future optimizations
-    peer_tracker: Option<aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker>,
     pub choking_algo: Option<ChokingAlgorithm>,
     pub multi_file_layout: Option<MultiFileLayout>,
 
@@ -76,6 +73,7 @@ pub struct BtDownloadCommand {
     // BEP 6 (Fast Extension): track AllowedFast messages sent to peers
     /// Track which AllowedFast pieces have been sent to each peer
     /// Key: peer identifier (using connection index for now)
+    #[allow(dead_code)]
     pub(crate) allowed_fast_sent_peers: HashMap<usize, HashSet<u32>>,
 
     /// Track suggest counts per peer to avoid spamming
@@ -83,6 +81,7 @@ pub struct BtDownloadCommand {
 
     // Tracker event state machine (Phase 15 - H5): manages Started/Completed/Stopped events
     /// State machine for tracker announce events
+    #[allow(dead_code)]
     pub(crate) tracker_state: TrackerState,
 
     // Web-seed (BEP 19 / HTTP fallback) integration
@@ -158,12 +157,12 @@ impl BtDownloadCommand {
             || options.bt_snubbed_timeout.is_some()
         {
             let config = ChokingConfig {
-                max_upload_slots: options.bt_max_upload_slots.unwrap_or(4) as usize,
+                max_upload_slots: options.bt_max_upload_slots.unwrap_or(constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32) as usize,
                 optimistic_unchoke_interval_secs: options
                     .bt_optimistic_unchoke_interval
-                    .unwrap_or(30),
-                snubbed_timeout_secs: options.bt_snubbed_timeout.unwrap_or(60),
-                choke_rotation_interval_secs: 10,
+                    .unwrap_or(constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS),
+                snubbed_timeout_secs: options.bt_snubbed_timeout.unwrap_or(constants::BT_SNUBBED_TIMEOUT_SECS),
+                choke_rotation_interval_secs: constants::BT_CHOKE_ROTATION_INTERVAL_SECS,
             };
             Some(ChokingAlgorithm::new(config))
         } else {
@@ -231,7 +230,6 @@ impl BtDownloadCommand {
             udp_client: None,
             dht_engine: None,
             public_trackers: None,
-            peer_tracker: None,
             choking_algo,
             multi_file_layout,
 

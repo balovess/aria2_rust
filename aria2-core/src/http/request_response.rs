@@ -1,11 +1,10 @@
-//! HTTP 请求构建和响应解析模块
+//! HTTP request building and response parsing module
 //!
-//! 提供了完整的 HTTP/1.1 请求构建、响应解析、Cookie 管理和认证功能。
-//! 支持流式 API 构建 HTTP 请求，自动添加标准 headers，以及 RFC 6265 合规的 Cookie 管理。
+//! Provides HTTP/1.1 request building, response parsing, and authentication.
+//! Supports fluent API for building HTTP requests with automatic standard headers.
 
 use base64::{Engine, engine::general_purpose};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
 use crate::error::{Aria2Error, Result};
@@ -437,407 +436,49 @@ impl HttpResponse {
     /// // decoded 包含解压后的原始数据
     /// ```
     pub fn decoded_body(&self) -> Result<Vec<u8>> {
-        use crate::http::stream_filter::AutoFilterSelector;
+        use crate::http::stream_filter::{AutoFilterSelector, process_filters};
 
         let encoding = self.header("Content-Encoding").map(|s| s.as_str());
         let transfer_enc = self.header("Transfer-Encoding").map(|s| s.as_str());
 
-        let mut chain = AutoFilterSelector::select_filters(encoding, transfer_enc);
+        let mut filters = AutoFilterSelector::select_filters(encoding, transfer_enc);
 
         match &self.body {
-            Some(raw_data) => chain.process(raw_data),
+            Some(raw_data) => process_filters(&mut filters, raw_data),
             None => Ok(Vec::new()),
         }
     }
 }
 
-/// Cookie 结构体 (RFC 6265 合规)
+/// Generate Basic Auth header value
 ///
-/// 表示一个 HTTP cookie，包含名称、值、域、路径等属性。
-#[derive(Debug, Clone)]
-pub struct Cookie {
-    /// Cookie 名称
-    pub name: String,
-    /// Cookie 值
-    pub value: String,
-    /// Cookie 所属域
-    pub domain: String,
-    /// Cookie 有效路径
-    pub path: String,
-    /// 过期时间 (None 表示会话 cookie)
-    pub expiry: Option<SystemTime>,
-    /// 是否仅 HTTPS 传输
-    pub secure: bool,
-    /// 是否禁止 JavaScript 访问
-    pub http_only: bool,
-}
-
-impl Cookie {
-    /// 创建新的 Cookie
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Cookie 名称
-    /// * `value` - Cookie 值
-    /// * `domain` - 所属域
-    /// * `path` - 有效路径
-    ///
-    /// # Returns
-    ///
-    /// 新的 Cookie 实例
-    pub fn new(name: &str, value: &str, domain: &str, path: &str) -> Self {
-        Cookie {
-            name: name.to_string(),
-            value: value.to_string(),
-            domain: domain.to_string().to_lowercase(),
-            path: path.to_string(),
-            expiry: None,
-            secure: false,
-            http_only: false,
-        }
-    }
-
-    /// 检查 Cookie 是否已过期
-    ///
-    /// # Returns
-    ///
-    /// 如果 Cookie 已过期返回 true
-    pub fn is_expired(&self) -> bool {
-        if let Some(expiry) = self.expiry {
-            SystemTime::now() > expiry
-        } else {
-            false // 会话 cookie 永不过期
-        }
-    }
-
-    /// 检查域名是否匹配
-    ///
-    /// 根据 RFC 6265 规范检查域名是否匹配 cookie 的域属性。
-    /// 支持精确匹配和子域匹配 (以 . 开头的域)。
-    ///
-    /// # Arguments
-    ///
-    /// * `host` - 要检查的主机名
-    ///
-    /// # Returns
-    ///
-    /// 如果域名匹配返回 true
-    fn domain_matches(&self, host: &str) -> bool {
-        let cookie_domain = self.domain.to_lowercase();
-        let host = host.to_lowercase();
-
-        // 精确匹配
-        if cookie_domain == host {
-            return true;
-        }
-
-        // 子域匹配 (cookie domain 以 . 开头)
-        if let Some(stripped) = cookie_domain.strip_prefix('.') {
-            // .example.com matches example.com and sub.example.com
-            host == stripped || host.ends_with(&cookie_domain)
-        } else {
-            // 不以 . 开头的 domain，需要 host 以 .domain 结尾
-            host.ends_with(&format!(".{}", cookie_domain))
-        }
-    }
-
-    /// 检查路径是否匹配
-    ///
-    /// 根据 RFC 6265 规范检查路径是否匹配 cookie 的路径属性。
-    ///
-    /// # Arguments
-    ///
-    /// * `request_path` - 请求路径
-    ///
-    /// # Returns
-    ///
-    /// 如果路径匹配返回 true
-    fn path_matches(&self, request_path: &str) -> bool {
-        // "/" 匹配所有路径
-        if self.path == "/" {
-            return true;
-        }
-
-        // cookie 路径是请求路径的前缀
-        if request_path.starts_with(&self.path) {
-            // 确保边界对齐: /foo 匹配 /foobar 不合法，但 /foo/ 匹配 /foo/bar 合法
-            if request_path.len() == self.path.len() {
-                return true; // 精确匹配
-            }
-            // 检查 cookie 路径是否以 / 结尾，或者请求路径的下一个字符是 /
-            if self.path.ends_with('/') || request_path.chars().nth(self.path.len()) == Some('/') {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// 检查 Cookie 是否应该发送给指定的 URL
-    ///
-    /// 综合考虑域名、路径、安全标志等因素。
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - 目标 URL
-    ///
-    /// # Returns
-    ///
-    /// 如果应该发送此 Cookie 返回 true
-    pub fn should_send_to(&self, url: &Url) -> bool {
-        // 安全标志检查
-        if self.secure && url.scheme() != "https" {
-            return false;
-        }
-
-        // 过期检查
-        if self.is_expired() {
-            return false;
-        }
-
-        // 域名匹配
-        let host = url.host_str().unwrap_or("");
-        if !self.domain_matches(host) {
-            return false;
-        }
-
-        // 路径匹配
-        let path = url.path();
-        if !self.path_matches(path) {
-            return false;
-        }
-
-        true
-    }
-}
-
-/// Cookie Jar (RFC 6265 合规的 Cookie 存储和管理)
+/// Encodes username:password as Base64 and returns `Basic <credentials>`.
 ///
-/// 用于存储和管理 HTTP cookies，支持从 Set-Cookie header 解析，
-/// 以及根据请求 URL 获取合适的 cookies。
-#[derive(Debug, Clone)]
-pub struct CookieJar {
-    /// 存储的所有 cookies
-    cookies: Vec<Cookie>,
-}
-
-impl CookieJar {
-    /// 创建新的空 Cookie Jar
-    ///
-    /// # Returns
-    ///
-    /// 新的 CookieJar 实例
-    pub fn new() -> Self {
-        CookieJar {
-            cookies: Vec::new(),
-        }
-    }
-
-    /// 从 Set-Cookie header 添加 Cookie
-    ///
-    /// 解析 Set-Cookie header 的值并存储到 jar 中。
-    /// 自动从请求 URL 提取默认的 domain 和 path。
-    ///
-    /// # Arguments
-    ///
-    /// * `set_cookie_header` - Set-Cookie header 的完整值
-    /// * `request_url` - 触发 Set-Cookie 的请求 URL
-    pub fn set_cookie(&mut self, set_cookie_header: &str, request_url: &Url) {
-        let header = set_cookie_header.trim();
-        if header.is_empty() {
-            return;
-        }
-
-        // 解析 name=value 部分
-        let (name_value, attributes) = match header.find(';') {
-            Some(pos) => (&header[..pos], &header[pos + 1..]),
-            None => (header, ""),
-        };
-
-        // 解析 name=value
-        let eq_pos = match name_value.find('=') {
-            Some(pos) => pos,
-            None => return, // 无效格式
-        };
-
-        let name = name_value[..eq_pos].trim();
-        let value = name_value[eq_pos + 1..].trim();
-
-        if name.is_empty() {
-            return;
-        }
-
-        // 获取默认 domain 和 path
-        let default_domain = request_url.host_str().unwrap_or("").to_string();
-        let default_path = request_url.path().to_string();
-
-        // 创建 cookie
-        let mut cookie = Cookie::new(name, value, &default_domain, &default_path);
-
-        // 解析属性
-        for attr in attributes.split(';') {
-            let attr = attr.trim();
-            if attr.is_empty() {
-                continue;
-            }
-
-            if let Some((attr_name, attr_value)) = attr.split_once('=') {
-                match attr_name.trim().to_lowercase().as_str() {
-                    "domain" => {
-                        let domain = attr_value.trim();
-                        // 确保 domain 以 . 开头
-                        if domain.starts_with('.') {
-                            cookie.domain = domain.to_lowercase();
-                        } else {
-                            cookie.domain = format!(".{}", domain).to_lowercase();
-                        }
-                    }
-                    "path" => {
-                        cookie.path = attr_value.trim().to_string();
-                    }
-                    "max-age" => {
-                        if let Ok(seconds) = attr_value.trim().parse::<u64>() {
-                            let expiry =
-                                SystemTime::now() + std::time::Duration::from_secs(seconds);
-                            cookie.expiry = Some(expiry);
-                        }
-                    }
-                    "expires" => {
-                        // 简单实现: 尝试解析常见日期格式
-                        // 完整实现需要更复杂的日期解析
-                        if let Ok(timestamp) = attr_value.trim().parse::<i64>() {
-                            let expiry =
-                                UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
-                            cookie.expiry = Some(expiry);
-                        }
-                    }
-                    _ => {} // 忽略未知属性
-                }
-            } else {
-                // 无值的布尔属性
-                match attr.to_lowercase().as_str() {
-                    "secure" => cookie.secure = true,
-                    "httponly" => cookie.http_only = true,
-                    _ => {} // 忽略未知属性
-                }
-            }
-        }
-
-        // 移除同名的旧 cookie (同一 domain + path + name)
-        self.cookies.retain(|c| {
-            !(c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path)
-        });
-
-        // 添加新 cookie
-        self.cookies.push(cookie);
-    }
-
-    /// 获取适用于指定 URL 的所有 Cookies
-    ///
-    /// 根据域名、路径和安全标志筛选合适的 cookies，
-    /// 并返回格式化为 `Cookie:` header 的字符串。
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - 目标 URL
-    ///
-    /// # Returns
-    ///
-    /// 格式化为 `name1=value1; name2=value2` 的字符串
-    pub fn get_cookies_for_url(&self, url: &Url) -> String {
-        let matching_cookies: Vec<&Cookie> = self
-            .cookies
-            .iter()
-            .filter(|c| c.should_send_to(url))
-            .collect();
-
-        if matching_cookies.is_empty() {
-            return String::new();
-        }
-
-        matching_cookies
-            .iter()
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect::<Vec<_>>()
-            .join("; ")
-    }
-
-    /// 清除所有过期的 Cookies
-    ///
-    /// 移除所有已过期的持久性 cookies。会话 cookies (无过期时间) 不会被移除。
-    pub fn cleanup_expired(&mut self) {
-        self.cookies.retain(|c| !c.is_expired());
-    }
-
-    /// 获取存储的 Cookies 数量
-    ///
-    /// # Returns
-    ///
-    /// 当前存储的 cookie 数量
-    pub fn len(&self) -> usize {
-        self.cookies.len()
-    }
-
-    /// 检查 Cookie Jar 是否为空
-    ///
-    /// # Returns
-    ///
-    /// 如果没有存储任何 cookie 返回 true
-    pub fn is_empty(&self) -> bool {
-        self.cookies.is_empty()
-    }
-}
-
-impl Default for CookieJar {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 认证头构建工具
+/// # Examples
 ///
-/// 提供 Basic Auth 等 HTTP 认证方案的 header 生成功能。
-pub struct AuthHeaderBuilder;
+/// ```
+/// use aria2_core::http::request_response::basic_auth;
+///
+/// let auth_header = basic_auth("user", "pass");
+/// assert_eq!(auth_header, "Basic dXNlcjpwYXNz");
+/// ```
+pub fn basic_auth(username: &str, password: &str) -> String {
+    let credentials = format!("{}:{}", username, password);
+    let encoded = general_purpose::STANDARD.encode(credentials.as_bytes());
+    format!("Basic {}", encoded)
+}
 
-impl AuthHeaderBuilder {
-    /// 生成 Basic Auth 认证头
-    ///
-    /// 将用户名和密码进行 Base64 编码生成 `Authorization: Basic <credentials>` header。
-    ///
-    /// # Arguments
-    ///
-    /// * `username` - 用户名
-    /// * `password` - 密码
-    ///
-    /// # Returns
-    ///
-    /// 完整的 Authorization header 值 (如 `Basic dXNlcjpwYXNz`)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use aria2_core::http::request_response::AuthHeaderBuilder;
-    ///
-    /// let auth_header = AuthHeaderBuilder::basic_auth("user", "pass");
-    /// assert_eq!(auth_header, "Basic dXNlcjpwYXNz");
-    /// ```
-    pub fn basic_auth(username: &str, password: &str) -> String {
-        let credentials = format!("{}:{}", username, password);
-        let encoded = general_purpose::STANDARD.encode(credentials.as_bytes());
-        format!("Basic {}", encoded)
-    }
-
-    /// 生成 Bearer Token 认证头
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - Bearer token
-    ///
-    /// # Returns
-    ///
-    /// 完整的 Authorization header 值
-    pub fn bearer_token(token: &str) -> String {
-        format!("Bearer {}", token)
-    }
+/// Generate Bearer Token header value
+///
+/// # Arguments
+///
+/// * `token` - Bearer token
+///
+/// # Returns
+///
+/// Complete Authorization header value (e.g., `Bearer my-token`)
+pub fn bearer_token(token: &str) -> String {
+    format!("Bearer {}", token)
 }
 
 // Base64 编码已通过 use base64::{engine::general_purpose, Engine} 导入
@@ -1057,138 +698,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cookie_jar_basic_operations() {
-        let jar = CookieJar::new();
-        assert!(jar.is_empty());
-        assert_eq!(jar.len(), 0);
-    }
-
-    #[test]
-    fn test_cookie_jar_set_and_get() {
-        let mut jar = CookieJar::new();
-        let url = Url::parse("http://example.com/page").unwrap();
-
-        jar.set_cookie("session=abc123; Path=/", &url);
-        jar.set_cookie("user=john; Domain=.example.com", &url);
-
-        assert_eq!(jar.len(), 2);
-
-        let cookies = jar.get_cookies_for_url(&url);
-        assert!(cookies.contains("session=abc123"));
-        assert!(cookies.contains("user=john"));
-    }
-
-    #[test]
-    fn test_cookie_jar_domain_match() {
-        let mut jar = CookieJar::new();
-        let url = Url::parse("http://example.com/page").unwrap();
-
-        // 设置一个针对 example.com 及其子域的 cookie (显式指定 Path=/)
-        jar.set_cookie("token=xyz; Domain=.example.com; Path=/", &url);
-
-        // 主域应该能获取到
-        let main_url = Url::parse("http://example.com/resource").unwrap();
-        let cookies = jar.get_cookies_for_url(&main_url);
-        assert!(cookies.contains("token=xyz"));
-
-        // 子域也应该能获取到
-        let sub_url = Url::parse("http://sub.example.com/resource").unwrap();
-        let cookies_sub = jar.get_cookies_for_url(&sub_url);
-        assert!(cookies_sub.contains("token=xyz"));
-
-        // 不同域不应该获取到
-        let other_url = Url::parse("http://other.com/resource").unwrap();
-        let cookies_other = jar.get_cookies_for_url(&other_url);
-        assert!(!cookies_other.contains("token=xyz"));
-    }
-
-    #[test]
-    fn test_cookie_jar_path_match() {
-        let mut jar = CookieJar::new();
-        let url = Url::parse("http://example.com/page").unwrap();
-
-        // 设置特定路径的 cookie
-        jar.set_cookie("pref=en; Path=/api", &url);
-
-        // 匹配 /api 及其子路径
-        let api_url = Url::parse("http://example.com/api/users").unwrap();
-        let cookies_api = jar.get_cookies_for_url(&api_url);
-        assert!(cookies_api.contains("pref=en"));
-
-        // 不匹配其他路径
-        let home_url = Url::parse("http://example.com/home").unwrap();
-        let cookies_home = jar.get_cookies_for_url(&home_url);
-        assert!(!cookies_home.contains("pref=en"));
-    }
-
-    #[test]
-    fn test_cookie_secure_flag() {
-        let mut jar = CookieJar::new();
-        let url = Url::parse("https://secure.example.com/api").unwrap();
-
-        // 设置 secure cookie
-        jar.set_cookie("secret=token; Secure; Domain=.example.com", &url);
-
-        // HTTPS 请求可以获取
-        let https_url = Url::parse("https://secure.example.com/api").unwrap();
-        let cookies_https = jar.get_cookies_for_url(&https_url);
-        assert!(cookies_https.contains("secret=token"));
-
-        // HTTP 请求不能获取
-        let http_url = Url::parse("http://secure.example.com/api").unwrap();
-        let cookies_http = jar.get_cookies_for_url(&http_url);
-        assert!(!cookies_http.contains("secret=token"));
-    }
-
-    #[test]
-    fn test_cookie_expiry_cleanup() {
-        let mut jar = CookieJar::new();
-        let url = Url::parse("http://example.com/page").unwrap();
-
-        // 设置一个立即过期的 cookie (Max-Age: 0)
-        jar.set_cookie("expired=value; Max-Age=0", &url);
-
-        // 设置一个不会过期的 session cookie
-        jar.set_cookie("session=active", &url);
-
-        assert_eq!(jar.len(), 2);
-
-        // 清理过期 cookie
-        jar.cleanup_expired();
-
-        // 应该只剩 session cookie
-        assert_eq!(jar.len(), 1);
-        let cookies = jar.get_cookies_for_url(&url);
-        assert!(cookies.contains("session=active"));
-        assert!(!cookies.contains("expired=value"));
-    }
-
-    #[test]
-    fn test_cookie_replace_same_name_domain_path() {
-        let mut jar = CookieJar::new();
-        let url = Url::parse("http://example.com/page").unwrap();
-
-        // 第一次设置
-        jar.set_cookie("session=first", &url);
-        assert_eq!(jar.len(), 1);
-
-        // 相同 name+domain+path 的 cookie 应该替换旧的
-        jar.set_cookie("session=second", &url);
-        assert_eq!(jar.len(), 1);
-
-        let cookies = jar.get_cookies_for_url(&url);
-        assert!(cookies.contains("session=second"));
-        assert!(!cookies.contains("session=first"));
-    }
-
-    #[test]
     fn test_basic_auth_header_generation() {
-        // 测试基本的 Base64 编码
-        let auth = AuthHeaderBuilder::basic_auth("user", "pass");
+        // Test basic Base64 encoding
+        let auth = basic_auth("user", "pass");
         assert_eq!(auth, "Basic dXNlcjpwYXNz");
 
-        // 测试特殊字符
-        let auth_special = AuthHeaderBuilder::basic_auth("admin@email.com", "p@ssw0rd!");
+        // Test special characters
+        let auth_special = basic_auth("admin@email.com", "p@ssw0rd!");
         // 验证格式正确
         assert!(auth_special.starts_with("Basic "));
         // 验证可以解码回原始凭证
@@ -1202,13 +718,13 @@ mod tests {
         assert_eq!(decoded, "admin@email.com:p@ssw0rd!");
 
         // 测试空密码
-        let auth_empty_pass = AuthHeaderBuilder::basic_auth("user", "");
+        let auth_empty_pass = basic_auth("user", "");
         assert!(auth_empty_pass.starts_with("Basic "));
     }
 
     #[test]
     fn test_bearer_token_generation() {
-        let token = AuthHeaderBuilder::bearer_token("my-access-token-12345");
+        let token = bearer_token("my-access-token-12345");
         assert_eq!(token, "Bearer my-access-token-12345");
     }
 
@@ -1251,59 +767,4 @@ mod tests {
         assert!(resp.header("Content-Length").is_some());
     }
 
-    #[test]
-    fn test_cookie_httponly_flag() {
-        let mut jar = CookieJar::new();
-        let url = Url::parse("http://example.com/page").unwrap();
-
-        // HttpOnly 只是标记，不影响发送逻辑 (浏览器层面限制 JavaScript 访问)
-        jar.set_cookie("session=abc; HttpOnly", &url);
-
-        let cookies = jar.get_cookies_for_url(&url);
-        assert!(cookies.contains("session=abc"));
-    }
-
-    #[test]
-    fn test_full_request_response_cycle() {
-        // 模拟完整的请求-响应周期
-        let url = Url::parse("http://example.com/api/data").unwrap();
-
-        // 构建请求
-        let request = HttpRequestBuilder::new(HttpMethod::Get, url.clone())
-            .header("Accept", "application/json")
-            .build()
-            .unwrap();
-
-        // 序列化请求
-        let request_bytes = request.to_bytes();
-        let request_str = String::from_utf8_lossy(&request_bytes);
-        assert!(request_str.contains("GET /api/data HTTP/1.1"));
-        assert!(request_str.contains("Accept: application/json"));
-
-        // 模拟服务器响应
-        let response_data = "HTTP/1.1 200 OK\r\n\
-                           Content-Type: application/json\r\n\
-                           Set-Cookie: session=xyz; Path=/\r\n\
-                           Content-Length: 17\r\n\r\n\
-                           {\"data\":\"test\"}";
-
-        // 解析响应
-        let response = HttpResponse::from_bytes(response_data.as_bytes()).unwrap();
-        assert_eq!(response.status_code, 200);
-        assert_eq!(response.header("Content-Type").unwrap(), "application/json");
-        assert_eq!(response.header_all("Set-Cookie").len(), 1);
-        assert!(response.body.is_some());
-
-        // 处理 Set-Cookie
-        let mut jar = CookieJar::new();
-        jar.set_cookie(response.header("Set-Cookie").unwrap(), &url);
-
-        // 后续请求应该携带 cookie
-        let next_request = HttpRequestBuilder::new(HttpMethod::Get, url.clone())
-            .header("Cookie", &jar.get_cookies_for_url(&url))
-            .build()
-            .unwrap();
-
-        assert_eq!(next_request.headers.get("Cookie").unwrap(), "session=xyz");
-    }
 }

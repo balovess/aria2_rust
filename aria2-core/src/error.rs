@@ -2,25 +2,25 @@ use thiserror::Error;
 
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum Aria2Error {
-    #[error("网络错误: {0}")]
+    #[error("Network error: {0}")]
     Network(String),
 
-    #[error("IO错误: {0}")]
+    #[error("IO error: {0}")]
     Io(String),
 
-    #[error("解析错误: {0}")]
+    #[error("Parse error: {0}")]
     Parse(String),
 
-    #[error("校验失败: {0}")]
+    #[error("Checksum failed: {0}")]
     Checksum(String),
 
-    #[error("下载失败: {0}")]
+    #[error("Download failed: {0}")]
     DownloadFailed(String),
 
-    #[error("可恢复错误: {0}")]
+    #[error("Recoverable error: {0}")]
     Recoverable(#[from] RecoverableError),
 
-    #[error("致命错误: {0}")]
+    #[error("Fatal error: {0}")]
     Fatal(#[from] FatalError),
 }
 
@@ -30,39 +30,57 @@ impl From<serde_json::Error> for Aria2Error {
     }
 }
 
+impl From<std::io::Error> for Aria2Error {
+    fn from(err: std::io::Error) -> Self {
+        Aria2Error::Io(err.to_string())
+    }
+}
+
+impl From<std::string::FromUtf8Error> for Aria2Error {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        Aria2Error::Parse(err.to_string())
+    }
+}
+
+impl From<base64::DecodeError> for Aria2Error {
+    fn from(err: base64::DecodeError) -> Self {
+        Aria2Error::Parse(err.to_string())
+    }
+}
+
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum RecoverableError {
-    #[error("连接超时")]
+    #[error("Connection timeout")]
     Timeout,
 
-    #[error("服务器返回错误: {code}")]
+    #[error("Server returned error: {code}")]
     ServerError { code: u16 },
 
-    #[error("临时网络故障: {message}")]
+    #[error("Temporary network failure: {message}")]
     TemporaryNetworkFailure { message: String },
 
-    #[error("重试次数已用尽: {attempts}次")]
+    #[error("Max retries reached: {attempts} attempts")]
     MaxTriesReached { attempts: u32 },
 
-    #[error("无效的 piece 索引: {index} (最大: {max_index})")]
+    #[error("Invalid piece index: {index} (max: {max_index})")]
     InvalidPieceIndex { index: u32, max_index: u32 },
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum FatalError {
-    #[error("配置错误: {0}")]
+    #[error("Configuration error: {0}")]
     Config(String),
 
-    #[error("磁盘空间不足")]
+    #[error("Insufficient disk space")]
     DiskSpaceExhausted,
 
-    #[error("权限被拒绝: {path}")]
+    #[error("Permission denied: {path}")]
     PermissionDenied { path: String },
 
-    #[error("文件不存在: {path}")]
+    #[error("File not found: {path}")]
     FileNotFound { path: String },
 
-    #[error("不支持的协议: {protocol}")]
+    #[error("Unsupported protocol: {protocol}")]
     UnsupportedProtocol { protocol: String },
 }
 

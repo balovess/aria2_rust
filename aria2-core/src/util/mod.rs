@@ -1,5 +1,6 @@
 pub mod bencode;
 pub mod encoding;
+pub mod format;
 pub mod hash;
 pub mod perf_monitor;
 pub mod random;

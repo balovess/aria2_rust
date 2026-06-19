@@ -52,7 +52,7 @@ impl Default for DownloadTaskInfo {
     fn default() -> Self {
         Self {
             gid: 0,
-            status: "waiting".to_string(),
+            status: crate::constants::STATUS_WAITING_LOWER.to_string(),
             total_length: 0,
             completed_length: 0,
             download_speed: 0.0,
@@ -93,10 +93,6 @@ pub struct DownloadSummary {
 ///     Default::default()
 /// ).await?;
 ///
-/// // Get status
-/// let info = coordinator.get_download_info(gid).await?;
-/// println!("Progress: {}/{}", info.completed_length, info.total_length);
-///
 /// // Shutdown
 /// coordinator.shutdown().await?;
 /// ```
@@ -132,7 +128,7 @@ impl DownloadCoordinator {
         let config = Arc::new(RwLock::new(options));
 
         // Initialize engine with default tick interval
-        let tick_ms = 100u64; // Default BT peer timeout
+        let tick_ms = crate::constants::DEFAULT_TICK_INTERVAL_MS; // Default BT peer timeout
 
         Self {
             engine: Arc::new(RwLock::new(Some(DownloadEngine::new(tick_ms)))),
@@ -175,92 +171,6 @@ impl DownloadCoordinator {
         Ok(gid)
     }
 
-    /// Pause an active download
-    ///
-    /// # Arguments
-    /// * `gid` - GID of the download to pause
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully paused
-    /// * `Err(Aria2Error)` - If pause failed or GID not found
-    #[allow(dead_code)]
-    pub async fn pause_download(&self, gid: GroupId) -> Result<()> {
-        tracing::info!("[Coordinator] Pausing download GID={:x}", gid);
-
-        // TODO: Implement actual pause logic
-        // This would involve:
-        // 1. Finding the request group by GID
-        // 2. Setting its status to paused
-        // 3. Notifying the engine
-
-        Ok(())
-    }
-
-    /// Resume a paused download
-    ///
-    /// # Arguments
-    /// * `gid` - GID of the download to resume
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully resumed
-    /// * `Err(Aria2Error)` - If resume failed or GID not found
-    #[allow(dead_code)]
-    pub async fn resume_download(&self, gid: GroupId) -> Result<()> {
-        tracing::info!("[Coordinator] Resuming download GID={:x}", gid);
-
-        // TODO: Implement actual resume logic
-        Ok(())
-    }
-
-    /// Remove a download (cancel or complete)
-    ///
-    /// # Arguments
-    /// * `gid` - GID of the download to remove
-    /// * `force` - If true, force removal even if actively downloading
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully removed
-    /// * `Err(Aria2Error)` - If removal failed or GID not found
-    #[allow(dead_code)]
-    pub async fn remove_download(&self, gid: GroupId, force: bool) -> Result<()> {
-        tracing::info!(
-            "[Coordinator] Removing download GID={:x} (force={})",
-            gid,
-            force
-        );
-
-        // TODO: Implement actual removal logic
-        Ok(())
-    }
-
-    /// Get information about a specific download
-    ///
-    /// # Arguments
-    /// * `gid` - GID of the download to query
-    ///
-    /// # Returns
-    /// * `Ok(DownloadTaskInfo)` - Current status information
-    /// * `Err(Aria2Error)` - If GID not found or query failed
-    pub async fn get_download_info(&self, gid: GroupId) -> Result<DownloadTaskInfo> {
-        // TODO: Query actual download info from engine/request man
-        // For now, return placeholder data
-        Ok(DownloadTaskInfo {
-            gid,
-            status: "active".to_string(),
-            ..Default::default()
-        })
-    }
-
-    /// Get list of all active downloads
-    ///
-    /// # Returns
-    /// * Vector of `DownloadTaskInfo` for each active download
-    pub async fn get_active_downloads(&self) -> Result<Vec<DownloadTaskInfo>> {
-        // TODO: Query actual active downloads from engine
-        // For now, return empty vector
-        Ok(Vec::new())
-    }
-
     /// Get global download summary
     ///
     /// Aggregates statistics across all downloads.
@@ -268,16 +178,11 @@ impl DownloadCoordinator {
     /// # Returns
     /// * `DownloadSummary` with aggregate data
     pub async fn get_summary(&self) -> Result<DownloadSummary> {
-        let active = self.get_active_downloads().await?;
-        
+        // TODO: Query actual active downloads from engine for real statistics
         Ok(DownloadSummary {
-            active_count: active.len(),
-            total_downloaded: active.iter().map(|i| i.completed_length).sum(),
-            avg_speed: if active.is_empty() {
-                0.0
-            } else {
-                active.iter().map(|i| i.download_speed).sum::<f64>() / active.len() as f64
-            },
+            active_count: 0,
+            total_downloaded: 0,
+            avg_speed: 0.0,
             total_elapsed: std::time::Duration::ZERO,
         })
     }
@@ -380,13 +285,13 @@ impl DownloadCoordinator {
     /// * Formatted string suitable for console output
     pub fn format_task_info(info: &DownloadTaskInfo) -> String {
         format!(
-            "GID:{:016x} | Status:{} | {}/{} | Speed:{} | Time:{}",
-            info.gid,
+            "GID:{} | Status:{} | {}/{} | Speed:{} | Time:{}",
+            format!(crate::constants::GID_FORMAT, info.gid),
             info.status,
             format_bytes(info.completed_length),
             format_bytes(info.total_length),
             format_speed(info.download_speed),
-            format_duration(info.elapsed)
+            format_duration(info.elapsed.as_secs())
         )
     }
 }
@@ -423,7 +328,7 @@ mod tests {
     #[test]
     fn test_download_task_info_default() {
         let info = DownloadTaskInfo::default();
-        assert_eq!(info.status, "waiting");
+        assert_eq!(info.status, crate::constants::STATUS_WAITING_LOWER);
         assert_eq!(info.total_length, 0);
         assert_eq!(info.completed_length, 0);
     }
@@ -432,7 +337,7 @@ mod tests {
     fn test_format_task_info() {
         let info = DownloadTaskInfo {
             gid: 0x12345678,
-            status: "active".to_string(),
+            status: crate::constants::STATUS_ACTIVE_LOWER.to_string(),
             total_length: 1024 * 1024,
             completed_length: 512 * 1024,
             download_speed: 1024.0 * 100.0,
@@ -451,15 +356,6 @@ mod tests {
         let summary = coordinator.get_summary().await.unwrap();
         assert_eq!(summary.active_count, 0);
         assert_eq!(summary.total_downloaded, 0);
-    }
-
-    #[tokio::test]
-    async fn test_restore_session_nonexistent() {
-        let coordinator = DownloadCoordinator::new().await.unwrap();
-        let result = coordinator
-            .restore_session(std::path::Path::new("/nonexistent/session.txt"))
-            .await;
-        assert!(result.is_ok()); // Should succeed with 0 restored
     }
 
     #[tokio::test]

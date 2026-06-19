@@ -1,7 +1,7 @@
 //! 流式数据解码器框架
 //!
 //! 提供可组合的流式数据过滤器，支持 GZip、Chunked、BZip2 等编码格式的解码。
-//! 通过 `FilterChain` 可以将多个过滤器串联使用，实现复杂的数据处理流水线。
+//! 通过 `process_filters` 可以将多个过滤器串联使用，实现复杂的数据处理流水线。
 
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_writer::SeekableDiskWriter;
@@ -643,159 +643,44 @@ impl StreamFilter for BZip2Decoder {
     }
 }
 
-// ==================== FilterChain 过滤器链 ====================
+// ==================== Filter processing helper ====================
 
-/// 流式过滤器链
+/// Process input data through a sequence of filters.
 ///
-/// 允许将多个 `StreamFilter` 串联起来形成数据处理流水线。
-/// 数据会依次通过每个过滤器，前一个过滤器的输出作为后一个的输入。
+/// Passes input data through each filter in sequence. The first filter receives
+/// a direct reference to the input to avoid unnecessary cloning. Subsequent filters
+/// receive the output from the previous filter.
 ///
-/// # Architecture
-///
-/// ```text
-/// Input → Filter1 → Filter2 → ... → FilterN → Output
-/// ```
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use aria2_core::http::stream_filter::*;
-/// use std::sync::Arc;
-///
-/// let mut chain = FilterChain::new();
-/// chain.push(Box::new(GZipDecoder::new()));
-/// chain.push(Box::new(ChunkedDecoder::new()));
-///
-/// let output = chain.process(input_data)?;
-/// ```
-#[derive(Debug, Default)]
-pub struct FilterChain {
-    /// 过滤器列表（按执行顺序排列）
-    filters: Vec<Box<dyn StreamFilter>>,
+/// If the filter list is empty, returns a copy of the input.
+pub fn process_filters(filters: &mut [Box<dyn StreamFilter>], input: &[u8]) -> Result<Vec<u8>> {
+    let mut data: Option<Vec<u8>> = None;
+
+    for (index, filter) in filters.iter_mut().enumerate() {
+        data = Some(if index == 0 {
+            filter.filter(input)?
+        } else {
+            filter.filter(data.as_ref().unwrap())?
+        });
+    }
+
+    Ok(data.unwrap_or_else(|| input.to_vec()))
 }
 
-impl FilterChain {
-    /// 创建空的过滤器链
-    ///
-    /// # Returns
-    ///
-    /// 新的 FilterChain 实例（不含任何过滤器）
-    pub fn new() -> Self {
-        FilterChain {
-            filters: Vec::new(),
-        }
+/// Flush all filters and collect remaining output.
+pub fn flush_filters(filters: &mut [Box<dyn StreamFilter>]) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    for filter in filters {
+        let flushed = filter.flush()?;
+        data.extend_from_slice(&flushed);
     }
-
-    /// 向过滤器链末尾添加一个过滤器
-    ///
-    /// 新添加的过滤器将在最后执行。
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - 要添加的过滤器（装箱后的 trait object）
-    pub fn push(&mut self, filter: Box<dyn StreamFilter>) {
-        self.filters.push(filter);
-    }
-
-    /// 清除所有过滤器
-    ///
-    /// 移除链中的所有过滤器，使其变为空链。
-    pub fn clear(&mut self) {
-        self.filters.clear();
-    }
-
-    /// Process input data through the filter chain
-    ///
-    /// Passes input data through each filter in sequence. The first filter receives
-    /// a direct reference to the input to avoid unnecessary cloning. Subsequent filters
-    /// receive the output from the previous filter.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - Raw data to be processed
-    ///
-    /// # Returns
-    ///
-    /// Final data after processing through all filters, or an error
-    ///
-    /// # Errors
-    ///
-    /// If any filter fails, returns error immediately and stops processing
-    ///
-    /// # Performance
-    ///
-    /// Optimized to avoid cloning input data before the first filter call.
-    /// Only allocates when filters actually modify the data.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut chain = FilterChain::new();
-    /// chain.push(Box::new(GZipDecoder::new()));
-    /// let result = chain.process(gzip_compressed_data)?;
-    /// ```
-    pub fn process(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        // Optimization: avoid unnecessary clone by passing input reference directly to first filter
-        let mut data: Option<Vec<u8>> = None;
-
-        for (index, filter) in self.filters.iter_mut().enumerate() {
-            data = Some(if index == 0 {
-                // First filter: pass input reference directly (no clone needed)
-                filter.filter(input)?
-            } else {
-                // Subsequent filters: use output from previous filter
-                filter.filter(data.as_ref().unwrap())?
-            });
-        }
-
-        Ok(data.unwrap_or_else(|| input.to_vec()))
-    }
-
-    /// 刷新所有过滤器的缓冲区
-    ///
-    /// 依次调用链中每个过滤器的 flush 方法，
-    /// 确保所有缓冲的数据都被输出。
-    ///
-    /// # Returns
-    ///
-    /// 所有过滤器的剩余数据经过完整处理后得到的最终结果
-    ///
-    /// # Errors
-    ///
-    /// 如果任何过滤器刷新失败，返回错误
-    pub fn flush(&mut self) -> Result<Vec<u8>> {
-        let mut data = Vec::new();
-        for filter in &mut self.filters {
-            let flushed = filter.flush()?;
-            data.extend_from_slice(&flushed);
-        }
-        Ok(data)
-    }
-
-    /// 获取链中过滤器的数量
-    ///
-    /// # Returns
-    ///
-    /// 当前注册的过滤器数量
-    pub fn len(&self) -> usize {
-        self.filters.len()
-    }
-
-    /// 检查过滤器链是否为空
-    ///
-    /// # Returns
-    ///
-    /// 如果没有任何过滤器则返回 true
-    pub fn is_empty(&self) -> bool {
-        self.filters.is_empty()
-    }
+    Ok(data)
 }
 
 // ==================== AutoFilterSelector 自动选择器 ====================
 
 /// HTTP 内容编码自动选择器
 ///
-/// 根据 HTTP headers 自动选择合适的解码过滤器链。
+/// 根据 HTTP headers 自动选择合适的解码过滤器列表。
 /// 遵循 RFC 7230 Section 3.3.1 规范：Transfer-Encoding 优先于 Content-Encoding。
 ///
 /// # Priority Rules
@@ -811,20 +696,20 @@ impl FilterChain {
 /// use aria2_core::http::stream_filter::AutoFilterSelector;
 ///
 /// // 根据 Content-Encoding: gzip 自动选择 GZip 解码器
-/// let chain = AutoFilterSelector::select_filters(Some("gzip"), None);
-/// assert_eq!(chain.len(), 1);
+/// let filters = AutoFilterSelector::select_filters(Some("gzip"), None);
+/// assert_eq!(filters.len(), 1);
 ///
 /// // Transfer-Encoding 优先
-/// let chain = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
-/// assert_eq!(chain.len(), 1); // 只有 chunked
+/// let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
+/// assert_eq!(filters.len(), 1); // 只有 chunked
 /// ```
 pub struct AutoFilterSelector;
 
 impl AutoFilterSelector {
-    /// 根据 HTTP headers 创建合适的 FilterChain
+    /// 根据 HTTP headers 创建合适的过滤器列表
     ///
     /// 自动分析 Content-Encoding 和 Transfer-Encoding headers，
-    /// 构建相应的解码过滤器链。
+    /// 构建相应的解码过滤器。
     ///
     /// # Arguments
     ///
@@ -833,7 +718,7 @@ impl AutoFilterSelector {
     ///
     /// # Returns
     ///
-    /// 配置好的 FilterChain 实例
+    /// 配置好的过滤器列表
     ///
     /// # RFC Compliance
     ///
@@ -843,8 +728,8 @@ impl AutoFilterSelector {
     pub fn select_filters(
         content_encoding: Option<&str>,
         transfer_encoding: Option<&str>,
-    ) -> FilterChain {
-        let mut chain = FilterChain::new();
+    ) -> Vec<Box<dyn StreamFilter>> {
+        let mut filters: Vec<Box<dyn StreamFilter>> = Vec::new();
 
         // Transfer-Encoding 优先于 Content-Encoding (RFC 7230)
         if let Some(te) = transfer_encoding {
@@ -853,28 +738,27 @@ impl AutoFilterSelector {
                 let encoding = encoding.trim().to_lowercase();
                 match encoding.as_str() {
                     "chunked" => {
-                        chain.push(Box::new(ChunkedDecoder::new()));
+                        filters.push(Box::new(ChunkedDecoder::new()));
                     }
                     "gzip" | "x-gzip" => {
-                        chain.push(Box::new(GZipDecoder::new()));
+                        filters.push(Box::new(GZipDecoder::new()));
                     }
                     "deflate" => {
                         // TODO: 未来支持 ZlibDecoder
                         tracing::warn!("Deflate encoding not yet implemented");
                     }
                     "bzip2" | "x-bzip2" => {
-                        chain.push(Box::new(BZip2Decoder::new()));
+                        filters.push(Box::new(BZip2Decoder::new()));
                     }
                     _ => {
                         // Identity / none encoding → passthrough (no decoder needed)
                         if encoding.eq_ignore_ascii_case("identity")
                             || encoding.eq_ignore_ascii_case("none")
                         {
-                            // No decoder needed for identity encoding
                             continue;
                         }
 
-                        // LZMA / x-lzma → log warning, return identity chain (not yet supported)
+                        // LZMA / x-lzma → log warning, return identity (not yet supported)
                         if encoding.contains("lzma") {
                             tracing::warn!(
                                 "LZMA encoding not yet supported, returning passthrough"
@@ -898,14 +782,14 @@ impl AutoFilterSelector {
                 let encoding = encoding.trim().to_lowercase();
                 match encoding.as_str() {
                     "gzip" | "x-gzip" => {
-                        chain.push(Box::new(GZipDecoder::new()));
+                        filters.push(Box::new(GZipDecoder::new()));
                     }
                     "deflate" => {
                         // TODO: 未来支持 ZlibDecoder
                         tracing::warn!("Deflate encoding not yet implemented");
                     }
                     "bzip2" | "x-bzip2" => {
-                        chain.push(Box::new(BZip2Decoder::new()));
+                        filters.push(Box::new(BZip2Decoder::new()));
                     }
                     "identity" | "" => {
                         // identity 表示无编码，忽略
@@ -915,11 +799,10 @@ impl AutoFilterSelector {
                         if encoding.eq_ignore_ascii_case("identity")
                             || encoding.eq_ignore_ascii_case("none")
                         {
-                            // No decoder needed for identity encoding
                             continue;
                         }
 
-                        // LZMA / x-lzma → log warning, return identity chain (not yet supported)
+                        // LZMA / x-lzma → log warning, return identity (not yet supported)
                         if encoding.contains("lzma") {
                             tracing::warn!(
                                 "LZMA encoding not yet supported, returning passthrough"
@@ -939,7 +822,7 @@ impl AutoFilterSelector {
             }
         }
 
-        chain
+        filters
     }
 }
 
@@ -993,7 +876,7 @@ pub fn detect_encoding_from_magic_bytes(data: &[u8]) -> &'static str {
 /// Wraps a disk writer with automatic stream filtering.
 ///
 /// Data written through this wrapper passes through the configured
-/// FilterChain before being written to disk. This enables transparent
+/// filters before being written to disk. This enables transparent
 /// decompression of compressed streams during download.
 ///
 /// # Type Parameters
@@ -1003,22 +886,21 @@ pub fn detect_encoding_from_magic_bytes(data: &[u8]) -> &'static str {
 /// # Examples
 ///
 /// ```rust,ignore
-/// use aria2_core::http::stream_filter::{StreamingFilterWriter, FilterChain, GZipDecoder};
+/// use aria2_core::http::stream_filter::{StreamingFilterWriter, GZipDecoder};
 /// use aria2_core::filesystem::disk_writer::CachedDiskWriter;
 ///
 /// let writer = CachedDiskWriter::new(&path, None, None);
-/// let mut chain = FilterChain::new();
-/// chain.push(Box::new(GZipDecoder::new()));
+/// let filters = vec![Box::new(GZipDecoder::new()) as Box<dyn StreamFilter>];
 ///
-/// let mut filter_writer = StreamingFilterWriter::new(writer, chain);
+/// let mut filter_writer = StreamingFilterWriter::new(writer, filters);
 /// filter_writer.write_filtered(&compressed_data).await?;
 /// filter_writer.flush_filtered().await?;
 /// ```
 pub struct StreamingFilterWriter<W: SeekableDiskWriter> {
     /// Underlying disk writer for actual I/O operations
     inner: W,
-    /// Filter chain to process data through
-    chain: FilterChain,
+    /// Filters to process data through
+    filters: Vec<Box<dyn StreamFilter>>,
     /// Buffered input data waiting to be processed
     buffer: Vec<u8>,
     /// Process data in chunks of this size (default 64KB)
@@ -1037,15 +919,15 @@ impl<W: SeekableDiskWriter> StreamingFilterWriter<W> {
     /// # Arguments
     ///
     /// * `inner` - The underlying disk writer
-    /// * `chain` - The filter chain to apply to all written data
+    /// * `filters` - The filters to apply to all written data
     ///
     /// # Returns
     ///
     /// A new StreamingFilterWriter instance with 64KB chunk size
-    pub fn new(inner: W, chain: FilterChain) -> Self {
+    pub fn new(inner: W, filters: Vec<Box<dyn StreamFilter>>) -> Self {
         Self {
             inner,
-            chain,
+            filters,
             buffer: Vec::with_capacity(64 * 1024),
             chunk_size: 64 * 1024,
             total_written: 0,
@@ -1096,7 +978,7 @@ impl<W: SeekableDiskWriter> StreamingFilterWriter<W> {
         // Process complete chunks
         while self.buffer.len() >= self.chunk_size {
             let chunk = self.buffer.drain(..self.chunk_size).collect::<Vec<_>>();
-            let filtered = self.chain.process(&chunk)?;
+            let filtered = process_filters(&mut self.filters, &chunk)?;
             if !filtered.is_empty() {
                 self.inner.write_at(self.write_offset, &filtered).await?;
                 self.write_offset += filtered.len() as u64;
@@ -1124,7 +1006,7 @@ impl<W: SeekableDiskWriter> StreamingFilterWriter<W> {
         // Process any remaining buffered data
         if !self.buffer.is_empty() {
             let remaining = std::mem::take(&mut self.buffer);
-            let filtered = self.chain.process(&remaining)?;
+            let filtered = process_filters(&mut self.filters, &remaining)?;
             if !filtered.is_empty() {
                 self.inner.write_at(self.write_offset, &filtered).await?;
                 self.write_offset += filtered.len() as u64;
@@ -1309,51 +1191,51 @@ mod tests {
     fn test_unknown_encoding_passthrough() {
         // Test that AutoFilterSelector handles unknown encodings without errors
 
-        // Test "br" (Brotli) - should return empty chain (passthrough)
-        let chain_br = AutoFilterSelector::select_filters(Some("br"), None);
+        // Test "br" (Brotli) - should return empty filter list (passthrough)
+        let filters_br = AutoFilterSelector::select_filters(Some("br"), None);
         assert_eq!(
-            chain_br.len(),
+            filters_br.len(),
             0,
-            "Brotli encoding should result in empty filter chain"
+            "Brotli encoding should result in empty filter list"
         );
 
-        // Test "lzma" - should return empty chain (passthrough)
-        let chain_lzma = AutoFilterSelector::select_filters(Some("lzma"), None);
+        // Test "lzma" - should return empty filter list (passthrough)
+        let filters_lzma = AutoFilterSelector::select_filters(Some("lzma"), None);
         assert_eq!(
-            chain_lzma.len(),
+            filters_lzma.len(),
             0,
-            "LZMA encoding should result in empty filter chain"
+            "LZMA encoding should result in empty filter list"
         );
 
-        // Test "identity" - should return empty chain (no decoder needed)
-        let chain_identity = AutoFilterSelector::select_filters(Some("identity"), None);
+        // Test "identity" - should return empty filter list (no decoder needed)
+        let filters_identity = AutoFilterSelector::select_filters(Some("identity"), None);
         assert_eq!(
-            chain_identity.len(),
+            filters_identity.len(),
             0,
-            "Identity encoding should result in empty filter chain"
+            "Identity encoding should result in empty filter list"
         );
 
-        // Test "none" - should return empty chain (no decoder needed)
-        let chain_none = AutoFilterSelector::select_filters(Some("none"), None);
+        // Test "none" - should return empty filter list (no decoder needed)
+        let filters_none = AutoFilterSelector::select_filters(Some("none"), None);
         assert_eq!(
-            chain_none.len(),
+            filters_none.len(),
             0,
-            "None encoding should result in empty filter chain"
+            "None encoding should result in empty filter list"
         );
 
         // Test Transfer-Encoding with unknown values
-        let chain_te_br = AutoFilterSelector::select_filters(None, Some("br"));
+        let filters_te_br = AutoFilterSelector::select_filters(None, Some("br"));
         assert_eq!(
-            chain_te_br.len(),
+            filters_te_br.len(),
             0,
-            "Transfer-Encoding br should result in empty filter chain"
+            "Transfer-Encoding br should result in empty filter list"
         );
 
-        let chain_te_lzma = AutoFilterSelector::select_filters(None, Some("lzma"));
+        let filters_te_lzma = AutoFilterSelector::select_filters(None, Some("lzma"));
         assert_eq!(
-            chain_te_lzma.len(),
+            filters_te_lzma.len(),
             0,
-            "Transfer-Encoding lzma should result in empty filter chain"
+            "Transfer-Encoding lzma should result in empty filter list"
         );
     }
 
@@ -1373,13 +1255,12 @@ mod tests {
         assert_eq!(compressed_data[0], 0x1f);
         assert_eq!(compressed_data[1], 0x8b);
 
-        // Create a filter chain with GZip decoder
-        let mut chain = FilterChain::new();
-        chain.push(Box::new(GZipDecoder::new()));
+        // Create filters with GZip decoder
+        let filters = vec![Box::new(GZipDecoder::new()) as Box<dyn StreamFilter>];
 
         // Create StreamingFilterWriter with mock writer
         let mock_writer = MockSeekableWriter::new();
-        let mut filter_writer = StreamingFilterWriter::new(mock_writer, chain);
+        let mut filter_writer = StreamingFilterWriter::new(mock_writer, filters);
 
         // Write compressed data through the filter
         filter_writer
@@ -1423,10 +1304,9 @@ mod tests {
 
         // Test with chunk size customization
         let mock_writer2 = MockSeekableWriter::new();
-        let mut chain2 = FilterChain::new();
-        chain2.push(Box::new(GZipDecoder::new()));
+        let filters2 = vec![Box::new(GZipDecoder::new()) as Box<dyn StreamFilter>];
         let mut filter_writer2 =
-            StreamingFilterWriter::new(mock_writer2, chain2).with_chunk_size(1024);
+            StreamingFilterWriter::new(mock_writer2, filters2).with_chunk_size(1024);
 
         filter_writer2
             .write_filtered(&compressed_data)

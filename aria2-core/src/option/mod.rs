@@ -6,4 +6,5 @@
 
 pub mod option_handler;
 
-pub use option_handler::{OptionHandler, OptionValue};
+pub use option_handler::OptionHandler;
+pub use crate::config::option::OptionValue;

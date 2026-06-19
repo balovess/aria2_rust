@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::constants;
+use crate::error::Aria2Error;
+
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     pub max_retries: u32,
@@ -8,23 +11,19 @@ pub struct RetryPolicy {
     pub max_wait_ms: u64,
     pub backoff_factor: f64,
     pub retryable_http_codes: HashSet<u16>,
+    pub max_retries_per_server: u32,
 }
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        let mut codes = HashSet::new();
-        codes.insert(408);
-        codes.insert(429);
-        codes.insert(500);
-        codes.insert(502);
-        codes.insert(503);
-        codes.insert(504);
+        let codes: HashSet<u16> = constants::RETRYABLE_HTTP_CODES.iter().copied().collect();
         Self {
-            max_retries: 3,
+            max_retries: constants::DEFAULT_MAX_RETRIES,
             base_wait_ms: 1000,
             max_wait_ms: 30000,
             backoff_factor: 2.0,
             retryable_http_codes: codes,
+            max_retries_per_server: u32::MAX,
         }
     }
 }
@@ -43,6 +42,21 @@ impl RetryPolicy {
         self
     }
 
+    pub fn with_max_per_server(mut self, n: u32) -> Self {
+        self.max_retries_per_server = n;
+        self
+    }
+
+    pub fn with_max_wait_ms(mut self, ms: u64) -> Self {
+        self.max_wait_ms = ms;
+        self
+    }
+
+    /// Alias for `max_retries` for compatibility with the engine retry loop.
+    pub fn max_tries(&self) -> u32 {
+        self.max_retries
+    }
+
     pub fn compute_wait(&self, attempt: u32) -> Option<Duration> {
         if attempt == 0 {
             return None;
@@ -50,6 +64,35 @@ impl RetryPolicy {
         let raw = (self.base_wait_ms as f64) * self.backoff_factor.powi(attempt as i32 - 1);
         let ms = raw.min(self.max_wait_ms as f64) as u64;
         Some(Duration::from_millis(ms))
+    }
+
+    /// Compute wait duration using exponential backoff (Duration-based API).
+    ///
+    /// This is equivalent to [`compute_wait`](Self::compute_wait) but returns
+    /// a `Duration` directly, clamped between `base_wait` and `max_wait`.
+    pub fn wait_duration(&self, attempt: u32) -> Duration {
+        let base = Duration::from_millis(self.base_wait_ms);
+        let max = Duration::from_millis(self.max_wait_ms);
+        let secs = base.as_secs().saturating_mul(1 << attempt.min(20));
+        let dur = Duration::from_secs(secs);
+        if dur > max {
+            max
+        } else if dur < base {
+            base
+        } else {
+            dur
+        }
+    }
+
+    /// Check whether a retry should be attempted based on the error type.
+    ///
+    /// Returns `true` if the attempt count has not been exhausted and the
+    /// error is a recoverable [`Aria2Error`].
+    pub fn should_retry(&self, attempt: u32, error: &Aria2Error) -> bool {
+        if attempt + 1 >= self.max_retries {
+            return false;
+        }
+        matches!(error, Aria2Error::Recoverable(_))
     }
 
     pub fn should_retry_http(&self, status_code: u16) -> bool {

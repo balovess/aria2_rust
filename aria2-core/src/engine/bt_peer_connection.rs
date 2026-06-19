@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 
 #[allow(clippy::large_enum_variant)]
@@ -135,7 +136,7 @@ impl UtpPeerConnection {
     /// Receive a BitTorrent message
     pub async fn recv_message(&mut self) -> Result<Option<Vec<u8>>> {
         // Try to receive data
-        let mut buf = vec![0u8; 4096];
+        let mut buf = vec![0u8; constants::BT_RECEIVE_BUFFER_SIZE];
         let len = {
             let mut socket = self.socket.lock().await;
             match socket.recv(self.conn_id, &mut buf) {

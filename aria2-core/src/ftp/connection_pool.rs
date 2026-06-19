@@ -168,11 +168,11 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_connections: 16,
-            max_idle_time: Duration::from_secs(300), // 5 minutes
-            max_connection_age: Duration::from_secs(1800), // 30 minutes
-            connect_timeout: Duration::from_secs(30),
-            read_timeout: Duration::from_secs(30),
+            max_connections: crate::constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS,
+            max_idle_time: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_MAX_IDLE_TIME_SECS),
+            max_connection_age: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_MAX_CONNECTION_AGE_SECS),
+            connect_timeout: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_CONNECT_TIMEOUT_SECS),
+            read_timeout: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_READ_TIMEOUT_SECS),
         }
     }
 }
@@ -473,18 +473,15 @@ impl FtpConnectionPool {
     }
 }
 
-/// Global FTP connection pool instance
-static GLOBAL_POOL: once_cell::sync::Lazy<Arc<FtpConnectionPool>> = 
-    once_cell::sync::Lazy::new(|| {
-        Arc::new(FtpConnectionPool::new(16))
-    });
-
-/// Get the global FTP connection pool
-pub fn get_global_pool() -> Arc<FtpConnectionPool> {
-    GLOBAL_POOL.clone()
+/// Create a new FTP connection pool with default configuration.
+///
+/// Use this to create an injectable pool instance instead of relying on a global singleton.
+/// The pool should be created once during engine initialization and passed down via dependency injection.
+pub fn create_pool(max_connections: usize) -> Arc<FtpConnectionPool> {
+    Arc::new(FtpConnectionPool::new(max_connections))
 }
 
-/// Create a custom FTP connection pool with specific configuration
+/// Create a custom FTP connection pool with specific configuration.
 pub fn create_custom_pool(config: PoolConfig) -> Arc<FtpConnectionPool> {
     Arc::new(FtpConnectionPool::with_config(config))
 }
@@ -564,21 +561,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_global_pool_is_shared() {
-        let pool1 = get_global_pool();
-        let pool2 = get_global_pool();
-        
-        // Both should point to the same pool instance
-        assert!(Arc::ptr_eq(&pool1, &pool2));
+    async fn test_create_pool_returns_shared_arc() {
+        let pool = create_pool(10);
+        let pool2 = pool.clone();
+
+        // Both Arcs should point to the same pool instance
+        assert!(Arc::ptr_eq(&pool, &pool2));
     }
 
     #[tokio::test]
     async fn test_custom_pool_is_different() {
-        let global = get_global_pool();
-        let custom = create_custom_pool(PoolConfig::default());
-        
+        let pool1 = create_pool(10);
+        let pool2 = create_custom_pool(PoolConfig::default());
+
         // Should be different instances
-        assert!(!Arc::ptr_eq(&global, &custom));
+        assert!(!Arc::ptr_eq(&pool1, &pool2));
     }
 
     #[test]

@@ -80,7 +80,7 @@ impl TimerEntry {
     }
 
     /// Check if the timer has expired
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Utility method; not yet called from production code
     fn is_expired(&self) -> bool {
         Instant::now() >= self.expires_at
     }

@@ -1,6 +1,6 @@
 //! 流式过滤器框架的单元测试
 //!
-//! 测试覆盖 GZip、Chunked、BZip2 解码器，FilterChain 组合，
+//! 测试覆盖 GZip、Chunked、BZip2 解码器，过滤器组合，
 //! AutoFilterSelector 自动选择器，以及 HttpResponse 集成测试。
 
 use super::stream_filter::*;
@@ -179,7 +179,7 @@ fn test_chunked_multiple_chunks() {
     );
 }
 
-// ==================== FilterChain 测试 ====================
+// ==================== Filter processing tests ====================
 
 #[test]
 fn test_filter_chain_gzip_then_chunked() {
@@ -196,9 +196,6 @@ fn test_filter_chain_gzip_then_chunked() {
     )
     .into_bytes();
 
-    // 注意：这个测试验证 FilterChain 的组合能力
-    // 实际场景中可能需要调整顺序或使用不同的组合
-
     // 单独测试每个过滤器
     let mut gzip_decoder = GZipDecoder::new();
     let decompressed = gzip_decoder.filter(&compressed).expect("GZip failed");
@@ -206,36 +203,32 @@ fn test_filter_chain_gzip_then_chunked() {
 }
 
 #[test]
-fn test_filter_chain_empty() {
-    // 空 chain 应该直接透传数据
-    let mut chain = FilterChain::new();
+fn test_process_filters_empty() {
+    // Empty filter list should pass through data
+    let mut filters: Vec<Box<dyn StreamFilter>> = Vec::new();
     let input = b"passthrough data";
 
-    let result = chain.process(input).expect("Empty chain process failed");
+    let result = process_filters(&mut filters, input).expect("Empty filter process failed");
 
     assert_eq!(
         result, input,
-        "Empty chain should pass through data unchanged"
+        "Empty filter list should pass through data unchanged"
     );
-    assert!(chain.is_empty(), "Chain should be empty");
-    assert_eq!(chain.len(), 0, "Length should be 0");
+    assert!(filters.is_empty(), "Filter list should be empty");
 }
 
 #[test]
-fn test_filter_chain_push_and_clear() {
-    let mut chain = FilterChain::new();
+fn test_process_filters_with_decoders() {
+    let mut filters: Vec<Box<dyn StreamFilter>> = Vec::new();
+    filters.push(Box::new(GZipDecoder::new()));
+    assert_eq!(filters.len(), 1, "Should have 1 filter after push");
 
-    // 添加过滤器
-    chain.push(Box::new(GZipDecoder::new()));
-    assert_eq!(chain.len(), 1, "Should have 1 filter after push");
+    filters.push(Box::new(ChunkedDecoder::new()));
+    assert_eq!(filters.len(), 2, "Should have 2 filters after second push");
 
-    chain.push(Box::new(ChunkedDecoder::new()));
-    assert_eq!(chain.len(), 2, "Should have 2 filters after second push");
-
-    // 清除
-    chain.clear();
-    assert!(chain.is_empty(), "Should be empty after clear");
-    assert_eq!(chain.len(), 0, "Length should be 0 after clear");
+    filters.clear();
+    assert!(filters.is_empty(), "Should be empty after clear");
+    assert_eq!(filters.len(), 0, "Length should be 0 after clear");
 }
 
 // ==================== AutoFilterSelector 测试 ====================
@@ -243,33 +236,33 @@ fn test_filter_chain_push_and_clear() {
 #[test]
 fn test_auto_select_gzip_content_encoding() {
     // Content-Encoding: gzip → 应选择 GZipDecoder
-    let chain = AutoFilterSelector::select_filters(Some("gzip"), None);
+    let filters = AutoFilterSelector::select_filters(Some("gzip"), None);
 
-    assert_eq!(chain.len(), 1, "Should select 1 filter for gzip");
+    assert_eq!(filters.len(), 1, "Should select 1 filter for gzip");
 }
 
 #[test]
 fn test_auto_select_chunked_transfer_encoding() {
     // Transfer-Encoding: chunked → 应选择 ChunkedDecoder
-    let chain = AutoFilterSelector::select_filters(None, Some("chunked"));
+    let filters = AutoFilterSelector::select_filters(None, Some("chunked"));
 
-    assert_eq!(chain.len(), 1, "Should select 1 filter for chunked");
+    assert_eq!(filters.len(), 1, "Should select 1 filter for chunked");
 }
 
 #[test]
 fn test_auto_select_x_gzip_encoding() {
     // x-gzip 是 gzip 的别名
-    let chain = AutoFilterSelector::select_filters(Some("x-gzip"), None);
+    let filters = AutoFilterSelector::select_filters(Some("x-gzip"), None);
 
-    assert_eq!(chain.len(), 1, "x-gzip should be treated as gzip");
+    assert_eq!(filters.len(), 1, "x-gzip should be treated as gzip");
 }
 
 #[test]
 fn test_auto_select_bzip2_encoding() {
-    let chain = AutoFilterSelector::select_filters(Some("bzip2"), None);
+    let filters = AutoFilterSelector::select_filters(Some("bzip2"), None);
 
     assert_eq!(
-        chain.len(),
+        filters.len(),
         1,
         "Should select BZip2Decoder for bzip2 encoding"
     );
@@ -278,10 +271,10 @@ fn test_auto_select_bzip2_encoding() {
 #[test]
 fn test_auto_select_identity_encoding() {
     // identity 表示无编码
-    let chain = AutoFilterSelector::select_filters(Some("identity"), None);
+    let filters = AutoFilterSelector::select_filters(Some("identity"), None);
 
     assert_eq!(
-        chain.len(),
+        filters.len(),
         0,
         "Identity encoding should not add any filters"
     );
@@ -290,9 +283,9 @@ fn test_auto_select_identity_encoding() {
 #[test]
 fn test_auto_select_no_encoding() {
     // 无编码信息
-    let chain = AutoFilterSelector::select_filters(None, None);
+    let filters = AutoFilterSelector::select_filters(None, None);
 
-    assert_eq!(chain.len(), 0, "No encoding should result in empty chain");
+    assert_eq!(filters.len(), 0, "No encoding should result in empty list");
 }
 
 // ==================== HttpResponse 集成测试 ====================
@@ -361,10 +354,10 @@ fn test_mixed_encoding_handling() {
 
     // 场景1: Transfer-Encoding=chunked + Content-Encoding=gzip
     // 应该只使用 chunked 解码器
-    let chain = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
+    let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
 
     assert_eq!(
-        chain.len(),
+        filters.len(),
         1,
         "Transfer-Encoding should take priority over Content-Encoding"
     );
@@ -373,11 +366,11 @@ fn test_mixed_encoding_handling() {
 #[test]
 fn test_multiple_content_encodings() {
     // 多个 Content-Encoding 值（逗号分隔）
-    let chain = AutoFilterSelector::select_filters(Some("gzip, deflate"), None);
+    let filters = AutoFilterSelector::select_filters(Some("gzip, deflate"), None);
 
     // 目前只支持 gzip，deflate 会输出 warning 但不添加过滤器
     assert!(
-        !chain.is_empty(),
+        !filters.is_empty(),
         "Should at least handle supported encodings"
     );
 }

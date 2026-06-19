@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -112,7 +110,7 @@ impl EndgameState {
     }
 
     /// Get the number of actively tracked duplicate requests (for debugging/metrics)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Debugging metric; used in tests only
     pub fn tracked_count(&self) -> usize {
         self.active_duplicate_requests.len()
     }
@@ -397,7 +395,9 @@ impl BtDownloadCommand {
                     
                     self.dht_engine = Some(engine);
                     tracing::info!("[BT] DHT engine started");
-                    self.dht_engine.as_ref().unwrap().start_maintenance_loop();
+                    if let Some(dht) = self.dht_engine.as_ref() {
+                        dht.start_maintenance_loop();
+                    }
                 }
                 Err(e) => {
                     warn!("[BT] DHT engine start failed: {}", e);
@@ -762,9 +762,9 @@ impl BtDownloadCommand {
                 let pex_peers_count = self.pex_known_peers.len();
 
                 for peer_idx in pex_enabled_peers.iter() {
-                    if let Some(conn) = active_connections.get(*peer_idx) {
+                    if let Some(_conn) = active_connections.get(*peer_idx) {
                         // Build PEX message for this peer
-                        let remote_addr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                        let _remote_addr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
                             "0.0.0.0", // Placeholder - actual address would come from connection
                             0,
                         );
@@ -1167,6 +1167,7 @@ impl BtDownloadCommand {
     }
 
     /// Check if both local and remote peer support ut_pex extension
+    #[allow(dead_code)] // PEX support check; not yet called from production download loop
     pub fn check_pex_support(
         local_extension_ids: &[Option<u8>],
         remote_extension_ids: &[Option<u8>],
@@ -1263,8 +1264,8 @@ impl BtDownloadCommand {
     pub async fn connect_to_pex_discovered_peers(
         &mut self,
         new_peers: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
-        info_hash_raw: &[u8; 20],
-        num_pieces: u32,
+        _info_hash_raw: &[u8; 20],
+        _num_pieces: u32,
         active_connections: &[BtPeerConn],
     ) -> usize {
         if new_peers.is_empty() {
@@ -1274,7 +1275,7 @@ impl BtDownloadCommand {
         // Filter out peers we're already connected to
         let already_connected: HashSet<(String, u16)> = active_connections
             .iter()
-            .filter_map(|conn| {
+            .filter_map(|_conn| {
                 // In a full implementation, we'd get the actual remote address
                 // For now, we use a placeholder check
                 None
@@ -1328,6 +1329,7 @@ impl BtDownloadCommand {
     /// Check if a bitfield has a specific piece index set
     ///
     /// BitTorrent bitfields use MSB-first ordering within each byte.
+    #[allow(dead_code)] // BEP 6 utility; used in tests only
     fn is_bitfield_set(bitfield: &[u8], piece_index: u32) -> bool {
         let byte_idx = (piece_index as usize) / 8;
         let bit_idx = 7 - ((piece_index as usize) % 8);
@@ -1345,6 +1347,7 @@ impl BtDownloadCommand {
     /// - We still need (not completed)
     /// - The peer has (based on their bitfield)
     /// - We haven't already sent AllowedFast for
+    #[allow(dead_code)] // BEP 6 utility; used in tests only
     fn calculate_fast_set(
         needed_pieces: &[u32],
         peer_bitfield: &[u8],
@@ -1373,6 +1376,7 @@ impl BtDownloadCommand {
     ///
     /// This should be called after the extension handshake completes and we've received
     /// the peer's bitfield. It allows us to request specific pieces even when choked.
+    #[allow(dead_code)] // BEP 6 method; not yet called from production download loop
     async fn send_allowed_fast_to_peer(
         peer_conn: &mut BtPeerConn,
         needed_pieces: &[u32],
@@ -1401,6 +1405,7 @@ impl BtDownloadCommand {
     }
 
     /// Initialize BEP 6 tracking structures for all active connections
+    #[allow(dead_code)]
     fn init_bep6_tracking(&mut self, num_connections: usize) {
         self.allowed_fast_sent_peers = HashMap::with_capacity(num_connections);
         self.suggest_sent_counts = HashMap::with_capacity(num_connections);
@@ -1410,6 +1415,7 @@ impl BtDownloadCommand {
     ///
     /// This is called once during initialization to establish fast extension
     /// support with compatible peers.
+    #[allow(dead_code)]
     async fn broadcast_allowed_fast(
         &mut self,
         active_connections: &mut [BtPeerConn],
@@ -1462,6 +1468,7 @@ impl BtDownloadCommand {
     /// # Arguments
     /// * `peer_idx` - Index of the peer in active_connections
     /// * `piece_picker` - The piece picker for selecting which pieces to suggest
+    #[allow(dead_code)] // BEP 6 method; not yet called from production download loop
     async fn send_suggest_to_peer(
         &mut self,
         peer_idx: usize,

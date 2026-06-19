@@ -29,7 +29,7 @@ fn test_segment_single_4gb_plus_range() {
 fn test_bitfield_large_index() {
     let mut bf = Bitfield::new(100000);
     let _ = bf.set(99999);
-    let _ = bf.unset(99999);
+    let _ = bf.clear(99999);
 }
 
 #[test]

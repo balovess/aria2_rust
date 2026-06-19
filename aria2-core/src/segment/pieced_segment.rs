@@ -1,5 +1,5 @@
-use super::bitfield::Bitfield;
-use crate::error::Result;
+use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
+use crate::error::{Aria2Error, Result};
 
 pub struct PiecedSegment {
     piece_index: usize,
@@ -33,49 +33,47 @@ impl PiecedSegment {
     }
 
     pub fn mark_block_completed(&mut self, block_index: usize) -> Result<()> {
-        self.bitfield.set(block_index)?;
-        Ok(())
+        self.bitfield.set(block_index).ok_or_else(|| {
+            Aria2Error::DownloadFailed(format!(
+                "Block index out of range: {} >= {}",
+                block_index,
+                self.bitfield.len()
+            ))
+        })
     }
 
     pub fn mark_block_incomplete(&mut self, block_index: usize) -> Result<()> {
-        self.bitfield.unset(block_index)?;
-        Ok(())
+        self.bitfield.clear(block_index).ok_or_else(|| {
+            Aria2Error::DownloadFailed(format!(
+                "Block index out of range: {} >= {}",
+                block_index,
+                self.bitfield.len()
+            ))
+        })
     }
 
     pub fn is_block_completed(&self, block_index: usize) -> bool {
-        self.bitfield.get(block_index)
+        self.bitfield.test(block_index)
     }
 
     pub fn get_next_missing_block(&self) -> Option<usize> {
-        self.bitfield.find_first_unset()
+        self.bitfield.find_first_clear()
     }
 
     pub fn get_completed_blocks(&self) -> Vec<usize> {
-        let mut completed = Vec::new();
-        for i in 0..self.bitfield.len() {
-            if self.bitfield.get(i) {
-                completed.push(i);
-            }
-        }
-        completed
+        self.bitfield.iter_set().collect()
     }
 
     pub fn get_missing_blocks(&self) -> Vec<usize> {
-        let mut missing = Vec::new();
-        for i in 0..self.bitfield.len() {
-            if !self.bitfield.get(i) {
-                missing.push(i);
-            }
-        }
-        missing
+        self.bitfield.iter_clear().collect()
     }
 
     pub fn completed_blocks_count(&self) -> usize {
-        self.bitfield.count_set_bits()
+        self.bitfield.count_set()
     }
 
     pub fn missing_blocks_count(&self) -> usize {
-        self.bitfield.count_unset_bits()
+        self.bitfield.count_clear()
     }
 
     pub fn progress(&self) -> f64 {

@@ -1,11 +1,85 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::selector::server_stat::ServerStat;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
 
-const DEFAULT_NB_SERVER_TO_EVALUATE: i32 = 3;
-const DEFAULT_NB_CONNECTIONS: i32 = 1;
+// =========================================================================
+// Source Scoring Functions (consolidated from source_scorer.rs)
+// =========================================================================
+
+/// Score a source server using EMA-averaged speed from ServerStat.
+///
+/// Lower score = better source. `f64::MAX` indicates a dead source.
+pub fn score_source(stat: &ServerStat) -> f64 {
+    let avg_speed = stat.get_avg_speed() as f64;
+    let failure_count = stat.get_consecutive_failures();
+    let last_success_age = calculate_last_success_age(stat);
+
+    if avg_speed <= 0.0 && failure_count > 0 {
+        return f64::MAX;
+    }
+
+    let speed_score = if avg_speed > 0.0 {
+        -avg_speed.ln_1p()
+    } else {
+        0.0
+    };
+
+    let penalty = (failure_count as f64) * 100.0;
+    let age_bonus = (last_success_age as f64 / 60.0).min(10.0);
+
+    speed_score + penalty - age_bonus
+}
+
+/// Score a source using raw parameters (convenience function).
+pub fn score_source_raw(avg_speed_bps: f64, failure_count: u32, last_success_age_secs: u64) -> f64 {
+    if avg_speed_bps <= 0.0 && failure_count > 0 {
+        return f64::MAX;
+    }
+
+    let speed_score = if avg_speed_bps > 0.0 {
+        -avg_speed_bps.ln_1p()
+    } else {
+        0.0
+    };
+
+    let penalty = (failure_count as f64) * 100.0;
+    let age_bonus = (last_success_age_secs as f64 / 60.0).min(10.0);
+
+    speed_score + penalty - age_bonus
+}
+
+/// Calculate seconds since last successful update.
+fn calculate_last_success_age(stat: &ServerStat) -> u64 {
+    let last_updated = stat.get_last_updated();
+    if last_updated == 0 {
+        return 0;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    now.saturating_sub(last_updated)
+}
+
+/// Compare two sources and return the better one.
+pub fn is_better_source(stat_a: &ServerStat, stat_b: &ServerStat) -> bool {
+    score_source(stat_a) < score_source(stat_b)
+}
+
+/// Sort a list of ServerStat references by score (best first).
+pub fn sort_by_score(stats: &mut [&ServerStat]) {
+    stats.sort_by(|a, b| {
+        let score_a = score_source(a);
+        let score_b = score_source(b);
+        score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
 
 fn extract_host(uri: &str) -> Option<String> {
     let uri = uri.trim();
@@ -36,8 +110,8 @@ impl AdaptiveUriSelector {
         Self {
             stat_man,
             uris: Vec::new(),
-            nb_server_toevaluate: AtomicI32::new(DEFAULT_NB_SERVER_TO_EVALUATE),
-            nb_connections: AtomicI32::new(DEFAULT_NB_CONNECTIONS),
+            nb_server_toevaluate: AtomicI32::new(crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32),
+            nb_connections: AtomicI32::new(crate::constants::DEFAULT_NB_CONNECTIONS as i32),
         }
     }
 
@@ -70,8 +144,8 @@ impl AdaptiveUriSelector {
         Self {
             stat_man,
             uris,
-            nb_server_toevaluate: AtomicI32::new(DEFAULT_NB_SERVER_TO_EVALUATE),
-            nb_connections: AtomicI32::new(DEFAULT_NB_CONNECTIONS),
+            nb_server_toevaluate: AtomicI32::new(crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32),
+            nb_connections: AtomicI32::new(crate::constants::DEFAULT_NB_CONNECTIONS as i32),
         }
     }
 

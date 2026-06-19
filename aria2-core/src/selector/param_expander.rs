@@ -238,40 +238,6 @@ fn generate_range(start: u64, end: u64, step: u64, width: usize) -> Vec<String> 
     values
 }
 
-/// Generate a range of numbers WITHOUT zero-padding (used for bracket [N-M] patterns)
-#[allow(dead_code)]
-fn generate_range_no_pad(start: u64, end: u64, step: u64) -> Vec<String> {
-    if step == 0 {
-        return Vec::new();
-    }
-
-    let mut values = Vec::new();
-    match start.cmp(&end) {
-        Ordering::Less => {
-            let mut current = start;
-            while current <= end {
-                values.push(current.to_string());
-                current += step;
-            }
-        }
-        Ordering::Greater => {
-            let mut current = start;
-            while current >= end {
-                values.push(current.to_string());
-                if current < step {
-                    break;
-                }
-                current -= step;
-            }
-        }
-        Ordering::Equal => {
-            values.push(start.to_string());
-        }
-    }
-
-    values
-}
-
 /// Expand a parameterized URI into concrete URIs.
 ///
 /// This is the main entry point for URI expansion. It detects all parameterized patterns

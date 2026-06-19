@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::constants;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
@@ -28,11 +29,11 @@ pub struct MirrorConfig {
 impl Default for MirrorConfig {
     fn default() -> Self {
         Self {
-            max_connections_per_mirror: 2,
+            max_connections_per_mirror: constants::DEFAULT_MAX_CONNECTIONS_PER_MIRROR,
             max_total_connections: 16,
-            speed_threshold: 10_000, // 10 KB/s
-            cooldown_secs: 60,
-            max_retries: 3,
+            speed_threshold: constants::MIRROR_SPEED_THRESHOLD,
+            cooldown_secs: constants::MIRROR_COOLDOWN_SECS,
+            max_retries: constants::MAX_MIRROR_FAILURES,
         }
     }
 }
@@ -68,7 +69,7 @@ pub struct MirrorCoordinator {
     /// Server statistics manager for tracking mirror performance.
     stat_man: Arc<ServerStatMan>,
     /// URI selector for intelligent mirror selection.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Selector stored for future per-request mirror selection logic
     selector: Box<dyn UriSelector>,
     /// Segment manager for download state tracking.
     segment_manager: ConcurrentSegmentManager,

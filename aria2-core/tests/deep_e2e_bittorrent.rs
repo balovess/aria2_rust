@@ -447,8 +447,8 @@ async fn bt_hook_exec_env_vars() {
     );
 
     // Test other statuses display correctly
-    assert_eq!(format!("{}", DownloadStatus::Error), "error");
-    assert_eq!(format!("{}", DownloadStatus::Stopped), "stopped");
+    assert_eq!(format!("{}", DownloadStatus::Error("test".to_string())), "error");
+    assert_eq!(format!("{}", DownloadStatus::Removed), "removed");
     assert_eq!(format!("{}", DownloadStatus::Paused), "paused");
 
     // Test DownloadStats Display impl
@@ -875,9 +875,9 @@ async fn bt_mse_encrypted_handshake_plus_piece() {
 
     // Create two MSE managers simulating both sides of the handshake
     let mut client_mgr =
-        MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).expect("Client MSE init failed");
+        MseHandshakeManager::new(info_hash).expect("Client MSE init failed");
     let mut server_mgr =
-        MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).expect("Server MSE init failed");
+        MseHandshakeManager::new(info_hash).expect("Server MSE init failed");
 
     // ---- Phase 1: Method Selection ----
     let client_method_sel = client_mgr.build_method_selection();
@@ -1105,7 +1105,7 @@ async fn bt_mse_plaintext_fallback() {
     ];
 
     // Local side supports encryption
-    let _mgr = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).expect("MSE init failed");
+    let _mgr = MseHandshakeManager::new(info_hash).expect("MSE init failed");
 
     // Remote side sends plaintext indicator (\x00)
     let remote_method_selection = b"\x00".to_vec();

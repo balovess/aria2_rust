@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, warn};
 
+use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
 
 // Re-export score_source for convenience
-pub use crate::selector::source_scorer::{score_source_raw as score_source, score_source_raw};
+pub use crate::selector::adaptive_uri_selector::{score_source_raw as score_source, score_source_raw};
 
 pub struct HttpSegmentDownloader {
     client: reqwest::Client,
@@ -141,7 +142,7 @@ impl HttpSegmentDownloader {
             .client
             .get(url)
             .header("Range", &range_header)
-            .timeout(Duration::from_secs(120));
+            .timeout(Duration::from_secs(constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS));
         if let Some(ch) = cookie_header {
             req = req.header("Cookie", ch);
         }

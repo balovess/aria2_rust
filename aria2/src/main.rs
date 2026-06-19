@@ -1,4 +1,5 @@
 mod app;
+pub mod constants;
 use app::App;
 
 #[tokio::main]

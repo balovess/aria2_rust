@@ -72,7 +72,7 @@ fn test_bitfield_concurrent_set_unset() {
                 if idx < 100000 {
                     let mut b = bf.lock().unwrap();
                     let _ = b.set(idx);
-                    let _ = b.unset(idx);
+                    let _ = b.clear(idx);
                 }
             }
         }));

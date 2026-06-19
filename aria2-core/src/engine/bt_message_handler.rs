@@ -12,22 +12,23 @@
 //! - `src/BtMessageDispatcher.h` - Message dispatching
 //! - `src/PeerInteractionCommand.h` - Peer interaction
 
+use crate::constants;
 use crate::engine::bt_download_execute::EndgameState;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use tracing::{debug, info, warn};
 
 /// Block size for each piece block request (16 KB)
-pub const BLOCK_SIZE: u32 = 16384;
+pub const BLOCK_SIZE: u32 = constants::BT_BLOCK_SIZE as u32;
 
 /// Maximum number of retries for a failed piece download
-pub const MAX_RETRIES: u32 = 3;
+pub const MAX_RETRIES: u32 = constants::BT_MAX_RETRIES;
 
 /// Timeout for each block request (seconds)
-pub const BLOCK_REQUEST_TIMEOUT_SECS: u64 = 3;
+pub const BLOCK_REQUEST_TIMEOUT_SECS: u64 = constants::BT_BLOCK_REQUEST_TIMEOUT_SECS;
 
 /// Maximum messages to read while waiting for a specific block
-pub const MAX_BLOCK_READ_MESSAGES: u32 = 10000;
+pub const MAX_BLOCK_READ_MESSAGES: u32 = constants::BT_MAX_BLOCK_READ_MESSAGES as u32;
 
 /// Result of a block download attempt
 pub struct BlockDownloadResult {
@@ -332,7 +333,7 @@ impl BtMessageHandler {
             );
 
             // Small delay before retry
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(constants::BT_RETRY_DELAY_MS)).await;
         }
 
         Err(Aria2Error::Fatal(FatalError::Config(format!(

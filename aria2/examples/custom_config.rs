@@ -25,17 +25,26 @@ fn main() {
     println!("\n--- 2. 创建自定义选项注册表 ---");
     let mut custom_reg = OptionRegistry::new();
     custom_reg.register(
-        OptionDef::new("custom-cache-dir", OptionType::String)
-            .short('C')
-            .default(OptionValue::Str("/var/cache/aria2".into()))
-            .desc("自定义缓存目录")
-            .category(OptionCategory::Advanced),
+        OptionDef {
+            name: "custom-cache-dir".into(),
+            opt_type: OptionType::String,
+            short_name: Some('C'),
+            default_value: OptionValue::Str("/var/cache/aria2".into()),
+            description: "自定义缓存目录".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        },
     );
     custom_reg.register(
-        OptionDef::new("max-retry-delay", OptionType::Integer)
-            .default(OptionValue::Int(300))
-            .desc("最大重试延迟(秒)")
-            .range(0, 3600),
+        OptionDef {
+            name: "max-retry-delay".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(300),
+            description: "最大重试延迟(秒)".into(),
+            min: Some(0),
+            max: Some(3600),
+            ..Default::default()
+        },
     );
 
     println!("自定义注册表大小: {}", custom_reg.count());

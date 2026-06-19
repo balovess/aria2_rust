@@ -125,9 +125,9 @@ impl FtpResponse {
 pub struct FtpConnection {
     pub stream: BufReader<TcpStream>,
     pub options: FtpOptions,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Host stored for connection logging and reconnection
     pub host: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Port stored for connection logging and reconnection
     pub port: u16,
 }
 

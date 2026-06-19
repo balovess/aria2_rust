@@ -16,7 +16,7 @@ fn create_test_info_hash() -> [u8; 20] {
 #[test]
 fn test_method_selection_encrypted_support() {
     let info_hash = create_test_info_hash();
-    let manager = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).unwrap();
+    let manager = MseHandshakeManager::new(info_hash).unwrap();
 
     let method_sel = manager.build_method_selection();
 
@@ -28,7 +28,7 @@ fn test_method_selection_encrypted_support() {
 #[test]
 fn test_method_selection_plain_only() {
     let info_hash = create_test_info_hash();
-    let manager = MseHandshakeManager::new(info_hash, CryptoMethod::Plain).unwrap();
+    let manager = MseHandshakeManager::new(info_hash).unwrap();
 
     // 即使选择 Plain 模式，build_method_selection 也应该返回 MSegadd
     // 因为这是协商过程，我们声明支持加密，但最终可能降级到 Plain
@@ -59,7 +59,7 @@ fn test_parse_remote_method_invalid() {
 #[test]
 fn test_key_exchange_payload_format() {
     let info_hash = create_test_info_hash();
-    let manager = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).unwrap();
+    let manager = MseHandshakeManager::new(info_hash).unwrap();
 
     let payload = manager
         .build_key_exchange_payload(&[CryptoMethod::Rc4])
@@ -129,7 +129,7 @@ fn test_dh_shared_secret_computation() {
 #[test]
 fn test_skey_computation() {
     let info_hash = create_test_info_hash();
-    let mut manager = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).unwrap();
+    let mut manager = MseHandshakeManager::new(info_hash).unwrap();
 
     // 手动设置共享密钥用于测试
     let fake_shared_secret: Vec<u8> = vec![0x42; 32];
@@ -234,7 +234,7 @@ fn test_plaintext_fallback_no_op() {
 #[test]
 fn test_state_machine_full_flow() {
     let info_hash = create_test_info_hash();
-    let manager = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).unwrap();
+    let manager = MseHandshakeManager::new(info_hash).unwrap();
 
     // 初始状态: Idle
     assert!(matches!(manager.state(), MseState::Idle));
@@ -262,10 +262,10 @@ fn test_crypto_method_negotiation_rc4() {
     let info_hash = create_test_info_hash();
 
     // Alice (initiator)
-    let mut alice = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).unwrap();
+    let mut alice = MseHandshakeManager::new(info_hash).unwrap();
 
     // Bob (responder)
-    let mut bob = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).unwrap();
+    let mut bob = MseHandshakeManager::new(info_hash).unwrap();
 
     // Phase 1: Method Selection
     let alice_method = alice.build_method_selection();
@@ -313,7 +313,7 @@ fn test_crypto_method_negotiation_fallback_to_plain() {
     let info_hash = create_test_info_hash();
 
     // Alice 支持加密
-    let _alice = MseHandshakeManager::new(info_hash, CryptoMethod::Rc4).unwrap();
+    let _alice = MseHandshakeManager::new(info_hash).unwrap();
 
     // Bob 仅支持明文 (发送 \x00)
     let bob_method_selection = b"\x00".to_vec();

@@ -362,143 +362,6 @@ impl ResumeData {
         Ok(Some(data))
     }
 
-    /// Build ResumeData from current download command state
-    ///
-    /// Extracts all relevant state from a DownloadCommandLike implementor
-    /// including GID, URIs with status, progress metrics, timing, and
-    /// protocol-specific fields.
-    ///
-    /// # Arguments
-    ///
-    /// * `cmd` - Download command trait object providing state accessors
-    ///
-    /// # Returns
-    ///
-    /// Fully populated ResumeData reflecting current command state
-    pub fn from_download_command(cmd: &dyn DownloadCommandLike) -> Self {
-        let gid = cmd.gid().to_string();
-        let raw_uris = cmd.uris();
-
-        // Convert raw URI list to UriState with tracking info
-        let uris: Vec<UriState> = raw_uris
-            .iter()
-            .map(|uri| UriState {
-                uri: uri.clone(),
-                tried: false,      // Will be updated by caller based on actual usage
-                used: false,       // Will be updated by caller based on active connections
-                last_result: None, // Will be updated after each attempt
-                speed_bytes_per_sec: None, // Will be measured during download
-            })
-            .collect();
-
-        let total_length = cmd.total_length();
-        let completed_length = cmd.completed_length();
-        let status = cmd.status().to_string();
-        let output_path = cmd.output_path().map(|s| s.to_string());
-
-        // Determine creation time as now (or could be passed through)
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        ResumeData {
-            gid,
-            uris,
-            total_length,
-            completed_length,
-            uploaded_length: 0, // Default; can be overridden by BT-aware callers
-            bitfield: vec![],   // Default; BT callers should set this explicitly
-            num_pieces: None,
-            piece_length: None,
-            status,
-            error_message: None,
-            last_download_time: created_at,
-            created_at,
-            output_path,
-            checksum: None,          // Callers should set if available
-            options: HashMap::new(), // Populated by from_request_group()
-            resume_offset: if completed_length > 0 {
-                Some(completed_length)
-            } else {
-                None
-            },
-            bt_info_hash: None,           // BT callers should set this
-            bt_saved_metadata_path: None, // BT callers should set this
-        }
-    }
-
-    /// Restore download command from saved resume data
-    ///
-    /// Reconstructs a downloadable session from persisted state by creating
-    /// a new command via the SessionLike interface, applying all stored
-    /// progress, options, and protocol-specific metadata.
-    ///
-    /// Protocol-specific restoration:
-    /// - **HTTP/FTP**: Sets resume_offset so the downloader starts from completed_length
-    /// - **BitTorrent**: Restores bitfield into PiecePicker, re-establishes piece ownership
-    /// - **Metalink**: Rebuilds mirror priority from URI tried/used/speed history
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - Session manager capable of creating commands from resume data
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(GidStub)` - Identifier of the restored command
-    /// * `Err(String)` - Restoration failure with context
-    pub fn restore_to_session(&self, session: &mut dyn SessionLike) -> Result<GidStub, String> {
-        debug!(
-            gid = %self.gid,
-            status = %self.status,
-            completed = self.completed_length,
-            total = self.total_length,
-            is_bt = self.is_bit_torrent(),
-            "Restoring download from resume data"
-        );
-
-        // Validate required fields before attempting restoration
-        if self.gid.is_empty() {
-            return Err("Cannot restore resume data: GID is empty".to_string());
-        }
-
-        if self.uris.is_empty() {
-            return Err(format!(
-                "Cannot restore resume data for GID {}: no URIs available",
-                self.gid
-            ));
-        }
-
-        // Log protocol-specific restoration details
-        if self.is_bit_torrent() {
-            debug!(
-                gid = %self.gid,
-                info_hash = ?self.bt_info_hash,
-                pieces = ?self.num_pieces,
-                piece_len = ?self.piece_length,
-                bitfield_len = self.bitfield.len(),
-                "Restoring BitTorrent session"
-            );
-        } else if self.resume_offset.is_some() {
-            debug!(
-                gid = %self.gid,
-                offset = self.resume_offset.unwrap(),
-                "Restoring HTTP/FTP session with resume offset"
-            );
-        }
-
-        // Delegate actual command creation to the session manager
-        let result = session.create_command(self)?;
-
-        info!(
-            gid = %self.gid,
-            restored_gid = %result.0,
-            "Download restored from resume data successfully"
-        );
-
-        Ok(result)
-    }
-
     /// Calculate download completion ratio (0.0 to 1.0)
     ///
     /// Returns 0.0 if total_length is 0 (unknown size).
@@ -612,57 +475,6 @@ impl ResumeData {
         } else {
             "unknown"
         }
-    }
-}
-
-// =========================================================================
-// Trait definitions for download command abstraction
-// =========================================================================
-
-/// Trait for download commands that can be serialized to ResumeData
-///
-/// This trait abstracts over different download command types (HTTP, FTP, BT)
-/// to allow uniform extraction of resume state.
-pub trait DownloadCommandLike {
-    /// Get unique global identifier
-    fn gid(&self) -> &str;
-
-    /// Get list of source URIs
-    fn uris(&self) -> Vec<String>;
-
-    /// Get total download length (0 if unknown)
-    fn total_length(&self) -> u64;
-
-    /// Get completed byte count
-    fn completed_length(&self) -> u64;
-
-    /// Get current status string
-    fn status(&self) -> &str;
-
-    /// Get output file path
-    fn output_path(&self) -> Option<&str>;
-}
-
-/// Trait for session managers that can restore downloads
-///
-/// Abstracts session operations needed for resume restoration.
-pub trait SessionLike {
-    /// Create a new download command from resume data
-    fn create_command(&mut self, data: &ResumeData) -> Result<GidStub, String>;
-
-    /// Pause an active download by GID
-    fn pause_download(&mut self, gid: &str) -> Result<(), String>;
-}
-
-/// Stub type for GID (Global IDentifier)
-///
-/// Used as a lightweight identifier when full GroupId integration is not needed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GidStub(pub String);
-
-impl std::fmt::Display for GidStub {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 
@@ -2380,36 +2192,12 @@ mod tests {
             other => panic!("Expected HttpFtp restore state, got: {:?}", other),
         }
 
-        // --- Phase 6: Simulate successful restoration ---
-        // In production, this would call session.create_command(&loaded)
-        // Here we verify the data is ready for that call
-
-        // Mock session that accepts any valid data
-        struct MockSession;
-        impl SessionLike for MockSession {
-            fn create_command(&mut self, data: &ResumeData) -> Result<GidStub, String> {
-                // Validate before accepting
-                data.validate_for_restore()?;
-                Ok(GidStub(format!("restored-{}", data.gid)))
-            }
-
-            fn pause_download(&mut self, _gid: &str) -> Result<(), String> {
-                Ok(())
-            }
-        }
-
-        let mut mock_session = MockSession;
-        let restore_result = loaded.restore_to_session(&mut mock_session);
-
+        // --- Phase 6: Verify data is ready for restoration ---
+        let validation = loaded.validate_for_restore();
         assert!(
-            restore_result.is_ok(),
-            "Restoration should succeed: {:?}",
-            restore_result.err()
-        );
-        assert_eq!(
-            restore_result.unwrap().0,
-            "restored-deadbeefcafebabe",
-            "Restored GID should indicate successful recovery"
+            validation.is_ok(),
+            "Loaded data should be valid for restoration: {:?}",
+            validation.err()
         );
 
         // Clean up

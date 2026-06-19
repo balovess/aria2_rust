@@ -1,12 +1,11 @@
 use crate::error::{Aria2Error, Result};
 use async_trait::async_trait;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use super::disk_adaptor::{DiskAdaptor, StripedDiskAdaptor};
+use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use super::disk_cache::WrDiskCache;
 
 #[async_trait]
@@ -107,7 +106,8 @@ impl DiskWriter for ByteArrayDiskWriter {
     }
 }
 
-const DEFAULT_DIRECT_WRITE_THRESHOLD: usize = 256 * 1024;
+/// Fixed threshold: writes >= 1MB bypass the cache and go directly to disk.
+const DIRECT_WRITE_THRESHOLD: usize = 1024 * 1024;
 
 #[async_trait]
 #[allow(clippy::len_without_is_empty)]
@@ -128,32 +128,25 @@ pub trait SeekableDiskWriter: Send + Sync {
 }
 
 pub struct CachedDiskWriter {
-    adaptor: Arc<Mutex<StripedDiskAdaptor>>,
+    adaptor: Arc<Mutex<DirectDiskAdaptor>>,
     cache: Option<Arc<WrDiskCache>>,
     path: PathBuf,
     total_size: Option<u64>,
-    direct_write_threshold: usize,
     opened: bool,
-    // Task I2: Rate limiter for write throttling
+    // Rate limiter for write throttling
     rate_limiter: Option<Arc<crate::rate_limiter::RateLimiter>>,
-    // Task I3: Adaptive threshold fields
-    write_history: VecDeque<usize>,
-    write_count: usize,
 }
 
 impl CachedDiskWriter {
     pub fn new(path: &Path, total_size: Option<u64>, cache_size_mb: Option<usize>) -> Self {
         let cache = cache_size_mb.map(|mb| Arc::new(WrDiskCache::new(mb)));
         Self {
-            adaptor: Arc::new(Mutex::new(StripedDiskAdaptor::new())),
+            adaptor: Arc::new(Mutex::new(DirectDiskAdaptor::new())),
             cache,
             path: path.to_path_buf(),
             total_size,
-            direct_write_threshold: DEFAULT_DIRECT_WRITE_THRESHOLD,
             opened: false,
             rate_limiter: None,
-            write_history: VecDeque::with_capacity(100),
-            write_count: 0,
         }
     }
 
@@ -163,12 +156,7 @@ impl CachedDiskWriter {
         Ok(writer)
     }
 
-    pub fn with_threshold(mut self, threshold: usize) -> Self {
-        self.direct_write_threshold = threshold;
-        self
-    }
-
-    /// Attach a rate limiter for write throttling (Task I2).
+    /// Attach a rate limiter for write throttling.
     /// Uses non-blocking try_acquire: if tokens unavailable, writes proceed without blocking.
     pub fn with_rate_limiter(mut self, limiter: Arc<crate::rate_limiter::RateLimiter>) -> Self {
         self.rate_limiter = Some(limiter);
@@ -177,17 +165,6 @@ impl CachedDiskWriter {
 
     pub fn is_opened(&self) -> bool {
         self.opened
-    }
-
-    /// Returns the current direct_write_threshold value.
-    /// Useful for observing adaptive threshold adjustments (Task I3).
-    pub fn direct_write_threshold(&self) -> usize {
-        self.direct_write_threshold
-    }
-
-    /// Returns total number of writes recorded since creation or last reset.
-    pub fn write_count(&self) -> usize {
-        self.write_count
     }
 }
 
@@ -225,7 +202,7 @@ impl SeekableDiskWriter for CachedDiskWriter {
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         self.open().await?;
 
-        // Task I2: Rate limiting — non-blocking try_acquire
+        // Rate limiting — non-blocking try_acquire
         if let Some(ref limiter) = self.rate_limiter
             && !limiter.try_acquire_download(data.len() as u64).await
         {
@@ -236,38 +213,14 @@ impl SeekableDiskWriter for CachedDiskWriter {
             );
         }
 
-        let write_len = data.len();
-
-        if data.len() >= self.direct_write_threshold {
+        if data.len() >= DIRECT_WRITE_THRESHOLD {
             let mut adaptor = self.adaptor.lock().await;
             adaptor.write(offset, data).await?;
         } else if let Some(ref cache) = self.cache {
-            // Zero-copy: convert slice to Bytes for cache write
             cache.write(offset, bytes::Bytes::copy_from_slice(data)).await?;
         } else {
             let mut adaptor = self.adaptor.lock().await;
             adaptor.write(offset, data).await?;
-        }
-
-        // Task I3: Track write size for adaptive threshold
-        self.write_history.push_back(write_len);
-        self.write_count += 1;
-
-        // Adapt threshold every 100 writes
-        if self.write_count.is_multiple_of(100) && self.write_history.len() >= 10 {
-            let mut sorted: Vec<usize> = self.write_history.iter().copied().collect();
-            sorted.sort_unstable();
-            let p90_idx = (sorted.len() as f64 * 0.9) as usize;
-            let p90 = sorted
-                .get(p90_idx.min(sorted.len() - 1))
-                .copied()
-                .unwrap_or(DEFAULT_DIRECT_WRITE_THRESHOLD);
-            // Clamp between 64KB and 4MB
-            self.direct_write_threshold = p90.clamp(64 * 1024, 4 * 1024 * 1024);
-            debug!(
-                "Adaptive direct_write_threshold adjusted to {} bytes (p90={})",
-                self.direct_write_threshold, p90
-            );
         }
 
         Ok(())
@@ -277,7 +230,7 @@ impl SeekableDiskWriter for CachedDiskWriter {
     async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
         self.open().await?;
 
-        // Task I2: Rate limiting — non-blocking try_acquire
+        // Rate limiting — non-blocking try_acquire
         if let Some(ref limiter) = self.rate_limiter
             && !limiter.try_acquire_download(data.len() as u64).await
         {
@@ -288,38 +241,14 @@ impl SeekableDiskWriter for CachedDiskWriter {
             );
         }
 
-        let write_len = data.len();
-
-        if data.len() >= self.direct_write_threshold {
+        if data.len() >= DIRECT_WRITE_THRESHOLD {
             let mut adaptor = self.adaptor.lock().await;
             adaptor.write(offset, &data).await?;
         } else if let Some(ref cache) = self.cache {
-            // Zero-copy: pass Bytes directly to cache, no intermediate Vec needed
             cache.write(offset, data).await?;
         } else {
             let mut adaptor = self.adaptor.lock().await;
             adaptor.write(offset, &data).await?;
-        }
-
-        // Task I3: Track write size for adaptive threshold
-        self.write_history.push_back(write_len);
-        self.write_count += 1;
-
-        // Adapt threshold every 100 writes
-        if self.write_count.is_multiple_of(100) && self.write_history.len() >= 10 {
-            let mut sorted: Vec<usize> = self.write_history.iter().copied().collect();
-            sorted.sort_unstable();
-            let p90_idx = (sorted.len() as f64 * 0.9) as usize;
-            let p90 = sorted
-                .get(p90_idx.min(sorted.len() - 1))
-                .copied()
-                .unwrap_or(DEFAULT_DIRECT_WRITE_THRESHOLD);
-            // Clamp between 64KB and 4MB
-            self.direct_write_threshold = p90.clamp(64 * 1024, 4 * 1024 * 1024);
-            debug!(
-                "Adaptive direct_write_threshold adjusted to {} bytes (p90={})",
-                self.direct_write_threshold, p90
-            );
         }
 
         Ok(())
@@ -578,7 +507,7 @@ mod tests {
         assert_eq!(content, "before close after reopen");
     }
 
-    // ── Task I2: Rate limiter wiring tests ──────────────────────────
+    // ── Rate limiter wiring tests ──────────────────────────
 
     #[tokio::test]
     async fn test_cached_writer_with_rate_limiter() {
@@ -624,124 +553,22 @@ mod tests {
         );
     }
 
-    // ── Task I3: Adaptive threshold tests ─────────────────────────
+    // ── Concurrent write tests ─────────────────────
 
     #[tokio::test]
-    async fn test_adaptive_threshold_increases_with_small_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_adapt_up.bin");
-
-        // Start with low threshold so small writes go to cache
-        // Use smaller file size to avoid disk space issues
-        let mut writer =
-            CachedDiskWriter::new(&path, Some(512 * 1024), None).with_threshold(64 * 1024); // 64KB initial
-        writer.open().await.unwrap();
-
-        assert_eq!(writer.direct_write_threshold(), 64 * 1024);
-
-        // Do 100+ small writes of 1KB each
-        for i in 0..110 {
-            let data = vec![i as u8; 1024];
-            writer.write_at((i * 1024) as u64, &data).await.unwrap();
-        }
-
-        // After 100 writes, threshold should have adapted upward
-        // p90 of [1024, 1024, ...] is 1024, clamped to min 64KB → stays at 64KB
-        // But the mechanism itself should have fired (write_count >= 100)
-        assert_eq!(writer.write_count(), 110);
-        // Threshold should be clamped between 64KB and 4MB
-        let thresh = writer.direct_write_threshold();
-        assert!(
-            thresh >= 64 * 1024,
-            "threshold {} should be >= 64KB",
-            thresh
-        );
-        assert!(
-            thresh <= 4 * 1024 * 1024,
-            "threshold {} should be <= 4MB",
-            thresh
-        );
-    }
-
-    #[tokio::test]
-    async fn test_adaptive_threshold_decreases_with_large_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_adapt_down.bin");
-
-        // Start with a high threshold
-        // Use smaller file size to avoid disk space issues
-        let mut writer = CachedDiskWriter::new(&path, Some(2 * 1024 * 1024), None)
-            .with_threshold(4 * 1024 * 1024);
-        writer.open().await.unwrap();
-
-        assert_eq!(writer.direct_write_threshold(), 4 * 1024 * 1024);
-
-        // Do 100+ writes of varying sizes including some small ones
-        // Mix of sizes: mostly small (1KB-8KB) with occasional larger ones
-        for i in 0..110 {
-            let size = if i % 10 == 0 { 64 * 1024 } else { 2 * 1024 }; // 90% are 2KB
-            let data = vec![i as u8; size];
-            writer.write_at((i * size) as u64, &data).await.unwrap();
-        }
-
-        assert_eq!(writer.write_count(), 110);
-
-        // p90 should be on the lower end since most writes are small (2KB)
-        // Clamped minimum is 64KB
-        let thresh = writer.direct_write_threshold();
-        assert!(
-            thresh >= 64 * 1024,
-            "adaptive threshold {} should be >= 64KB floor",
-            thresh
-        );
-        assert!(
-            thresh <= 4 * 1024 * 1024,
-            "adaptive threshold {} should be <= 4MB ceiling",
-            thresh
-        );
-    }
-
-    #[tokio::test]
-    async fn test_adaptive_threshold_clamping_bounds() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_clamp.bin");
-
-        let mut writer = CachedDiskWriter::new(&path, Some(1024), None);
-        writer.open().await.unwrap();
-
-        // Write 100 entries of exactly 128 bytes each
-        for i in 0..100 {
-            let data = vec![i as u8; 128];
-            writer.write_at((i * 128) as u64, &data).await.unwrap();
-        }
-
-        // p90 of all-128-byte writes is 128, but threshold must be >= 64KB
-        let thresh = writer.direct_write_threshold();
-        assert_eq!(
-            thresh,
-            64 * 1024,
-            "should clamp to 64KB floor when p90 is tiny"
-        );
-    }
-
-    // ── Task 2: Striped locks concurrent tests ─────────────────────
-
-    #[tokio::test]
-    async fn test_concurrent_writes_different_shards() {
+    async fn test_concurrent_writes_different_offsets() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_concurrent.bin");
 
-        // Use smaller file size to avoid disk space issues
         let mut writer = CachedDiskWriter::new(&path, Some(16 * 1024 * 1024), None);
         writer.open().await.unwrap();
 
-        // Write to different shards concurrently (each shard covers 1MB range)
         let mut handles = vec![];
         for i in 0..16 {
-            let offset = (i as u64) * 1024 * 1024; // Each write goes to a different shard
+            let offset = (i as u64) * 1024 * 1024;
             let data = vec![i as u8; 4096];
             let path_clone = path.clone();
-            
+
             handles.push(tokio::spawn(async move {
                 let mut w = CachedDiskWriter::new(&path_clone, None, None);
                 w.open().await.unwrap();
@@ -751,12 +578,10 @@ mod tests {
             }));
         }
 
-        // Wait for all concurrent writes
         for handle in handles {
             handle.await.unwrap();
         }
 
-        // Verify all writes succeeded
         let content = tokio::fs::read(&path).await.unwrap();
         for i in 0..16 {
             let offset = (i as usize) * 1024 * 1024;
@@ -764,21 +589,20 @@ mod tests {
             assert_eq!(
                 &content[offset..offset + 4096],
                 &expected[..],
-                "Data mismatch at shard {}",
+                "Data mismatch at offset {}",
                 i
             );
         }
     }
 
     #[tokio::test]
-    async fn test_concurrent_writes_same_shard_serialized() {
+    async fn test_concurrent_writes_serialized() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_same_shard.bin");
+        let path = dir.path().join("test_same_offset.bin");
 
-        // Use smaller file size to avoid disk space issues
         let mut writer = CachedDiskWriter::new(&path, Some(1024 * 1024), None);
         writer.open().await.unwrap();
         writer.close().await.unwrap();
@@ -786,9 +610,8 @@ mod tests {
         let write_count = Arc::new(AtomicUsize::new(0));
         let mut handles = vec![];
 
-        // Multiple concurrent writes to the same shard (same 1MB range)
         for i in 0..10 {
-            let offset = (i as u64) * 1024; // All within the first 1MB (same shard)
+            let offset = (i as u64) * 1024;
             let data = vec![i as u8; 1024];
             let path_clone = path.clone();
             let counter = write_count.clone();
@@ -803,15 +626,12 @@ mod tests {
             }));
         }
 
-        // Wait for all writes
         for handle in handles {
             handle.await.unwrap();
         }
 
-        // All writes should have completed
         assert_eq!(write_count.load(Ordering::SeqCst), 10);
 
-        // Verify data integrity
         let content = tokio::fs::read(&path).await.unwrap();
         for i in 0..10 {
             let offset = i * 1024;
@@ -830,7 +650,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_stress.bin");
 
-        // Use smaller file size to avoid disk space issues
         let mut writer = CachedDiskWriter::new(&path, Some(32 * 1024 * 1024), None);
         writer.open().await.unwrap();
         writer.close().await.unwrap();
@@ -841,29 +660,26 @@ mod tests {
 
         for thread_id in 0..num_threads {
             let path_clone = path.clone();
-            
+
             handles.push(tokio::spawn(async move {
                 let mut w = CachedDiskWriter::new(&path_clone, None, None);
                 w.open().await.unwrap();
-                
+
                 for write_id in 0..writes_per_thread {
-                    // Spread writes across different shards
                     let offset = ((thread_id * writes_per_thread + write_id) as u64) * 8192;
                     let data = vec![(thread_id + write_id) as u8; 8192];
                     w.write_at(offset, &data).await.unwrap();
                 }
-                
+
                 w.flush().await.unwrap();
                 w.close().await.unwrap();
             }));
         }
 
-        // Wait for all threads
         for handle in handles {
             handle.await.unwrap();
         }
 
-        // Verify some random samples
         let content = tokio::fs::read(&path).await.unwrap();
         for thread_id in 0..num_threads {
             for write_id in 0..writes_per_thread {

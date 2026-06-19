@@ -15,7 +15,7 @@ pub enum TimerEvent {
 }
 
 pub struct Timer {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Timer ID stored for identification; not yet used in current implementation
     id: TimerId,
     next_fire: TokioInstant,
     interval: Option<Duration>,

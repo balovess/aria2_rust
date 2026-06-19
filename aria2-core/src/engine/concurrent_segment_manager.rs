@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tracing::debug;
 
+use crate::constants;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
 
@@ -53,7 +54,7 @@ impl MirrorState {
             url,
             speed: 0.0,
             active_segments: 0,
-            max_connections: 2,
+            max_connections: constants::DEFAULT_MAX_CONNECTIONS_PER_MIRROR,
             consecutive_failures: 0,
             disabled: false,
         }
@@ -70,8 +71,6 @@ impl MirrorState {
 
 pub struct ConcurrentSegmentManager {
     total_size: u64,
-    #[allow(dead_code)] // Reserved for segment size queries in future optimizations
-    segment_size: u64,
     segments: Vec<Segment>,
     mirrors: Vec<MirrorState>,
     /// URLs for mirror selection (used with UriSelector)
@@ -92,7 +91,7 @@ impl ConcurrentSegmentManager {
     /// for mirror tracking. For intelligent mirror selection, use
     /// `new_with_selector()` instead.
     pub fn new(total_size: u64, urls: Vec<String>, segment_size: Option<u64>) -> Self {
-        let seg_size = segment_size.unwrap_or(1_048_576);
+        let seg_size = segment_size.unwrap_or(constants::DEFAULT_SEGMENT_SIZE as u64);
         let num_segments = if total_size == 0 {
             0
         } else {
@@ -111,13 +110,12 @@ impl ConcurrentSegmentManager {
 
         Self {
             total_size,
-            segment_size: seg_size,
             segments,
             mirrors,
             mirror_urls: urls,
             completed_bytes: 0,
-            max_retries_per_segment: 3,
-            max_mirror_failures: 3,
+            max_retries_per_segment: constants::MAX_RETRIES_PER_SEGMENT,
+            max_mirror_failures: constants::MAX_MIRROR_FAILURES as usize,
             stat_man: None,
             uri_selector: None,
         }
@@ -163,7 +161,7 @@ impl ConcurrentSegmentManager {
         stat_man: Arc<ServerStatMan>,
         uri_selector: Box<dyn UriSelector>,
     ) -> Self {
-        let seg_size = segment_size.unwrap_or(1_048_576);
+        let seg_size = segment_size.unwrap_or(constants::DEFAULT_SEGMENT_SIZE as u64);
         let num_segments = if total_size == 0 {
             0
         } else {
@@ -182,13 +180,12 @@ impl ConcurrentSegmentManager {
 
         Self {
             total_size,
-            segment_size: seg_size,
             segments,
             mirrors,
             mirror_urls: urls,
             completed_bytes: 0,
-            max_retries_per_segment: 3,
-            max_mirror_failures: 3,
+            max_retries_per_segment: constants::MAX_RETRIES_PER_SEGMENT,
+            max_mirror_failures: constants::MAX_MIRROR_FAILURES as usize,
             stat_man: Some(stat_man),
             uri_selector: Some(uri_selector),
         }

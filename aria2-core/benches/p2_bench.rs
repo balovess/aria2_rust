@@ -9,7 +9,7 @@ use aria2_core::auth::digest_auth::{
 use aria2_core::engine::bt_mse_handshake::{CryptoMethod, MseCryptoContext, MseHandshakeManager};
 use aria2_core::engine::bt_progress_info_file::{BtProgress, BtProgressManager, DownloadStats};
 use aria2_core::engine::lpd_manager::{LpdManager, parse_lpd_announcement};
-use aria2_core::http::stream_filter::{ChunkedDecoder, FilterChain, GZipDecoder, StreamFilter};
+use aria2_core::http::stream_filter::{ChunkedDecoder, GZipDecoder, StreamFilter, process_filters};
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -278,9 +278,9 @@ fn bench_mse_handshake_full_3phase(c: &mut Criterion) {
         b.iter(|| {
             // Phase 1: Method selection
             let mut mgr_a =
-                MseHandshakeManager::new(black_box(info_hash), CryptoMethod::Rc4).unwrap();
+                MseHandshakeManager::new(black_box(info_hash)).unwrap();
             let mut mgr_b =
-                MseHandshakeManager::new(black_box(info_hash), CryptoMethod::Rc4).unwrap();
+                MseHandshakeManager::new(black_box(info_hash)).unwrap();
 
             let method_sel_a = black_box(mgr_a.build_method_selection());
             let method_sel_b = black_box(mgr_b.build_method_selection());
@@ -333,8 +333,8 @@ fn bench_x25519_key_exchange(c: &mut Criterion) {
     c.bench_function("x25519_key_exchange_single", |b| {
         b.iter(|| {
             let hash = black_box(make_test_hash(0xBB));
-            let mut mgr = MseHandshakeManager::new(hash, CryptoMethod::Rc4).unwrap();
-            let mut peer_mgr = MseHandshakeManager::new(hash, CryptoMethod::Rc4).unwrap();
+            let mut mgr = MseHandshakeManager::new(hash).unwrap();
+            let mut peer_mgr = MseHandshakeManager::new(hash).unwrap();
 
             let payload = mgr
                 .build_key_exchange_payload(&[CryptoMethod::Rc4])
@@ -393,11 +393,11 @@ fn bench_filter_chain_gzip_then_chunked_512kb(c: &mut Criterion) {
 
     c.bench_function("filter_chain_gzip_then_chunked_512kb", |b| {
         b.iter(|| {
-            let mut chain = FilterChain::new();
-            chain.push(Box::new(ChunkedDecoder::new()));
-            chain.push(Box::new(GZipDecoder::new()));
+            let mut filters: Vec<Box<dyn StreamFilter>> = Vec::new();
+            filters.push(Box::new(ChunkedDecoder::new()));
+            filters.push(Box::new(GZipDecoder::new()));
 
-            let result = chain.process(black_box(&chunked_wrapped));
+            let result = process_filters(&mut filters, black_box(&chunked_wrapped));
             black_box(result.map(|d| d.len()))
         });
     });

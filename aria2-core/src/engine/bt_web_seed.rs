@@ -93,7 +93,9 @@ pub struct WebSeedClient {
     base_url: String,
     /// Reusable reqwest HTTP client with connection pooling
     client: reqwest::Client,
-    /// Pieces currently being requested (for concurrency control)
+    /// Pieces currently being requested (for concurrency control).
+    /// Uses std::sync::Mutex because the lock is only held for short synchronous
+    /// operations (insert/remove/check) and never across .await points.
     active_requests: Arc<std::sync::Mutex<HashSet<u32>>>,
     /// Statistics for this web seed
     stats: Arc<WebSeedStats>,
@@ -152,25 +154,25 @@ impl WebSeedClient {
 
     /// Check if a piece can be requested (not already active).
     pub fn can_request(&self, piece_index: u32) -> bool {
-        let active = self.active_requests.lock().unwrap();
+        let active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
         !active.contains(&piece_index)
     }
 
     /// Mark a piece as being requested.
     pub fn mark_requesting(&self, piece_index: u32) {
-        let mut active = self.active_requests.lock().unwrap();
+        let mut active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
         active.insert(piece_index);
     }
 
     /// Mark a piece as no longer being requested.
     pub fn clear_request(&self, piece_index: u32) {
-        let mut active = self.active_requests.lock().unwrap();
+        let mut active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
         active.remove(&piece_index);
     }
 
     /// Get the number of active requests.
     pub fn active_request_count(&self) -> usize {
-        let active = self.active_requests.lock().unwrap();
+        let active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
         active.len()
     }
 

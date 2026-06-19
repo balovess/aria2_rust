@@ -14,6 +14,9 @@ use tracing::{debug, error, info, warn};
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::GroupId;
 
+// Re-export DownloadStatus for backward compatibility
+pub use crate::request::request_group::DownloadStatus;
+
 // ============================================================================
 // 核心数据结构
 // ============================================================================
@@ -78,30 +81,6 @@ impl HookContext {
     /// 获取父目录路径
     pub fn directory(&self) -> &Path {
         self.file_path.parent().unwrap_or(self.file_path.as_path())
-    }
-}
-
-/// 下载状态枚举
-#[derive(Clone, Debug, PartialEq)]
-pub enum DownloadStatus {
-    /// 下载完成
-    Complete,
-    /// 下载出错
-    Error,
-    /// 下载已停止
-    Stopped,
-    /// 下载已暂停
-    Paused,
-}
-
-impl std::fmt::Display for DownloadStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DownloadStatus::Complete => write!(f, "complete"),
-            DownloadStatus::Error => write!(f, "error"),
-            DownloadStatus::Stopped => write!(f, "stopped"),
-            DownloadStatus::Paused => write!(f, "paused"),
-        }
     }
 }
 

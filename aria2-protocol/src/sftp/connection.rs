@@ -193,7 +193,7 @@ impl SshOptions {
 #[derive(Clone)]
 struct HandlerState {
     /// Connection options for authentication
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Stored for re-authentication and connection reuse
     options: Arc<SshOptions>,
     /// Host key checking mode
     host_key_mode: HostKeyCheckingMode,
@@ -612,7 +612,7 @@ pub struct SshConnectionPool {
     /// Available connections keyed by target string
     connections: std::collections::HashMap<String, Arc<tokio::sync::Mutex<SshConnection>>>,
     /// Maximum number of connections per target
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Pool limit; stored for future connection cap enforcement
     max_per_target: usize,
     /// Maximum idle time before eviction
     max_idle: Duration,

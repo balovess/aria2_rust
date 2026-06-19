@@ -182,7 +182,9 @@ pub struct BtSeedManager {
     uploaded_bytes_atomic: AtomicU64,
     /// Current upload speed in bytes/sec
     upload_speed_atomic: AtomicU64,
-    /// Last upload timestamp
+    /// Last upload timestamp.
+    /// Uses std::sync::Mutex because the lock is only held for short synchronous
+    /// reads/writes of an Instant and never across .await points.
     last_upload_time: std::sync::Mutex<Instant>,
     
     // Seeding control
@@ -200,7 +202,9 @@ pub struct BtSeedManager {
     // Upload speed limiting
     /// Maximum upload speed in bytes/sec (None = unlimited)
     max_upload_speed: Option<u64>,
-    /// Timestamp of last speed throttle check
+    /// Timestamp of last speed throttle check.
+    /// Uses std::sync::Mutex because the lock is only held for short synchronous
+    /// reads/writes of an Instant and never across .await points.
     last_throttle_check: std::sync::Mutex<Instant>,
     /// Bytes uploaded in current throttle window
     throttle_window_bytes: AtomicU64,

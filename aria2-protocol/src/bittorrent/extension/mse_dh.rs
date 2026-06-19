@@ -43,7 +43,7 @@ impl MseDhKeyExchange {
     }
 
     /// Get the full public key (for internal use).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in tests for DH shared secret verification
     fn full_public_key(&self) -> &[u8] {
         &self.keypair.public
     }

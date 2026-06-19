@@ -79,10 +79,6 @@ impl Command for AutoSaveSession {
     fn status(&self) -> CommandStatus {
         self.status.clone()
     }
-
-    fn priority(&self) -> u32 {
-        99
-    }
 }
 
 #[cfg(test)]

@@ -30,8 +30,8 @@ impl App {
             return Err("RPC is not enabled".to_string());
         }
 
-        let port = self.get_opt_usize("rpc-listen-port").await.unwrap_or(6800) as u16;
-        let host = self.get_opt_str("rpc-listen-address").await.unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = self.get_opt_usize("rpc-listen-port").await.unwrap_or(crate::constants::DEFAULT_RPC_PORT) as u16;
+        let host = self.get_opt_str("rpc-listen-address").await.unwrap_or_else(|| crate::constants::DEFAULT_RPC_HOST.to_string());
 
         // Build authentication config
         let auth = if let Some(secret) = self.get_opt_str("rpc-secret").await {

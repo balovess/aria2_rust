@@ -89,11 +89,11 @@ impl App {
         self.load_env().await;
 
         if let Err(e) = self.load_config_file(None).await {
-            tracing::error!("加载配置文件失败: {}", e);
+            tracing::error!("Failed to load config file: {}", e);
         }
 
         if let Err(e) = self.load_args(args).await {
-            eprintln!("{}", format!("参数解析错误: {}", e).red());
+            eprintln!("{}", format!("Argument parsing error: {}", e).red());
             return 1;
         }
 
@@ -161,11 +161,11 @@ impl App {
         match self.restore_session().await {
             Ok(count) => {
                 if count > 0 {
-                    info!("成功恢复 {} 个下载任务", count);
+                    info!("Successfully restored {} download tasks", count);
                 }
             }
             Err(e) => {
-                warn!("会话恢复失败（将继续执行）: {}", e);
+                warn!("Session restore failed (will continue): {}", e);
                 // Restore failure doesn't block execution, just log warning
             }
         }
@@ -188,7 +188,7 @@ impl App {
             } else {
                 eprintln!(
                     "{}",
-                    "错误: 请提供下载URI或torrent文件路径，或使用 --input-file 恢复之前的下载".red()
+                    "Error: Please provide a download URI or torrent file path, or use --input-file to resume previous downloads".red()
                 );
                 return 1;
             }
@@ -198,18 +198,18 @@ impl App {
         if !self.detected_inputs.is_empty() {
             match self.add_downloads().await {
                 Ok(gids) => {
-                    info!("已添加 {} 个下载任务", gids.len());
+                    info!("Added {} download tasks", gids.len());
                     for gid in &gids {
-                        println!("  {} 任务 #{}", "#".cyan(), gid.to_string().yellow());
+                        println!("  {} Task #{}", "#".cyan(), gid.to_string().yellow());
                     }
                 }
                 Err(e) => {
-                    eprintln!("{}", format!("添加任务失败: {}", e).red());
+                    eprintln!("{}", format!("Failed to add task: {}", e).red());
                     return 1;
                 }
             }
         } else if has_restored_tasks {
-            info!("仅使用恢复的下载任务");
+            info!("Using restored download tasks only");
         }
 
         println!();
@@ -219,7 +219,7 @@ impl App {
             match self.start_rpc_server().await {
                 Ok(handle) => Some(handle),
                 Err(e) => {
-                    warn!("RPC 服务器启动失败: {}", e);
+                    warn!("RPC server failed to start: {}", e);
                     None
                 }
             }
@@ -233,22 +233,22 @@ impl App {
         // Step 8: Shutdown RPC server
         if let Some(handle) = rpc_handle {
             handle.abort();
-            info!("RPC 服务器已关闭");
+            info!("RPC server shut down");
         }
 
         // Step 9: Save session on shutdown
         if let Err(e) = self.save_session_on_shutdown().await {
-            warn!("关闭保存会话失败: {}", e);
+            warn!("Failed to save session on shutdown: {}", e);
             // Save failure doesn't affect exit code
         }
 
         match run_result {
             Ok(()) => {
-                println!("{}", "所有任务完成!".green().bold());
+                println!("{}", "All tasks completed!".green().bold());
                 0
             }
             Err(e) => {
-                eprintln!("{}", format!("下载失败: {}", e).red());
+                eprintln!("{}", format!("Download failed: {}", e).red());
                 1
             }
         }

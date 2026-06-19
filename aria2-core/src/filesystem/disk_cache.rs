@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -17,14 +16,11 @@ impl Default for WrDiskCache {
 
 /// Eviction target ratio: when over limit, evict down to this fraction of max size
 const EVICTION_TARGET_RATIO: f64 = 0.5;
-
 #[derive(Clone)]
 pub struct CacheEntry {
     offset: u64,
     data: bytes::Bytes,  // Zero-copy immutable buffer
     dirty: bool,
-    #[allow(dead_code)]
-    last_access: Instant,
 }
 
 impl CacheEntry {
@@ -152,7 +148,6 @@ impl WrDiskCache {
             offset,
             data,
             dirty: true,
-            last_access: Instant::now(),
         };
 
         entries.push_back(entry);

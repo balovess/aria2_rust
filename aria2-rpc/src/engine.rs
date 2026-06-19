@@ -3,16 +3,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use super::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use super::server::{
-    AuthConfig, CorsConfig, DownloadStatus, FileInfo, GlobalOptions, GlobalStat, PeerInfo,
-    RpcAuthMiddleware, StatusInfo, TaskOptions, create_gid,
-};
-use super::websocket::{DownloadEvent, EventPublisher, EventType};
-use aria2_core::engine::multi_file_layout::TorrentFileEntry;
-
-// Include handler implementations from separate file (avoids module visibility issues)
-include!("rpc_handlers.rs");
+use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
+use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
+use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
+use super::websocket::EventPublisher;
+use aria2_core::TorrentFileEntry;
 
 /// Core RPC engine that manages download tasks and handles aria2 protocol requests.
 ///
@@ -22,20 +17,20 @@ include!("rpc_handlers.rs");
 /// - Provides progress tracking and status queries
 /// - Publishes events via WebSocket for real-time notifications
 ///
-/// Handler implementations are in [rpc_handlers](crate::engine::rpc_handlers) module.
+/// Handler implementations are in the [`handlers`](crate::handlers) module.
 pub struct RpcEngine {
     /// Active download tasks keyed by GID
-    pub(super) tasks: Arc<RwLock<HashMap<String, TaskState>>>,
+    pub(crate) tasks: Arc<RwLock<HashMap<String, TaskState>>>,
     /// Global configuration options
-    pub(super) global_opts: GlobalOptions,
+    pub(crate) global_opts: GlobalOptions,
     /// Per-task configuration options
-    pub(super) task_opts: TaskOptions,
+    pub(crate) task_opts: TaskOptions,
     /// Completed/stopped task results
-    pub(super) stopped_tasks: Arc<RwLock<Vec<StatusInfo>>>,
+    pub(crate) stopped_tasks: Arc<RwLock<Vec<StatusInfo>>>,
     /// Event publisher for WebSocket notifications
-    pub(super) event_publisher: Arc<EventPublisher>,
+    pub(crate) event_publisher: Arc<EventPublisher>,
     /// Authentication middleware for token-based RPC auth
-    pub(super) auth_middleware: RpcAuthMiddleware,
+    pub(crate) auth_middleware: RpcAuthMiddleware,
 }
 
 /// Internal state for an active download task.
@@ -43,32 +38,32 @@ pub struct RpcEngine {
 /// Contains both static metadata (GID, URIs, options) and dynamic
 /// progress fields (speeds, lengths, connections) that are updated
 /// by the download engine during execution.
-pub(super) struct TaskState {
+pub(crate) struct TaskState {
     /// Current status information with metadata
-    pub(super) status: StatusInfo,
+    pub(crate) status: StatusInfo,
     /// Configuration options specific to this task
-    #[allow(dead_code)]
-    pub(super) options: HashMap<String, serde_json::Value>,
+    #[allow(dead_code)] // Stored for future RPC tellActive/tellStopped option reporting
+    pub(crate) options: HashMap<String, serde_json::Value>,
     /// URI list for this download
-    #[allow(dead_code)]
-    pub(super) uris: Vec<String>,
+    #[allow(dead_code)] // Stored for future RPC getUris option reporting
+    pub(crate) uris: Vec<String>,
     /// Torrent file entries (for BitTorrent downloads)
-    pub(super) torrent_files: Option<Vec<TorrentFileEntry>>,
+    pub(crate) torrent_files: Option<Vec<TorrentFileEntry>>,
     // === Dynamic progress fields (updated by download engine) ===
-    pub(super) total_length: u64,
-    pub(super) completed_length: u64,
-    pub(super) upload_length: u64,
-    pub(super) download_speed: u64,
-    pub(super) upload_speed: u64,
-    pub(super) connections: u16,
+    pub(crate) total_length: u64,
+    pub(crate) completed_length: u64,
+    pub(crate) upload_length: u64,
+    pub(crate) download_speed: u64,
+    pub(crate) upload_speed: u64,
+    pub(crate) connections: u16,
     /// Peer list for BitTorrent downloads
-    pub(super) peers: Vec<PeerInfo>,
+    pub(crate) peers: Vec<PeerInfo>,
     /// Cancellation token for forceful interruption of active downloads
-    pub(super) cancel_token: Option<CancellationToken>,
+    pub(crate) cancel_token: Option<CancellationToken>,
 }
 
 impl TaskState {
-    fn new(
+    pub(crate) fn new(
         status: StatusInfo,
         options: HashMap<String, serde_json::Value>,
         uris: Vec<String>,
@@ -93,9 +88,9 @@ impl TaskState {
     ///
     /// Called before returning status to ensure all progress fields
     /// are reflected in the response.
-    fn update_status_info(&mut self) {
+    pub(crate) fn update_status_info(&mut self) {
         let mut status = StatusInfo::new(&self.status.gid)
-            .with_status(self.status.status)
+            .with_status(self.status.status.clone())
             .with_total_length(self.total_length)
             .with_completed_length(self.completed_length)
             .with_upload_length(self.upload_length)
@@ -346,48 +341,6 @@ impl RpcEngine {
         }
     }
 
-    /// Internal helper to add a new download task.
-    ///
-    /// Creates a new GID, initializes task state, stores it in the task map,
-    /// and publishes a DownloadStart event.
-    async fn add_task(
-        &self,
-        uris: Vec<String>,
-        options: HashMap<String, serde_json::Value>,
-    ) -> Result<String, JsonRpcError> {
-        let gid = create_gid();
-        let dir = options
-            .get("dir")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".")
-            .to_string();
-        let status = StatusInfo::new(&gid)
-            .with_status(DownloadStatus::Active)
-            .with_dir(dir)
-            .with_total_length(0)
-            .with_completed_length(0)
-            .with_files(vec![FileInfo::new("", 0)]);
-        let state = TaskState::new(status, options, uris);
-        {
-            let mut tasks = self.tasks.write().await;
-            tasks.insert(gid.clone(), state);
-        }
-        let _ = self.event_publisher.publish(
-            EventType::DownloadStart,
-            DownloadEvent::download_start(&gid, vec![]),
-        );
-        Ok(gid)
-    }
-
-    /// Internal helper to get current status info for a task.
-    ///
-    /// Updates the status snapshot from internal state before returning.
-    async fn get_status(&self, gid: &str) -> Option<StatusInfo> {
-        let mut tasks = self.tasks.write().await;
-        let state = tasks.get_mut(gid)?;
-        state.update_status_info();
-        Some(state.status.clone())
-    }
 }
 
 impl Default for RpcEngine {

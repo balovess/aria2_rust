@@ -10,7 +10,7 @@
 use aria2_core::filesystem::disk_cache::WrDiskCache;
 use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use aria2_core::filesystem::file_allocation::preallocate_file;
-use aria2_core::util::perf_monitor::{AtomicMetrics, DefaultPerformanceMonitor, Metrics, PerformanceMonitor};
+use aria2_core::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -696,19 +696,18 @@ async fn test_write_strategy_throughput_comparison() {
     }
 }
 
-/// Test adaptive threshold behavior
+/// Test fixed threshold behavior
 #[tokio::test]
-async fn test_adaptive_threshold_behavior() {
+async fn test_fixed_threshold_behavior() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("adaptive.bin");
+    let path = dir.path().join("fixed_threshold.bin");
 
-    let mut writer = CachedDiskWriter::new(&path, Some(10 * 1024 * 1024), None)
-        .with_threshold(64 * 1024); // Start with 64 KB threshold
+    let mut writer = CachedDiskWriter::new(&path, Some(10 * 1024 * 1024), None);
 
     writer.open().await.unwrap();
 
-    println!("\n=== Adaptive Threshold Behavior ===");
-    println!("Initial threshold: {} bytes", writer.direct_write_threshold());
+    println!("\n=== Fixed Threshold Behavior ===");
+    println!("Threshold: 1 MB (fixed)");
 
     // Write mix of small and large blocks
     let small_size = 4 * 1024; // 4 KB
@@ -725,15 +724,7 @@ async fn test_adaptive_threshold_behavior() {
 
         let data = vec![i as u8; size];
         writer.write_at(offset as u64, &data).await.unwrap();
-
-        // Log threshold changes
-        if i > 0 && i % 50 == 0 {
-            println!("After {} writes: threshold = {} bytes", i, writer.direct_write_threshold());
-        }
     }
-
-    println!("Final threshold: {} bytes", writer.direct_write_threshold());
-    println!("Total writes: {}", writer.write_count());
 
     writer.flush().await.unwrap();
 }
@@ -745,7 +736,7 @@ async fn test_adaptive_threshold_behavior() {
 /// Generate comprehensive disk I/O performance report
 #[tokio::test]
 async fn test_generate_disk_io_performance_report() {
-    let monitor = Arc::new(DefaultPerformanceMonitor::new());
+    let monitor = Arc::new(PerformanceMonitor::new());
 
     println!("\n{}", "=".repeat(80));
     println!("DISK I/O PERFORMANCE ANALYSIS REPORT");

@@ -54,11 +54,11 @@ pub struct HttpConfig {
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            max_connections: 16,
-            connect_timeout: Duration::from_secs(30),
-            read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(60),
-            idle_timeout: Duration::from_secs(300),
+            max_connections: crate::constants::HTTP_CONFIG_DEFAULT_MAX_CONNECTIONS,
+            connect_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_CONNECT_TIMEOUT_SECS),
+            read_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_READ_TIMEOUT_SECS),
+            write_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_WRITE_TIMEOUT_SECS),
+            idle_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_IDLE_TIMEOUT_SECS),
         }
     }
 }
@@ -196,7 +196,7 @@ impl HttpConnectionManager {
             host_connections: HashMap::new(),
             active_count: 0,
             id_counter: AtomicU64::new(1),
-            max_redirects: 5,
+            max_redirects: crate::constants::HTTP_DEFAULT_MAX_REDIRECTS as u32,
             cookie_jar: None,
         }
     }
@@ -478,7 +478,7 @@ impl HttpConnectionManager {
         F: FnMut(&Url) -> Fut,
         Fut: std::future::Future<Output = Result<HttpResponse>>,
     {
-        const MAX_REDIRECTS: u8 = 5;
+        const MAX_REDIRECTS: u8 = crate::constants::HTTP_DEFAULT_MAX_REDIRECTS as u8;
 
         let mut current_url = initial_url.clone();
         let mut seen_urls = std::collections::HashSet::<String>::new();
@@ -815,8 +815,8 @@ impl HttpConnectionManager {
     /// 从 URL 中提取主机标识（host:port）
     fn extract_host(url: &Url) -> String {
         match url.port_or_known_default() {
-            Some(port) => format!("{}:{}", url.host_str().unwrap_or("localhost"), port),
-            None => url.host_str().unwrap_or("localhost").to_string(),
+            Some(port) => format!("{}:{}", url.host_str().unwrap_or(crate::constants::DEFAULT_HOST), port),
+            None => url.host_str().unwrap_or(crate::constants::DEFAULT_HOST).to_string(),
         }
     }
 

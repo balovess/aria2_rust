@@ -482,9 +482,9 @@ fn bench_json_serialization(c: &mut Criterion) {
 // ==================== Performance Monitor Integration ====================
 
 fn bench_perf_monitor_overhead(c: &mut Criterion) {
-    use aria2_core::util::perf_monitor::{DefaultPerformanceMonitor, Metrics, PerformanceMonitor};
+    use aria2_core::util::perf_monitor::{Metrics, PerformanceMonitor};
 
-    let monitor = Arc::new(DefaultPerformanceMonitor::new());
+    let monitor = Arc::new(PerformanceMonitor::new());
 
     c.bench_function("perf_monitor_record_metric", |b| {
         b.iter(|| {

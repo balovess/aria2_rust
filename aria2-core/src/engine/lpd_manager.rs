@@ -30,22 +30,17 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::constants;
+
+// Re-export LPD constants for backward compatibility with test imports
+pub use constants::{LPD_MULTICAST_ADDRESS as LPD_MULTICAST_ADDR, LPD_PORT, LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS as DEFAULT_ANNOUNCE_INTERVAL_SECS};
+
 // =========================================================================
 // Constants
 // =========================================================================
 
-/// Standard LPD multicast address (IPv4)
-pub const LPD_MULTICAST_ADDR: &str = "239.192.152.143";
-/// Standard LPD port
-pub const LPD_PORT: u16 = 6771;
-/// Default announce interval in seconds
-pub const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 300; // 5 minutes
 /// Maximum number of peers to track per info hash
 pub const MAX_PEERS_PER_HASH: usize = 50;
-/// Receive buffer size for LPD announcements
-pub const RECV_BUFFER_SIZE: usize = 1024;
-/// Timeout for receiving announcements during discovery
-pub const DEFAULT_RECEIVE_TIMEOUT_MS: u64 = 2000;
 
 // =========================================================================
 // LpdPeer - Discovered peer from LPD announcement
@@ -149,7 +144,7 @@ impl LpdAnnouncer {
     /// - Cannot enable broadcast mode
     /// - Cannot join multicast group
     pub fn new() -> Result<Self, String> {
-        Self::with_config(DEFAULT_ANNOUNCE_INTERVAL_SECS)
+        Self::with_config(constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS)
     }
 
     /// Create with custom announce interval
@@ -180,12 +175,12 @@ impl LpdAnnouncer {
         }
 
         // Parse multicast address
-        let multicast_addr: SocketAddr = format!("{}:{}", LPD_MULTICAST_ADDR, LPD_PORT)
+        let multicast_addr: SocketAddr = format!("{}:{}", constants::LPD_MULTICAST_ADDRESS, constants::LPD_PORT)
             .parse()
             .map_err(|e| format!("Invalid LPD multicast address: {}", e))?;
 
         // Join multicast group
-        let multicast_ip: Ipv4Addr = LPD_MULTICAST_ADDR
+        let multicast_ip: Ipv4Addr = constants::LPD_MULTICAST_ADDRESS
             .parse()
             .map_err(|e| format!("Invalid LPD multicast IP: {}", e))?;
 
@@ -293,7 +288,7 @@ impl LpdAnnouncer {
     ///
     /// Vector of discovered peers. May be empty if no announcements received.
     pub fn receive_announcements(&self, timeout: Duration) -> Vec<LpdPeer> {
-        let mut buf = [0u8; RECV_BUFFER_SIZE];
+        let mut buf = [0u8; constants::LPD_RECEIVE_BUFFER_SIZE];
         let mut peers = Vec::new();
         let mut seen: HashSet<(String, IpAddr)> = HashSet::new();
 
@@ -416,7 +411,7 @@ impl LpdManager {
             // If we can't create real socket, create a dummy one for testing
             // In production this would be an error
             warn!("Could not create LPD announcer, LPD will be disabled");
-            LpdAnnouncer::with_config(DEFAULT_ANNOUNCE_INTERVAL_SECS)
+            LpdAnnouncer::with_config(constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS)
                 .unwrap_or_else(|_| panic!("Fatal: cannot create LPD announcer"))
         });
 
@@ -471,7 +466,7 @@ impl LpdManager {
 
     /// Discover peers for a specific info_hash via LPD
     pub async fn discover_peers(&self, _info_hash: &str, timeout_ms: Option<u64>) -> Vec<LpdPeer> {
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_RECEIVE_TIMEOUT_MS));
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(constants::LPD_DEFAULT_RECEIVE_TIMEOUT_MS));
         self.announcer.receive_announcements(timeout)
     }
 

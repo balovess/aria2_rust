@@ -6,19 +6,19 @@ use std::time::Duration;
 #[test]
 fn test_retry_policy_default() {
     let policy = RetryPolicy::default();
-    assert_eq!(policy.max_tries(), 5);
+    assert_eq!(policy.max_tries(), 3);
 }
 
 #[test]
 fn test_retry_policy_custom() {
-    let policy = RetryPolicy::new(10, Duration::from_secs(2));
+    let policy = RetryPolicy::new(10, 2000);
     assert_eq!(policy.max_tries(), 10);
     assert_eq!(policy.wait_duration(0), Duration::from_secs(2));
 }
 
 #[test]
 fn test_should_retry_recoverable_error() {
-    let policy = RetryPolicy::new(3, Duration::from_secs(1));
+    let policy = RetryPolicy::new(3, 1000);
 
     assert!(policy.should_retry(0, &Aria2Error::Recoverable(RecoverableError::Timeout)));
     assert!(policy.should_retry(1, &Aria2Error::Recoverable(RecoverableError::Timeout)));
@@ -38,7 +38,7 @@ fn test_should_retry_recoverable_error() {
 
 #[test]
 fn test_should_not_retry_fatal_error() {
-    let policy = RetryPolicy::new(3, Duration::from_secs(1));
+    let policy = RetryPolicy::new(3, 1000);
 
     assert!(!policy.should_retry(0, &Aria2Error::Fatal(FatalError::DiskSpaceExhausted)));
     assert!(!policy.should_retry(0, &Aria2Error::Fatal(FatalError::Config("bad".into()))));
@@ -47,7 +47,7 @@ fn test_should_not_retry_fatal_error() {
 
 #[test]
 fn test_should_not_retry_max_tries_exceeded() {
-    let policy = RetryPolicy::new(2, Duration::from_secs(1));
+    let policy = RetryPolicy::new(2, 1000);
 
     assert!(!policy.should_retry(2, &Aria2Error::Recoverable(RecoverableError::Timeout)));
     assert!(!policy.should_retry(100, &Aria2Error::Recoverable(RecoverableError::Timeout)));
@@ -55,8 +55,7 @@ fn test_should_not_retry_max_tries_exceeded() {
 
 #[test]
 fn test_wait_duration_exponential_backoff() {
-    let policy =
-        RetryPolicy::new(10, Duration::from_secs(1)).with_max_wait(Duration::from_secs(1000));
+    let policy = RetryPolicy::new(10, 1000).with_max_wait_ms(600_000);
 
     assert_eq!(policy.wait_duration(0), Duration::from_secs(1));
     assert_eq!(policy.wait_duration(1), Duration::from_secs(2));
@@ -68,20 +67,20 @@ fn test_wait_duration_exponential_backoff() {
 
 #[test]
 fn test_wait_duration_capped_at_max() {
-    let policy =
-        RetryPolicy::new(10, Duration::from_secs(1)).with_max_wait(Duration::from_secs(10));
+    let policy = RetryPolicy::new(10, 1000);
 
+    // max_wait_ms defaults to 30000 (30s), so test with that
     assert_eq!(policy.wait_duration(0), Duration::from_secs(1));
     assert_eq!(policy.wait_duration(1), Duration::from_secs(2));
     assert_eq!(policy.wait_duration(2), Duration::from_secs(4));
     assert_eq!(policy.wait_duration(3), Duration::from_secs(8));
-    assert_eq!(policy.wait_duration(4), Duration::from_secs(10));
-    assert_eq!(policy.wait_duration(100), Duration::from_secs(10));
+    // At attempt 15, raw = 1000 * 2^14 = 16384000ms > 30000ms cap
+    assert_eq!(policy.wait_duration(15), Duration::from_secs(30));
 }
 
 #[tokio::test]
 async fn test_executor_success_no_retry() {
-    let policy = RetryPolicy::new(5, Duration::from_millis(10));
+    let policy = RetryPolicy::new(5, 10);
     let stats = RetryStats::default();
     let executor = RetryExecutor::new(&policy, &stats);
 
@@ -96,7 +95,7 @@ async fn test_executor_success_no_retry() {
 
 #[tokio::test]
 async fn test_executor_retry_then_success() {
-    let policy = RetryPolicy::new(5, Duration::from_millis(5));
+    let policy = RetryPolicy::new(5, 5);
     let stats = RetryStats::default();
     let executor = RetryExecutor::new(&policy, &stats);
     let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -129,7 +128,7 @@ async fn test_executor_retry_then_success() {
 
 #[tokio::test]
 async fn test_executor_max_tries_exhausted() {
-    let policy = RetryPolicy::new(3, Duration::from_millis(5));
+    let policy = RetryPolicy::new(3, 5);
     let stats = RetryStats::default();
     let executor = RetryExecutor::new(&policy, &stats);
 
@@ -148,7 +147,7 @@ async fn test_executor_max_tries_exhausted() {
 
 #[tokio::test]
 async fn test_executor_fatal_error_no_retry() {
-    let policy = RetryPolicy::new(5, Duration::from_millis(5));
+    let policy = RetryPolicy::new(5, 5);
     let stats = RetryStats::default();
     let executor = RetryExecutor::new(&policy, &stats);
 
@@ -181,7 +180,7 @@ fn test_stats_reset() {
 
 #[test]
 fn test_with_max_per_server() {
-    let policy = RetryPolicy::new(10, Duration::from_secs(1)).with_max_per_server(3);
+    let policy = RetryPolicy::new(10, 1000).with_max_per_server(3);
     assert_eq!(policy.max_tries(), 10);
 }
 
@@ -193,7 +192,7 @@ async fn test_concurrent_executors_independent() {
     for i in 0..10u32 {
         let stats_clone = stats.clone();
         handles.push(tokio::spawn(async move {
-            let policy = RetryPolicy::new(3, Duration::from_millis(5));
+            let policy = RetryPolicy::new(3, 5);
             let executor = RetryExecutor::new(&policy, &stats_clone);
             let result: Result<u32, Aria2Error> = if i % 2 == 0 {
                 executor.execute(|_| async { Ok(i) }).await

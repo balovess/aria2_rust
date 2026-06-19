@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
+use crate::constants;
 use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
@@ -24,11 +25,9 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::selector::adaptive_uri_selector::AdaptiveUriSelector;
 use crate::selector::server_stat_man::ServerStatMan;
-use crate::util::perf_monitor::{AtomicMetrics, DefaultPerformanceMonitor, Metrics, PerformanceMonitor};
+use crate::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
 
-const CONCURRENT_MIN_FILE_SIZE: u64 = 1024 * 1024;
-/// Progress update interval in bytes - update progress every 256KB to reduce lock contention
-const PROGRESS_UPDATE_BYTES: u64 = 256 * 1024;
+
 
 pub struct DownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -46,7 +45,7 @@ pub struct DownloadCommand {
     /// Shared across downloads to maintain historical performance data.
     stat_man: Arc<ServerStatMan>,
     /// Performance monitor for collecting metrics (optional, minimal overhead when enabled)
-    perf_monitor: Option<Arc<DefaultPerformanceMonitor>>,
+    perf_monitor: Option<Arc<PerformanceMonitor>>,
     /// Atomic metrics for low-overhead collection
     atomic_metrics: Arc<AtomicMetrics>,
 }
@@ -62,12 +61,12 @@ impl DownloadCommand {
         let dir = output_dir
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
-            .unwrap_or_else(|| ".".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_OUTPUT_DIR.to_string());
 
         let filename = output_name
             .map(|n| n.to_string())
             .or_else(|| Self::extract_filename(uri))
-            .unwrap_or_else(|| "download".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
@@ -78,13 +77,13 @@ impl DownloadCommand {
         } else {
             // Proxy configuration present - create custom client
             let mut builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(120))
-                .user_agent("aria2-rust/1.0")
-                .redirect(reqwest::redirect::Policy::limited(5))
-                .pool_max_idle_per_host(8)
-                .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
-                .tcp_keepalive(Some(std::time::Duration::from_secs(60)));
+                .connect_timeout(Duration::from_secs(constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS))
+                .timeout(Duration::from_secs(constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS))
+                .user_agent(constants::USER_AGENT)
+                .redirect(reqwest::redirect::Policy::limited(constants::HTTP_DEFAULT_MAX_REDIRECTS))
+                .pool_max_idle_per_host(constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
+                .pool_idle_timeout(Some(std::time::Duration::from_secs(constants::HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS)))
+                .tcp_keepalive(Some(std::time::Duration::from_secs(constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS)));
 
             if let Some(ref proxy) = options.http_proxy
                 && let Ok(proxy_url) = proxy.parse::<reqwest::Url>()
@@ -178,7 +177,7 @@ impl DownloadCommand {
             completed: false,
             completed_bytes: 0,
             continue_enabled: true,
-            file_allocation: "prealloc".to_string(),
+            file_allocation: constants::DEFAULT_FILE_ALLOCATION.to_string(),
             cookie_storage,
             cookie_file,
             no_proxy_matcher: options
@@ -206,12 +205,12 @@ impl DownloadCommand {
         let dir = output_dir
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
-            .unwrap_or_else(|| ".".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_OUTPUT_DIR.to_string());
 
         let filename = output_name
             .map(|n| n.to_string())
             .or_else(|| Self::extract_filename(uri))
-            .unwrap_or_else(|| "download".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
@@ -259,7 +258,7 @@ impl DownloadCommand {
             completed: false,
             completed_bytes: 0,
             continue_enabled: true,
-            file_allocation: "prealloc".to_string(),
+            file_allocation: constants::DEFAULT_FILE_ALLOCATION.to_string(),
             cookie_storage,
             cookie_file,
             no_proxy_matcher: options
@@ -293,7 +292,7 @@ impl DownloadCommand {
     ///
     /// This adds minimal overhead (< 1%) to track throughput, latency, memory, and lock wait times.
     pub fn enable_perf_monitor(&mut self) {
-        self.perf_monitor = Some(Arc::new(DefaultPerformanceMonitor::new()));
+        self.perf_monitor = Some(Arc::new(PerformanceMonitor::new()));
     }
 
     /// Get performance metrics snapshot (low-overhead, always available)
@@ -322,7 +321,7 @@ impl DownloadCommand {
         reqwest::Url::parse(uri)
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
-            .unwrap_or_else(|| "localhost".to_string())
+            .unwrap_or_else(|| constants::DEFAULT_HOST.to_string())
     }
 
     fn save_cookies_if_configured(&self) {
@@ -352,7 +351,7 @@ impl DownloadCommand {
         if !supports_range {
             return false;
         }
-        if total_length < CONCURRENT_MIN_FILE_SIZE {
+        if total_length < constants::CONCURRENT_MIN_FILE_SIZE as u64 {
             return false;
         }
 
@@ -464,7 +463,7 @@ impl DownloadCommand {
 
             // Batch progress updates to reduce lock contention
             // Only update progress every PROGRESS_UPDATE_BYTES (256KB)
-            if self.completed_bytes - last_progress_update >= PROGRESS_UPDATE_BYTES {
+            if self.completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
                 let g = self.group.write().await;
                 g.update_progress(self.completed_bytes).await;
                 // Export to atomic fields for session persistence
@@ -473,7 +472,7 @@ impl DownloadCommand {
 
                 // Speed update still happens every 500ms
                 let elapsed = last_speed_update.elapsed();
-                if elapsed.as_millis() >= 500 {
+                if elapsed.as_millis() >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128 {
                     let delta = self.completed_bytes - last_completed;
                     let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
                     g.update_speed(speed, 0).await;
@@ -532,7 +531,7 @@ impl DownloadCommand {
     async fn execute_concurrent_download(&mut self, uri: &str, total_length: u64) -> Result<()> {
         let options = self.group.read().await.options().clone();
         let split = options.split.unwrap_or(1) as usize;
-        let max_conn = options.max_connection_per_server.unwrap_or(4) as usize;
+        let max_conn = options.max_connection_per_server.unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16) as usize;
         let seg_size = total_length / split as u64;
         let mut last_progress_update = 0u64; // Track last progress update for batch updates
 
@@ -622,7 +621,7 @@ impl DownloadCommand {
                                 self.completed_bytes += data_len as u64;
 
                                 // Batch progress updates to reduce lock contention
-                                if self.completed_bytes - last_progress_update >= PROGRESS_UPDATE_BYTES {
+                                if self.completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
                                     let g = self.group.write().await;
                                     g.update_progress(self.completed_bytes).await;
                                     // Export to atomic fields for session persistence
@@ -800,14 +799,14 @@ impl DownloadCommand {
     ) -> Result<()> {
         let split = self.group.read().await.options().split.unwrap_or(1) as u64;
         let segment_size = total_length.div_ceil(split);
-        let max_conn = self.group.read().await.options().max_connection_per_server.unwrap_or(4) as usize;
+        let max_conn = self.group.read().await.options().max_connection_per_server.unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16) as usize;
 
         // Create mirror configuration
         let mirror_config = MirrorConfig {
             max_connections_per_mirror: max_conn.min(split as usize),
             max_total_connections: max_conn * uris.len(),
-            speed_threshold: 10_000, // 10 KB/s
-            cooldown_secs: 60,
+            speed_threshold: constants::MIRROR_SPEED_THRESHOLD,
+            cooldown_secs: constants::MIRROR_COOLDOWN_SECS,
             max_retries: max_retries_per_segment,
         };
 
@@ -903,7 +902,7 @@ impl DownloadCommand {
                         warn!("段 {} 下载失败 (mirror={}): {}", seg_idx, mirror_idx, e);
 
                         // Default error code for network errors
-                        let error_code = 500;
+                        let error_code = constants::HTTP_DEFAULT_ERROR_CODE;
 
                         // Report failure to coordinator
                         coordinator.on_segment_failed(mirror_idx, seg_idx, error_code);
@@ -923,7 +922,7 @@ impl DownloadCommand {
                 };
 
                 // Batch progress updates to reduce lock contention
-                if self.completed_bytes - last_progress_update >= PROGRESS_UPDATE_BYTES {
+                if self.completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
                     let g = self.group.write().await;
                     g.update_progress(self.completed_bytes).await;
                     g.set_completed_length(self.completed_bytes);
@@ -931,7 +930,7 @@ impl DownloadCommand {
 
                     // Update speed periodically
                     let elapsed = last_speed_update.elapsed();
-                    if elapsed.as_millis() >= 500 {
+                    if elapsed.as_millis() >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128 {
                         let delta = self.completed_bytes - last_completed;
                         let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
                         g.update_speed(speed, 0).await;
@@ -1055,7 +1054,7 @@ impl DownloadCommand {
                     }
                     Err(e) => {
                         warn!("段 {} 下载失败: {}", seg_idx, e);
-                        manager.report_segment_failed(seg_idx_u32, 500);
+                        manager.report_segment_failed(seg_idx_u32, constants::HTTP_DEFAULT_ERROR_CODE);
                     }
                 }
 
@@ -1275,6 +1274,6 @@ impl Command for DownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(300))
+        Some(Duration::from_secs(constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS))
     }
 }

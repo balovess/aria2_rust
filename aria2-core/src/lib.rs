@@ -81,6 +81,8 @@ pub mod auth;
 pub mod checksum;
 pub mod colorized_stream;
 pub mod config;
+pub mod constants;
+pub mod dns;
 pub mod engine;
 pub mod error;
 pub mod filesystem;
@@ -97,6 +99,11 @@ pub mod session;
 pub mod ui;
 pub mod util;
 pub mod validation;
+
+// Re-export commonly used types for downstream crates.
+// This avoids forcing consumers to depend on internal module paths.
+pub use engine::multi_file_layout::TorrentFileEntry;
+pub use request::request_group::DownloadStatus;
 
 #[cfg(test)]
 mod integration_tests_j2_j5;

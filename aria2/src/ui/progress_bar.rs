@@ -37,11 +37,11 @@ pub enum TaskStatus {
 impl std::fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TaskStatus::Active => write!(f, "ACTIVE"),
-            TaskStatus::Waiting => write!(f, "WAITING"),
-            TaskStatus::Complete => write!(f, "COMPLETE"),
-            TaskStatus::Error => write!(f, "ERROR"),
-            TaskStatus::Seeding => write!(f, "SEEDING"),
+            TaskStatus::Active => write!(f, "{}", crate::constants::STATUS_ACTIVE),
+            TaskStatus::Waiting => write!(f, "{}", crate::constants::STATUS_WAITING),
+            TaskStatus::Complete => write!(f, "{}", crate::constants::STATUS_COMPLETE),
+            TaskStatus::Error => write!(f, "{}", crate::constants::STATUS_ERROR),
+            TaskStatus::Seeding => write!(f, "{}", crate::constants::STATUS_SEEDING),
         }
     }
 }
@@ -109,7 +109,7 @@ impl ProgressBar {
     pub fn new(quiet: bool) -> Self {
         Self {
             quiet,
-            width: 24, // Default bar width in characters
+            width: crate::constants::PROGRESS_BAR_WIDTH, // Default bar width in characters
             tasks: Vec::new(),
             started: Instant::now(),
             last_render: Instant::now() - Duration::from_secs(1), // Allow immediate first render
@@ -121,7 +121,7 @@ impl ProgressBar {
     ///
     /// Default is 24 characters. Minimum effective value is 4.
     pub fn with_width(mut self, width: usize) -> Self {
-        self.width = width.max(4);
+        self.width = width.max(crate::constants::PROGRESS_BAR_MIN_WIDTH);
         self
     }
 
@@ -399,51 +399,8 @@ impl ProgressBar {
 
 // ==================== Helper Functions ====================
 
-/// Format a byte count into human-readable form using binary prefixes (KiB/MiB/GiB).
-///
-/// # Arguments
-///
-/// * `bytes` - Raw byte count
-///
-/// # Returns
-///
-/// * Formatted string like `"12.3 MiB"` or `"456 KiB"`
-pub fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-/// Format a transfer speed into human-readable form.
-///
-/// # Arguments
-///
-/// * `speed` - Speed in bytes per second
-///
-/// # Returns
-///
-/// * Formatted string like `"2.34 MiB/s"` or `"512 KiB/s"`
-pub fn format_speed(speed: f64) -> String {
-    if speed < 1024.0 {
-        format!("{:.2} B/s", speed)
-    } else if speed < 1024.0 * 1024.0 {
-        format!("{:.2} KiB/s", speed / 1024.0)
-    } else if speed < 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.2} MiB/s", speed / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GiB/s", speed / (1024.0 * 1024.0 * 1024.0))
-    }
-}
+// Re-export shared formatting functions from aria2-core
+pub use aria2_core::util::format::{format_bytes, format_speed};
 
 /// Calculate and format estimated time arrival (ETA).
 ///
@@ -461,21 +418,8 @@ pub fn format_eta(total_remaining: u64, speed: f64) -> Option<String> {
         return None;
     }
 
-    let secs = total_remaining as f64 / speed;
-    let duration = Duration::from_secs_f64(secs);
-
-    let total_secs = duration.as_secs();
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        Some(format!("{}h{}m{}s", hours, minutes, seconds))
-    } else if minutes > 0 {
-        Some(format!("{}m{}s", minutes, seconds))
-    } else {
-        Some(format!("{}s", seconds))
-    }
+    let secs = (total_remaining as f64 / speed) as u64;
+    Some(aria2_core::util::format::format_duration_short(secs))
 }
 
 /// Internal function to render a progress bar character string.

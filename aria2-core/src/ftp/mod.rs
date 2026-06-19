@@ -17,5 +17,5 @@ mod connection_tests;
 pub use connection::{FtpClient, FtpFileInfo, FtpMode, FtpResponse};
 pub use connection_pool::{
     ConnectionKey, FtpConnectionPool, PooledConnection, PoolConfig, PoolStats,
-    get_global_pool, create_custom_pool,
+    create_pool, create_custom_pool,
 };

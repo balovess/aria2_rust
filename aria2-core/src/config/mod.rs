@@ -1,8 +1,6 @@
 pub mod netrc;
 pub mod option;
 pub mod option_definitions;
-pub mod option_types;
-pub mod option_validator;
 pub mod parser;
 pub mod uri_list;
 
@@ -10,7 +8,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
-pub use option::{OptionCategory, OptionDef, OptionRegistry, OptionType, OptionValue};
+pub use option::{
+    ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition,
+    OptionError, OptionRegistry, OptionType, OptionValue, OptionValidator, PathValidator,
+    RangeValidator, RegexValidator, UrlValidator,
+};
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
 

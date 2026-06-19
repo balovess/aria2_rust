@@ -4,7 +4,7 @@
 /// with other test files that have pre-existing errors in the codebase.
 #[cfg(test)]
 mod standalone_option_validator_tests {
-    use aria2_core::config::option_validator::*;
+    use aria2_core::config::option::*;
     use serde_json::{Value, json};
     use std::collections::HashMap;
 

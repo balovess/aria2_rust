@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::constants;
 use super::peer_stats::PeerStats;
 
 /// Action to take for a peer during choke rotation
@@ -308,25 +309,25 @@ impl ChokingAlgorithm {
 
         // Download speed (primary factor - tit-for-tat)
         // Scale down to reasonable range
-        score += peer.download_speed * 0.00001;
+        score += peer.download_speed * constants::CHOKING_DOWNLOAD_SPEED_WEIGHT;
 
         // Upload speed (reciprocity)
-        score += peer.upload_speed * 0.000005;
+        score += peer.upload_speed * constants::CHOKING_UPLOAD_SPEED_WEIGHT;
 
         // Snubbed penalty (heavy penalty to avoid wasting slots)
         // Check both PeerStats-level and algorithm-level snubbing
         if peer.is_snubbed || is_explicitly_snubbed {
-            score -= 1000.0;
+            score -= constants::CHOKING_SNUBBED_PENALTY;
         }
 
         // Interest bonus (prefer peers who want our data)
         if peer.peer_interested {
-            score += 50.0;
+            score += constants::CHOKING_INTEREST_BONUS;
         }
 
         // Anti-churn: prefer keeping current unchoked peers stable
-        if !peer.am_choking && peer.time_since_last_unchoke().as_secs() < 60 {
-            score += 30.0;
+        if !peer.am_choking && peer.time_since_last_unchoke().as_secs() < constants::CHOKING_ANTI_CHURN_THRESHOLD_SECS {
+            score += constants::CHOKING_ANTI_CHURN_BONUS;
         }
 
         score

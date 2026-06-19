@@ -3,11 +3,6 @@ use tracing::{debug, warn};
 use super::response::{TrackerEvent, TrackerResponse};
 use super::udp_tracker_protocol::{AnnounceParams, AsyncUdpTrackerClient, AnnounceResponse, UdpEvent};
 
-#[allow(dead_code)]
-const DEFAULT_INTERVAL_SECS: u32 = 1800;
-#[allow(dead_code)]
-const TRACKER_TIMEOUT_SECS: u64 = 15;
-
 #[derive(Debug, Clone)]
 pub struct TrackerAnnounceParams {
     pub info_hash: [u8; 20],

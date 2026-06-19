@@ -3,9 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+use crate::constants;
 use crate::error::Result;
-
-const DEFAULT_BURST_BYTES: u64 = 256 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct RateLimiterConfig {
@@ -61,7 +60,7 @@ pub struct TokenBucket {
 
 impl TokenBucket {
     pub fn new(rate_bytes_per_sec: u64, burst_bytes: Option<u64>) -> Self {
-        let burst = burst_bytes.unwrap_or(DEFAULT_BURST_BYTES) as f64;
+        let burst = burst_bytes.unwrap_or(constants::DEFAULT_BURST_BYTES as u64) as f64;
         Self {
             capacity: burst,
             tokens: burst,
@@ -107,7 +106,7 @@ impl TokenBucket {
         self.tokens = 0.0;
         self.last_refill = Instant::now();
 
-        if wait_secs > 0.000001 {
+        if wait_secs > constants::RATE_LIMITER_MIN_WAIT_SECS {
             tokio::time::sleep(Duration::from_secs_f64(wait_secs)).await;
         }
 
@@ -231,8 +230,6 @@ impl RateLimiter {
 pub struct ThrottledWriter<W> {
     inner: W,
     limiter: RateLimiter,
-    #[allow(dead_code)] // Buffer for future write batching optimization
-    buffer: Vec<u8>,
     chunk_size: usize,
 }
 
@@ -244,13 +241,12 @@ where
         Self {
             inner,
             limiter,
-            buffer: Vec::with_capacity(64 * 1024),
-            chunk_size: 8192,
+            chunk_size: constants::RATE_LIMITER_CHUNK_SIZE,
         }
     }
 
     pub fn with_chunk_size(mut self, size: usize) -> Self {
-        self.chunk_size = size.max(512);
+        self.chunk_size = size.max(constants::RATE_LIMITER_MIN_CHUNK_SIZE);
         self
     }
 

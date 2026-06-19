@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
+use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
@@ -45,12 +46,12 @@ impl FtpDownloadCommand {
         let dir = output_dir
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
-            .unwrap_or_else(|| ".".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_OUTPUT_DIR.to_string());
 
         let filename = output_name
             .map(|n| n.to_string())
             .or_else(|| Self::extract_filename(&remote_path))
-            .unwrap_or_else(|| "download".to_string());
+            .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
@@ -84,7 +85,7 @@ impl FtpDownloadCommand {
             password,
             resume_offset,
             passive_mode: true, // Default to passive mode
-            max_retries: 3,
+            max_retries: constants::DEFAULT_MAX_RETRIES,
             current_retry: 0,
         })
     }
@@ -112,7 +113,7 @@ impl FtpDownloadCommand {
         };
 
         let (username, password) = if auth.is_empty() {
-            ("anonymous".to_string(), "aria2@".to_string())
+            (constants::FTP_DEFAULT_USER.to_string(), constants::FTP_DEFAULT_PASSWORD.to_string())
         } else if let Some(colon_pos) = auth.find(':') {
             (
                 auth[..colon_pos].to_string(),
@@ -125,9 +126,9 @@ impl FtpDownloadCommand {
         let (host, port) = match host_port.rfind(':') {
             Some(idx) => (
                 host_port[..idx].to_string(),
-                host_port[idx + 1..].parse::<u16>().unwrap_or(21),
+                host_port[idx + 1..].parse::<u16>().unwrap_or(constants::FTP_DEFAULT_PORT),
             ),
-            None => (host_port.to_string(), 21),
+            None => (host_port.to_string(), constants::FTP_DEFAULT_PORT),
         };
 
         Ok((host, port, username, password, urlencoding_decode(path)))
@@ -148,7 +149,7 @@ impl FtpDownloadCommand {
     }
 
     /// Classify FTP response code to determine error handling strategy
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Must remain: will be used when FTP retry-with-classification logic is integrated into execute_single_attempt
     fn classify_ftp_error(&self, code: u16, message: &str) -> Aria2Error {
         match code {
             // Positive responses (should not be errors)
@@ -283,7 +284,7 @@ impl RawFtpControl {
             reader: BufReader::new(stream),
             host: host.to_string(),
         };
-        let welcome = ctrl.read_response(Duration::from_secs(15)).await?;
+        let welcome = ctrl.read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS)).await?;
 
         if !(200..300).contains(&welcome.0) && !(100..200).contains(&welcome.0) {
             return Err(Aria2Error::Fatal(FatalError::Config(format!(
@@ -388,7 +389,7 @@ impl RawFtpControl {
     /// Send command and read response in one operation
     async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
         self.send_command(cmd).await?;
-        self.read_response(Duration::from_secs(30)).await
+        self.read_response(Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS)).await
     }
 
     /// Authenticate with USER/PASS commands
@@ -523,7 +524,7 @@ impl RawFtpControl {
 
     /// Read final transfer completion response
     async fn read_transfer_complete(&mut self) -> Result<()> {
-        match self.read_response(Duration::from_secs(10)).await {
+        match self.read_response(Duration::from_secs(constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS)).await {
             Ok((226, msg)) => {
                 debug!("Transfer complete: {}", msg);
                 Ok(())
@@ -620,7 +621,7 @@ impl Command for FtpDownloadCommand {
 
                     if should_retry {
                         self.current_retry += 1;
-                        let wait_ms = 1000u64 * (1 << (self.current_retry - 1));
+                        let wait_ms = constants::FTP_BASE_RETRY_WAIT_MS * (1 << (self.current_retry - 1));
                         warn!(
                             "FTP download failed (attempt {}/{}), retrying in {}ms: {}",
                             self.current_retry, self.max_retries, wait_ms, e
@@ -653,7 +654,7 @@ impl Command for FtpDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(300)) // 5 minute default timeout
+        Some(Duration::from_secs(constants::FTP_DEFAULT_COMMAND_TIMEOUT_SECS))
     }
 }
 
@@ -708,7 +709,7 @@ impl FtpDownloadCommand {
             })?;
 
         let mut data_stream = tokio::time::timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
             tokio::net::TcpStream::connect(data_addr),
         )
         .await
@@ -754,7 +755,7 @@ impl FtpDownloadCommand {
         }
 
         // Step 10: Data receive loop with progress tracking
-        let mut buffer = vec![0u8; 65536]; // 64KB buffer
+        let mut buffer = vec![0u8; constants::FTP_BUFFER_SIZE];
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
@@ -798,7 +799,7 @@ impl FtpDownloadCommand {
 
                 // Update speed calculation every 500ms
                 let elapsed = last_speed_update.elapsed();
-                if elapsed.as_millis() >= 500 {
+                if elapsed.as_millis() >= constants::FTP_SPEED_UPDATE_INTERVAL_MS as u128 {
                     let delta = self.completed_bytes - last_completed;
                     let speed = if elapsed.as_secs_f64() > 0.0 {
                         (delta as f64 / elapsed.as_secs_f64()) as u64

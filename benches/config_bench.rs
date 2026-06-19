@@ -95,9 +95,14 @@ fn bench_parse_cli_args(c: &mut Criterion) {
 }
 
 fn bench_option_def_validation(c: &mut Criterion) {
-    let def = OptionDef::new("split", OptionType::Integer)
-        .default(OptionValue::Int(1))
-        .range(1, 16);
+    let def = OptionDef {
+        name: "split".into(),
+        opt_type: OptionType::Integer,
+        default_value: OptionValue::Int(1),
+        min: Some(1),
+        max: Some(16),
+        ..Default::default()
+    };
     let test_vals: Vec<String> = (0..100).map(|i| (i + 1).to_string()).collect();
     c.bench(BenchmarkId::new("option_validate_100_ints"), |b| {
         b.iter_with_large_input(&test_vals, |vals| {

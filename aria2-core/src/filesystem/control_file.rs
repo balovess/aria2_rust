@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 const CONTROL_MAGIC: &[u8; 4] = b"A2CF";
 const CONTROL_VERSION: u16 = 1;
 const FLAG_HAS_CHECKSUM: u8 = 0x01;
-#[allow(dead_code)] // Reserved for future transaction ID tracking in control files
-const FLAG_HAS_TID: u8 = 0x02;
 
 #[derive(Debug, Clone)]
 pub struct ControlFile {

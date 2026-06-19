@@ -251,80 +251,8 @@ impl Default for SpeedSmoother {
 // Format Helpers
 // =========================================================================
 
-/// Format bytes per second with automatic unit selection.
-///
-/// Converts a raw bytes/second value into a human-readable string with
-/// appropriate unit suffix (B/s, KiB/s, MiB/s, GiB/s).
-///
-/// # Arguments
-///
-/// * `bytes_per_sec` - Speed in bytes per second
-///
-/// # Returns
-///
-/// Formatted string like "1.50 MiB/s" or "512 B/s"
-///
-/// # Example
-///
-/// ```
-/// use aria2_core::util::speed_smooth::format_bytes_per_sec;
-///
-/// assert_eq!(format_bytes_per_sec(1536.0), "1.50 KiB/s");
-/// assert_eq!(format_bytes_per_sec(1048576.0), "1.00 MiB/s");
-/// ```
-pub fn format_bytes_per_sec(bytes_per_sec: f64) -> String {
-    if bytes_per_sec >= 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.2} GiB/s", bytes_per_sec / (1024.0 * 1024.0 * 1024.0))
-    } else if bytes_per_sec >= 1024.0 * 1024.0 {
-        format!("{:.2} MiB/s", bytes_per_sec / (1024.0 * 1024.0))
-    } else if bytes_per_sec >= 1024.0 {
-        format!("{:.2} KiB/s", bytes_per_sec / 1024.0)
-    } else {
-        format!("{:.0} B/s", bytes_per_sec)
-    }
-}
-
-/// Format a duration in seconds as a short human-readable string.
-///
-/// Produces compact representations suitable for UI display:
-/// - Seconds only: "42s"
-/// - Minutes + seconds: "3m12s"
-/// - Hours + minutes + seconds: "1h23m45s"
-/// - Zero: "0s"
-///
-/// # Arguments
-///
-/// * `secs` - Duration in seconds
-///
-/// # Returns
-///
-/// Short formatted string like "3m12s" or "1h23m"
-///
-/// # Example
-///
-/// ```
-/// use aria2_core::util::speed_smooth::format_duration_short;
-///
-/// assert_eq!(format_duration_short(0), "0s");
-/// assert_eq!(format_duration_short(45), "45s");
-/// assert_eq!(format_duration_short(125), "2m5s");
-/// assert_eq!(format_duration_short(3661), "1h1m1s");
-/// ```
-pub fn format_duration_short(secs: u64) -> String {
-    if secs == 0 {
-        return "0s".to_string();
-    }
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{}h{}m{}s", h, m, s)
-    } else if m > 0 {
-        format!("{}m{}s", m, s)
-    } else {
-        format!("{}s", s)
-    }
-}
+// Re-export shared formatting functions from the format module
+pub use super::format::{format_duration_short, format_speed as format_bytes_per_sec};
 
 // =========================================================================
 // Unit Tests
