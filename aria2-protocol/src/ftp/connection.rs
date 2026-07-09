@@ -138,12 +138,12 @@ impl FtpConnection {
         options: Option<FtpOptions>,
     ) -> Result<Self, String> {
         let options = options.unwrap_or_default();
-        info!("FTP连接中: {}:{}", host, port);
+        info!("FTP connecting: {}:{}", host, port);
 
         let stream = timeout(options.connect_timeout, TcpStream::connect((host, port)))
             .await
-            .map_err(|_| format!("FTP连接超时 ({}秒)", options.connect_timeout.as_secs()))?
-            .map_err(|e| format!("FTP连接失败: {}", e))?;
+            .map_err(|_| format!("FTP connection timeout ({}s)", options.connect_timeout.as_secs()))?
+            .map_err(|e| format!("FTP connection failed: {}", e))?;
 
         let mut conn = Self {
             stream: BufReader::new(stream),
@@ -155,125 +155,125 @@ impl FtpConnection {
         let welcome = conn.read_response().await?;
         if !welcome.is_positive_completion() && !welcome.is_positive_preliminary() {
             return Err(format!(
-                "FTP服务器拒绝连接: {} {}",
+                "FTP server refused connection: {} {}",
                 welcome.code, welcome.message
             ));
         }
-        debug!("FTP连接成功: {}", welcome.message);
+        debug!("FTP connected: {}", welcome.message);
 
         Ok(conn)
     }
 
     pub async fn login(&mut self) -> Result<(), String> {
-        debug!("发送USER命令: {}", self.options.username);
+        debug!("Sending USER command: {}", self.options.username);
         self.send_command(&format!("USER {}", self.options.username))
             .await?;
         let resp = self.read_response().await?;
 
         if resp.code == 331 || resp.code == 332 {
-            debug!("需要密码认证，发送PASS命令");
+            debug!("Password required, sending PASS command");
             self.send_command(&format!("PASS {}", self.options.password))
                 .await?;
             let pass_resp = self.read_response().await?;
             if !pass_resp.is_positive_completion() {
                 return Err(format!(
-                    "FTP登录失败: {} {}",
+                    "FTP login failed: {} {}",
                     pass_resp.code, pass_resp.message
                 ));
             }
-            info!("FTP登录成功");
+            info!("FTP login successful");
         } else if !resp.is_positive_completion() {
-            return Err(format!("FTP登录失败: {} {}", resp.code, resp.message));
+            return Err(format!("FTP login failed: {} {}", resp.code, resp.message));
         } else {
-            info!("FTP登录成功 (无需密码)");
+            info!("FTP login successful (no password required)");
         }
 
         Ok(())
     }
 
     pub async fn cwd(&mut self, path: &str) -> Result<(), String> {
-        debug!("切换目录: {}", path);
+        debug!("Changing directory: {}", path);
         self.send_command(&format!("CWD {}", path)).await?;
         let resp = self.read_response().await?;
         if !resp.is_positive_completion() {
-            return Err(format!("CWD失败: {} {}", resp.code, resp.message));
+            return Err(format!("CWD failed: {} {}", resp.code, resp.message));
         }
         Ok(())
     }
 
     pub async fn size(&mut self, filename: &str) -> Result<u64, String> {
-        debug!("查询文件大小: {}", filename);
+        debug!("Querying file size: {}", filename);
         self.send_command(&format!("SIZE {}", filename)).await?;
         let resp = self.read_response().await?;
         if resp.code == 213 {
             let size_str = resp.message.trim();
             size_str
                 .parse::<u64>()
-                .map_err(|e| format!("解析文件大小失败: {} ({})", e, size_str))
+                .map_err(|e| format!("Failed to parse file size: {} ({})", e, size_str))
         } else {
-            Err(format!("SIZE命令失败: {} {}", resp.code, resp.message))
+            Err(format!("SIZE command failed: {} {}", resp.code, resp.message))
         }
     }
 
     pub async fn mdtm(&mut self, filename: &str) -> Result<String, String> {
-        debug!("查询修改时间: {}", filename);
+        debug!("Querying modification time: {}", filename);
         self.send_command(&format!("MDTM {}", filename)).await?;
         let resp = self.read_response().await?;
         if resp.code == 213 {
             Ok(resp.message.trim().to_string())
         } else {
-            Err(format!("MDTM命令失败: {} {}", resp.code, resp.message))
+            Err(format!("MDTM command failed: {} {}", resp.code, resp.message))
         }
     }
 
     pub async fn pasv(&mut self) -> Result<(String, u16), String> {
-        debug!("请求被动模式数据连接");
+        debug!("Requesting passive mode data connection");
         self.send_command("PASV").await?;
         let resp = self.read_response().await?;
         if resp.code != 227 {
-            return Err(format!("PASV失败: {} {}", resp.code, resp.message));
+            return Err(format!("PASV failed: {} {}", resp.code, resp.message));
         }
 
         match Self::parse_pasv_response(&resp.message) {
             Some(addr) => {
-                debug!("PASV数据通道: {}:{}", addr.0, addr.1);
+                debug!("PASV data channel: {}:{}", addr.0, addr.1);
                 Ok(addr)
             }
-            None => Err("无法解析PASV响应".to_string()),
+            None => Err("Failed to parse PASV response".to_string()),
         }
     }
 
     pub async fn epsv(&mut self) -> Result<u16, String> {
-        debug!("请求扩展被动模式");
+        debug!("Requesting extended passive mode");
         self.send_command("EPSV").await?;
         let resp = self.read_response().await?;
         if resp.code == 229 {
             if let Some(port) = Self::parse_epsv_response(&resp.message) {
-                debug!("EPSV端口: {}", port);
+                debug!("EPSV port: {}", port);
                 return Ok(port);
             }
         } else if resp.code == 590 || resp.code == 500 || resp.code == 501 {
-            warn!("服务器不支持EPSV，回退到PASV模式");
+            warn!("Server does not support EPSV, falling back to PASV mode");
             let (host, port) = self.pasv().await?;
             let _ = host;
             return Ok(port);
         }
-        Err(format!("EPSV失败: {} {}", resp.code, resp.message))
+        Err(format!("EPSV failed: {} {}", resp.code, resp.message))
     }
 
     /// Enter active mode using PORT command (IPv4)
     /// Binds a local socket and sends PORT command with local address
     pub async fn port_active(&mut self) -> Result<u16, String> {
-        debug!("请求主动模式数据连接 (IPv4)");
+        debug!("Requesting active mode data connection (IPv4)");
 
         // Bind to a local port for active mode
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
             .await
-            .map_err(|e| format!("绑定本地端口失败: {}", e))?;
+            .map_err(|e| format!("Failed to bind local port: {}", e))?;
 
         let local_addr = listener
             .local_addr()
-            .map_err(|e| format!("获取本地地址失败: {}", e))?;
+            .map_err(|e| format!("Failed to get local address: {}", e))?;
 
         let ip = local_addr.ip();
         let port = local_addr.port();
@@ -282,7 +282,7 @@ impl FtpConnection {
         let octets = match ip {
             std::net::IpAddr::V4(v4) => v4.octets(),
             std::net::IpAddr::V6(_) => {
-                return Err("IPv6地址不支持PORT命令，请使用EPRT".to_string());
+                return Err("IPv6 address not supported for PORT command, use EPRT instead".to_string());
             }
         };
 
@@ -293,16 +293,16 @@ impl FtpConnection {
             octets[0], octets[1], octets[2], octets[3], p1, p2
         );
 
-        debug!("发送PORT命令: {}", port_cmd);
+        debug!("Sending PORT command: {}", port_cmd);
         self.send_command(&port_cmd).await?;
         let resp = self.read_response().await?;
         if !resp.is_positive_completion() {
-            return Err(format!("PORT失败: {} {}", resp.code, resp.message));
+            return Err(format!("PORT failed: {} {}", resp.code, resp.message));
         }
 
         // Spawn a task to accept the incoming connection
         // The caller should use accept_data_connection() to get the stream
-        debug!("等待主动模式数据连接在端口 {}", port);
+        debug!("Waiting for active mode data connection on port {}", port);
 
         // Store listener for later acceptance (simplified - in real impl would store it)
         drop(listener); // In real implementation, we'd keep this alive
@@ -313,16 +313,16 @@ impl FtpConnection {
     /// Enter active mode using EPRT command (IPv6/IPv4)
     /// Extended PORT command that supports both IPv4 and IPv6
     pub async fn eprt_active(&mut self) -> Result<(String, u16), String> {
-        debug!("请求扩展主动模式数据连接");
+        debug!("Requesting extended active mode data connection");
 
         // Bind to a local port
         let listener = tokio::net::TcpListener::bind("::0")
             .await
-            .map_err(|e| format!("绑定本地端口失败: {}", e))?;
+            .map_err(|e| format!("Failed to bind local port: {}", e))?;
 
         let local_addr = listener
             .local_addr()
-            .map_err(|e| format!("获取本地地址失败: {}", e))?;
+            .map_err(|e| format!("Failed to get local address: {}", e))?;
 
         let ip = local_addr.ip();
         let port = local_addr.port();
@@ -336,71 +336,71 @@ impl FtpConnection {
 
         let eprt_cmd = format!("EPRT |{}|{}|{}", proto, addr_str, port);
 
-        debug!("发送EPRT命令: {}", eprt_cmd);
+        debug!("Sending EPRT command: {}", eprt_cmd);
         self.send_command(&eprt_cmd).await?;
         let resp = self.read_response().await?;
         if !resp.is_positive_completion() {
-            return Err(format!("EPRT失败: {} {}", resp.code, resp.message));
+            return Err(format!("EPRT failed: {} {}", resp.code, resp.message));
         }
 
-        debug!("EPRT成功，监听 {}:{}", addr_str, port);
+        debug!("EPRT successful, listening {}:{}", addr_str, port);
         drop(listener);
 
         Ok((addr_str, port))
     }
 
     pub async fn rest(&mut self, offset: u64) -> Result<(), String> {
-        debug!("设置恢复偏移: {}", offset);
+        debug!("Setting resume offset: {}", offset);
         self.send_command(&format!("REST {}", offset)).await?;
         let resp = self.read_response().await?;
         if resp.code != 350 {
-            return Err(format!("REST失败: {} {}", resp.code, resp.message));
+            return Err(format!("REST failed: {} {}", resp.code, resp.message));
         }
         Ok(())
     }
 
     pub async fn retr(&mut self, filename: &str) -> Result<(), String> {
-        debug!("准备下载文件: {}", filename);
+        debug!("Preparing to download file: {}", filename);
         self.send_command(&format!("RETR {}", filename)).await?;
         let resp = self.read_response().await?;
         if !resp.is_positive_preliminary() {
-            return Err(format!("RETR失败: {} {}", resp.code, resp.message));
+            return Err(format!("RETR failed: {} {}", resp.code, resp.message));
         }
         Ok(())
     }
 
     pub async fn type_image(&mut self) -> Result<(), String> {
-        debug!("设置传输类型为二进制(I)");
+        debug!("Setting transfer type to binary (I)");
         self.send_command("TYPE I").await?;
         let resp = self.read_response().await?;
         if !resp.is_positive_completion() {
-            return Err(format!("TYPE I失败: {} {}", resp.code, resp.message));
+            return Err(format!("TYPE I failed: {} {}", resp.code, resp.message));
         }
         Ok(())
     }
 
     pub async fn quit(mut self) -> Result<(), String> {
-        debug!("发送QUIT命令");
+        debug!("Sending QUIT command");
         self.send_command("QUIT").await?;
         let resp = self.read_response().await?;
-        info!("FTP断开连接: {}", resp.message);
+        info!("FTP disconnected: {}", resp.message);
         Ok(())
     }
 
     /// Send ABOR command to abort a transfer in progress
     pub async fn abor(&mut self) -> Result<(), String> {
-        debug!("发送ABOR命令中止传输");
+        debug!("Sending ABOR command to abort transfer");
         // Send Telnet IP (Interrupt Process) + ABOR command
         self.stream
             .get_mut()
             .write_all(b"\xff\xf4") // Telnet IP
             .await
-            .map_err(|e| format!("发送Telnet IP失败: {}", e))?;
+            .map_err(|e| format!("Failed to send Telnet IP: {}", e))?;
         self.stream
             .get_mut()
             .flush()
             .await
-            .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
+            .map_err(|e| format!("Failed to flush buffer: {}", e))?;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -408,10 +408,10 @@ impl FtpConnection {
         let resp = self.read_response().await?;
         // ABOR can return 226 (success) or 426 (connection closed)
         if resp.code == 226 || resp.code == 225 {
-            debug!("传输已成功中止: {}", resp.message);
+            debug!("Transfer successfully aborted: {}", resp.message);
             Ok(())
         } else {
-            warn!("ABOR响应异常: {} {}", resp.code, resp.message);
+            warn!("ABOR response unusual: {} {}", resp.code, resp.message);
             Ok(())
         }
     }
@@ -420,11 +420,11 @@ impl FtpConnection {
     pub async fn list(&mut self, path: Option<&str>) -> Result<FtpResponse, String> {
         match path {
             Some(p) => {
-                debug!("列出目录详细内容: {}", p);
+                debug!("Listing directory details: {}", p);
                 self.send_command(&format!("LIST {}", p)).await?
             }
             None => {
-                debug!("列出当前目录详细内容");
+                debug!("Listing current directory details");
                 self.send_command("LIST").await?
             }
         };
@@ -436,11 +436,11 @@ impl FtpConnection {
     pub async fn nlst(&mut self, path: Option<&str>) -> Result<FtpResponse, String> {
         match path {
             Some(p) => {
-                debug!("列出目录名称: {}", p);
+                debug!("Listing directory names: {}", p);
                 self.send_command(&format!("NLST {}", p)).await?
             }
             None => {
-                debug!("列出当前目录名称");
+                debug!("Listing current directory names");
                 self.send_command("NLST").await?
             }
         };
@@ -450,25 +450,25 @@ impl FtpConnection {
 
     /// Send TYPE A command for ASCII mode transfer
     pub async fn type_ascii(&mut self) -> Result<(), String> {
-        debug!("设置传输类型为ASCII(A)");
+        debug!("Setting transfer type to ASCII (A)");
         self.send_command("TYPE A").await?;
         let resp = self.read_response().await?;
         if !resp.is_positive_completion() {
-            return Err(format!("TYPE A失败: {} {}", resp.code, resp.message));
+            return Err(format!("TYPE A failed: {} {}", resp.code, resp.message));
         }
         Ok(())
     }
 
     /// Send NOOP command for keep-alive / connection test
     pub async fn noop(&mut self) -> Result<(), String> {
-        debug!("发送NOOP保活命令");
+        debug!("Sending NOOP keep-alive command");
         self.send_command("NOOP").await?;
         let resp = self.read_response().await?;
         if resp.code == 200 {
-            debug!("NOOK保活成功");
+            debug!("NOOP keep-alive successful");
             Ok(())
         } else {
-            Err(format!("NOOP失败: {} {}", resp.code, resp.message))
+            Err(format!("NOOP failed: {} {}", resp.code, resp.message))
         }
     }
 
@@ -496,19 +496,19 @@ impl FtpConnection {
     }
 
     async fn send_command(&mut self, command: &str) -> Result<(), String> {
-        debug!("FTP命令: {}", command.trim());
+        debug!("FTP command: {}", command.trim());
         self.stream
             .write_all(command.as_bytes())
             .await
-            .map_err(|e| format!("发送FTP命令失败: {}", e))?;
+            .map_err(|e| format!("Failed to send FTP command: {}", e))?;
         self.stream
             .write_all(b"\r\n")
             .await
-            .map_err(|e| format!("发送换行符失败: {}", e))?;
+            .map_err(|e| format!("Failed to send newline: {}", e))?;
         self.stream
             .flush()
             .await
-            .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
+            .map_err(|e| format!("Failed to flush buffer: {}", e))?;
         Ok(())
     }
 
@@ -522,8 +522,8 @@ impl FtpConnection {
             line.clear();
             let bytes_read = timeout(self.options.read_timeout, self.stream.read_line(&mut line))
                 .await
-                .map_err(|_| "FTP读取超时".to_string())?
-                .map_err(|e| format!("读取FTP响应失败: {}", e))?;
+                .map_err(|_| "FTP read timeout".to_string())?
+                .map_err(|e| format!("Failed to read FTP response: {}", e))?;
 
             if bytes_read == 0 {
                 break;
@@ -557,7 +557,7 @@ impl FtpConnection {
         }
 
         let code_val = code.unwrap_or(0);
-        debug!("FTP响应: {} {}", code_val, message.trim());
+        debug!("FTP response: {} {}", code_val, message.trim());
         Ok(FtpResponse {
             code: code_val,
             message,

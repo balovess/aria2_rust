@@ -178,13 +178,11 @@ impl App {
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
 
         if !has_restored_tasks && self.detected_inputs.is_empty() {
-            if daemon_mode {
-                if !rpc_enabled {
-                    warn!("Daemon mode requires --enable-rpc when no downloads are specified");
-                    info!("Starting daemon with RPC server for remote control");
-                }
-                // In daemon mode with RPC, we can start without downloads
-                info!("Starting daemon in RPC-only mode");
+            if rpc_enabled {
+                info!("Starting in RPC-only mode (no initial downloads)");
+            } else if daemon_mode {
+                warn!("Daemon mode requires --enable-rpc when no downloads are specified");
+                info!("Starting daemon with RPC server for remote control");
             } else {
                 eprintln!(
                     "{}",
@@ -216,7 +214,13 @@ impl App {
 
         // Step 6: Start RPC server (if enabled)
         let rpc_handle = if rpc_enabled {
-            match self.start_rpc_server().await {
+            // Extract shared state from the engine before run() consumes it
+            let (group_man, cmd_tx) = {
+                let engine_lock = self.engine.lock().await;
+                let engine_ref = engine_lock.as_ref().expect("engine should be initialized");
+                (self.request_man.clone(), engine_ref.command_sender())
+            };
+            match self.start_rpc_server(group_man, cmd_tx).await {
                 Ok(handle) => Some(handle),
                 Err(e) => {
                     warn!("RPC server failed to start: {}", e);
@@ -228,7 +232,7 @@ impl App {
         };
 
         // Step 7: Run engine
-        let run_result = self.run_engine().await;
+        let run_result = self.run_engine(rpc_enabled).await;
 
         // Step 8: Shutdown RPC server
         if let Some(handle) = rpc_handle {

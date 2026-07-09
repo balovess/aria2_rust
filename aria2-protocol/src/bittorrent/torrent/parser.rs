@@ -36,18 +36,18 @@ pub struct TorrentMeta {
 
 impl TorrentMeta {
     pub fn parse(data: &[u8]) -> Result<Self, String> {
-        info!("开始解析torrent文件 ({} 字节)", data.len());
+        info!("Starting torrent file parsing ({} bytes)", data.len());
         let (root, _) =
-            BencodeValue::decode(data).map_err(|e| format!("bencode解码失败: {}", e))?;
+            BencodeValue::decode(data).map_err(|e| format!("Bencode decoding failed: {}", e))?;
 
         let announce = root
             .dict_get_str("announce")
-            .ok_or("缺少announce字段")?
+            .ok_or("Missing announce field")?
             .to_string();
 
         let announce_list = Self::parse_announce_list(&root);
 
-        let info = root.dict_get(b"info").ok_or("缺少info字典")?;
+        let info = root.dict_get(b"info").ok_or("Missing info dictionary")?;
 
         let info_hash = InfoHash::from_info_value(info);
         debug!("info_hash: {}", info_hash.as_hex());
@@ -64,7 +64,7 @@ impl TorrentMeta {
 
         let total_size = Self::compute_total_size(&info_dict);
         info!(
-            "Torrent解析完成: name={}, pieces={}, size={}, web_seeds={}",
+            "Torrent parsing complete: name={}, pieces={}, size={}, web_seeds={}",
             info_dict.name,
             info_dict.pieces.len(),
             total_size,
@@ -126,7 +126,7 @@ impl TorrentMeta {
     }
 
     fn parse_info_dict(info: &BencodeValue) -> Result<InfoDict, String> {
-        let dict = info.as_dict().ok_or("info不是字典类型")?;
+        let dict = info.as_dict().ok_or("info is not a dictionary type")?;
 
         let name = dict
             .get(&b"name"[..])
@@ -139,15 +139,15 @@ impl TorrentMeta {
             .and_then(|v| v.as_int())
             .filter(|&n| n > 0 && n <= i32::MAX as i64)
             .map(|n| n as u32)
-            .ok_or("无效或缺失的piece length")?;
+            .ok_or("Invalid or missing piece length")?;
 
         let pieces_raw = dict
             .get(&b"pieces"[..])
             .and_then(|v| v.as_bytes())
-            .ok_or("缺失pieces字段")?;
+            .ok_or("Missing pieces field")?;
 
         if pieces_raw.len() % 20 != 0 {
-            return Err(format!("pieces长度({})不是20的倍数", pieces_raw.len()));
+            return Err(format!("pieces length ({}) is not a multiple of 20", pieces_raw.len()));
         }
 
         let pieces = (0..pieces_raw.len() / 20)
@@ -185,30 +185,30 @@ impl TorrentMeta {
         let files_val = dict
             .get(&b"files"[..])
             .and_then(|v| v.as_list())
-            .ok_or("多文件模式缺少files字段")?;
+            .ok_or("Multi-file mode missing files field")?;
 
         if files_val.is_empty() {
-            return Err("files列表为空".to_string());
+            return Err("files list is empty".to_string());
         }
 
         let mut entries = Vec::with_capacity(files_val.len());
         for file in files_val {
-            let fd = file.as_dict().ok_or("file条目不是字典")?;
+            let fd = file.as_dict().ok_or("file entry is not a dictionary")?;
             let length = fd
                 .get(&b"length"[..])
                 .and_then(|v| v.as_int())
                 .map(|n| n as u64)
-                .ok_or("文件缺少length字段")?;
+                .ok_or("file missing length field")?;
             let path_val = fd
                 .get(&b"path"[..])
                 .and_then(|v| v.as_list())
-                .ok_or("文件缺少path字段")?;
+                .ok_or("file missing path field")?;
             let path: Vec<String> = path_val
                 .iter()
                 .filter_map(|p| p.as_str().map(|s| s.to_string()))
                 .collect();
             if path.is_empty() {
-                return Err("文件path为空".to_string());
+                return Err("file path is empty".to_string());
             }
             entries.push(FileEntry { length, path });
         }

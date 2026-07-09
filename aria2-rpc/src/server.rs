@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use aria2_core::error::Aria2Error;
 
+use crate::engine::RpcEngine;
+
 // Re-export data model types from types module
 pub use super::types::{
     DownloadStatus, FileInfo, GlobalOptions, GlobalStat, PeerInfo, ServerInfo, ServerInfoIndex,
@@ -420,6 +422,9 @@ pub struct RpcServer {
     config: ServerConfig,
     /// TLS acceptor (None for HTTP, Some for HTTPS)
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    /// Shared RPC engine that persists across all requests.
+    /// Holds download task state, group manager, and command channel.
+    engine: Arc<RpcEngine>,
 }
 
 impl RpcServer {
@@ -439,6 +444,25 @@ impl RpcServer {
         Ok(Self {
             config,
             tls_acceptor,
+            engine: Arc::new(RpcEngine::new()),
+        })
+    }
+
+    /// Create a new RPC server with a pre-configured shared engine.
+    /// Use this when the caller has already set up `group_man` and `cmd_tx`
+    /// on the engine (e.g., when wiring to a running DownloadEngine).
+    pub fn new_with_engine(config: ServerConfig, engine: Arc<RpcEngine>) -> Result<Self, TlsError> {
+        let tls_acceptor = if let Some(ref tls_config) = config.tls {
+            let server_config = tls_config.load_server_config()?;
+            Some(tokio_rustls::TlsAcceptor::from(server_config))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            tls_acceptor,
+            engine,
         })
     }
 
@@ -449,6 +473,7 @@ impl RpcServer {
                 .with_host(host)
                 .with_port(port),
             tls_acceptor: None,
+            engine: Arc::new(RpcEngine::new()),
         }
     }
 
@@ -473,6 +498,7 @@ impl RpcServer {
                 .with_port(port)
                 .with_tls(tls_config),
             tls_acceptor: Some(tls_acceptor),
+            engine: Arc::new(RpcEngine::new()),
         })
     }
 
@@ -544,10 +570,9 @@ impl RpcServer {
         use tokio::net::TcpListener;
         use tower_http::cors::{Any, CorsLayer};
 
-        // Create shared state
+        // Create shared state with the persistent RPC engine
         let state = RpcState {
-            _auth: self.config.auth.clone(),
-            _cors: self.config.cors.clone(),
+            engine: self.engine.clone(),
         };
 
         // Build CORS layer
@@ -596,8 +621,7 @@ impl RpcServer {
 /// Shared state for RPC handlers
 #[derive(Clone)]
 struct RpcState {
-    _auth: AuthConfig,
-    _cors: CorsConfig,
+    engine: Arc<RpcEngine>,
 }
 
 /// Root handler - returns server info
@@ -617,21 +641,14 @@ async fn root_handler() -> impl axum::response::IntoResponse {
 
 /// Handle JSON-RPC POST requests
 async fn handle_jsonrpc(
-    axum::extract::State(_state): axum::extract::State<RpcState>,
+    axum::extract::State(state): axum::extract::State<RpcState>,
     axum::Json(req): axum::Json<crate::json_rpc::JsonRpcRequest>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::StatusCode;
     use axum::response::Json;
-    use crate::engine::RpcEngine;
 
-    // TODO: Add authentication check here
-    // if state.auth.has_token() {
-    //     // Validate token from request
-    // }
-
-    // Process request
-    let engine = RpcEngine::new();
-    let response = engine.handle_request(&req).await;
+    // Process request using the shared persistent engine
+    let response = state.engine.handle_request(&req).await;
 
     (StatusCode::OK, Json(response))
 }

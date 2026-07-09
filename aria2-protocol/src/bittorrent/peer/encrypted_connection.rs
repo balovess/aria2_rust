@@ -21,15 +21,15 @@ impl EncryptedConnection {
         require_encryption: bool,
     ) -> Result<Self, String> {
         let socket_addr = addr.to_socket_addr();
-        debug!("MSE连接peer: {}", socket_addr);
+        debug!("MSE connecting to peer: {}", socket_addr);
 
         let mut stream = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             tokio::net::TcpStream::connect(&socket_addr),
         )
         .await
-        .map_err(|_| format!("连接peer超时: {}", socket_addr))?
-        .map_err(|e| format!("连接peer失败: {}", e))?;
+        .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
+        .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
         let my_peer_id = crate::bittorrent::peer::id::generate_peer_id();
         let handshake = Handshake::new(info_hash, &my_peer_id).with_extensions(true);
@@ -38,7 +38,7 @@ impl EncryptedConnection {
         stream
             .write_all(&handshake_bytes)
             .await
-            .map_err(|e| format!("发送握手失败: {}", e))?;
+            .map_err(|e| format!("Failed to send handshake: {}", e))?;
 
         let mut response = [0u8; 68];
         match tokio::time::timeout(
@@ -48,13 +48,13 @@ impl EncryptedConnection {
         .await
         {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(format!("读取握手响应失败: {}", e)),
-            Err(_) => return Err("读取握手响应超时".to_string()),
+            Ok(Err(e)) => return Err(format!("Failed to read handshake response: {}", e)),
+            Err(_) => return Err("Handshake response read timeout".to_string()),
         }
 
         let remote_hs = Handshake::parse(&response)?;
         if remote_hs.info_hash != *info_hash {
-            return Err("info_hash不匹配".to_string());
+            return Err("info_hash mismatch".to_string());
         }
 
         let local_supports_mse = true;
@@ -62,7 +62,7 @@ impl EncryptedConnection {
         if MseHandshake::should_negotiate(local_supports_mse, &remote_hs.reserved) {
             Self::complete_mse_handshake(stream, info_hash, &remote_hs, require_encryption).await
         } else if require_encryption {
-            Err(format!("Peer {} 不支持加密，但要求强制加密", socket_addr))
+            Err(format!("Peer {} does not support encryption, but encryption is required", socket_addr))
         } else {
             Ok(Self::from_plain_connection(stream, remote_hs.peer_id))
         }
@@ -122,7 +122,7 @@ impl EncryptedConnection {
         let _method = initiator.receive_step2(&step2_r_buf)?;
         let crypto = initiator.finalize()?;
 
-        info!("MSE握手完成: encrypted={}", crypto.is_encrypted());
+        info!("MSE handshake complete: encrypted={}", crypto.is_encrypted());
 
         let peer_id = remote_hs.peer_id;
         let conn = PeerConnection::from_stream_with_peer(stream, peer_id);
@@ -189,7 +189,7 @@ impl EncryptedConnection {
         self.inner.stream_write(&buf).await?;
         self.inner.stream_flush().await?;
 
-        debug!("发送加密消息: {} bytes", buf.len());
+        debug!("Sent encrypted message: {} bytes", buf.len());
         Ok(())
     }
 
@@ -203,7 +203,7 @@ impl EncryptedConnection {
                 if e.contains("unexpected eof") || e.contains("failed to fill whole buffer") {
                     Ok(false)
                 } else {
-                    Err(format!("读取加密消息失败: {}", e))
+                    Err(format!("Failed to read encrypted message: {}", e))
                 }
             }
         }

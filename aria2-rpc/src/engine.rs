@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
@@ -8,6 +8,8 @@ use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
 use super::websocket::EventPublisher;
 use aria2_core::TorrentFileEntry;
+use aria2_core::engine::command::Command;
+use aria2_core::request::request_group_man::RequestGroupMan;
 
 /// Core RPC engine that manages download tasks and handles aria2 protocol requests.
 ///
@@ -31,6 +33,14 @@ pub struct RpcEngine {
     pub(crate) event_publisher: Arc<EventPublisher>,
     /// Authentication middleware for token-based RPC auth
     pub(crate) auth_middleware: RpcAuthMiddleware,
+    /// Shared download group manager (for live progress queries and task tracking).
+    /// When set, RPC handlers read progress directly from RequestGroupMan
+    /// instead of the placeholder `tasks` map.
+    pub(crate) group_man: Option<Arc<RwLock<RequestGroupMan>>>,
+    /// Channel sender to submit download commands to the DownloadEngine loop.
+    /// When set, `aria2.addUri` starts real downloads by sending a
+    /// `DownloadCommand` through this channel.
+    pub(crate) cmd_tx: Option<mpsc::UnboundedSender<Box<dyn Command>>>,
 }
 
 /// Internal state for an active download task.
@@ -134,6 +144,8 @@ impl RpcEngine {
             stopped_tasks: Arc::new(RwLock::new(Vec::new())),
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),
+            group_man: None,
+            cmd_tx: None,
         }
     }
 
@@ -154,6 +166,21 @@ impl RpcEngine {
     /// Chainable builder method to set CORS config.
     pub fn with_cors(self, cors: CorsConfig) -> Self {
         let _ = cors;
+        self
+    }
+
+    /// Chainable builder method to set the shared RequestGroupMan.
+    /// When set, RPC handlers read live progress from the group manager
+    /// and `aria2.addUri` registers downloads there.
+    pub fn with_group_man(mut self, man: Arc<RwLock<RequestGroupMan>>) -> Self {
+        self.group_man = Some(man);
+        self
+    }
+
+    /// Chainable builder method to set the command channel sender.
+    /// When set, `aria2.addUri` sends real `DownloadCommand`s to the engine.
+    pub fn with_cmd_tx(mut self, tx: mpsc::UnboundedSender<Box<dyn Command>>) -> Self {
+        self.cmd_tx = Some(tx);
         self
     }
 

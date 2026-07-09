@@ -34,13 +34,13 @@ impl SaveSessionCommand {
 impl Command for SaveSessionCommand {
     async fn execute(&mut self) -> Result<()> {
         self.status = CommandStatus::Running;
-        debug!("开始保存 session 到 {}", self.path.display());
+        debug!("Starting session save to {}", self.path.display());
 
         let groups = self.request_group_man.read().await.list_groups().await;
         session_serializer::save_to_file(&self.path, &groups).await?;
 
         self.status = CommandStatus::Completed;
-        info!("Session 已保存到 {}", self.path.display());
+        info!("Session saved to {}", self.path.display());
         Ok(())
     }
 

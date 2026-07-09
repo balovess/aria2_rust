@@ -34,7 +34,7 @@ impl ActiveSessionManager {
     /// ```
     pub fn new(session_path: PathBuf, auto_save_interval: Duration) -> Self {
         tracing::info!(
-            "创建 ActiveSessionManager: path={}, interval={:?}",
+            "Creating ActiveSessionManager: path={}, interval={:?}",
             session_path.display(),
             auto_save_interval
         );
@@ -56,7 +56,7 @@ impl ActiveSessionManager {
     pub async fn load_session(&self) -> Result<Vec<SessionEntry>, String> {
         if !self.session_path.exists() {
             tracing::debug!(
-                "会话文件不存在，返回空列表: {}",
+                "Session file not found, returning empty list: {}",
                 self.session_path.display()
             );
             return Ok(vec![]);
@@ -65,7 +65,7 @@ impl ActiveSessionManager {
         match session_serializer::load_from_file(&self.session_path).await {
             Ok(entries) => {
                 tracing::info!(
-                    "成功加载会话文件: {}, 条目数: {}",
+                    "Session file loaded successfully: {}, entries: {}",
                     self.session_path.display(),
                     entries.len()
                 );
@@ -104,7 +104,7 @@ impl ActiveSessionManager {
         }
 
         if entries.is_empty() {
-            tracing::debug!("没有需要保存的活动条目");
+            tracing::debug!("No active entries to save");
             return Ok(0);
         }
 
@@ -112,7 +112,7 @@ impl ActiveSessionManager {
         match session_serializer::save_to_file_with_entries(&self.session_path, &entries).await {
             Ok(_) => {
                 tracing::info!(
-                    "成功保存会话文件: {}, 条目数: {}",
+                    "Session file saved successfully: {}, entries: {}",
                     self.session_path.display(),
                     entries.len()
                 );
@@ -129,7 +129,7 @@ impl ActiveSessionManager {
     /// 标记会话为脏状态（有未保存的更改）
     pub fn mark_dirty(&self) {
         self.dirty_flag.store(true, Ordering::Relaxed);
-        tracing::debug!("标记会话为脏状态");
+        tracing::debug!("Marking session as dirty");
     }
 
     /// 检查会话是否有未保存的更改
@@ -153,7 +153,7 @@ impl ActiveSessionManager {
     pub fn start_auto_save(self: &Arc<Self>, groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>>) {
         let mgr = Arc::clone(self);
 
-        tracing::info!("启动自动保存任务, 间隔: {:?}", mgr.auto_save_interval);
+        tracing::info!("Starting auto-save task, interval: {:?}", mgr.auto_save_interval);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(mgr.auto_save_interval);
@@ -163,17 +163,17 @@ impl ActiveSessionManager {
 
                 // 如果没有更改，跳过本次保存
                 if !mgr.is_dirty() {
-                    tracing::debug!("自动保存检查: 无更改，跳过");
+                    tracing::debug!("Auto-save check: no changes, skipping");
                     continue;
                 }
 
-                tracing::debug!("自动保存检查: 检测到更改，开始保存");
+                tracing::debug!("Auto-save check: changes detected, starting save");
 
                 // 获取所有组的读锁
                 let groups_read = groups.read().await;
                 match mgr.save_session(&groups_read).await {
                     Ok(n) => {
-                        tracing::debug!("自动保存成功: 保存了 {} 个条目", n);
+                        tracing::debug!("Auto-save succeeded: saved {} entries", n);
                         // 保存成功后清除脏标记
                         mgr.dirty_flag.store(false, Ordering::Relaxed);
                     }

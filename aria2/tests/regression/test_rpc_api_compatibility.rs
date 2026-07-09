@@ -164,7 +164,7 @@ async fn regression_pause_changes_status() {
     let status_req = make_request("aria2.tellStatus", serde_json::json!([gid]));
     let status_resp = engine.handle_request(&status_req).await;
     let status: serde_json::Value = status_resp.result.unwrap();
-    assert_eq!(status.get("status").unwrap().as_str().unwrap(), "Paused");
+    assert_eq!(status.get("status").unwrap().as_str().unwrap(), "paused");
 }
 
 /// Test: aria2.forcePause returns "OK".
@@ -207,7 +207,7 @@ async fn regression_unpause_restores_active() {
     let status_req = make_request("aria2.tellStatus", serde_json::json!([gid]));
     let status_resp = engine.handle_request(&status_req).await;
     let status: serde_json::Value = status_resp.result.unwrap();
-    assert_eq!(status.get("status").unwrap().as_str().unwrap(), "Active");
+    assert_eq!(status.get("status").unwrap().as_str().unwrap(), "active");
 }
 
 // =========================================================================
@@ -850,7 +850,7 @@ async fn regression_status_values_match_aria2() {
     
     let status_str = status.get("status").unwrap().as_str().unwrap();
     // Valid aria2 status values
-    let valid_statuses = ["Active", "Waiting", "Paused", "Complete", "Error", "Removed"];
+    let valid_statuses = ["active", "waiting", "paused", "complete", "error", "removed"];
     assert!(valid_statuses.contains(&status_str));
 }
 

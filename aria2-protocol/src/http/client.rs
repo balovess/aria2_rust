@@ -56,19 +56,19 @@ impl HttpClient {
             match std::fs::read(ca_path) {
                 Ok(cert_bytes) => {
                     let cert = Certificate::from_pem(&cert_bytes)
-                        .map_err(|e| format!("加载CA证书失败: {}", e))?;
+                        .map_err(|e| format!("Failed to load CA certificate: {}", e))?;
                     builder = builder.add_root_certificate(cert);
                 }
-                Err(e) => return Err(format!("读取CA证书文件失败: {}", e)),
+                Err(e) => return Err(format!("Failed to read CA certificate file: {}", e)),
             }
         }
 
         let inner = builder
             .build()
-            .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
         info!(
-            "HttpClient初始化完成 (超时={:?}, 重定向上限={}, TLS验证={})",
+            "HttpClient initialized (timeout={:?}, max_redirects={}, verify_tls={})",
             options.timeout, options.max_redirects, options.verify_tls
         );
 
@@ -80,14 +80,14 @@ impl HttpClient {
     }
 
     pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, String> {
-        debug!("发送HTTP请求: {} {}", request.method, request.url);
+        debug!("Sending HTTP request: {} {}", request.method, request.url);
 
         let mut reqwest_request = match request.method.to_uppercase().as_str() {
             "GET" => self.inner.get(&request.url),
             "POST" => self.inner.post(&request.url),
             "HEAD" => self.inner.head(&request.url),
             "PUT" => self.inner.put(&request.url),
-            _ => return Err(format!("不支持的HTTP方法: {}", request.method)),
+            _ => return Err(format!("Unsupported HTTP method: {}", request.method)),
         };
 
         if let Some(ref headers) = request.headers {
@@ -95,7 +95,7 @@ impl HttpClient {
                 reqwest_request = reqwest_request.header(
                     key.as_str()
                         .parse::<reqwest::header::HeaderName>()
-                        .map_err(|e| format!("无效的请求头名称: {}", e))?,
+                        .map_err(|e| format!("Invalid header name: {}", e))?,
                     value.as_str(),
                 );
             }
@@ -108,11 +108,11 @@ impl HttpClient {
         let response = reqwest_request
             .send()
             .await
-            .map_err(|e| format!("HTTP请求失败: {}", e))?;
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
 
         let status = response.status();
         let status_code = status.as_u16();
-        debug!("收到HTTP响应: 状态码={}", status_code);
+        debug!("Received HTTP response: status_code={}", status_code);
 
         let headers_map: Vec<(String, String)> = response
             .headers()
@@ -123,7 +123,7 @@ impl HttpClient {
         let body_bytes = response
             .bytes()
             .await
-            .map_err(|e| format!("读取响应体失败: {}", e))?
+            .map_err(|e| format!("Failed to read response body: {}", e))?
             .to_vec();
 
         Ok(HttpResponse {
@@ -174,10 +174,10 @@ impl<'a> HttpRequestBuilder<'a> {
         let mut headers = self.headers.take().unwrap_or_default();
         headers.insert(
             name.parse::<reqwest::header::HeaderName>()
-                .expect("无效的请求头名称"),
+                .expect("Invalid header name"),
             value
                 .parse::<reqwest::header::HeaderValue>()
-                .expect("无效的请求头值"),
+                .expect("Invalid header value"),
         );
         self.headers = Some(headers);
         self
@@ -258,7 +258,7 @@ impl RedirectHandler {
         max_redirects: usize,
     ) -> Option<RedirectAction> {
         if current_redirects >= max_redirects {
-            debug!("达到最大重定向次数上限: {}", max_redirects);
+            debug!("Maximum redirect limit reached: {}", max_redirects);
             return None;
         }
 
@@ -273,7 +273,7 @@ impl RedirectHandler {
     pub fn resolve_redirect_url(current_url: &str, location: &str) -> Result<String, String> {
         let location = location.trim();
         if location.is_empty() {
-            return Err("Location头为空".to_string());
+            return Err("Location header is empty".to_string());
         }
 
         if location.starts_with("http://") || location.starts_with("https://") {
@@ -298,7 +298,7 @@ impl RedirectHandler {
 
     pub fn sanitize_redirect_url(url: &str) -> Result<String, String> {
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(format!("不安全的重定向URL协议: {}", url));
+            return Err(format!("Unsafe redirect URL protocol: {}", url));
         }
         Ok(url.to_string())
     }

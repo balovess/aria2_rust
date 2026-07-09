@@ -186,7 +186,7 @@ async fn test_force_pause() {
 
     let status_json = status_resp.result.unwrap();
     let status_str = status_json.get("status").unwrap().as_str().unwrap();
-    assert_eq!(status_str, "Paused", "Task status should be 'Paused' after forcePause");
+    assert_eq!(status_str, "paused", "Task status should be 'paused' after forcePause");
 }
 
 #[tokio::test]

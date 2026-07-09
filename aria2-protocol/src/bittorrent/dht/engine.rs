@@ -79,7 +79,7 @@ pub struct DhtEngine {
 impl DhtEngine {
     pub async fn start(config: DhtEngineConfig) -> Result<Arc<Self>, String> {
         let socket = DhtSocket::bind(config.port).await?;
-        info!("DHT 引擎启动于 {}", socket.local_addr());
+        info!("DHT engine started at {}", socket.local_addr());
 
         let mut self_id = config.self_id;
         let mut loaded_nodes: Vec<DhtNode> = Vec::new();
@@ -89,16 +89,16 @@ impl DhtEngine {
                 Ok(data) => {
                     self_id = data.self_id;
                     info!(
-                        "DHT: 从 {} 加载了 {} 个节点 (self_id 已恢复)",
-                        path,
-                        data.nodes.len()
+                        "DHT: Loaded {} nodes from {} (self_id restored)",
+                        data.nodes.len(),
+                        path
                     );
                     for pn in &data.nodes {
                         loaded_nodes.push(DhtNode::new(pn.id, pn.addr));
                     }
                 }
                 Err(e) => {
-                    debug!("DHT: 无法加载路由表文件 {} (使用 bootstrap): {}", path, e);
+                    debug!("DHT: Failed to load routing table file {} (using bootstrap): {}", path, e);
                 }
             }
         }
@@ -305,7 +305,7 @@ impl DhtEngine {
             .count();
 
         info!(
-            "DHT announce_peer: 向 {} 个节点宣告 (port={})",
+            "DHT announce_peer: Announced to {} nodes (port={})",
             announced, port
         );
         Ok(())
@@ -398,7 +398,7 @@ impl DhtEngine {
                     break;
                 }
             }
-            info!("DHT 维护循环已退出");
+            info!("DHT maintenance loop exited");
         });
     }
 
@@ -415,8 +415,8 @@ impl DhtEngine {
             )
             .await
             {
-                Ok(n) => debug!("DHT 自动保存: {} 个 good 节点", n),
-                Err(e) => warn!("DHT 自动保存失败: {}", e),
+                Ok(n) => debug!("DHT auto-saved {} good nodes", n),
+                Err(e) => warn!("DHT auto-save failed: {}", e),
             }
         }
     }
@@ -442,12 +442,12 @@ impl DhtEngine {
                 &self.config.self_id,
                 &nodes,
             ) {
-                Ok(n) => info!("DHT: 已保存 {} 个 good 节点到 {}", n, path),
-                Err(e) => warn!("DHT: 保存路由表失败: {}", e),
+                Ok(n) => info!("DHT: Saved {} good nodes to {}", n, path),
+                Err(e) => warn!("DHT: Failed to save routing table: {}", e),
             }
         }
 
-        info!("DHT 引擎已关闭");
+        info!("DHT engine shutdown complete");
     }
 
     pub async fn shutdown_async(&self) {
@@ -465,12 +465,12 @@ impl DhtEngine {
             )
             .await
             {
-                Ok(n) => info!("DHT: 已保存 {} 个 good 节点到 {}", n, path),
-                Err(e) => warn!("DHT: 保存路由表失败: {}", e),
+                Ok(n) => info!("DHT: Saved {} good nodes to {}", n, path),
+                Err(e) => warn!("DHT: Failed to save routing table: {}", e),
             }
         }
 
-        info!("DHT 引擎已关闭");
+        info!("DHT engine shutdown complete");
     }
 
     pub async fn stats(&self) -> DhtStats {

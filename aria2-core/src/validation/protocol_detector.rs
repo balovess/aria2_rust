@@ -152,18 +152,20 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
                 file_data: Some(data),
             });
         }
+        // A local file that exists but is neither a torrent nor a metalink must
+        // not be reinterpreted as an HTTP URL. Returning an error here prevents
+        // the app from downloading its own executable (or any other local file)
+        // when a path accidentally leaks into detect().
+        return Err(Aria2Error::Fatal(FatalError::Config(format!(
+            "File exists but is not a .torrent or .metalink: {}",
+            trimmed
+        ))));
     }
 
-    if trimmed.contains('/') || trimmed.contains('\\') {
-        return Ok(DetectedInput {
-            input_type: InputType::HttpUrl,
-            raw: format!("http://{}", trimmed),
-            file_data: None,
-        });
-    }
-
+    // Original aria2c never guesses scheme-less inputs as URLs.
+    // Reject ambiguous inputs and require users to provide full URIs.
     Err(Aria2Error::Fatal(FatalError::Config(format!(
-        "Cannot detect input type for: {}",
+        "Cannot detect input type for: {}. Please provide:\n  - A full URL with scheme (http://, https://, ftp://, sftp://)\n  - A magnet link (magnet:?xt=...)\n  - A .torrent or .metalink file path\n  - Or use --input-file to load URIs from a file",
         trimmed
     ))))
 }
@@ -208,6 +210,47 @@ mod tests {
     fn test_detect_empty_input() {
         assert!(detect("").is_err());
         assert!(detect("   ").is_err());
+    }
+
+    #[test]
+    fn test_detect_existing_local_non_container_file_is_rejected() {
+        // Regression guard: an existing local file that is neither a torrent nor
+        // a metalink must NOT be turned into an http:// URL. This previously
+        // caused the app to download its own executable on startup (the path
+        // contained a separator and matched the bare-hostname fallback).
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let file_path = dir.path().join("aria2c.exe");
+        std::fs::write(&file_path, b"this is a plain binary, not a torrent")
+            .expect("write file");
+
+        let detected = detect(file_path.to_str().unwrap());
+        assert!(
+            detected.is_err(),
+            "Existing local non-torrent/non-metalink file must be rejected, but detect() succeeded"
+        );
+    }
+
+    #[test]
+    fn test_detect_bare_hostname_is_rejected() {
+        // Bare hostname/path without scheme must be rejected.
+        // This aligns with original aria2c behavior which never guesses scheme-less inputs.
+        let result = detect("example.com/path/file.zip");
+        assert!(
+            result.is_err(),
+            "Bare hostname without scheme must be rejected, but detect() succeeded"
+        );
+        let err_msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!("Already asserted is_err()"),
+        };
+        assert!(
+            err_msg.contains("Cannot detect input type"),
+            "Error message should mention detection failure"
+        );
+        assert!(
+            err_msg.contains("full URL with scheme"),
+            "Error message should suggest using a full URL with scheme"
+        );
     }
 
     #[test]

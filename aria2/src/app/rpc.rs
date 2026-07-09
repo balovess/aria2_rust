@@ -4,13 +4,25 @@
 //! - HTTP/HTTPS RPC server setup
 //! - Authentication configuration
 //! - CORS configuration
+//! - Shared engine state (RequestGroupMan + command channel)
 
 use super::App;
-use aria2_rpc::server::{AuthConfig, CorsConfig, RpcServer, ServerConfig};
+use aria2_core::engine::command::Command;
+use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_rpc::engine::RpcEngine;
+use aria2_rpc::server::{
+    AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig,
+};
+use std::sync::Arc;
+use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info};
 
 impl App {
-    /// Start the RPC HTTP server in the background.
+    /// Start the RPC HTTP server in the background with shared engine state.
+    ///
+    /// `group_man` and `cmd_tx` are extracted from the DownloadEngine before
+    /// `run()` is called, so RPC handlers can start real downloads and query
+    /// live progress.
     ///
     /// Reads RPC configuration options and creates a server instance:
     /// - `enable-rpc` — Enable/disable RPC server
@@ -23,7 +35,11 @@ impl App {
     /// - `rpc-cors-domain` — CORS allowed origins
     ///
     /// Returns a handle to the server task on success.
-    pub async fn start_rpc_server(&self) -> std::result::Result<tokio::task::JoinHandle<()>, String> {
+    pub async fn start_rpc_server(
+        &self,
+        group_man: Arc<RwLock<RequestGroupMan>>,
+        cmd_tx: mpsc::UnboundedSender<Box<dyn Command>>,
+    ) -> std::result::Result<tokio::task::JoinHandle<()>, String> {
         // Read RPC configuration
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
         if !rpc_enabled {
@@ -57,24 +73,33 @@ impl App {
         let cert_path = self.get_opt_str("rpc-certificate").await;
         let key_path = self.get_opt_str("rpc-private-key").await;
 
+        // Build RPC engine with shared state (group_man + cmd_tx) so that
+        // aria2.addUri starts real downloads and tellStatus/getGlobalStat
+        // read live progress.
+        let secret = self.get_opt_str("rpc-secret").await.unwrap_or_default();
+        let rpc_engine = RpcEngine::new()
+            .with_auth_middleware(RpcAuthMiddleware::new(&secret))
+            .with_group_man(group_man)
+            .with_cmd_tx(cmd_tx);
+
         // Build server config
-        let config = ServerConfig::default()
+        let mut config = ServerConfig::default()
             .with_host(&host)
             .with_port(port)
             .with_auth(auth)
             .with_cors(cors);
 
-        // Create server
+        // Create server with the pre-configured shared engine
         let server = if rpc_secure {
             let cert = cert_path.ok_or("rpc-certificate is required when rpc-secure is enabled")?;
             let key = key_path.ok_or("rpc-private-key is required when rpc-secure is enabled")?;
-
             info!("Starting HTTPS RPC server on {}:{}", host, port);
-            RpcServer::new_https(&host, port, &cert, &key)
+            config = config.with_tls(TlsConfig::new(cert, key));
+            RpcServer::new_with_engine(config, Arc::new(rpc_engine))
                 .map_err(|e| format!("Failed to create HTTPS RPC server: {}", e))?
         } else {
             info!("Starting HTTP RPC server on {}:{}", host, port);
-            RpcServer::new(config)
+            RpcServer::new_with_engine(config, Arc::new(rpc_engine))
                 .map_err(|e| format!("Failed to create RPC server: {}", e))?
         };
 

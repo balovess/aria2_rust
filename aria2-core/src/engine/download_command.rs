@@ -48,11 +48,35 @@ pub struct DownloadCommand {
     perf_monitor: Option<Arc<PerformanceMonitor>>,
     /// Atomic metrics for low-overhead collection
     atomic_metrics: Arc<AtomicMetrics>,
+    /// Parsed custom HTTP headers (Name, Value) applied to HEAD probes and range
+    /// GETs. Includes `User-Agent` / `Referer` overrides from options.
+    headers: Vec<(String, String)>,
 }
 
 impl DownloadCommand {
+    /// Create a DownloadCommand with a standalone RequestGroup (not registered
+    /// in RequestGroupMan). Use this for simple CLI/test scenarios where
+    /// external progress queries are not needed.
     pub fn new(
         gid: GroupId,
+        uri: &str,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+    ) -> Result<Self> {
+        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+            gid,
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+        Self::new_with_group(group, uri, options, output_dir, output_name)
+    }
+
+    /// Create a DownloadCommand with a shared RequestGroup Arc (registered in
+    /// RequestGroupMan). Use this for RPC and CLI paths where external progress
+    /// queries are needed.
+    pub fn new_with_group(
+        group: Arc<tokio::sync::RwLock<RequestGroup>>,
         uri: &str,
         options: &DownloadOptions,
         output_dir: Option<&str>,
@@ -70,9 +94,15 @@ impl DownloadCommand {
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        // Use global client if no proxy configuration, otherwise create custom client
+        // Parse custom headers once (includes User-Agent / Referer overrides).
+        let headers = options.parsed_headers();
+
+        // Use global client if no proxy configuration AND no custom headers,
+        // otherwise create custom client (custom headers require per-request
+        // application but a custom client is still built when a proxy is set).
         let client = if options.http_proxy.is_none() && options.all_proxy.is_none() {
-            // No proxy configuration - use shared global client for better performance
+            // No proxy configuration - use shared global client for better performance.
+            // Custom headers are applied per-request in execute()/segment downloader.
             client_pool::get_global_client()
         } else {
             // Proxy configuration present - create custom client
@@ -133,8 +163,7 @@ impl DownloadCommand {
             Arc::new(client)
         };
 
-        let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
-        info!("DownloadCommand 创建: {} -> {}", uri, path.display());
+        info!("DownloadCommand created: {} -> {}", uri, path.display());
 
         let cookie_file = options.cookie_file.clone();
         let cookie_storage = Arc::new(CookieStorage::new());
@@ -143,8 +172,8 @@ impl DownloadCommand {
             let p = std::path::Path::new(cf);
             if p.exists() {
                 match cookie_storage.load_file(p) {
-                    Ok(n) => info!("从文件加载了 {} 个 Cookie: {}", n, cf),
-                    Err(e) => warn!("加载 Cookie 文件失败 {}: {}", cf, e),
+                    Ok(n) => info!("Loaded {} cookies from file: {}", n, cf),
+                    Err(e) => warn!("Failed to load cookie file {}: {}", cf, e),
                 }
             }
         }
@@ -165,12 +194,12 @@ impl DownloadCommand {
                 }
             }
             if !cookie_storage.is_empty() {
-                info!("手动设置了 {} 个 Cookie", cookie_storage.count());
+                info!("Manually set {} cookies", cookie_storage.count());
             }
         }
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group,
             client,
             output_path: path,
             started: false,
@@ -187,15 +216,30 @@ impl DownloadCommand {
             stat_man: Arc::new(ServerStatMan::new()),
             perf_monitor: None, // Disabled by default for zero overhead
             atomic_metrics: Arc::new(AtomicMetrics::new()),
+            headers,
         })
     }
 
-    /// Create a DownloadCommand with a custom HTTP client.
-    ///
-    /// Use this when you want to share an HTTP client across multiple downloads
-    /// for better connection reuse and memory efficiency.
+    /// Create a DownloadCommand with a custom HTTP client and standalone group.
     pub fn new_with_client(
         gid: GroupId,
+        uri: &str,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+        client: Arc<reqwest::Client>,
+    ) -> Result<Self> {
+        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+            gid,
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+        Self::new_with_group_and_client(group, uri, options, output_dir, output_name, client)
+    }
+
+    /// Create a DownloadCommand with a shared group Arc and custom HTTP client.
+    pub fn new_with_group_and_client(
+        group: Arc<tokio::sync::RwLock<RequestGroup>>,
         uri: &str,
         options: &DownloadOptions,
         output_dir: Option<&str>,
@@ -214,8 +258,8 @@ impl DownloadCommand {
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
-        info!("DownloadCommand 创建 (共享客户端): {} -> {}", uri, path.display());
+        let headers = options.parsed_headers();
+        info!("DownloadCommand created (shared client): {} -> {}", uri, path.display());
 
         let cookie_file = options.cookie_file.clone();
         let cookie_storage = Arc::new(CookieStorage::new());
@@ -224,8 +268,8 @@ impl DownloadCommand {
             let p = std::path::Path::new(cf);
             if p.exists() {
                 match cookie_storage.load_file(p) {
-                    Ok(n) => info!("从文件加载了 {} 个 Cookie: {}", n, cf),
-                    Err(e) => warn!("加载 Cookie 文件失败 {}: {}", cf, e),
+                    Ok(n) => info!("Loaded {} cookies from file: {}", n, cf),
+                    Err(e) => warn!("Failed to load cookie file {}: {}", cf, e),
                 }
             }
         }
@@ -246,12 +290,12 @@ impl DownloadCommand {
                 }
             }
             if !cookie_storage.is_empty() {
-                info!("手动设置了 {} 个 Cookie", cookie_storage.count());
+                info!("Manually set {} cookies", cookie_storage.count());
             }
         }
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group,
             client,
             output_path: path,
             started: false,
@@ -268,6 +312,7 @@ impl DownloadCommand {
             stat_man: Arc::new(ServerStatMan::new()),
             perf_monitor: None, // Disabled by default for zero overhead
             atomic_metrics: Arc::new(AtomicMetrics::new()),
+            headers,
         })
     }
 
@@ -327,9 +372,9 @@ impl DownloadCommand {
     fn save_cookies_if_configured(&self) {
         if let Some(ref cf) = self.cookie_file {
             if let Err(e) = self.cookie_storage.save_file(std::path::Path::new(cf)) {
-                warn!("保存 Cookie 文件失败 {}: {}", cf, e);
+                warn!("Failed to save cookie file {}: {}", cf, e);
             } else {
-                info!("Cookie 已保存到 {}", cf);
+                info!("Cookies saved to {}", cf);
             }
         }
     }
@@ -368,7 +413,7 @@ impl DownloadCommand {
         let url_parsed = reqwest::Url::parse(uri).ok();
         let mut request = if let Some(range_header) = ResumeHelper::build_range_header(resume_state)
         {
-            debug!("断点续传: {}", range_header);
+            debug!("Resume download: {}", range_header);
             self.client.get(uri).header("Range", range_header)
         } else {
             self.client.get(uri)
@@ -384,9 +429,14 @@ impl DownloadCommand {
             }
         }
 
+        // Apply custom HTTP headers (Referer, User-Agent, etc.)
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
+
         let response = request.send().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("HTTP请求失败: {}", e),
+                message: format!("HTTP request failed: {}", e),
             })
         })?;
 
@@ -398,7 +448,7 @@ impl DownloadCommand {
                     && let Some(c) = Cookie::from_set_cookie_header(sc_str, domain, path)
                 {
                     self.cookie_storage.add(c);
-                    debug!("收到 Set-Cookie: {}", sc_str);
+                    debug!("Received Set-Cookie: {}", sc_str);
                 }
             }
         }
@@ -411,7 +461,7 @@ impl DownloadCommand {
                 }));
             }
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                format!("HTTP错误: {}", status),
+                format!("HTTP error: {}", status),
             )));
         }
 
@@ -441,7 +491,7 @@ impl DownloadCommand {
             Some(rate) if rate > 0 => {
                 let cfg = RateLimiterConfig::new(Some(rate), None);
                 let limiter = RateLimiter::new(&cfg);
-                debug!("下载限速启用: {} bytes/s", rate);
+                debug!("Download speed limit enabled: {} bytes/s", rate);
                 Box::new(ThrottledWriter::new(raw_writer, limiter))
             }
             _ => Box::new(raw_writer),
@@ -519,7 +569,7 @@ impl DownloadCommand {
         }
 
         info!(
-            "顺序下载完成: {} ({} bytes)",
+            "Sequential download complete: {} ({} bytes)",
             self.output_path.display(),
             self.completed_bytes
         );
@@ -536,7 +586,7 @@ impl DownloadCommand {
         let mut last_progress_update = 0u64; // Track last progress update for batch updates
 
         info!(
-            "并发下载启动: split={}, max_conn={}, segment_size={} bytes, total={}",
+            "Concurrent download started: split={}, max_conn={}, segment_size={} bytes, total={}",
             split, max_conn, seg_size, total_length
         );
 
@@ -580,8 +630,9 @@ impl DownloadCommand {
                         let url = uri.to_string();
                         let dl = HttpSegmentDownloader::new(&self.client);
                         let ch = cookie_hdr_for_spawn.clone();
+                        let headers = self.headers.clone();
                         let handle = tokio::spawn(async move {
-                            dl.download_range(&url, offset, length, ch.as_deref())
+                            dl.download_range(&url, offset, length, ch.as_deref(), &headers)
                                 .await
                                 .map_err(|e| e.to_string())
                         });
@@ -610,7 +661,7 @@ impl DownloadCommand {
                                 {
                                     writer.write_at(offset, &data).await.map_err(|e| {
                                         Aria2Error::Fatal(crate::error::FatalError::Config(
-                                            format!("写入失败: {}", e),
+                                            format!("Write failed: {}", e),
                                         ))
                                     })?;
                                 } else {
@@ -630,11 +681,11 @@ impl DownloadCommand {
                                 }
                             }
                             Ok(Err(e)) => {
-                                warn!("段 {} 下载失败: {}", seg_idx, e);
+                                warn!("Segment {} download failed: {}", seg_idx, e);
                                 manager.fail_segment(seg_idx);
                             }
                             Err(_) => {
-                                warn!("段 {} 任务 panic", seg_idx);
+                                warn!("Segment {} task panic", seg_idx);
                                 manager.fail_segment(seg_idx);
                             }
                         }
@@ -643,7 +694,7 @@ impl DownloadCommand {
             }
 
             if manager.is_complete() {
-                debug!("所有段已完成");
+                debug!("All segments complete");
                 break;
             }
 
@@ -653,7 +704,7 @@ impl DownloadCommand {
             {
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
-                        message: "并发下载所有段均失败".into(),
+                        message: "Concurrent download: all segments failed".into(),
                     },
                 ));
             }
@@ -663,7 +714,7 @@ impl DownloadCommand {
 
         writer.flush().await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "flush 失败: {}",
+                "Flush failed: {}",
                 e
             )))
         })?;
@@ -690,7 +741,7 @@ impl DownloadCommand {
         }
 
         info!(
-            "并发下载完成: {} ({} bytes)",
+            "Concurrent download complete: {} ({} bytes)",
             self.output_path.display(),
             self.completed_bytes
         );
@@ -711,7 +762,7 @@ impl DownloadCommand {
             if attempt > 0
                 && let Some(wait) = retry_policy.compute_wait(attempt - 1)
             {
-                info!("顺序下载重试 #{} (等待 {:?})...", attempt, wait);
+                info!("Sequential download retry #{} (waiting {:?})...", attempt, wait);
                 tokio::time::sleep(wait).await;
             }
 
@@ -721,7 +772,7 @@ impl DownloadCommand {
             {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    warn!("顺序下载尝试 #{} 失败: {}", attempt + 1, e);
+                    warn!("Sequential download attempt #{} failed: {}", attempt + 1, e);
                     last_err = Some(e);
                     if retry_policy.is_exhausted(attempt)
                         || !retry_policy
@@ -735,7 +786,7 @@ impl DownloadCommand {
 
         Err(last_err.unwrap_or_else(|| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: "所有重试均失败".into(),
+                message: "All retries failed".into(),
             })
         }))
     }
@@ -748,7 +799,7 @@ impl DownloadCommand {
         max_retries_per_segment: u32,
     ) -> Result<()> {
         info!(
-            "使用并发模式下载 (split={}, max_retries/segment={})",
+            "Using concurrent download mode (split={}, max_retries/segment={})",
             self.group.read().await.options().split.unwrap_or(1),
             max_retries_per_segment
         );
@@ -764,7 +815,7 @@ impl DownloadCommand {
 
         if use_intelligent_selection {
             info!(
-                "启用智能多镜像选择: {} 个镜像源",
+                "Intelligent multi-mirror selection enabled: {} mirror sources",
                 all_uris.len()
             );
             self.execute_concurrent_download_with_coordinator(
@@ -838,7 +889,7 @@ impl DownloadCommand {
             // Note: We'd need to expose mark_completed_up_to in MirrorCoordinator
             // For now, we'll handle this at the segment manager level
             debug!(
-                "断点续传: 已有 {} bytes, 从偏移 {} 继续",
+                "Resume: existing {} bytes, continuing from offset {}",
                 resume_state.existing_length, resume_state.start_offset
             );
         }
@@ -854,7 +905,7 @@ impl DownloadCommand {
                 coordinator.select_mirror_for_segment()
             {
                 info!(
-                    "启动段 {} 下载: mirror={}, offset={}, size={}",
+                    "Starting segment {} download: mirror={}, offset={}, size={}",
                     seg_idx, mirror_idx, offset, length
                 );
 
@@ -874,7 +925,7 @@ impl DownloadCommand {
                 };
 
                 let result = downloader
-                    .download_range(&mirror_url, offset, length, if cookie_hdr.is_empty() { None } else { Some(&cookie_hdr) })
+                    .download_range(&mirror_url, offset, length, if cookie_hdr.is_empty() { None } else { Some(&cookie_hdr) }, &self.headers)
                     .await;
 
                 match result {
@@ -886,11 +937,11 @@ impl DownloadCommand {
                             0
                         };
 
-                        debug!("段 {} 完成: {} bytes, speed={} B/s", seg_idx, data.len(), speed);
+                        debug!("Segment {} complete: {} bytes, speed={} B/s", seg_idx, data.len(), speed);
 
                         writer.write_at(offset, &data).await.map_err(|e| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "写入失败: {}",
+                                "Write failed: {}",
                                 e
                             )))
                         })?;
@@ -899,7 +950,7 @@ impl DownloadCommand {
                         coordinator.on_segment_complete(mirror_idx, seg_idx, data, speed);
                     }
                     Err(e) => {
-                        warn!("段 {} 下载失败 (mirror={}): {}", seg_idx, mirror_idx, e);
+                        warn!("Segment {} download failed (mirror={}): {}", seg_idx, mirror_idx, e);
 
                         // Default error code for network errors
                         let error_code = constants::HTTP_DEFAULT_ERROR_CODE;
@@ -946,10 +997,10 @@ impl DownloadCommand {
             }
 
             if coordinator.has_failed_segments() {
-                error!("存在永久失败的下载段");
+                error!("Permanently failed download segments exist");
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
-                        message: "部分下载段永久失败".into(),
+                        message: "Some download segments permanently failed".into(),
                     },
                 ));
             }
@@ -959,7 +1010,7 @@ impl DownloadCommand {
 
         writer.flush().await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "flush 失败: {}",
+                "Flush failed: {}",
                 e
             )))
         })?;
@@ -988,11 +1039,11 @@ impl DownloadCommand {
 
         // Save server stats for future use
         if let Err(e) = self.save_server_stats().await {
-            warn!("保存服务器统计失败: {}", e);
+            warn!("Failed to save server statistics: {}", e);
         }
 
         info!(
-            "多镜像并发下载完成: {} ({} bytes, {} B/s)",
+            "Multi-mirror concurrent download complete: {} ({} bytes, {} B/s)",
             self.output_path.display(),
             self.completed_bytes,
             final_speed
@@ -1025,12 +1076,12 @@ impl DownloadCommand {
             while let Some((seg_idx, offset, length)) = manager.next_pending_segment() {
                 let seg_idx_u32 = seg_idx;
                 info!(
-                    "启动段 {} 下载: offset={}, size={}",
+                    "Starting segment {} download: offset={}, size={}",
                     seg_idx, offset, length
                 );
                 let downloader = HttpSegmentDownloader::new(&self.client);
                 let seg_start = Instant::now();
-                let result = downloader.download_range(uri, offset, length, None).await;
+                let result = downloader.download_range(uri, offset, length, None, &self.headers).await;
 
                 match result {
                     Ok(data) => {
@@ -1040,11 +1091,11 @@ impl DownloadCommand {
                         } else {
                             0
                         };
-                        debug!("段 {} 完成: {} bytes, speed={} B/s", seg_idx, data.len(), speed);
+                        debug!("Segment {} complete: {} bytes, speed={} B/s", seg_idx, data.len(), speed);
 
                         writer.write_at(offset, &data).await.map_err(|e| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "写入失败: {}",
+                                "Write failed: {}",
                                 e
                             )))
                         })?;
@@ -1053,7 +1104,7 @@ impl DownloadCommand {
                         manager.report_segment_complete(seg_idx_u32, data, speed, false);
                     }
                     Err(e) => {
-                        warn!("段 {} 下载失败: {}", seg_idx, e);
+                        warn!("Segment {} download failed: {}", seg_idx, e);
                         manager.report_segment_failed(seg_idx_u32, constants::HTTP_DEFAULT_ERROR_CODE);
                     }
                 }
@@ -1070,10 +1121,10 @@ impl DownloadCommand {
             }
 
             if manager.has_permanently_failed_segments() {
-                error!("存在永久失败的下载段");
+                error!("Permanently failed download segments exist");
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
-                        message: "部分下载段永久失败".into(),
+                        message: "Some download segments permanently failed".into(),
                     },
                 ));
             }
@@ -1083,7 +1134,7 @@ impl DownloadCommand {
 
         writer.flush().await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "flush 失败: {}",
+                "Flush failed: {}",
                 e
             )))
         })?;
@@ -1125,18 +1176,18 @@ impl Command for DownloadCommand {
 
         if uri.is_empty() {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                "下载URI为空".into(),
+                "Download URI is empty".into(),
             )));
         }
 
-        debug!("开始下载: {} -> {}", uri, self.output_path.display());
+        debug!("Starting download: {} -> {}", uri, self.output_path.display());
 
         if let Some(parent) = self.output_path.parent()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent).map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "创建目录失败: {}",
+                    "Failed to create directory: {}",
                     e
                 )))
             })?;
@@ -1178,6 +1229,11 @@ impl Command for DownloadCommand {
         if !cookie_hdr_head.is_empty() {
             head_req = head_req.header("Cookie", &cookie_hdr_head);
         }
+        // Apply custom HTTP headers (Referer, User-Agent override, etc.) to the
+        // HEAD probe so servers that 403 without them respond correctly.
+        for (name, value) in &self.headers {
+            head_req = head_req.header(name, value);
+        }
         let head_resp = head_req.send().await.ok();
         let (total_length, supports_range) = if let Some(ref resp) = head_resp {
             let tl = resp.content_length().unwrap_or(0);
@@ -1196,7 +1252,7 @@ impl Command for DownloadCommand {
 
         if resume_state.is_complete {
             info!(
-                "文件已完整存在，跳过下载: {} ({} bytes)",
+                "File already exists completely, skipping download: {} ({} bytes)",
                 self.output_path.display(),
                 resume_state.existing_length
             );
@@ -1227,7 +1283,7 @@ impl Command for DownloadCommand {
         if self.should_use_concurrent(total_length, supports_range) {
             if resume_state.should_resume {
                 info!(
-                    "并发模式 + 断点续传: 已有 {} bytes, 从偏移 {} 继续",
+                    "Concurrent mode + resume: existing {} bytes, continuing from offset {}",
                     resume_state.existing_length, resume_state.start_offset
                 );
             }

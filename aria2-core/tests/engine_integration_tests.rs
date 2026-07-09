@@ -60,6 +60,7 @@ fn test_download_options(output_dir: &std::path::Path) -> DownloadOptions {
         no_proxy: None,
         enable_utp: false,
         utp_listen_port: None,
+        ..Default::default()
     }
 }
 

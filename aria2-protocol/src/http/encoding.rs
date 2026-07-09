@@ -11,9 +11,9 @@ impl HttpEncoding {
             "" | "identity" => Ok(body.to_vec()),
             "gzip" | "x-gzip" => Self::decode_gzip(body),
             "deflate" => Self::decode_deflate(body),
-            "br" => Err("Brotli压缩暂不支持".to_string()),
-            "compress" => Err("compress压缩格式已废弃".to_string()),
-            other => Err(format!("不支持的Content-Encoding: {}", other)),
+            "br" => Err("Brotli compression not supported yet".to_string()),
+            "compress" => Err("compress compression format is deprecated".to_string()),
+            other => Err(format!("Unsupported Content-Encoding: {}", other)),
         }
     }
 
@@ -25,9 +25,9 @@ impl HttpEncoding {
         let mut decompressed = Vec::with_capacity(data.len() * 4);
         decoder
             .read_to_end(&mut decompressed)
-            .map_err(|e| format!("gzip解压失败: {}", e))?;
+            .map_err(|e| format!("gzip decompression failed: {}", e))?;
         debug!(
-            "gzip解压完成: {} -> {} 字节",
+            "gzip decompression complete: {} -> {} bytes",
             data.len(),
             decompressed.len()
         );
@@ -42,9 +42,9 @@ impl HttpEncoding {
         let mut decompressed = Vec::with_capacity(data.len() * 4);
         decoder
             .read_to_end(&mut decompressed)
-            .map_err(|e| format!("deflate解压失败: {}", e))?;
+            .map_err(|e| format!("deflate decompression failed: {}", e))?;
         debug!(
-            "deflate解压完成: {} -> {} 字节",
+            "deflate decompression complete: {} -> {} bytes",
             data.len(),
             decompressed.len()
         );
@@ -74,12 +74,12 @@ impl ChunkedDecoder {
             let line_end = data[pos..]
                 .iter()
                 .position(|&b| b == b'\r' || b == b'\n')
-                .ok_or("分块编码格式错误: 找不到块大小行")?;
+                .ok_or("Chunked encoding format error: cannot find chunk size line")?;
 
             let size_str = unsafe { std::str::from_utf8_unchecked(&data[pos..pos + line_end]) };
             let size_str = size_str.trim();
             let chunk_size: usize = usize::from_str_radix(size_str, 16)
-                .map_err(|e| format!("块大小解析失败: {}", e))?;
+                .map_err(|e| format!("Chunk size parsing failed: {}", e))?;
 
             pos += line_end;
             if pos < data.len() && data[pos] == b'\r' {
@@ -94,7 +94,7 @@ impl ChunkedDecoder {
             }
 
             if pos + chunk_size > data.len() {
-                return Err("分块数据截断".to_string());
+                return Err("Chunked data truncated".to_string());
             }
 
             result.extend_from_slice(&data[pos..pos + chunk_size]);

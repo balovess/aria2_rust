@@ -1,7 +1,7 @@
-//! MSE (Message Stream Encryption) 加密握手模块
+//! MSE (Message Stream Encryption) encrypted handshake module
 //!
-//! 实现 BitTorrent BEP 10 定义的加密层协议，在 BT 协议握手上叠加可选的加密握手。
-//! 包含三阶段握手：Method Selection、PAD/DH 密钥交换、SKEY/SVC 验证。
+//! Implements BitTorrent BEP 10 encryption layer protocol, overlaying optional encrypted handshake on BT protocol handshake.
+//! Contains three-phase handshake: Method Selection, PAD/DH key exchange, SKEY/SVC verification.
 
 use rc4::{KeyInit, Rc4 as Rc4Cipher, StreamCipher};
 use ring::agreement::{self, EphemeralPrivateKey, UnparsedPublicKey};
@@ -11,19 +11,19 @@ use std::sync::Mutex;
 
 use crate::error::{Aria2Error, Result};
 
-/// MSE 加密方法
+/// MSE encryption method
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoMethod {
-    /// 明文传输，不加密
+    /// Plaintext transmission, no encryption
     Plain = 0x0001,
-    /// RC4 流密码
+    /// RC4 stream cipher
     Rc4 = 0x0002,
-    /// AES-128-CBC (可选)
+    /// AES-128-CBC (optional)
     Aes128Cbc = 0x0003,
 }
 
 impl CryptoMethod {
-    /// 从 u16 值创建 CryptoMethod
+    /// Create CryptoMethod from u16 value
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
             0x0001 => Some(CryptoMethod::Plain),
@@ -33,31 +33,31 @@ impl CryptoMethod {
         }
     }
 
-    /// 转换为 u16
+    /// Convert to u16
     pub fn to_u16(self) -> u16 {
         self as u16
     }
 }
 
-/// MSE 握手状态机
+/// MSE handshake state machine
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum MseState {
-    /// 空闲状态
+    /// Idle state
     Idle,
-    /// 已发送 method selection, 等待对方响应
+    /// Method selection sent, waiting for remote response
     MethodSelectionSent,
-    /// DH 参数交换中
+    /// DH parameter exchange in progress
     KeyExchangeInProgress,
-    /// 等待 SKEY 验证
+    /// Waiting for SKEY verification
     VerificationPending,
-    /// 握手完成
+    /// Handshake complete
     Established(MseCryptoContext),
-    /// 握手失败
+    /// Handshake failed
     Failed(String),
 }
 
-/// MSE 加密上下文 (握手完成后用于加解密 BT 消息)
+/// MSE encryption context (used for encrypting/decrypting BT messages after handshake complete)
 pub struct MseCryptoContext {
     send_key: Vec<u8>,
     recv_key: Vec<u8>,
@@ -80,10 +80,10 @@ impl std::fmt::Debug for MseCryptoContext {
 
 impl Clone for MseCryptoContext {
     fn clone(&self) -> Self {
-        // 注意: RC4 状态不能真正克隆 (会丢失状态)，这里创建新的实例
+        // Note: RC4 state cannot truly be cloned (will lose state), here creating new instance
         match self.crypto_method {
             CryptoMethod::Rc4 => {
-                // 尝试同步状态 (不完美但可用)
+                // Attempt to sync state (imperfect but usable)
                 Self::new(&self.send_key, &self.recv_key, self.crypto_method)
             }
             _ => Self {
@@ -106,19 +106,19 @@ impl PartialEq for MseCryptoContext {
 }
 
 impl MseCryptoContext {
-    /// 使用派生密钥创建新的加密上下文
+    /// Create new encryption context using derived keys
     ///
-    /// 对于 RC4 方法，会初始化两个 RC4 实例并丢弃前 1024 字节 keystream
-    /// (MSE spec section 5.2 防止 keystream attack)
+    /// For RC4 method, initializes two RC4 instances and discards first 1024 bytes keystream
+    /// (MSE spec section 5.2 to prevent keystream attack)
     pub fn new(send_key: &[u8], recv_key: &[u8], method: CryptoMethod) -> Self {
         match method {
             CryptoMethod::Rc4 => {
-                // 初始化发送方向 RC4 并丢弃 1024 字节 keystream
+                // Initialize send direction RC4 and discard 1024 bytes keystream
                 let mut rc4_send = Rc4Cipher::new_from_slice(send_key).unwrap();
                 let mut discard = vec![0u8; 1024];
                 rc4_send.apply_keystream(&mut discard);
 
-                // 初始化接收方向 RC4 并丢弃 1024 字节 keystream
+                // Initialize receive direction RC4 and discard 1024 bytes keystream
                 let mut rc4_recv = Rc4Cipher::new_from_slice(recv_key).unwrap();
                 let mut discard = vec![0u8; 1024];
                 rc4_recv.apply_keystream(&mut discard);
@@ -141,7 +141,7 @@ impl MseCryptoContext {
         }
     }
 
-    /// 加密数据
+    /// Encrypt data
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         match self.crypto_method {
             CryptoMethod::Rc4 => {
@@ -156,13 +156,13 @@ impl MseCryptoContext {
                 }
             }
             CryptoMethod::Plain | CryptoMethod::Aes128Cbc => {
-                // Plain 和 AES 模式暂不支持或直接返回原文
+                // Plain and AES modes currently not supported or return plaintext directly
                 Ok(plaintext.to_vec())
             }
         }
     }
 
-    /// 解密数据
+    /// Decrypt data
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         match self.crypto_method {
             CryptoMethod::Rc4 => {
@@ -177,24 +177,24 @@ impl MseCryptoContext {
                 }
             }
             CryptoMethod::Plain | CryptoMethod::Aes128Cbc => {
-                // Plain 和 AES 模式暂不支持或直接返回原文
+                // Plain and AES modes currently not supported or return plaintext directly
                 Ok(ciphertext.to_vec())
             }
         }
     }
 
-    /// 获取当前加密方法
+    /// Get current encryption method
     pub fn crypto_method(&self) -> CryptoMethod {
         self.crypto_method
     }
 
-    /// 是否使用加密
+    /// Whether using encryption
     pub fn is_encrypted(&self) -> bool {
         self.crypto_method != CryptoMethod::Plain
     }
 }
 
-/// 明文回退: 创建无加密的上下文
+/// Plaintext fallback: create unencrypted context
 impl Default for MseCryptoContext {
     fn default() -> Self {
         Self {
@@ -222,11 +222,11 @@ pub struct MseHandshakeManager {
 }
 
 impl MseHandshakeManager {
-    /// 创建新的 MSE 握手实例
+    /// Create new MSE handshake instance
     pub fn new(info_hash: [u8; 20]) -> Result<Self> {
         let rng = SystemRandom::new();
 
-        // 生成 X25519 密钥对
+        // Generate X25519 key pair
         let private_key = EphemeralPrivateKey::generate(&agreement::X25519, &rng).map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                 "Failed to generate DH key: {}",
@@ -234,7 +234,7 @@ impl MseHandshakeManager {
             )))
         })?;
 
-        // 获取公钥 (X25519 公钥固定为 32 字节)
+        // Get public key (X25519 public key is fixed at 32 bytes)
         let public_key = private_key.compute_public_key().map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                 "Failed to compute public key: {}",
@@ -246,7 +246,7 @@ impl MseHandshakeManager {
         let mut local_dh_pubkey = vec![0u8; pubkey_slice.len()];
         local_dh_pubkey.copy_from_slice(pubkey_slice);
 
-        // 随机 PAD 长度 (0-512 bytes)
+        // Random PAD length (0-512 bytes)
         use rand::RngCore;
         let mut rng_core = rand::thread_rng();
         let pad_length = rng_core.next_u32() as u16 % 513;
@@ -262,27 +262,27 @@ impl MseHandshakeManager {
         })
     }
 
-    /// Phase 1: 构造 Method Selection payload
+    /// Phase 1: Build Method Selection payload
     ///
-    /// 返回 `\x13MSegadd` (支持加密) 或 `\x00` (仅明文)
+    /// Returns `\x13MSegadd` (supports encryption) or `\x00` (plaintext only)
     pub fn build_method_selection(&self) -> Vec<u8> {
         b"\x13MSegadd".to_vec()
     }
 
-    /// 解析对方的 Method Selection
+    /// Parse remote Method Selection
     ///
-    /// data: 对方发来的 method selection bytes
+    /// data: Method selection bytes received from remote
     pub fn parse_remote_method_selection(data: &[u8]) -> Result<CryptoMethod> {
         if data.is_empty() {
             return Err(Aria2Error::Parse("Empty method selection".to_string()));
         }
 
-        // 检查是否为 MSegadd (\x13MSegadd)
+        // Check if MSegadd (\x13MSegadd)
         if data == b"\x13MSegadd" {
-            return Ok(CryptoMethod::Rc4); // 支持加密
+            return Ok(CryptoMethod::Rc4); // Supports encryption
         }
 
-        // 检查是否为明文模式 (\x00)
+        // Check if plaintext mode (\x00)
         if data == b"\x00" || data[0] == 0x00 {
             return Ok(CryptoMethod::Plain);
         }
@@ -293,13 +293,13 @@ impl MseHandshakeManager {
         )))
     }
 
-    /// Phase 2: 构建 PAD + DH 公钥 + CryptoProvisions payload
+    /// Phase 2: Build PAD + DH public key + CryptoProvisions payload
     ///
-    /// 格式:
+    /// Format:
     /// ```text
     /// ┌────────┬──────────┬─────────────┬────────────┐
     /// │ PAD_D  │ PAD_LEN  │ Crypto_Pro  │ ICB/IV     │
-    /// │ (2B BE)│ (2B BE)  │ (2B BE)     │ (可选 16B)  │
+    /// │ (2B BE)│ (2B BE)  │ (2B BE)     │ (optional 16B) │
     /// ├────────┼──────────┼─────────────┼────────────┤
     /// │          DH Public Key (X25519 = 32 bytes)                │
     /// └────────┴──────────┴─────────────┴────────────┘
@@ -307,20 +307,20 @@ impl MseHandshakeManager {
     pub fn build_key_exchange_payload(&self, crypto_methods: &[CryptoMethod]) -> Result<Vec<u8>> {
         let mut payload = Vec::new();
 
-        // PAD_D (2 bytes big-endian): 随机填充长度
+        // PAD_D (2 bytes big-endian): Random padding length
         payload.extend_from_slice(&self.pad_length.to_be_bytes());
 
-        // PAD_LEN (2 bytes big-endian): 与 PAD_D 相同
+        // PAD_LEN (2 bytes big-endian): Same as PAD_D
         payload.extend_from_slice(&self.pad_length.to_be_bytes());
 
-        // Crypto_Provisions (2 bytes big-endian): 支持的加密方法位掩码
+        // Crypto_Provisions (2 bytes big-endian): Supported encryption method bitmask
         let mut crypto_provisions: u16 = 0;
         for method in crypto_methods {
             crypto_provisions |= method.to_u16();
         }
         payload.extend_from_slice(&crypto_provisions.to_be_bytes());
 
-        // 随机 PAD 数据
+        // Random PAD data
         use rand::RngCore;
         let mut rng_core = rand::thread_rng();
         let mut pad_data = vec![0u8; self.pad_length as usize];
@@ -333,7 +333,7 @@ impl MseHandshakeManager {
         Ok(payload)
     }
 
-    /// 解析对方的 key exchange payload, 计算 shared secret
+    /// Parse remote key exchange payload, compute shared secret
     pub fn process_remote_key_exchange(&mut self, data: &[u8]) -> Result<()> {
         if data.len() < 8 + 32 {
             return Err(Aria2Error::Parse(
@@ -341,13 +341,13 @@ impl MseHandshakeManager {
             ));
         }
 
-        // 解析字段
+        // Parse fields
         let _pad_d = u16::from_be_bytes([data[0], data[1]]);
         let _pad_len = u16::from_be_bytes([data[2], data[3]]);
         let _crypto_pro = u16::from_be_bytes([data[4], data[5]]);
-        // 跳过可能的 ICB/IV (6-22)
+        // Skip possible ICB/IV (6-22)
 
-        // 计算 PAD 结束位置
+        // Calculate PAD end position
         let pad_end = 6 + (_pad_len as usize);
         if data.len() < pad_end + 32 {
             return Err(Aria2Error::Parse(
@@ -355,14 +355,14 @@ impl MseHandshakeManager {
             ));
         }
 
-        // 提取远程 DH 公钥 (最后 32 bytes)
+        // Extract remote DH public key (last 32 bytes)
         let remote_pubkey_start = data.len() - 32;
         let remote_pubkey = &data[remote_pubkey_start..];
 
-        // 存储远程公钥
+        // Store remote public key
         self.remote_dh_pubkey = Some(remote_pubkey.to_vec());
 
-        // 计算共享密钥
+        // Compute shared secret
         let peer_public_key = UnparsedPublicKey::new(&agreement::X25519, remote_pubkey);
 
         if let Some(private_key) = self.local_dh_private_key.take() {
@@ -388,13 +388,13 @@ impl MseHandshakeManager {
         Ok(())
     }
 
-    /// Phase 3: 构造 SKEY + VC + CryptoSelect 验证 payload
+    /// Phase 3: Build SKEY + VC + CryptoSelect verification payload
     ///
-    /// 格式:
+    /// Format:
     /// - SKEY hash (20 bytes): SHA-1(info_hash + shared_secret)
     /// - VC (2 bytes): version cipher (0x0001 for RC4)
-    /// - CryptoSelect (2 bytes): 选定的加密方法
-    /// - len(I) (2 bytes): 可选的初始数据长度 (通常为 0)
+    /// - CryptoSelect (2 bytes): Selected encryption method
+    /// - len(I) (2 bytes): Optional initial data length (usually 0)
     pub fn build_verification_payload(&self, selected_method: CryptoMethod) -> Result<Vec<u8>> {
         let skey = self.compute_skey()?;
         let mut payload = Vec::new();
@@ -402,19 +402,19 @@ impl MseHandshakeManager {
         // SKEY hash (20 bytes)
         payload.extend_from_slice(&skey);
 
-        // VC (2 bytes): 版本密码
+        // VC (2 bytes): Version cipher
         payload.extend_from_slice(&0x0001u16.to_be_bytes());
 
-        // CryptoSelect (2 bytes): 选定的加密方法
+        // CryptoSelect (2 bytes): Selected encryption method
         payload.extend_from_slice(&selected_method.to_u16().to_be_bytes());
 
-        // len(I) (2 bytes): 初始数据长度
+        // len(I) (2 bytes): Initial data length
         payload.extend_from_slice(&0x0000u16.to_be_bytes());
 
         Ok(payload)
     }
 
-    /// 解析对方的 verification payload, 验证 SKEY, 完成握手
+    /// Parse remote verification payload, verify SKEY, complete handshake
     pub fn process_remote_verification(&mut self, data: &[u8]) -> Result<MseCryptoContext> {
         if data.len() < 26 {
             return Err(Aria2Error::Parse(
@@ -422,24 +422,24 @@ impl MseHandshakeManager {
             ));
         }
 
-        // 解析字段
+        // Parse fields
         let remote_skey = &data[..20];
         let vc = u16::from_be_bytes([data[20], data[21]]);
         let crypto_select = u16::from_be_bytes([data[22], data[23]]);
         // len(I) at [24,25]
 
-        // 验证 VC
+        // Validate VC
         if vc != 0x0001 {
             return Err(Aria2Error::Parse(format!("Invalid VC value: {:#06x}", vc)));
         }
 
-        // 验证 SKEY
+        // Validate SKEY
         let expected_skey = self.compute_skey()?;
         if remote_skey != expected_skey.as_slice() {
             return Err(Aria2Error::Checksum("SKEY verification failed".to_string()));
         }
 
-        // 解析选定的加密方法
+        // Parse selected encryption method
         let selected_method = CryptoMethod::from_u16(crypto_select).ok_or_else(|| {
             Aria2Error::Parse(format!(
                 "Unknown crypto method selected: {:#06x}",
@@ -447,7 +447,7 @@ impl MseHandshakeManager {
             ))
         })?;
 
-        // 派生加密密钥
+        // Derive encryption keys
         let shared_secret = self.shared_secret.as_ref().ok_or_else(|| {
             Aria2Error::Fatal(crate::error::FatalError::Config(
                 "Shared secret not computed".to_string(),
@@ -456,13 +456,13 @@ impl MseHandshakeManager {
 
         let (send_key, recv_key) = Self::derive_keys(&expected_skey, shared_secret);
 
-        // 创建加密上下文
+        // Create encryption context
         let ctx = MseCryptoContext::new(&send_key, &recv_key, selected_method);
 
         Ok(ctx)
     }
 
-    /// 内部: 计算 SKEY = SHA-1(info_hash || shared_secret)
+    /// Internal: Compute SKEY = SHA-1(info_hash || shared_secret)
     pub(crate) fn compute_skey(&self) -> Result<[u8; 20]> {
         let shared_secret = self.shared_secret.as_ref().ok_or_else(|| {
             Aria2Error::Fatal(crate::error::FatalError::Config(
@@ -480,52 +480,52 @@ impl MseHandshakeManager {
         Ok(skey)
     }
 
-    /// 内部: 派生加密密钥
+    /// Internal: Derive encryption keys
     ///
     /// ```text
     /// send_key = SHA-1(SKEY + "keyA" + shared_secret)[:16]
     /// recv_key = SHA-1(SKEY + "keyB" + shared_secret)[:16]
     /// ```
     pub(crate) fn derive_keys(skey: &[u8], shared_secret: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        // 发送方向密钥
+        // Send direction key
         let mut hasher_a = Sha1::new();
         hasher_a.update(skey);
         hasher_a.update(b"keyA");
         hasher_a.update(shared_secret);
         let result_a = hasher_a.finalize();
 
-        // 接收方向密钥
+        // Receive direction key
         let mut hasher_b = Sha1::new();
         hasher_b.update(skey);
         hasher_b.update(b"keyB");
         hasher_b.update(shared_secret);
         let result_b = hasher_b.finalize();
 
-        // 取前 16 字节
+        // Take first 16 bytes
         (result_a[..16].to_vec(), result_b[..16].to_vec())
     }
 
-    /// 明文回退: 创建无加密的上下文
+    /// Plaintext fallback: create unencrypted context
     pub fn plaintext_fallback() -> MseCryptoContext {
         MseCryptoContext::default()
     }
 
-    /// 获取当前状态
+    /// Get current state
     pub fn state(&self) -> MseState {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// 更新状态
+    /// Update state
     pub fn set_state(&self, state: MseState) {
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = state;
     }
 
-    /// 获取本地 DH 公钥 (用于调试)
+    /// Get local DH public key (for debugging)
     pub fn local_dh_pubkey(&self) -> &[u8] {
         &self.local_dh_pubkey
     }
 
-    /// 获取共享密钥 (用于调试)
+    /// Get shared secret (for debugging)
     pub fn shared_secret(&self) -> Option<&[u8]> {
         self.shared_secret.as_deref()
     }

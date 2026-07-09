@@ -97,10 +97,18 @@ impl HttpSegmentDownloader {
         }
     }
 
-    pub async fn supports_range(&self, url: &str, cookie_header: Option<&str>) -> Result<bool> {
+    pub async fn supports_range(
+        &self,
+        url: &str,
+        cookie_header: Option<&str>,
+        headers: &[(String, String)],
+    ) -> Result<bool> {
         let mut req = self.client.head(url);
         if let Some(ch) = cookie_header {
             req = req.header("Cookie", ch);
+        }
+        for (name, value) in headers {
+            req = req.header(name, value);
         }
         let resp = req.send().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -130,6 +138,7 @@ impl HttpSegmentDownloader {
         offset: u64,
         length: u64,
         cookie_header: Option<&str>,
+        headers: &[(String, String)],
     ) -> Result<bytes::Bytes> {
         if length == 0 {
             return Ok(bytes::Bytes::new());
@@ -145,6 +154,9 @@ impl HttpSegmentDownloader {
             .timeout(Duration::from_secs(constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS));
         if let Some(ch) = cookie_header {
             req = req.header("Cookie", ch);
+        }
+        for (name, value) in headers {
+            req = req.header(name, value);
         }
         let response = req.send().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -232,7 +244,7 @@ mod tests {
             .unwrap();
         let dl = HttpSegmentDownloader::new(&client);
         let result = dl
-            .supports_range("http://127.0.0.1:1/nonexistent", None)
+            .supports_range("http://127.0.0.1:1/nonexistent", None, &[])
             .await;
         assert!(result.is_err(), "should fail for unreachable host");
     }
@@ -241,7 +253,7 @@ mod tests {
     async fn test_download_range_zero_length() {
         let client = reqwest::Client::new();
         let dl = HttpSegmentDownloader::new(&client);
-        let result = dl.download_range("http://example.com", 0, 0, None).await;
+        let result = dl.download_range("http://example.com", 0, 0, None, &[]).await;
         assert!(result.is_ok(), "zero-length range should return empty vec");
         assert!(result.unwrap().is_empty());
     }
@@ -278,7 +290,7 @@ mod tests {
             .unwrap();
         let dl = HttpSegmentDownloader::new(&client);
 
-        let result = dl.download_range(&url, 99999, 100, None).await;
+        let result = dl.download_range(&url, 99999, 100, None, &[]).await;
         assert!(result.is_err(), "416 should be an error");
 
         // Wait for server with timeout
@@ -297,6 +309,7 @@ mod tests {
             .supports_range(
                 "http://invalid-host-name-that-does-not-exist-12345.com/",
                 None,
+                &[],
             )
             .await
         {
@@ -315,7 +328,7 @@ mod tests {
         let dl = HttpSegmentDownloader::new(&client);
 
         let result_404 = dl
-            .download_range("http://httpbin.org/status/404", 0, 100, None)
+            .download_range("http://httpbin.org/status/404", 0, 100, None, &[])
             .await;
         assert!(result_404.is_err(), "404 should be fatal error");
     }

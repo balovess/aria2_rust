@@ -1,7 +1,7 @@
-//! BT 下载进度持久化系统
+//! BT download progress persistence system
 //!
-//! 提供将 BT 下载进度保存到 `.aria2` 文本格式文件的功能，支持原子写入和
-//! 自动检测 C++ 二进制格式与文本格式的兼容性。
+//! Provides functionality to save BT download progress to `.aria2` text format files,
+//! with atomic write support and automatic detection of C++ binary format vs text format.
 
 use std::fmt::{Display, Formatter};
 use std::fs;
@@ -12,12 +12,12 @@ use std::time::SystemTime;
 use crate::error::{Aria2Error, FatalError, Result};
 use tracing::{debug, info, warn};
 
-/// BT 下载进度的 Peer 地址信息
+/// BT download progress Peer address information
 #[derive(Clone, Debug)]
 pub struct PeerAddr {
-    /// IP 地址
+    /// IP address
     pub ip: String,
-    /// 端口号
+    /// Port number
     pub port: u16,
 }
 
@@ -27,43 +27,43 @@ impl Display for PeerAddr {
     }
 }
 
-/// BT 下载统计信息
+/// BT download statistics
 #[derive(Clone, Debug, Default)]
 pub struct DownloadStats {
-    /// 已上传字节数
+    /// Uploaded bytes
     pub uploaded_bytes: u64,
-    /// 已下载字节数
+    /// Downloaded bytes
     pub downloaded_bytes: u64,
-    /// 上传速度（字节/秒）
+    /// Upload speed (bytes/sec)
     pub upload_speed: f64,
-    /// 下载速度（字节/秒）
+    /// Download speed (bytes/sec)
     pub download_speed: f64,
-    /// 已用时间（秒）
+    /// Elapsed time (seconds)
     pub elapsed_seconds: u64,
 }
 
-/// BT 下载进度数据结构
+/// BT download progress data structure
 ///
-/// 包含 BT 下载的所有状态信息，用于持久化到磁盘。
+/// Contains all state information for BT download, used for persisting to disk.
 #[derive(Clone, Debug)]
 pub struct BtProgress {
-    /// 种子的 info_hash
+    /// Torrent info_hash
     pub info_hash: [u8; 20],
-    /// 已下载的 piece 位图
+    /// Downloaded piece bitmap
     pub bitfield: Vec<u8>,
-    /// 已连接的 peer 列表
+    /// Connected peer list
     pub peers: Vec<PeerAddr>,
-    /// 下载统计信息
+    /// Download statistics
     pub stats: DownloadStats,
-    /// 每个 piece 的长度
+    /// Length of each piece
     pub piece_length: u32,
-    /// 总大小
+    /// Total size
     pub total_size: u64,
-    /// 总 piece 数量
+    /// Total number of pieces
     pub num_pieces: u32,
-    /// 保存时间
+    /// Save time
     pub save_time: SystemTime,
-    /// 格式版本号
+    /// Format version number
     pub version: u32,
 }
 
@@ -84,11 +84,11 @@ impl Default for BtProgress {
 }
 
 impl BtProgress {
-    /// 将 info_hash 转为 40 位十六进制字符串
+    /// Convert info_hash to 40-character hex string
     ///
     /// # Returns
     ///
-    /// 返回小写的十六进制字符串表示
+    /// Returns lowercase hex string representation
     pub fn to_hex_hash(&self) -> String {
         self.info_hash
             .iter()
@@ -96,13 +96,13 @@ impl BtProgress {
             .collect()
     }
 
-    /// 计算完成百分比
+    /// Calculate completion percentage
     ///
-    /// 根据 bitfield 中已设置的位计算下载完成比例。
+    /// Calculates download completion ratio based on bits set in bitfield.
     ///
     /// # Returns
     ///
-    /// 返回 0.0 到 1.0 之间的完成比例
+    /// Returns completion ratio between 0.0 and 1.0
     pub fn completion_ratio(&self) -> f64 {
         if self.num_pieces == 0 || self.bitfield.is_empty() {
             return 0.0;
@@ -117,72 +117,73 @@ impl BtProgress {
     }
 }
 
-/// BT 进度文件管理器
+/// BT progress file manager
 ///
-/// 负责管理 BT 下载进度的保存、加载、删除和列表操作。
-/// 支持原子写入，确保在异常情况下不会损坏已存在的进度文件。
+/// Manages BT download progress save, load, delete, and list operations.
+/// Supports atomic writes to ensure existing progress files are not corrupted in abnormal situations.
 pub struct BtProgressManager {
-    /// 进度文件存储目录
+    /// Progress file storage directory
     progress_dir: PathBuf,
 }
 
 impl BtProgressManager {
-    /// 创建新的 BT 进度管理器
+    /// Create new BT progress manager
     ///
-    /// 自动创建指定的目录（如果不存在）。
+    /// Automatically creates specified directory if it doesn't exist.
     ///
     /// # Arguments
     ///
-    /// * `progress_dir` - 进度文件的存储目录路径
+    /// * `progress_dir` - Progress file storage directory path
     ///
     /// # Errors
     ///
-    /// 当无法创建目录时返回错误
+    /// Returns error when unable to create directory
     pub fn new(progress_dir: &Path) -> Result<Self> {
         fs::create_dir_all(progress_dir).map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!(
-                "无法创建进度目录 {}: {}",
+                "Failed to create progress directory {}: {}",
                 progress_dir.display(),
                 e
             )))
         })?;
 
-        info!(path = %progress_dir.display(), "BT 进度管理器初始化");
+        info!(path = %progress_dir.display(), "BT progress manager initialized");
 
         Ok(BtProgressManager {
             progress_dir: progress_dir.to_path_buf(),
         })
     }
 
-    /// 生成进度文件名
+    /// Generate progress file path
     pub fn get_progress_file_path(&self, info_hash: &[u8; 20]) -> PathBuf {
         let hex_hash: String = info_hash.iter().map(|b| format!("{:02x}", b)).collect();
         self.progress_dir.join(format!("{}.aria2", hex_hash))
     }
 
-    /// 保存 BT 下载进度到文件
+    /// Save BT download progress to file
     ///
-    /// 使用原子写入策略：先写入临时文件，再通过 rename 操作替换原文件，
-    /// 确保在写入过程中发生异常不会损坏已有的进度文件。
+    /// Uses atomic write strategy: writes to temporary file first, then replaces original file
+    /// via rename operation, ensuring existing progress files are not corrupted if exceptions
+    /// occur during write process.
     ///
     /// # Arguments
     ///
-    /// * `info_hash` - 种子的 info_hash (20 字节)
-    /// * `progress` - 要保存的进度数据
+    /// * `info_hash` - Torrent info_hash (20 bytes)
+    /// * `progress` - Progress data to save
     ///
     /// # Errors
     ///
-    /// 当文件写入失败时返回错误
+    /// Returns error when file write fails
     pub fn save_progress(&self, info_hash: &[u8; 20], progress: &BtProgress) -> Result<()> {
         let file_path = self.get_progress_file_path(info_hash);
 
         debug!(
             path = %file_path.display(),
             hash = %progress.to_hex_hash(),
-            "保存 BT 进度"
+            "Saving BT progress"
         );
 
-        // 写入临时文件 - use unique temp file name to avoid race conditions in concurrent writes
+        // Write to temporary file - use unique temp file name to avoid race conditions in concurrent writes
         let tmp_path = {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -202,27 +203,27 @@ impl BtProgressManager {
         let content = self.serialize_progress(progress);
         {
             let mut file = fs::File::create(&tmp_path)
-                .map_err(|e| Aria2Error::Io(format!("创建临时进度文件失败: {}", e)))?;
+                .map_err(|e| Aria2Error::Io(format!("Failed to create temporary progress file: {}", e)))?;
 
             file.write_all(content.as_bytes())
-                .map_err(|e| Aria2Error::Io(format!("写入进度数据失败: {}", e)))?;
+                .map_err(|e| Aria2Error::Io(format!("Failed to write progress data: {}", e)))?;
 
             file.flush()
-                .map_err(|e| Aria2Error::Io(format!("刷新进度文件缓冲区失败: {}", e)))?;
+                .map_err(|e| Aria2Error::Io(format!("Failed to flush progress file buffer: {}", e)))?;
         }
 
-        // 原子重命名
+        // Atomic rename
         fs::rename(&tmp_path, &file_path).map_err(|e| {
-            // 清理临时文件
+            // Clean up temporary file
             let _ = fs::remove_file(&tmp_path);
-            Aria2Error::Io(format!("重命名进度文件失败: {}", e))
+            Aria2Error::Io(format!("Failed to rename progress file: {}", e))
         })?;
 
         info!(
             path = %file_path.display(),
             pieces = progress.num_pieces,
             ratio = progress.completion_ratio(),
-            "BT 进度保存成功"
+            "BT progress saved successfully"
         );
 
         Ok(())
@@ -266,48 +267,48 @@ impl BtProgressManager {
         output
     }
 
-    /// 加载 BT 下载进度文件
+    /// Load BT download progress file
     ///
-    /// 自动检测 C++ 二进制格式和文本格式，并正确解析。
-    /// 会校验文件中的 info_hash 是否与传入的参数匹配。
+    /// Automatically detects C++ binary format and text format, and parses correctly.
+    /// Validates whether info_hash in file matches provided parameter.
     ///
     /// # Arguments
     ///
-    /// * `info_hash` - 预期的 info_hash (20 字节)，用于校验
+    /// * `info_hash` - Expected info_hash (20 bytes) for validation
     ///
     /// # Returns
     ///
-    /// 返回加载的进度数据
+    /// Returns loaded progress data
     ///
     /// # Errors
     ///
-    /// - 文件不存在或读取失败
-    /// - 文件格式无效或损坏
-    /// - info_hash 不匹配
+    /// - File doesn't exist or read failure
+    /// - File format invalid or corrupted
+    /// - info_hash mismatch
     pub fn load_progress(&self, info_hash: &[u8; 20]) -> Result<BtProgress> {
         let file_path = self.get_progress_file_path(info_hash);
 
         debug!(
             path = %file_path.display(),
             hash = %info_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
-            "加载 BT 进度"
+            "Loading BT progress"
         );
 
         let content = match fs::read_to_string(&file_path) {
             Ok(content) => content,
             Err(e) => {
-                // 尝试作为二进制格式读取
+                // Try reading as binary format
                 if e.kind() == std::io::ErrorKind::InvalidData {
                     return self.load_binary_format(info_hash, &file_path);
                 }
-                return Err(Aria2Error::Io(format!("读取进度文件失败: {}", e)));
+                return Err(Aria2Error::Io(format!("Failed to read progress file: {}", e)));
             }
         };
 
         self.parse_text_format(info_hash, &content, &file_path)
     }
 
-    /// 解析文本格式
+    /// Parse text format
     fn parse_text_format(
         &self,
         expected_hash: &[u8; 20],
@@ -331,7 +332,7 @@ impl BtProgressManager {
         for line in content.lines() {
             let line = line.trim();
 
-            // 跳过空行
+            // Skip empty lines
             if line.is_empty() {
                 continue;
             }
@@ -347,13 +348,13 @@ impl BtProgressManager {
                     if let Some((key, value)) = line.split_once('=') {
                         match key.trim() {
                             "info_hash" => {
-                                // 校验 info_hash 匹配
+                                // Validate info_hash match
                                 let file_hash = value.trim().to_lowercase();
                                 let expected_hex: String =
                                     expected_hash.iter().map(|b| format!("{:02x}", b)).collect();
                                 if file_hash != expected_hex {
                                     return Err(Aria2Error::Io(format!(
-                                        "进度文件的 info_hash 不匹配: 文件={}, 期望={}",
+                                        "Progress file info_hash mismatch: file={}, expected={}",
                                         file_hash, expected_hex
                                     )));
                                 }
@@ -403,21 +404,21 @@ impl BtProgressManager {
             path = %file_path.display(),
             pieces = progress.num_pieces,
             ratio = progress.completion_ratio(),
-            "BT 进度加载成功"
+            "BT progress loaded successfully"
         );
 
         Ok(progress)
     }
 
-    /// 尝试加载二进制格式（C++ 兼容格式）
+    /// Try loading binary format (C++ compatible format)
     fn load_binary_format(&self, _info_hash: &[u8; 20], _file_path: &Path) -> Result<BtProgress> {
-        // 二进制格式暂不支持，返回错误提示用户使用新格式
+        // Binary format currently not supported, return error prompting user to use new format
         Err(Aria2Error::Io(
-            "不支持旧的 C++ 二进制格式，请使用文本格式".to_string(),
+            "Old C++ binary format not supported, please use text format".to_string(),
         ))
     }
 
-    /// 解析 bitfield 的十六进制字符串
+    /// Parse bitfield hex string
     fn parse_bitfield_hex(&self, hex_str: &str) -> Vec<u8> {
         let hex_str = hex_str.trim();
         if hex_str.is_empty() {
@@ -436,14 +437,14 @@ impl BtProgressManager {
             .collect()
     }
 
-    /// 解析 peer 地址字符串
+    /// Parse peer address string
     fn parse_peer_addr(&self, addr_str: &str) -> Option<PeerAddr> {
         let addr_str = addr_str.trim();
         if addr_str.is_empty() {
             return None;
         }
 
-        // 查找最后一个冒号（IPv6 地址可能包含多个冒号）
+        // Find last colon (IPv6 addresses may contain multiple colons)
         if let Some(colon_pos) = addr_str.rfind(':') {
             let ip = addr_str[..colon_pos].trim().to_string();
             let port: u16 = addr_str[colon_pos + 1..].trim().parse().ok()?;
@@ -454,42 +455,42 @@ impl BtProgressManager {
         }
     }
 
-    /// 删除指定 info_hash 的进度文件
+    /// Delete progress file for specified info_hash
     ///
     /// # Arguments
     ///
-    /// * `info_hash` - 要删除的种子的 info_hash (20 字节)
+    /// * `info_hash` - info_hash of torrent to delete (20 bytes)
     ///
     /// # Errors
     ///
-    /// 当文件删除失败时返回错误
+    /// Returns error when file deletion fails
     pub fn remove_progress(&self, info_hash: &[u8; 20]) -> Result<()> {
         let file_path = self.get_progress_file_path(info_hash);
 
         debug!(
             hash = %info_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
-            "删除 BT 进度"
+            "Deleting BT progress"
         );
 
         if file_path.exists() {
             fs::remove_file(&file_path)
-                .map_err(|e| Aria2Error::Io(format!("删除进度文件失败: {}", e)))?;
+                .map_err(|e| Aria2Error::Io(format!("Failed to delete progress file: {}", e)))?;
 
-            info!(path = %file_path.display(), "BT 进度文件已删除");
+            info!(path = %file_path.display(), "BT progress file deleted");
         } else {
-            warn!(path = %file_path.display(), "进度文件不存在");
+            warn!(path = %file_path.display(), "Progress file does not exist");
         }
 
         Ok(())
     }
 
-    /// 列出所有已保存的进度文件
+    /// List all saved progress files
     ///
-    /// 扫描进度目录中所有 `.aria2` 文件，提取其 info_hash。
+    /// Scans all `.aria2` files in progress directory, extracts their info_hash.
     ///
     /// # Returns
     ///
-    /// 返回所有已保存进度的 info_hash 列表
+    /// Returns list of info_hash for all saved progress
     pub fn list_saved_progresses(&self) -> Vec<[u8; 20]> {
         let mut hashes = Vec::new();
 
@@ -499,14 +500,14 @@ impl BtProgressManager {
                 if let Some(name) = path.file_name() {
                     let name_str = name.to_string_lossy();
                     if let Some(hex_hash) = name_str.strip_suffix(".aria2") {
-                        // 从文件名提取 hex hash
-                        // 去掉 ".aria2"
+                        // Extract hex hash from filename
+                        // Remove ".aria2"
                         if let Ok(hash) = Self::hex_to_info_hash(hex_hash) {
                             hashes.push(hash);
                         } else {
                             warn!(
                                 filename = %name_str,
-                                "无法解析进度文件名中的 info_hash"
+                                "Cannot parse info_hash from progress file name"
                             );
                         }
                     }
@@ -514,12 +515,12 @@ impl BtProgressManager {
             }
         }
 
-        debug!(count = hashes.len(), "列出所有已保存的 BT 进度");
+        debug!(count = hashes.len(), "Listed all saved BT progress");
 
         hashes
     }
 
-    /// 将十六进制字符串转换为 info_hash
+    /// Convert hex string to info_hash
     fn hex_to_info_hash(hex_str: &str) -> std::result::Result<[u8; 20], ()> {
         if hex_str.len() != 40 {
             return Err(());
@@ -574,13 +575,13 @@ mod tests {
 
     #[test]
     fn test_completion_ratio_full() {
-        // 4 个 piece 全部下载完成
+        // 4 pieces all downloaded
         let progress = BtProgress {
             num_pieces: 4,
-            bitfield: vec![0xFF], // 8 bits, 但只有 4 个 piece
+            bitfield: vec![0xFF], // 8 bits, but only 4 pieces
             ..Default::default()
         };
-        // 应该是 4/4 = 1.0，但实际会计算所有 set bits
+        // Should be 4/4 = 1.0, but will actually calculate all set bits
         assert!(progress.completion_ratio() > 0.0);
     }
 

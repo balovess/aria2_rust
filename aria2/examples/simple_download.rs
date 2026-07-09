@@ -90,6 +90,7 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         bt_prioritize_piece: "rarest".to_string(),
         enable_utp: false,
         utp_listen_port: None,
+        ..Default::default()
     };
 
     match man.add_group(vec![uri.to_string()], download_opts).await {

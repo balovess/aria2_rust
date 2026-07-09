@@ -168,6 +168,19 @@ impl App {
                 .get_opt_i64("utp-listen-port")
                 .await
                 .and_then(|v| if v > 0 { Some(v as u16) } else { None }),
+            header: self
+                .get_opt_str("header")
+                .await
+                .map(|s| {
+                    s.split('\n')
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            user_agent: self.get_opt_str("user-agent").await,
+            referer: self.get_opt_str("referer").await,
+            ..Default::default()
         };
 
         let mut engine_lock = self.engine.lock().await;
@@ -254,10 +267,20 @@ impl App {
     }
 
     /// Run the download engine event loop.
-    pub async fn run_engine(&self) -> std::result::Result<(), String> {
+    pub async fn run_engine(&self, keep_alive: bool) -> std::result::Result<(), String> {
         let mut engine_lock: tokio::sync::MutexGuard<'_, Option<DownloadEngine>> =
             self.engine.lock().await;
-        if let Some(engine) = engine_lock.take() {
+        if let Some(mut engine) = engine_lock.take() {
+            engine.set_keep_alive(keep_alive);
+            // Take shutdown sender and wire to Ctrl+C (always, so user can interrupt)
+            if let Some(tx) = engine.take_shutdown_sender() {
+                tokio::spawn(async move {
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        tracing::info!("Ctrl+C received, shutting down...");
+                        let _ = tx.send(());
+                    }
+                });
+            }
             drop(engine_lock);
             info!("Starting download engine, {} tasks total", self.detected_inputs.len());
             let result: Result<(), _> = engine.run().await;

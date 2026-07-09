@@ -131,14 +131,8 @@ impl App {
 
         self.detected_inputs = positional_uris
             .into_iter()
-            .filter_map(|uri| match detect(&uri) {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    warn!("Cannot detect input type '{}': {}", uri, e);
-                    None
-                }
-            })
-            .collect();
+            .map(|uri| detect(&uri).map_err(|e| format!("Cannot detect input type '{}': {}", uri, e)))
+            .collect::<std::result::Result<Vec<_>, String>>()?;
         Ok(())
     }
 

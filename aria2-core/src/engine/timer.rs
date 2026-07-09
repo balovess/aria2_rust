@@ -48,7 +48,7 @@ impl TimerA2 {
             next_id: 0,
         };
 
-        info!("定时器系统初始化完成");
+        info!("Timer system initialization complete");
         (timer_a2, event_rx)
     }
 
@@ -68,7 +68,7 @@ impl TimerA2 {
         self.timers.insert(id, timer);
 
         debug!(
-            "添加定时器 #{} (延迟: {:?}, 间隔: {:?})",
+            "Adding timer #{} (delay: {:?}, interval: {:?})",
             id, delay, interval
         );
         Ok(id)
@@ -76,16 +76,16 @@ impl TimerA2 {
 
     pub fn remove_timer(&mut self, id: TimerId) {
         if self.timers.remove(&id).is_some() {
-            debug!("移除定时器 #{}", id);
+            debug!("Removing timer #{}", id);
         }
     }
 
     pub async fn run(mut self) -> Result<()> {
-        info!("定时器系统启动");
+        info!("Timer system started");
 
         loop {
             if self.timers.is_empty() {
-                debug!("无活跃定时器,等待新定时器");
+                debug!("No active timers, waiting for new timer");
                 tokio::task::yield_now().await;
                 continue;
             }

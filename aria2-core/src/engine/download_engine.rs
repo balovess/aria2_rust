@@ -35,6 +35,9 @@ pub struct DownloadEngine {
     /// DNS resolution cache for avoiding repeated lookups.
     /// Created during engine initialization and passed down via dependency injection.
     dns_cache: Arc<Mutex<DnsCache>>,
+    /// When true, the engine stays alive even with no pending/running commands
+    /// (used for RPC listen mode). The loop only exits on shutdown signal.
+    keep_alive: bool,
 }
 
 impl DownloadEngine {
@@ -63,10 +66,11 @@ impl DownloadEngine {
             auto_save: None,
             ftp_pool: Arc::new(FtpConnectionPool::new(constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS)),
             dns_cache: Arc::new(Mutex::new(DnsCache::new())),
+            keep_alive: false,
         };
 
         info!(
-            "下载引擎初始化完成, tick间隔: {}ms, 最大重试次数: {}",
+            "Download engine initialization complete, tick interval: {}ms, max retries: {}",
             tick_interval_ms, max_tries
         );
 
@@ -76,7 +80,7 @@ impl DownloadEngine {
     pub fn set_global_rate_limiter(&mut self, config: RateLimiterConfig) {
         self.global_limiter = Some(RateLimiter::new(&config));
         info!(
-            "全局限速已设置: download={:?}, upload={:?}",
+            "Global speed limits set: download={:?}, upload={:?}",
             config.download_rate(),
             config.upload_rate()
         );
@@ -105,12 +109,12 @@ impl DownloadEngine {
             let auto_save = AutoSaveSession::new(path, interval, man_ref.clone());
             self.auto_save = Some(Arc::new(Mutex::new(auto_save)));
             info!(
-                "自动保存 session 已启用: 路径={}, 间隔={:.1}s",
+                "Auto-save session enabled: path={}, interval={:.1}s",
                 path_clone.display(),
                 interval.as_secs_f64()
             );
         } else {
-            info!("手动保存 session 已启用: 路径={}", path.display());
+            info!("Manual save session enabled: path={}", path.display());
         }
     }
 
@@ -129,7 +133,7 @@ impl DownloadEngine {
     pub fn add_command(&self, command: Box<dyn Command>) -> Result<()> {
         self.command_tx
             .send(command)
-            .map_err(|e| Aria2Error::DownloadFailed(format!("添加命令失败: {}", e)))
+            .map_err(|e| Aria2Error::DownloadFailed(format!("Failed to add command: {}", e)))
     }
 
     pub fn retry_stats(&self) -> &RetryStats {
@@ -150,8 +154,27 @@ impl DownloadEngine {
         &self.dns_cache
     }
 
+    /// Enable/disable keep-alive mode. When true, the engine stays alive even
+    /// with no pending/running commands (used for RPC listen mode). The loop
+    /// only exits on shutdown signal.
+    pub fn set_keep_alive(&mut self, v: bool) {
+        self.keep_alive = v;
+    }
+
+    /// Clone the command sender so external callers (e.g., RPC) can submit
+    /// download commands to the engine loop.
+    pub fn command_sender(&self) -> mpsc::UnboundedSender<Box<dyn Command>> {
+        self.command_tx.clone()
+    }
+
+    /// Take the shutdown sender so an external task (e.g., Ctrl+C handler) can
+    /// signal the engine to stop. Must be called before `run()`.
+    pub fn take_shutdown_sender(&mut self) -> Option<oneshot::Sender<()>> {
+        self.shutdown_tx.take()
+    }
+
     pub async fn run(mut self) -> Result<()> {
-        info!("下载引擎启动");
+        info!("Download engine started");
 
         let mut pending_commands: Vec<Box<dyn Command>> = Vec::new();
         let mut running_commands: Vec<Box<dyn Command>> = Vec::new();
@@ -168,16 +191,16 @@ impl DownloadEngine {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    debug!("引擎tick触发");
+                    debug!("Engine tick triggered");
 
                     for (cmd, attempt) in failed_commands.drain(..) {
                         if policy.should_retry(attempt, &Aria2Error::Recoverable(RecoverableError::Timeout)) {
                             let wait = policy.wait_duration(attempt);
-                            warn!("重试命令 (第{}次), 等待 {:?}", attempt + 1, wait);
+                            warn!("Retrying command (attempt {}), waiting {:?}", attempt + 1, wait);
                             pending_commands.push(cmd);
                             tokio::time::sleep(wait).await;
                         } else {
-                            error!("命令放弃重试 (已尝试 {} 次)", attempt + 1);
+                            error!("Command retry abandoned (attempted {} times)", attempt + 1);
                         }
                     }
 
@@ -185,14 +208,14 @@ impl DownloadEngine {
                     self.check_timeouts(&mut running_commands, &policy, &stats, &mut failed_commands).await?;
                     self.collect_completed(&mut running_commands).await?;
 
-                    if pending_commands.is_empty() && running_commands.is_empty() && failed_commands.is_empty() {
-                        info!("所有任务已完成,引擎即将关闭");
+                    if !self.keep_alive && pending_commands.is_empty() && running_commands.is_empty() && failed_commands.is_empty() {
+                        info!("All tasks completed, engine shutting down");
                         break;
                     }
                 }
 
                 Ok(_) = &mut shutdown_rx => {
-                    info!("收到关闭信号");
+                    info!("Shutdown signal received");
                     self.shutdown(&mut running_commands).await;
                     break;
                 }
@@ -200,7 +223,7 @@ impl DownloadEngine {
         }
 
         info!(
-            "下载引擎停止, 重试统计: 总计={}, 超时={}, 服务错误={}, 网络故障={}",
+            "Download engine stopped, retry stats: total={}, timeouts={}, server_errors={}, network_failures={}",
             stats.total(),
             stats.timeouts(),
             stats.server_errors(),
@@ -220,10 +243,10 @@ impl DownloadEngine {
         while !pending.is_empty() {
             let mut cmd = pending.remove(0);
             if let Err(e) = cmd.execute().await {
-                error!("命令执行失败: {}", e);
+                error!("Command execution failed: {}", e);
             }
             running.push(cmd);
-            debug!("调度命令, 运行中: {}", running.len());
+            debug!("Dispatching command, running: {}", running.len());
         }
         Ok(())
     }
@@ -242,7 +265,7 @@ impl DownloadEngine {
             {
                 let status = cmd.status();
                 if matches!(status, CommandStatus::Running | CommandStatus::Pending) {
-                    error!("命令执行超时, 将加入重试队列");
+                    error!("Command execution timeout, will be added to retry queue");
                     stats.record_retry(&Aria2Error::Recoverable(RecoverableError::Timeout));
                     failed.push((cmd, 0));
                     continue;
@@ -265,12 +288,12 @@ impl DownloadEngine {
     }
 
     async fn shutdown(&self, running: &mut Vec<Box<dyn Command>>) {
-        info!("正在关闭运行中的命令...");
+        info!("Shutting down running commands...");
         if let (Some(path), Some(man)) = (&self.save_session_path, &self.request_group_man) {
             let mut cmd = SaveSessionCommand::new(path.clone(), man.clone());
             match cmd.execute().await {
-                Ok(_) => info!("关闭时已保存 session 到 {}", path.display()),
-                Err(e) => warn!("关闭时保存 session 失败: {}", e),
+                Ok(_) => info!("Session saved on shutdown to {}", path.display()),
+                Err(e) => warn!("Failed to save session on shutdown: {}", e),
             }
         }
         running.clear();

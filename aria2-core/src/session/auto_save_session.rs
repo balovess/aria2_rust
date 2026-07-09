@@ -33,7 +33,7 @@ impl AutoSaveSession {
 
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::SeqCst);
-        debug!("AutoSaveSession 标记为 dirty");
+        debug!("AutoSaveSession marked as dirty");
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -52,7 +52,7 @@ impl Command for AutoSaveSession {
 
         if elapsed < self.interval {
             debug!(
-                "AutoSave 跳过: 间隔未到 ({:.1}s < {:.1}s)",
+                "AutoSave skipped: interval not reached ({:.1}s < {:.1}s)",
                 elapsed.as_secs_f64(),
                 self.interval.as_secs_f64()
             );
@@ -60,12 +60,12 @@ impl Command for AutoSaveSession {
         }
 
         if !self.is_dirty() {
-            debug!("AutoSave 跳过: 无变更 (dirty=false)");
+            debug!("AutoSave skipped: no changes (dirty=false)");
             return Ok(());
         }
 
         debug!(
-            "AutoSave 触发: 间隔={:.1}s, dirty=true",
+            "AutoSave triggered: interval={:.1}s, dirty=true",
             elapsed.as_secs_f64()
         );
 

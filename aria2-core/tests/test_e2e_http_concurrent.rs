@@ -38,6 +38,7 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         no_proxy: None,
         enable_utp: false,
         utp_listen_port: None,
+        ..Default::default()
     };
     DownloadCommand::new(
         GroupId::new(1),
@@ -117,7 +118,7 @@ fn test_concurrent_segment_manager_fail_marks_failed() {
 async fn test_http_segment_downloader_zero_length() {
     let client = reqwest::Client::new();
     let dl = HttpSegmentDownloader::new(&client);
-    let result = dl.download_range("http://example.com", 0, 0, None).await;
+    let result = dl.download_range("http://example.com", 0, 0, None, &[]).await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
 }
@@ -166,6 +167,7 @@ fn test_download_options_with_values() {
         no_proxy: None,
         enable_utp: false,
         utp_listen_port: None,
+        ..Default::default()
     };
     assert_eq!(opts.split, Some(16));
     assert_eq!(opts.max_connection_per_server, Some(8));

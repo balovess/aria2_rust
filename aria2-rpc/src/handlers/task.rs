@@ -9,6 +9,8 @@ use crate::engine::TaskState;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, FileInfo, StatusInfo, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
+use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
 impl RpcEngine {
     /// Handle `aria2.addUri` - Add a new download task from URI(s).
@@ -417,18 +419,62 @@ impl RpcEngine {
     }
 
     /// Internal helper to add a new download task.
+    ///
+    /// When `group_man` and `cmd_tx` are configured (i.e., the RPC server is
+    /// wired to a running DownloadEngine), this creates a real download:
+    /// 1. Registers a `RequestGroup` in `RequestGroupMan` under the generated GID.
+    /// 2. Creates a `DownloadCommand` sharing that group.
+    /// 3. Sends the command to the engine via `cmd_tx`.
+    ///
+    /// When shared state is not available (e.g., in unit tests), it falls back
+    /// to creating a placeholder `TaskState` only.
     async fn add_task(
         &self,
         uris: Vec<String>,
         options: HashMap<String, serde_json::Value>,
     ) -> Result<String, JsonRpcError> {
-        let gid = create_gid();
+        let gid_str = create_gid();
+        let gid = GroupId::from_hex_string(&gid_str)
+            .ok_or_else(|| JsonRpcError::InternalError("Invalid GID generated".into()))?;
+
+        let dl_options = rpc_options_to_download_options(&options);
+
+        // Start a real download if we have shared engine state
+        if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
+            let man = group_man.read().await;
+            man.add_group_with_gid(gid, uris.clone(), dl_options.clone())
+                .await
+                .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
+
+            let group = man
+                .group_by_id(gid)
+                .ok_or_else(|| JsonRpcError::InternalError("Group not found after insert".into()))?;
+
+            let first_uri = uris.first().ok_or_else(|| {
+                JsonRpcError::InvalidParams("At least one URI is required".into())
+            })?;
+
+            let cmd = DownloadCommand::new_with_group(
+                group,
+                first_uri,
+                &dl_options,
+                dl_options.dir.as_deref(),
+                dl_options.out.as_deref(),
+            )
+            .map_err(|e| JsonRpcError::InternalError(format!("DownloadCommand failed: {}", e)))?;
+
+            cmd_tx
+                .send(Box::new(cmd))
+                .map_err(|e| JsonRpcError::InternalError(format!("Failed to send command: {}", e)))?;
+        }
+
+        // Track in RPC tasks map (for cancel_token, options metadata)
         let dir = options
             .get("dir")
             .and_then(|v| v.as_str())
             .unwrap_or(".")
             .to_string();
-        let status = StatusInfo::new(&gid)
+        let status = StatusInfo::new(&gid_str)
             .with_status(DownloadStatus::Active)
             .with_dir(dir)
             .with_total_length(0)
@@ -437,20 +483,81 @@ impl RpcEngine {
         let state = TaskState::new(status, options, uris);
         {
             let mut tasks = self.tasks.write().await;
-            tasks.insert(gid.clone(), state);
+            tasks.insert(gid_str.clone(), state);
         }
         let _ = self.event_publisher.publish(
             EventType::DownloadStart,
-            DownloadEvent::download_start(&gid, vec![]),
+            DownloadEvent::download_start(&gid_str, vec![]),
         );
-        Ok(gid)
+        Ok(gid_str)
     }
 
     /// Internal helper to get current status info for a task.
+    ///
+    /// Prefers live progress from `RequestGroupMan` (atomic fields updated by
+    /// the download engine). Falls back to the placeholder `tasks` map when
+    /// shared state is unavailable (e.g., unit tests).
     async fn get_status(&self, gid: &str) -> Option<StatusInfo> {
+        // Try RequestGroupMan first (live progress)
+        if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            if let Some(group_lock) = man.group_by_hex(gid) {
+                let g = group_lock.read().await;
+                let status = g.status().await;
+                let total = g.get_total_length_atomic();
+                let completed = g.get_completed_length();
+                let dl_speed = g.get_download_speed_cached();
+                let uploaded = g.get_uploaded_length();
+                let dir = g.options().dir.clone().unwrap_or_default();
+                let uris: Vec<String> = g.uris().to_vec();
+                let first_uri = uris.first().cloned().unwrap_or_default();
+                let files = vec![FileInfo::new(first_uri, total).with_completed(completed)];
+                return Some(StatusInfo::new(gid)
+                    .with_status(status)
+                    .with_total_length(total)
+                    .with_completed_length(completed)
+                    .with_upload_length(uploaded)
+                    .with_download_speed(dl_speed)
+                    .with_dir(dir)
+                    .with_files(files));
+            }
+        }
+        // Fallback to tasks map (placeholder, for tests/no-engine mode)
         let mut tasks = self.tasks.write().await;
         let state = tasks.get_mut(gid)?;
         state.update_status_info();
         Some(state.status.clone())
+    }
+}
+
+/// Convert RPC option map (from `aria2.addUri` params) to `DownloadOptions`.
+///
+/// Handles both array and newline-separated string forms of `header`.
+fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) -> DownloadOptions {
+    let get_str = |k: &str| opts.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let get_u16 = |k: &str| opts.get(k).and_then(|v| v.as_u64()).map(|n| n as u16);
+
+    let header: Vec<String> = match opts.get("header") {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        Some(serde_json::Value::String(s)) => s
+            .split('\n')
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => vec![],
+    };
+
+    DownloadOptions {
+        dir: get_str("dir"),
+        out: get_str("out"),
+        split: get_u16("split"),
+        max_connection_per_server: get_u16("max-connection-per-server"),
+        header,
+        user_agent: get_str("user-agent"),
+        referer: get_str("referer"),
+        ..Default::default()
     }
 }

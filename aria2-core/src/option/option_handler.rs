@@ -460,6 +460,19 @@ impl OptionHandler {
             bt_prioritize_piece: self.get("bt-prioritize-piece").as_str().unwrap_or("").to_string(),
             enable_utp: self.get("enable-utp").as_bool().unwrap_or(false),
             utp_listen_port: get_usize("utp-listen-port"),
+            header: {
+                // C++ aria2 allows repeated `--header NAME: VALUE`; the config
+                // parser joins them with newlines. Split on newlines here.
+                self.get("header")
+                    .as_str()
+                    .unwrap_or("")
+                    .split('\n')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            },
+            user_agent: get_str("user-agent"),
+            referer: get_str("referer"),
         }
     }
 

@@ -8,6 +8,5 @@ bindings/python/tests/unit/__pycache__/
 
 bindings/python/tests/integration/__pycache__/
 bindings/python/tests/__pycache__/
-test_output.txt
-
-test_output2.txt
+*.txt
+*.md

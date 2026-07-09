@@ -29,7 +29,7 @@ pub struct RequestGroupMan {
 
 impl RequestGroupMan {
     pub fn new() -> Self {
-        info!("初始化请求组管理器");
+        info!("Initializing request group manager");
 
         RequestGroupMan {
             groups: DashMap::new(),
@@ -45,18 +45,64 @@ impl RequestGroupMan {
 
         self.groups.insert(gid, Arc::new(RwLock::new(group)));
 
-        info!("添加下载任务 #{}", gid.value());
-        debug!("当前任务总数: {}", self.groups.len());
+        info!("Adding download task #{}", gid.value());
+        debug!("Current total tasks: {}", self.groups.len());
 
         Ok(gid)
+    }
+
+    /// Insert a download group under a caller-chosen GID (used by RPC, which
+    /// generates 16-hex GIDs). Returns `Err` if the GID already exists.
+    pub async fn add_group_with_gid(
+        &self,
+        gid: GroupId,
+        uris: Vec<String>,
+        options: DownloadOptions,
+    ) -> Result<()> {
+        if self.groups.contains_key(&gid) {
+            return Err(crate::error::Aria2Error::DownloadFailed(format!(
+                "GID {} already exists",
+                gid.to_hex_string()
+            )));
+        }
+        let group = RequestGroup::new(gid, uris, options);
+        self.groups.insert(gid, Arc::new(RwLock::new(group)));
+        info!("Adding download task (RPC) #{}", gid.to_hex_string());
+        Ok(())
+    }
+
+    /// Look up a group by its hex GID string (RPC convention). Synchronous
+    /// because DashMap lookups do not block.
+    pub fn group_by_hex(&self, hex: &str) -> Option<Arc<RwLock<RequestGroup>>> {
+        let gid = GroupId::from_hex_string(hex)?;
+        self.groups.get(&gid).map(|v| v.clone())
+    }
+
+    /// Look up a group by numeric GID. Synchronous (DashMap).
+    pub fn group_by_id(&self, gid: GroupId) -> Option<Arc<RwLock<RequestGroup>>> {
+        self.groups.get(&gid).map(|v| v.clone())
+    }
+
+    /// Snapshot of all groups as `(GroupId, Arc<RwLock<RequestGroup>>)` pairs.
+    /// Synchronous (DashMap iteration does not block).
+    pub fn all_groups(&self) -> Vec<(GroupId, Arc<RwLock<RequestGroup>>)> {
+        self.groups
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
+    }
+
+    /// Remove a group by numeric GID, returning the removed group if present.
+    pub fn remove_group_by_id(&self, gid: GroupId) -> Option<Arc<RwLock<RequestGroup>>> {
+        self.groups.remove(&gid).map(|(_, v)| v)
     }
 
     pub async fn remove_group(&self, gid: GroupId) -> Result<()> {
         if let Some((_, group_lock)) = self.groups.remove(&gid) {
             let mut group = group_lock.write().await;
             group.remove().await?;
-            info!("移除下载任务 #{}", gid.value());
-            debug!("剩余任务数: {}", self.groups.len());
+            info!("Removing download task #{}", gid.value());
+            debug!("Remaining tasks: {}", self.groups.len());
         }
 
         Ok(())
@@ -66,7 +112,7 @@ impl RequestGroupMan {
         if let Some(group_lock) = self.groups.get(&gid) {
             let mut group = group_lock.write().await;
             group.pause().await?;
-            info!("暂停下载任务 #{}", gid.value());
+            info!("Pausing download task #{}", gid.value());
         }
 
         Ok(())
@@ -77,7 +123,7 @@ impl RequestGroupMan {
             let mut group = group_lock.write().await;
             if group.status().await.is_paused() {
                 group.start().await?;
-                info!("恢复下载任务 #{}", gid.value());
+                info!("Resuming download task #{}", gid.value());
             }
         }
 
@@ -135,7 +181,7 @@ impl RequestGroupMan {
         *self.global_upload_limit.write().await = upload_limit;
 
         debug!(
-            "设置全局速度限制 - 下载: {:?}, 上传: {:?}",
+            "Setting global speed limit - download: {:?}, upload: {:?}",
             download_limit, upload_limit
         );
     }
@@ -179,7 +225,7 @@ impl RequestGroupMan {
             self.groups.remove(gid);
         }
 
-        info!("清除 {} 个已完成的任务", count);
+        info!("Cleared {} completed tasks", count);
         Ok(count)
     }
 }

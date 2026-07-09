@@ -249,12 +249,12 @@ impl StatusPanel {
             return;
         }
         println!();
-        println!("{}", "下载摘要:".yellow());
-        println!("  总文件数:   {}", total_files.to_string().white());
-        println!("  总大小:     {}", format_size(total_size).white());
-        println!("  总耗时:     {}", format_duration(elapsed_secs).white());
+        println!("{}", "Download summary:".yellow());
+        println!("  Total files:   {}", total_files.to_string().white());
+        println!("  Total size:     {}", format_size(total_size).white());
+        println!("  Total time:     {}", format_duration(elapsed_secs).white());
         println!(
-            "  平均速度:   {}/s",
+            "  Average speed:   {}/s",
             format_size((total_size as f64 / elapsed_secs.max(1.0)) as u64).white()
         );
     }

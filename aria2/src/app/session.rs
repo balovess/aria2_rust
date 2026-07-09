@@ -267,6 +267,13 @@ impl App {
             utp_listen_port: options
                 .get("utp-listen-port")
                 .and_then(|v| v.parse::<u16>().ok()),
+            // HTTP headers
+            header: options
+                .get("header")
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default(),
+            user_agent: options.get("user-agent").cloned(),
+            referer: options.get("referer").cloned(),
         }
     }
 }

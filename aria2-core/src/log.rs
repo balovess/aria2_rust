@@ -32,5 +32,5 @@ pub fn init_logging(level: Level, log_file: Option<&str>) {
             .init();
     }
 
-    tracing::info!("日志系统初始化完成");
+    tracing::info!("Log system initialization complete");
 }

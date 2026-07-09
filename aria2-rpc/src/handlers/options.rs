@@ -16,6 +16,7 @@ const VALID_OPTION_KEYS: &[&str] = &[
     "bt-piece-selection-strategy", "bt-endgame-threshold",
     "max-retries", "retry-wait", "http-proxy", "dht-file-path",
     "bt-max-upload-slots", "bt-optimistic-unchoke-interval", "bt-snubbed-timeout",
+    "header", "user-agent", "referer",
 ];
 
 impl RpcEngine {

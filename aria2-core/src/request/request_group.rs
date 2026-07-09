@@ -8,16 +8,43 @@ use tracing::{debug, info};
 use crate::error::Result;
 use crate::segment::Segment;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DownloadStatus {
     #[default]
     Waiting,
     Active,
     Paused,
-    #[serde(skip_serializing)]
     Error(String),
     Complete,
     Removed,
+}
+
+// Custom serde impl so every variant serializes as a plain lowercase string
+// (e.g. "active", "waiting", "error"), matching C++ aria2's wire format that
+// browser plugins expect. The `Error(String)` payload (error message) is not
+// emitted here; callers surface it via `StatusInfo.error_message` instead.
+impl Serialize for DownloadStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DownloadStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "waiting" => Ok(DownloadStatus::Waiting),
+            "active" => Ok(DownloadStatus::Active),
+            "paused" => Ok(DownloadStatus::Paused),
+            "error" => Ok(DownloadStatus::Error(String::new())),
+            "complete" => Ok(DownloadStatus::Complete),
+            "removed" => Ok(DownloadStatus::Removed),
+            _ => Err(serde::de::Error::unknown_variant(
+                "DownloadStatus",
+                &["waiting", "active", "paused", "error", "complete", "removed"],
+            )),
+        }
+    }
 }
 
 impl fmt::Display for DownloadStatus {
@@ -171,6 +198,57 @@ pub struct DownloadOptions {
     /// UDP port for uTP connections. 0 = auto-assign.
     /// Experimental feature not in original aria2.
     pub utp_listen_port: Option<u16>,
+
+    // ------------------------------------------------------------------
+    // HTTP headers (C++ aria2 `--header` / RPC `header` option)
+    // ------------------------------------------------------------------
+    /// Custom HTTP request headers as `"Name: Value"` strings.
+    /// Applied to both HEAD probes and range GETs.
+    pub header: Vec<String>,
+    /// Override `User-Agent` header. Also injected into the `header` list by
+    /// [`DownloadOptions::parsed_headers`] when set.
+    pub user_agent: Option<String>,
+    /// Override `Referer` header. Also injected into the `header` list by
+    /// [`DownloadOptions::parsed_headers`] when set.
+    pub referer: Option<String>,
+}
+
+impl DownloadOptions {
+    /// Parse the raw `header` list into `(name, value)` pairs, splitting each
+    /// `"Name: Value"` entry on the first `:`. When `user_agent` or `referer`
+    /// are set, they are appended as `User-Agent` / `Referer` pairs (unless an
+    /// entry with the same name already exists), so callers only need to handle
+    /// a single header list.
+    pub fn parsed_headers(&self) -> Vec<(String, String)> {
+        let mut result: Vec<(String, String)> = Vec::new();
+        for raw in &self.header {
+            if let Some((name, value)) = raw.split_once(':') {
+                let name = name.trim().to_string();
+                let value = value.trim().to_string();
+                if !name.is_empty() {
+                    result.push((name, value));
+                }
+            }
+        }
+        // Overlay user_agent / referer if not already present (case-insensitive).
+        if let Some(ref ua) = self.user_agent
+            && !has_header(&result, "User-Agent")
+        {
+            result.push(("User-Agent".to_string(), ua.clone()));
+        }
+        if let Some(ref ref_) = self.referer
+            && !has_header(&result, "Referer")
+        {
+            result.push(("Referer".to_string(), ref_.clone()));
+        }
+        result
+    }
+}
+
+/// Case-insensitive check whether a `(name, value)` header list already contains
+/// an entry with the given name.
+fn has_header(headers: &[(String, String)], name: &str) -> bool {
+    headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
 
 pub struct RequestGroup {
@@ -204,7 +282,7 @@ pub struct RequestGroup {
 
 impl RequestGroup {
     pub fn new(gid: GroupId, uris: Vec<String>, options: DownloadOptions) -> Self {
-        info!("创建请求组 #{}", gid.value());
+        info!("Creating request group #{}", gid.value());
 
         RequestGroup {
             gid,
@@ -239,7 +317,7 @@ impl RequestGroup {
         *status = DownloadStatus::Active;
         *start_time = Some(std::time::Instant::now());
 
-        info!("启动下载任务 #{}", self.gid.value());
+        info!("Starting download task #{}", self.gid.value());
         Ok(())
     }
 
@@ -248,7 +326,7 @@ impl RequestGroup {
 
         if matches!(*status, DownloadStatus::Active) {
             *status = DownloadStatus::Paused;
-            info!("暂停下载任务 #{}", self.gid.value());
+            info!("Pausing download task #{}", self.gid.value());
         }
 
         Ok(())
@@ -261,7 +339,7 @@ impl RequestGroup {
         *status = DownloadStatus::Removed;
         *end_time = Some(std::time::Instant::now());
 
-        info!("移除下载任务 #{}", self.gid.value());
+        info!("Removing download task #{}", self.gid.value());
         Ok(())
     }
 
@@ -274,7 +352,7 @@ impl RequestGroup {
         *end_time = Some(std::time::Instant::now());
         *completed_length = self.total_length;
 
-        info!("完成下载任务 #{}", self.gid.value());
+        info!("Completing download task #{}", self.gid.value());
         Ok(())
     }
 
@@ -285,7 +363,7 @@ impl RequestGroup {
         *status = DownloadStatus::Error(err.into());
         *end_time = Some(std::time::Instant::now());
 
-        debug!("下载任务 #{} 发生错误", self.gid.value());
+        debug!("Download task #{} encountered error", self.gid.value());
         Ok(())
     }
 
@@ -311,7 +389,7 @@ impl RequestGroup {
 
     pub async fn set_total_length(&mut self, length: u64) {
         self.total_length = length;
-        debug!("设置总长度: {} bytes", length);
+        debug!("Setting total length: {} bytes", length);
     }
 
     pub async fn completed_length(&self) -> u64 {
@@ -357,7 +435,7 @@ impl RequestGroup {
     pub async fn add_segment(&mut self, segment: Segment) {
         let mut segments = self.segments.write().await;
         segments.push(segment);
-        debug!("添加分段, 当前段数: {}", segments.len());
+        debug!("Adding segment, current segments: {}", segments.len());
     }
 
     pub async fn segments(&self) -> Vec<Segment> {
