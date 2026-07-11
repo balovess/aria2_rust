@@ -274,6 +274,12 @@ impl App {
                 .unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),
+            file_allocation: options.get("file-allocation").cloned(),
+            mmap_threshold: options.get("mmap-threshold").and_then(|v| v.parse::<u64>().ok()),
+            secure_falloc: options
+                .get("secure-falloc")
+                .map(|v| v == "true")
+                .unwrap_or(false),
         }
     }
 }

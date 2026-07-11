@@ -803,7 +803,7 @@ mod disk_io_tests {
 
                 // Warm-up
                 for _ in 0..config.warmup_iterations {
-                    preallocate_file(&path, file_size, strategy).await.unwrap();
+                    preallocate_file(&path, file_size, strategy, false).await.unwrap();
                     tokio::fs::remove_file(&path).await.ok();
                 }
 
@@ -811,7 +811,7 @@ mod disk_io_tests {
                 let mut durations = Vec::new();
                 for _ in 0..config.measured_iterations {
                     let start = Instant::now();
-                    preallocate_file(&path, file_size, strategy).await.unwrap();
+                    preallocate_file(&path, file_size, strategy, false).await.unwrap();
                     durations.push(start.elapsed());
                     tokio::fs::remove_file(&path).await.ok();
                 }

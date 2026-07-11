@@ -53,7 +53,11 @@ fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
         ("allow-overwrite", OptionValue::Bool(true)),
         (
             "file-allocation",
-            OptionValue::Str(String::from("prealloc")), // prealloc / none / falloc
+            OptionValue::Str(String::from("falloc")), // falloc / none / prealloc / trunc / mmap
+        ),
+        (
+            "mmap-threshold",
+            OptionValue::Usize(256 * 1024 * 1024), // 256 MiB
         ),
         ("auto-save-interval", OptionValue::Usize(60)),
         ("check-certificate", OptionValue::Bool(true)),
@@ -420,7 +424,7 @@ impl OptionHandler {
             cookies: get_str("cookies"),
             bt_force_encrypt: self.get("bt-force-encrypt").as_bool().unwrap_or(false),
             bt_require_crypto: self.get("bt-require-crypto").as_bool().unwrap_or(false),
-            enable_dht: self.get("enable-dht").as_bool().unwrap_or(false),
+            enable_dht: self.get("enable-dht").as_bool().unwrap_or(true),
             dht_listen_port: get_usize("dht-listen-port"),
             dht_entry_point: {
                 let v = self.get("dht-entry-point").as_str().unwrap_or("");
@@ -430,7 +434,7 @@ impl OptionHandler {
                     Some(v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
                 }
             },
-            enable_public_trackers: self.get("enable-public-trackers").as_bool().unwrap_or(false),
+            enable_public_trackers: self.get("enable-public-trackers").as_bool().unwrap_or(true),
             bt_piece_selection_strategy: self
                 .get("bt-piece-selection-strategy")
                 .as_str()
@@ -473,6 +477,9 @@ impl OptionHandler {
             },
             user_agent: get_str("user-agent"),
             referer: get_str("referer"),
+            file_allocation: get_str("file-allocation"),
+            mmap_threshold: get_u64("mmap-threshold"),
+            secure_falloc: self.get("secure-falloc").as_bool().unwrap_or(false),
         }
     }
 

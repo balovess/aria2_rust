@@ -11,11 +11,23 @@ use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 const VALID_OPTION_KEYS: &[&str] = &[
     "split", "max-connection-per-server", "max-download-limit",
     "max-upload-limit", "dir", "out", "seed-time", "seed-ratio",
+    // File allocation
+    "file-allocation", "mmap-threshold", "secure-falloc",
+    // Checksum & cookies
+    "checksum", "cookie-file", "cookies",
+    // BitTorrent
     "bt-force-encrypt", "bt-require-crypto", "enable-dht",
-    "dht-listen-port", "enable-public-trackers",
+    "dht-listen-port", "dht-entry-point", "enable-public-trackers",
     "bt-piece-selection-strategy", "bt-endgame-threshold",
-    "max-retries", "retry-wait", "http-proxy", "dht-file-path",
     "bt-max-upload-slots", "bt-optimistic-unchoke-interval", "bt-snubbed-timeout",
+    "bt-prioritize-piece", "enable-utp", "utp-listen-port",
+    // Retry
+    "max-retries", "retry-wait",
+    // DHT
+    "dht-file-path",
+    // Proxy
+    "http-proxy", "all-proxy", "https-proxy", "ftp-proxy", "no-proxy",
+    // HTTP headers
     "header", "user-agent", "referer",
 ];
 

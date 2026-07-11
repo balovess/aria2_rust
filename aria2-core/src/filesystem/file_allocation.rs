@@ -3,6 +3,14 @@ use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_space::check_disk_space;
 use std::path::Path;
 
+/// One-time warning emitted when `fallocate`-style allocation succeeds but
+/// the allocated blocks are NOT zero-filled by the platform (macOS
+/// `F_PREALLOCATE`, Windows `SetFileValidData`) and the caller did not opt
+/// into `secure-falloc`. In that case residual disk data may be exposed
+/// until the download overwrites those blocks. `std::sync::Once` ensures the
+/// warning is logged only once per process to avoid log spam.
+static SECURE_FALLOC_WARN_ONCE: std::sync::Once = std::sync::Once::new();
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AllocationStrategy {
     #[default]
@@ -10,6 +18,11 @@ pub enum AllocationStrategy {
     Prealloc,
     Falloc,
     Trunc,
+    /// Memory-mapped I/O: pre-allocate blocks via `fallocate`, then the writer
+    /// uses `MmapDiskWriter` for direct memory access. The allocation step is
+    /// identical to `Falloc`; the difference is in the writer construction
+    /// (handled by `DownloadCommand` based on the `file_allocation` option).
+    Mmap,
 }
 
 impl AllocationStrategy {
@@ -21,6 +34,7 @@ impl AllocationStrategy {
             "prealloc" => AllocationStrategy::Prealloc,
             "falloc" => AllocationStrategy::Falloc,
             "trunc" => AllocationStrategy::Trunc,
+            "mmap" => AllocationStrategy::Mmap,
             _ => AllocationStrategy::None,
         }
     }
@@ -37,22 +51,34 @@ impl AllocationStrategy {
 /// * `path` - Path to the file (used for error messages)
 /// * `length` - Desired file length in bytes
 /// * `strategy` - Allocation strategy to use
+/// * `secure` - When `true`, zero-fill allocated blocks on platforms that
+///   don't zero-fill (macOS, Windows). No-op on Linux where `fallocate(2)`
+///   always returns zeroed blocks.
 pub async fn allocate_file<D: DiskAdaptor>(
     adaptor: &mut D,
     _path: &Path,
     length: u64,
     strategy: AllocationStrategy,
+    secure: bool,
 ) -> Result<()> {
     match strategy {
         AllocationStrategy::None => Ok(()),
         AllocationStrategy::Prealloc => preallocate(adaptor, length).await,
-        AllocationStrategy::Falloc => fallocate(adaptor, length).await,
+        AllocationStrategy::Falloc => fallocate(adaptor, length, secure).await,
         AllocationStrategy::Trunc => truncate(adaptor, length).await,
+        // Mmap uses fallocate to ensure blocks are allocated before mapping;
+        // the actual mmap is performed by MmapDiskWriter at open time.
+        AllocationStrategy::Mmap => fallocate(adaptor, length, secure).await,
     }
 }
 
-pub async fn preallocate_file(path: &Path, length: u64, strategy: &str) -> Result<()> {
-    preallocate_file_with_progress(path, length, strategy, None::<&fn(u64, u64)>).await
+pub async fn preallocate_file(
+    path: &Path,
+    length: u64,
+    strategy: &str,
+    secure: bool,
+) -> Result<()> {
+    preallocate_file_with_progress(path, length, strategy, None::<&fn(u64, u64)>, secure).await
 }
 
 /// Preallocate file with optional progress callback for large allocations.
@@ -64,6 +90,7 @@ pub async fn preallocate_file_with_progress<F>(
     length: u64,
     strategy: &str,
     on_progress: Option<&F>,
+    secure: bool,
 ) -> Result<()>
 where
     F: Fn(u64, u64) + Send + Sync,
@@ -101,7 +128,7 @@ where
 
     let mut adaptor = DirectDiskAdaptor::new();
     adaptor.open(path).await?;
-    allocate_file(&mut adaptor, path, length, alloc_strategy).await?;
+    allocate_file(&mut adaptor, path, length, alloc_strategy, secure).await?;
 
     if let Some(cb) = on_progress
         && length >= PROGRESS_THRESHOLD
@@ -124,30 +151,100 @@ async fn preallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()>
     adaptor.truncate(length).await
 }
 
-/// Allocate file space using posix_fallocate on Unix systems.
-/// This method ensures contiguous disk space allocation when possible.
+/// Zero-fill a file region in async 1 MiB chunks.
+///
+/// This is used as a fallback when `fallocate(2)` returns `EOPNOTSUPP`
+/// (Linux) or as a security measure after `SetFileValidData`/`F_PREALLOCATE`
+/// (Windows/macOS) which don't zero-fill the allocated blocks.
+///
+/// Uses `tokio::task::yield_now()` between chunks to avoid blocking the
+/// reactor. The zero buffer is allocated once and reused.
+async fn async_zero_fill<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
+    let zero_chunk = vec![0u8; CHUNK_SIZE];
+    let mut remaining = length;
+    let mut offset: u64 = 0;
+
+    while remaining > 0 {
+        let write_len = remaining.min(CHUNK_SIZE as u64) as usize;
+        adaptor.write(offset, &zero_chunk[..write_len]).await?;
+        offset += write_len as u64;
+        remaining -= write_len as u64;
+
+        // Cooperative yield to avoid starving other tasks
+        tokio::task::yield_now().await;
+    }
+
+    Ok(())
+}
+
+/// Allocate file space using platform-native preallocation syscalls.
+/// This method attempts true disk-space allocation (avoiding sparse files)
+/// when the platform and filesystem support it, with graceful fallbacks.
 ///
 /// Platform-specific behavior:
-/// - **Unix/Linux**: Uses posix_fallocate64 syscall for true preallocation.
-///   Falls back to set_len if raw file descriptor is not available.
-/// - **Windows**: Uses SetEndOfFile via set_len() as native fallback.
-///   Windows doesn't have posix_fallocate, but set_len provides similar functionality.
-/// - **macOS**: macOS doesn't have fallocate/posix_fallocate.
-///   Uses set_len() which calls ftruncate under the hood.
-async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
+/// - **Linux**: Uses raw `fallocate(2)` (NOT `posix_fallocate64`) so that
+///   `EOPNOTSUPP` from the filesystem can be detected explicitly. When the
+///   filesystem doesn't support `fallocate(2)`, we fall back to
+///   `async_zero_fill` (cooperative zero-fill) instead of letting
+///   `posix_fallocate64` block the async runtime with its internal
+///   zero-fill loop. `fallocate(2)` always returns zeroed blocks on success,
+///   so `secure` has no effect on Linux. Falls back to `set_len` if no raw
+///   file descriptor is available.
+/// - **macOS**: Uses `fcntl(F_PREALLOCATE)` with `F_ALLOCATEALL` for true space
+///   allocation. `F_PREALLOCATE` does not zero-fill the allocated blocks, so
+///   when `secure == true` we additionally run `async_zero_fill`. When
+///   `secure == false`, a one-time warning is emitted (residual disk data
+///   may be exposed). `F_PREALLOCATE` does not extend the file size, so the
+///   file is sized first via `ftruncate` (set_len). Falls back to the sparse
+///   `set_len` result if the raw fd is unavailable.
+/// - **Windows**: Attempts `SetFileValidData` to extend the valid data length
+///   and force allocation. `SetFileValidData` does NOT zero-fill, so when
+///   `secure == true` we additionally run `async_zero_fill`. When
+///   `secure == false`, a one-time warning is emitted. Requires
+///   `SE_MANAGE_VOLUME_PRIVILEGE`; if the privilege is not held (or the call
+///   fails for any other reason), it falls back to the sparse file produced
+///   by `set_len` (SetEndOfFile).
+/// - **Other Unix (BSD, etc.)**: No portable preallocate syscall; uses `set_len`.
+async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64, secure: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Try to use posix_fallocate64 for true preallocation on Linux
         if let Some(fd) = adaptor.unix_raw_fd() {
-            unsafe {
-                let ret = libc::posix_fallocate64(fd, 0, length as i64);
-                if ret != 0 {
-                    return Err(Aria2Error::Io(
-                        std::io::Error::from_raw_os_error(ret).to_string(),
-                    ));
-                }
+            // Use raw fallocate(2) to detect EOPNOTSUPP explicitly.
+            // posix_fallocate64 would silently fall back to a blocking
+            // zero-fill loop inside libc when the kernel returns EOPNOTSUPP,
+            // which would stall the async runtime. By calling fallocate(2)
+            // directly we can fall back to our own cooperative async_zero_fill.
+            //
+            // FALLOC_FL_NONE (0) requests default behavior: allocate space
+            // and zero-fill it at the filesystem block level.
+            let ret = unsafe {
+                libc::fallocate(
+                    fd,
+                    libc::FALLOC_FL_NONE as libc::c_int,
+                    0,
+                    length as libc::off_t,
+                )
+            };
+            if ret == 0 {
+                // Success: kernel allocates zeroed blocks; secure is a no-op.
+                return Ok(());
             }
-            Ok(())
+            let errno = unsafe { *libc::__errno_location() };
+            if errno == libc::EOPNOTSUPP {
+                tracing::warn!(
+                    length,
+                    "fallocate(2) not supported by filesystem; \
+                     falling back to async zero-fill"
+                );
+                // Size the file first so writes land at correct offsets.
+                adaptor.truncate(length).await?;
+                return async_zero_fill(adaptor, length).await;
+            }
+            // Other errors: return as I/O error
+            return Err(Aria2Error::Io(
+                std::io::Error::from_raw_os_error(errno).to_string(),
+            ));
         } else {
             // Fall back to set_len if no raw fd available
             adaptor.truncate(length).await
@@ -156,16 +253,139 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
 
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        // On macOS and other Unix systems, posix_fallocate is not available
-        // Use ftruncate via set_len which is the standard approach
-        adaptor.truncate(length).await
+        // macOS-only: untested on this Windows dev machine, validated via
+        // type-checking only. `libc::fstore_t` and the F_* constants are
+        // exposed by the libc crate on macOS targets.
+        #[cfg(target_os = "macos")]
+        {
+            match adaptor.unix_raw_fd() {
+                Some(fd) => {
+                    // F_PREALLOCATE does not change the file size; size it first
+                    // via ftruncate so the file is correct even if preallocation
+                    // is rejected by the filesystem.
+                    adaptor.truncate(length).await?;
+                    // F_ALLOCATEALL allocates all requested space;
+                    // F_PEOFPOSMODE measures offset from physical end of file.
+                    let fstore = libc::fstore_t {
+                        fst_flags: libc::F_ALLOCATEALL as libc::c_uint,
+                        fst_posmode: libc::F_PEOFPOSMODE,
+                        fst_offset: 0,
+                        fst_length: length as libc::off_t,
+                        fst_bytesalloc: 0,
+                    };
+                    let ret = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &fstore) };
+                    if ret != 0 {
+                        // Filesystem may not support F_PREALLOCATE; the file is
+                        // already sized above, so it remains sparse but correct.
+                        tracing::warn!(
+                            length,
+                            "F_PREALLOCATE failed on macOS, file remains sparse"
+                        );
+                        return Ok(());
+                    }
+                    // F_PREALLOCATE succeeded but does NOT zero-fill the
+                    // allocated blocks. Zero-fill when secure is requested,
+                    // otherwise emit a one-time warning about the trade-off.
+                    if secure {
+                        async_zero_fill(adaptor, length).await
+                    } else {
+                        SECURE_FALLOC_WARN_ONCE.call_once(|| {
+                            tracing::warn!(
+                                "F_PREALLOCATE succeeded but does not zero-fill; \
+                                 residual disk data may be exposed. \
+                                 Enable --secure-falloc=true to zero-fill (at a \
+                                 performance cost). This warning is logged once."
+                            );
+                        });
+                        Ok(())
+                    }
+                }
+                None => adaptor.truncate(length).await,
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Other Unix (BSD, etc.): no portable preallocate syscall; use
+            // ftruncate via set_len which is the standard approach.
+            adaptor.truncate(length).await
+        }
     }
 
     #[cfg(not(unix))]
     {
-        // On Windows and other non-Unix systems, use set_len as native method
-        // This calls SetEndOfFile on Windows, which provides file allocation
-        adaptor.truncate(length).await
+        // Windows: attempt SetFileValidData for true space allocation.
+        // Requires SE_MANAGE_VOLUME_PRIVILEGE; fall back to sparse set_len
+        // (SetEndOfFile) when the privilege is not held or the call fails.
+        //
+        // NOTE: The raw HANDLE (*mut c_void) is not `Send`, so it must NOT be
+        // held across an await point (the future is required to be `Send` by
+        // callers). We therefore size the file first via `truncate` (which does
+        // not need the handle), then fetch the handle and invoke
+        // SetFileValidData synchronously with no await while the handle is live.
+        // The zero-fill (which may await) happens AFTER the handle goes out of
+        // scope, using a boolean flag to carry the result across the scope
+        // boundary.
+        adaptor.truncate(length).await?;
+        let valid_data_succeeded: bool = if let Some(handle) = adaptor.windows_raw_handle() {
+            // Extend the valid data length up to `length`, forcing the
+            // filesystem to allocate real blocks rather than a sparse hole.
+            let ok = unsafe {
+                windows_sys::Win32::Storage::FileSystem::SetFileValidData(
+                    handle,
+                    length as i64,
+                )
+            };
+            if ok == 0 {
+                let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                if err == windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD {
+                    // Promote to warn: SetFileValidData failure causes a 2x I/O
+                    // penalty because the writer must zero-fill every block on
+                    // first write (sparse file allocation on Windows).
+                    tracing::warn!(
+                        length,
+                        "SetFileValidData requires SE_MANAGE_VOLUME_PRIVILEGE; \
+                         falling back to sparse file. This causes ~2x I/O on \
+                         first write because each block must be zeroed by the \
+                         writer instead of being pre-allocated."
+                    );
+                } else {
+                    tracing::warn!(
+                        length,
+                        err,
+                        "SetFileValidData failed; file remains sparse"
+                    );
+                }
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+
+        // SetFileValidData succeeded but does NOT zero-fill the allocated
+        // blocks (it exposes whatever was previously on disk). Zero-fill when
+        // secure is requested, otherwise emit a one-time warning about the
+        // trade-off. This block is outside the handle scope so the await is
+        // safe (no non-Send raw handle is live across the suspension point).
+        if valid_data_succeeded {
+            if secure {
+                async_zero_fill(adaptor, length).await
+            } else {
+                SECURE_FALLOC_WARN_ONCE.call_once(|| {
+                    tracing::warn!(
+                        "SetFileValidData succeeded but does not zero-fill; \
+                         residual disk data may be exposed. \
+                         Enable --secure-falloc=true to zero-fill (at a \
+                         performance cost). This warning is logged once."
+                    );
+                });
+                Ok(())
+            }
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -268,6 +488,10 @@ mod tests {
             AllocationStrategy::Trunc
         );
         assert_eq!(
+            AllocationStrategy::from_str("mmap"),
+            AllocationStrategy::Mmap
+        );
+        assert_eq!(
             AllocationStrategy::from_str("invalid"),
             AllocationStrategy::None
         );
@@ -278,7 +502,7 @@ mod tests {
     async fn test_preallocate_file_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_none.bin");
-        preallocate_file(&path, 1024, "none").await.unwrap();
+        preallocate_file(&path, 1024, "none", false).await.unwrap();
         assert!(!path.exists());
     }
 
@@ -286,7 +510,7 @@ mod tests {
     async fn test_preallocate_file_trunc() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_trunc.bin");
-        preallocate_file(&path, 4096, "trunc").await.unwrap();
+        preallocate_file(&path, 4096, "trunc", false).await.unwrap();
 
         let metadata = tokio::fs::metadata(&path).await.unwrap();
         assert_eq!(metadata.len(), 4096);
@@ -296,7 +520,7 @@ mod tests {
     async fn test_preallocate_file_prealloc() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_prealloc.bin");
-        preallocate_file(&path, 1024 * 1024, "prealloc")
+        preallocate_file(&path, 1024 * 1024, "prealloc", false)
             .await
             .unwrap();
 
@@ -308,7 +532,7 @@ mod tests {
     async fn test_preallocate_zero_length() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_zero.bin");
-        preallocate_file(&path, 0, "trunc").await.unwrap();
+        preallocate_file(&path, 0, "trunc", false).await.unwrap();
         assert!(!path.exists());
     }
 
@@ -316,7 +540,7 @@ mod tests {
     async fn test_preallocate_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sub1").join("sub2").join("test_nested.bin");
-        preallocate_file(&path, 100, "trunc").await.unwrap();
+        preallocate_file(&path, 100, "trunc", false).await.unwrap();
 
         assert!(path.exists());
         let metadata = tokio::fs::metadata(&path).await.unwrap();
@@ -338,7 +562,7 @@ mod tests {
         let path = dir.path().join("test_overwrite.bin");
 
         tokio::fs::write(&path, b"original data").await.unwrap();
-        preallocate_file(&path, 2048, "trunc").await.unwrap();
+        preallocate_file(&path, 2048, "trunc", false).await.unwrap();
 
         let metadata = tokio::fs::metadata(&path).await.unwrap();
         assert_eq!(metadata.len(), 2048);
@@ -355,7 +579,7 @@ mod tests {
         tokio::fs::write(&path, b"hello").await.unwrap();
 
         // Allocate 10MB using Prealloc strategy
-        preallocate_file(&path, 10 * 1024 * 1024, "prealloc")
+        preallocate_file(&path, 10 * 1024 * 1024, "prealloc", false)
             .await
             .unwrap();
 
@@ -375,13 +599,33 @@ mod tests {
         tokio::fs::write(&path, b"initial data").await.unwrap();
 
         // Allocate 5MB using Falloc strategy
-        preallocate_file(&path, 5 * 1024 * 1024, "falloc")
+        preallocate_file(&path, 5 * 1024 * 1024, "falloc", false)
             .await
             .unwrap();
 
         // Verify size
         let metadata = tokio::fs::metadata(&path).await.unwrap();
         assert_eq!(metadata.len(), 5 * 1024 * 1024);
+    }
+
+    /// Test that the Falloc strategy produces a file of the correct logical size.
+    ///
+    /// On Windows the file is sparse unless `SetFileValidData` succeeds (which
+    /// requires `SE_MANAGE_VOLUME_PRIVILEGE`, typically absent in test runs).
+    /// On Unix, `posix_fallocate`/`F_PREALLOCATE` allocate real blocks when
+    /// supported. This test only asserts the logical size, keeping it
+    /// cross-platform and independent of privilege state.
+    #[tokio::test]
+    async fn test_fallocate_creates_sparse_file_of_correct_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_falloc_sparse.bin");
+
+        preallocate_file(&path, 1024 * 1024, "falloc", false)
+            .await
+            .unwrap();
+
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.len(), 1024 * 1024);
     }
 
     /// Test cross-platform file allocation with Trunc strategy
@@ -397,7 +641,7 @@ mod tests {
             .unwrap();
 
         // Truncate to 1MB using Trunc strategy
-        preallocate_file(&path, 1024 * 1024, "trunc").await.unwrap();
+        preallocate_file(&path, 1024 * 1024, "trunc", false).await.unwrap();
 
         // Verify size
         let metadata = tokio::fs::metadata(&path).await.unwrap();
@@ -411,7 +655,7 @@ mod tests {
         let path = dir.path().join("test_alloc_none.bin");
 
         // Try to allocate with None strategy - should not create file
-        preallocate_file(&path, 1024 * 1024, "none").await.unwrap();
+        preallocate_file(&path, 1024 * 1024, "none", false).await.unwrap();
 
         // File should not exist
         assert!(!path.exists());
@@ -424,7 +668,7 @@ mod tests {
         let path = dir.path().join("test_large_alloc.bin");
 
         // Allocate 50MB using falloc strategy
-        preallocate_file(&path, 50 * 1024 * 1024, "falloc")
+        preallocate_file(&path, 50 * 1024 * 1024, "falloc", false)
             .await
             .unwrap();
 
@@ -464,7 +708,9 @@ mod tests {
         for (i, strategy) in strategies.iter().enumerate() {
             let path = dir.path().join(format!("test_strategy_{}.bin", i));
 
-            preallocate_file(&path, test_size, strategy).await.unwrap();
+            preallocate_file(&path, test_size, strategy, false)
+                .await
+                .unwrap();
 
             let metadata = tokio::fs::metadata(&path).await.unwrap();
             assert_eq!(
@@ -494,6 +740,7 @@ mod tests {
             Some(&|allocated, total| {
                 pc.lock().unwrap().push((allocated, total));
             }),
+            false,
         )
         .await
         .unwrap();
@@ -538,6 +785,7 @@ mod tests {
             Some(&|allocated, total| {
                 pc.lock().unwrap().push((allocated, total));
             }),
+            false,
         )
         .await
         .unwrap();
@@ -549,5 +797,47 @@ mod tests {
             "small file should not trigger progress, got {} calls",
             calls.len()
         );
+    }
+
+    /// Verify the workspace default file allocation strategy is `falloc` and
+    /// that it parses to `AllocationStrategy::Falloc`.
+    #[test]
+    fn test_default_allocation_is_falloc() {
+        use crate::constants;
+        assert_eq!(constants::DEFAULT_FILE_ALLOCATION, "falloc");
+        assert_eq!(
+            AllocationStrategy::from_str(constants::DEFAULT_FILE_ALLOCATION),
+            AllocationStrategy::Falloc
+        );
+    }
+
+    /// Test that async_zero_fill produces a file of the correct size filled
+    /// with zeros.
+    #[tokio::test]
+    async fn test_async_zero_fill() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_zero_fill.bin");
+
+        let mut adaptor = DirectDiskAdaptor::new();
+        adaptor.open(&path).await.unwrap();
+        adaptor.truncate(5 * 1024 * 1024).await.unwrap(); // 5 MiB
+        async_zero_fill(&mut adaptor, 5 * 1024 * 1024).await.unwrap();
+        adaptor.close().await.unwrap();
+
+        // Verify size
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.len(), 5 * 1024 * 1024);
+
+        // Verify content is all zeros
+        let content = tokio::fs::read(&path).await.unwrap();
+        assert!(content.iter().all(|&b| b == 0), "File should be all zeros");
+    }
+
+    /// Test that secure_falloc option defaults to false in DownloadOptions
+    #[test]
+    fn test_secure_falloc_default() {
+        use crate::request::request_group::DownloadOptions;
+        let opts = DownloadOptions::default();
+        assert!(!opts.secure_falloc, "secure_falloc should default to false");
     }
 }

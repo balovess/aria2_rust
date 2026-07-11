@@ -57,7 +57,14 @@ pub const BT_RECEIVE_BUFFER_SIZE: usize = 4096;
 pub const BT_RETRY_DELAY_MS: u64 = 100;
 
 // Segment/Download defaults
-pub const DEFAULT_FILE_ALLOCATION: &str = "none";
+pub const DEFAULT_FILE_ALLOCATION: &str = "falloc";
+/// Default value for the `secure-falloc` option. When `false`, fallocate-based
+/// allocation on platforms that don't zero-fill allocated blocks (macOS
+/// `F_PREALLOCATE`, Windows `SetFileValidData`) leaves residual disk data
+/// accessible until overwritten. Set to `true` to zero-fill at a performance
+/// cost. Linux `fallocate(2)` always returns zeroed blocks, so this option has
+/// no effect there.
+pub const DEFAULT_SECURE_FALLOC: bool = false;
 pub const CONCURRENT_MIN_FILE_SIZE: usize = 1024 * 1024;
 pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
 pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 4;

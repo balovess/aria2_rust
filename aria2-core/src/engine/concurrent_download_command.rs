@@ -23,6 +23,9 @@ pub struct ConcurrentDownloadCommand {
     metalink_data: Vec<u8>,
     max_connections_per_server: u16,
     file_allocation: String,
+    /// When `true`, zero-fill allocated blocks after `fallocate` on platforms
+    /// that don't zero-fill (macOS, Windows). See `file_allocation::fallocate`.
+    secure_falloc: bool,
     disk_cache_size_mb: Option<usize>,
 }
 
@@ -76,6 +79,7 @@ impl ConcurrentDownloadCommand {
             })?;
 
         let alloc = "prealloc".to_string();
+        let secure = options.secure_falloc;
         let cache_mb: Option<usize> = None;
 
         info!(
@@ -94,6 +98,7 @@ impl ConcurrentDownloadCommand {
             metalink_data: metalink_bytes.to_vec(),
             max_connections_per_server: max_conn,
             file_allocation: alloc,
+            secure_falloc: secure,
             disk_cache_size_mb: cache_mb,
         })
     }
@@ -174,8 +179,13 @@ impl Command for ConcurrentDownloadCommand {
 
         let total_len = expected_size.unwrap_or(0);
         if total_len > 0 {
-            file_allocation::preallocate_file(&self.output_path, total_len, &self.file_allocation)
-                .await?;
+            file_allocation::preallocate_file(
+                &self.output_path,
+                total_len,
+                &self.file_allocation,
+                self.secure_falloc,
+            )
+            .await?;
         }
 
         let num_pieces = manager.num_segments().max(1);

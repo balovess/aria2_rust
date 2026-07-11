@@ -46,7 +46,7 @@ async fn test_preallocation_none() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_none.bin");
 
-    preallocate_file(&path, 1024 * 1024, "none").await.unwrap();
+    preallocate_file(&path, 1024 * 1024, "none", false).await.unwrap();
     assert!(!path.exists());
 }
 
@@ -55,7 +55,7 @@ async fn test_preallocation_trunc() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_trunc.bin");
 
-    preallocate_file(&path, 4096, "trunc").await.unwrap();
+    preallocate_file(&path, 4096, "trunc", false).await.unwrap();
 
     let metadata = tokio::fs::metadata(&path).await.unwrap();
     assert_eq!(metadata.len(), 4096);
@@ -66,7 +66,7 @@ async fn test_preallocation_prealloc() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_prealloc.bin");
 
-    preallocate_file(&path, 1024 * 1024, "prealloc")
+    preallocate_file(&path, 1024 * 1024, "prealloc", false)
         .await
         .unwrap();
 
@@ -184,7 +184,7 @@ async fn test_preallocate_creates_parent_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sub1").join("sub2").join("test_nested.bin");
 
-    preallocate_file(&path, 256, "trunc").await.unwrap();
+    preallocate_file(&path, 256, "trunc", false).await.unwrap();
 
     assert!(path.exists());
     let metadata = tokio::fs::metadata(&path).await.unwrap();

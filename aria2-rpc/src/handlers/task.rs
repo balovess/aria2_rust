@@ -401,7 +401,7 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         // Cancel all active downloads
         let mut tasks = self.tasks.write().await;
-        for (_, state) in tasks.iter_mut() {
+        for state in tasks.values_mut() {
             // Cancel the download if it has a cancellation token
             if let Some(cancel_token) = &state.cancel_token {
                 cancel_token.cancel();
@@ -536,6 +536,10 @@ impl RpcEngine {
 fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) -> DownloadOptions {
     let get_str = |k: &str| opts.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
     let get_u16 = |k: &str| opts.get(k).and_then(|v| v.as_u64()).map(|n| n as u16);
+    let get_u32 = |k: &str| opts.get(k).and_then(|v| v.as_u64()).map(|n| n as u32);
+    let get_u64 = |k: &str| opts.get(k).and_then(|v| v.as_u64());
+    let get_f64 = |k: &str| opts.get(k).and_then(|v| v.as_f64());
+    let get_bool = |k: &str| opts.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
 
     let header: Vec<String> = match opts.get("header") {
         Some(serde_json::Value::Array(arr)) => arr
@@ -550,14 +554,69 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         _ => vec![],
     };
 
+    let checksum = get_str("checksum").and_then(|v| {
+        if let Some((algo, val)) = v.split_once('=') {
+            Some((algo.trim().to_string(), val.trim().to_string()))
+        } else {
+            None
+        }
+    });
+
+    let dht_entry_point = get_str("dht-entry-point").map(|v| {
+        v.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+
     DownloadOptions {
-        dir: get_str("dir"),
-        out: get_str("out"),
+        // Basic
         split: get_u16("split"),
         max_connection_per_server: get_u16("max-connection-per-server"),
+        max_download_limit: get_u64("max-download-limit"),
+        max_upload_limit: get_u64("max-upload-limit"),
+        dir: get_str("dir"),
+        out: get_str("out"),
+        seed_time: get_u64("seed-time"),
+        seed_ratio: get_f64("seed-ratio"),
+        // File allocation
+        file_allocation: get_str("file-allocation"),
+        mmap_threshold: get_u64("mmap-threshold"),
+        secure_falloc: get_bool("secure-falloc"),
+        // Checksum
+        checksum,
+        // Cookies
+        cookie_file: get_str("cookie-file"),
+        cookies: get_str("cookies"),
+        // BT
+        bt_force_encrypt: get_bool("bt-force-encrypt"),
+        bt_require_crypto: get_bool("bt-require-crypto"),
+        enable_dht: opts.get("enable-dht").and_then(|v| v.as_bool()).unwrap_or(true),
+        dht_listen_port: get_u16("dht-listen-port"),
+        dht_entry_point,
+        enable_public_trackers: opts.get("enable-public-trackers").and_then(|v| v.as_bool()).unwrap_or(true),
+        bt_piece_selection_strategy: get_str("bt-piece-selection-strategy").unwrap_or_default(),
+        bt_endgame_threshold: get_u32("bt-endgame-threshold").unwrap_or(0),
+        bt_max_upload_slots: get_u32("bt-max-upload-slots"),
+        bt_optimistic_unchoke_interval: get_u64("bt-optimistic-unchoke-interval"),
+        bt_snubbed_timeout: get_u64("bt-snubbed-timeout"),
+        bt_prioritize_piece: get_str("bt-prioritize-piece").unwrap_or_default(),
+        enable_utp: get_bool("enable-utp"),
+        utp_listen_port: get_u16("utp-listen-port"),
+        // Retry
+        max_retries: get_u32("max-retries").unwrap_or(0),
+        retry_wait: get_u64("retry-wait").unwrap_or(0),
+        // DHT file
+        dht_file_path: get_str("dht-file-path"),
+        // Proxy
+        http_proxy: get_str("http-proxy"),
+        all_proxy: get_str("all-proxy"),
+        https_proxy: get_str("https-proxy"),
+        ftp_proxy: get_str("ftp-proxy"),
+        no_proxy: get_str("no-proxy"),
+        // HTTP headers
         header,
         user_agent: get_str("user-agent"),
         referer: get_str("referer"),
-        ..Default::default()
     }
 }

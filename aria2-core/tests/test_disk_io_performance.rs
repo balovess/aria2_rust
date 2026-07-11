@@ -402,7 +402,7 @@ async fn test_preallocation_strategy_performance() {
         let path = dir.path().join(format!("prealloc_{}.bin", strategy));
 
         let start = Instant::now();
-        preallocate_file(&path, file_size, strategy).await.unwrap();
+        preallocate_file(&path, file_size, strategy, false).await.unwrap();
         let duration = start.elapsed();
 
         let metadata = tokio::fs::metadata(&path).await;
@@ -462,7 +462,7 @@ async fn test_write_performance_with_preallocation() {
     // Test with preallocation
     {
         let path = dir.path().join("with_preallocation.bin");
-        preallocate_file(&path, file_size as u64, "falloc").await.unwrap();
+        preallocate_file(&path, file_size as u64, "falloc", false).await.unwrap();
 
         let mut writer = CachedDiskWriter::new(&path, Some(file_size as u64), None);
         writer.open().await.unwrap();
@@ -831,7 +831,7 @@ async fn test_preallocation_performance(dir: &tempfile::TempDir) -> Metrics {
     let size = 10 * 1024 * 1024;
 
     let start = Instant::now();
-    preallocate_file(&path, size, "falloc").await.unwrap();
+    preallocate_file(&path, size, "falloc", false).await.unwrap();
     let duration = start.elapsed();
 
     Metrics::new(size, duration.as_millis() as u64, 0, 0)

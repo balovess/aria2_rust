@@ -2,6 +2,7 @@ use aria2_core::engine::command::Command;
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::auto_save_session::AutoSaveSession;
+use aria2_core::session::session_entry::download_options_to_map;
 use aria2_core::session::session_serializer::{
     SessionEntry, deserialize, load_from_file, save_to_file,
 };
@@ -199,6 +200,71 @@ async fn test_e2e_full_roundtrip_file_io() {
     assert_eq!(loaded.len(), 1);
     assert!(loaded[0].uris[0].contains("roundtrip.bin"));
     assert_eq!(loaded[0].options.get("split"), Some(&"8".to_string()));
+
+    let _ = tokio::fs::remove_file(&path).await;
+}
+
+#[test]
+fn test_e2e_secure_falloc_roundtrip() {
+    // Verify that secure_falloc and file_allocation survive serialize → deserialize
+    let opts = DownloadOptions {
+        secure_falloc: true,
+        file_allocation: Some("trunc".to_string()),
+        mmap_threshold: Some(64 * 1024 * 1024),
+        ..Default::default()
+    };
+
+    let options_map = download_options_to_map(&opts);
+    let entry = SessionEntry::new(42, vec!["http://example.com/file.bin".to_string()])
+        .with_options(options_map);
+
+    let text = entry.serialize();
+
+    // Verify serialized text contains the options
+    assert!(text.contains("secure-falloc=true"), "secure-falloc should be serialized");
+    assert!(text.contains("file-allocation=trunc"), "file-allocation should be serialized");
+    assert!(text.contains("mmap-threshold=67108864"), "mmap-threshold should be serialized");
+
+    // Deserialize back
+    let entries = deserialize(&text).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].options.get("secure-falloc"), Some(&"true".to_string()));
+    assert_eq!(entries[0].options.get("file-allocation"), Some(&"trunc".to_string()));
+    assert_eq!(entries[0].options.get("mmap-threshold"), Some(&"67108864".to_string()));
+}
+
+#[tokio::test]
+async fn test_e2e_full_options_roundtrip_file_io() {
+    // Full file I/O round-trip with many non-default options
+    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    man.write()
+        .await
+        .add_group(
+            vec!["http://example.com/full-opts.bin".into()],
+            DownloadOptions {
+                secure_falloc: true,
+                file_allocation: Some("trunc".to_string()),
+                split: Some(4),
+                dir: Some("/tmp".to_string()),
+                max_retries: 5,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("e2e_full_opts_{}.sess", std::process::id()));
+
+    let groups = man.read().await.list_groups().await;
+    save_to_file(&path, &groups).await.unwrap();
+
+    let loaded = load_from_file(&path).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].options.get("secure-falloc"), Some(&"true".to_string()));
+    assert_eq!(loaded[0].options.get("file-allocation"), Some(&"trunc".to_string()));
+    assert_eq!(loaded[0].options.get("split"), Some(&"4".to_string()));
+    assert_eq!(loaded[0].options.get("max-retries"), Some(&"5".to_string()));
 
     let _ = tokio::fs::remove_file(&path).await;
 }

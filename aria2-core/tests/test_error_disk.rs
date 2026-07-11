@@ -225,8 +225,7 @@ async fn test_disk_writer_invalid_path_error() {
     let result = writer.open().await;
     
     // Should handle gracefully - either succeed (using ".") or fail
-    if result.is_err() {
-        let err = result.unwrap_err();
+    if let Err(err) = result {
         assert!(
             err.to_string().contains("IO") || err.to_string().contains("path"),
             "Error should mention I/O or path issue: {}",
@@ -509,7 +508,7 @@ async fn test_preallocation_trunc() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prealloc_trunc.bin");
     
-    let result = preallocate_file(&path, 4096, "trunc").await;
+    let result = preallocate_file(&path, 4096, "trunc", false).await;
     assert!(result.is_ok(), "Trunc preallocation should succeed");
     
     let metadata = tokio::fs::metadata(&path).await.unwrap();
@@ -522,7 +521,7 @@ async fn test_preallocation_none() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prealloc_none.bin");
     
-    let result = preallocate_file(&path, 4096, "none").await;
+    let result = preallocate_file(&path, 4096, "none", false).await;
     assert!(result.is_ok(), "None preallocation should succeed");
     
     assert!(!path.exists(), "File should not exist with 'none' method");
@@ -534,7 +533,7 @@ async fn test_preallocation_nested_path() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("deep").join("nested").join("path").join("file.bin");
     
-    let result = preallocate_file(&path, 256, "trunc").await;
+    let result = preallocate_file(&path, 256, "trunc", false).await;
     assert!(result.is_ok(), "Should create parent directories");
     
     assert!(path.exists(), "File should exist at nested path");
@@ -547,7 +546,7 @@ async fn test_preallocation_invalid_method() {
     let path = dir.path().join("invalid_method.bin");
     
     // Invalid method should be handled (implementation may vary)
-    let result = preallocate_file(&path, 256, "invalid_method").await;
+    let result = preallocate_file(&path, 256, "invalid_method", false).await;
     
     // Either succeeds (defaulting to a valid method) or fails gracefully
     assert!(result.is_ok() || result.is_err(), "Should handle invalid method gracefully");
@@ -687,7 +686,7 @@ async fn test_high_concurrency_stress() {
         for write_id in 0..writes_per_thread {
             let offset = ((thread_id * writes_per_thread + write_id) as usize) * 64;
             if offset + 64 <= content.len() {
-                let expected = vec![(thread_id + write_id) as u8; 64];
+                let expected = [(thread_id + write_id) as u8; 64];
                 assert_eq!(
                     &content[offset..offset + 64],
                     &expected[..],

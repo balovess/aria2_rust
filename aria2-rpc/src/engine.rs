@@ -8,6 +8,7 @@ use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
 use super::websocket::EventPublisher;
 use aria2_core::TorrentFileEntry;
+use aria2_core::config::OptionRegistry;
 use aria2_core::engine::command::Command;
 use aria2_core::request::request_group_man::RequestGroupMan;
 
@@ -135,11 +136,28 @@ impl TaskState {
 }
 
 impl RpcEngine {
-    /// Create a new RpcEngine instance with empty state.
+    /// Create a new RpcEngine instance with default global options seeded
+    /// from the `OptionRegistry`.
+    ///
+    /// The `global_opts` map is pre-populated with all registered option
+    /// defaults (e.g. `file-allocation=falloc`, `secure-falloc=false`,
+    /// `mmap-threshold=268435456`) so that `aria2.getGlobalOption` returns
+    /// meaningful values immediately, without requiring the client to first
+    /// call `aria2.changeGlobalOption`.
     pub fn new() -> Self {
+        let registry = OptionRegistry::new();
+        let mut defaults = HashMap::new();
+        for (name, def) in registry.all() {
+            let json_val: serde_json::Value = serde_json::Value::from(def.default_value());
+            // Skip None/Null defaults to keep the map compact
+            if !json_val.is_null() {
+                defaults.insert(name.clone(), json_val);
+            }
+        }
+
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
-            global_opts: Arc::new(RwLock::new(HashMap::new())),
+            global_opts: Arc::new(RwLock::new(defaults)),
             task_opts: Arc::new(RwLock::new(HashMap::new())),
             stopped_tasks: Arc::new(RwLock::new(Vec::new())),
             event_publisher: Arc::new(EventPublisher::default()),

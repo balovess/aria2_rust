@@ -130,9 +130,14 @@ pub fn decode_hex(hex: &str) -> Result<Vec<u8>> {
 // =========================================================================
 
 /// Converts DownloadOptions struct to a HashMap for serialization.
+///
+/// Only non-default / non-empty values are included to keep the session file
+/// compact. The load path (`map_entry_to_download_options`) uses
+/// `unwrap_or(default)` for every field, so absent keys are safe.
 pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String> {
     let mut map = HashMap::new();
 
+    // --- Basic download options ---
     if let Some(v) = opts.split {
         map.insert("split".to_string(), v.to_string());
     }
@@ -156,6 +161,129 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     }
     if let Some(v) = opts.seed_ratio {
         map.insert("seed-ratio".to_string(), v.to_string());
+    }
+
+    // --- File allocation ---
+    if let Some(ref v) = opts.file_allocation {
+        map.insert("file-allocation".to_string(), v.clone());
+    }
+    if let Some(v) = opts.mmap_threshold {
+        map.insert("mmap-threshold".to_string(), v.to_string());
+    }
+    if opts.secure_falloc {
+        map.insert("secure-falloc".to_string(), "true".to_string());
+    }
+
+    // --- Checksum ---
+    if let Some((ref algo, ref val)) = opts.checksum {
+        map.insert("checksum".to_string(), format!("{}={}", algo, val));
+    }
+
+    // --- Cookies ---
+    if let Some(ref v) = opts.cookie_file {
+        map.insert("cookie-file".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.cookies {
+        map.insert("cookies".to_string(), v.clone());
+    }
+
+    // --- BitTorrent options ---
+    if opts.bt_force_encrypt {
+        map.insert("bt-force-encrypt".to_string(), "true".to_string());
+    }
+    if opts.bt_require_crypto {
+        map.insert("bt-require-crypto".to_string(), "true".to_string());
+    }
+    // enable_dht defaults to true; only save if disabled
+    if !opts.enable_dht {
+        map.insert("enable-dht".to_string(), "false".to_string());
+    }
+    if let Some(v) = opts.dht_listen_port {
+        map.insert("dht-listen-port".to_string(), v.to_string());
+    }
+    if let Some(ref v) = opts.dht_entry_point {
+        map.insert("dht-entry-point".to_string(), v.join(","));
+    }
+    // enable_public_trackers defaults to true; only save if disabled
+    if !opts.enable_public_trackers {
+        map.insert("enable-public-trackers".to_string(), "false".to_string());
+    }
+    if !opts.bt_piece_selection_strategy.is_empty() {
+        map.insert(
+            "bt-piece-selection-strategy".to_string(),
+            opts.bt_piece_selection_strategy.clone(),
+        );
+    }
+    if opts.bt_endgame_threshold > 0 {
+        map.insert(
+            "bt-endgame-threshold".to_string(),
+            opts.bt_endgame_threshold.to_string(),
+        );
+    }
+    if let Some(v) = opts.bt_max_upload_slots {
+        map.insert("bt-max-upload-slots".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.bt_optimistic_unchoke_interval {
+        map.insert(
+            "bt-optimistic-unchoke-interval".to_string(),
+            v.to_string(),
+        );
+    }
+    if let Some(v) = opts.bt_snubbed_timeout {
+        map.insert("bt-snubbed-timeout".to_string(), v.to_string());
+    }
+    if !opts.bt_prioritize_piece.is_empty() {
+        map.insert(
+            "bt-prioritize-piece".to_string(),
+            opts.bt_prioritize_piece.clone(),
+        );
+    }
+    if opts.enable_utp {
+        map.insert("enable-utp".to_string(), "true".to_string());
+    }
+    if let Some(v) = opts.utp_listen_port {
+        map.insert("utp-listen-port".to_string(), v.to_string());
+    }
+
+    // --- Retry options ---
+    if opts.max_retries > 0 {
+        map.insert("max-retries".to_string(), opts.max_retries.to_string());
+    }
+    if opts.retry_wait > 0 {
+        map.insert("retry-wait".to_string(), opts.retry_wait.to_string());
+    }
+
+    // --- DHT file path ---
+    if let Some(ref v) = opts.dht_file_path {
+        map.insert("dht-file-path".to_string(), v.clone());
+    }
+
+    // --- Proxy options ---
+    if let Some(ref v) = opts.http_proxy {
+        map.insert("http-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.all_proxy {
+        map.insert("all-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.https_proxy {
+        map.insert("https-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.ftp_proxy {
+        map.insert("ftp-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.no_proxy {
+        map.insert("no-proxy".to_string(), v.clone());
+    }
+
+    // --- HTTP headers ---
+    if !opts.header.is_empty() {
+        map.insert("header".to_string(), opts.header.join(","));
+    }
+    if let Some(ref v) = opts.user_agent {
+        map.insert("user-agent".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.referer {
+        map.insert("referer".to_string(), v.clone());
     }
 
     map
@@ -725,5 +853,133 @@ http://example.com/file
             restored_with_bt.info_hash_hex,
             Some("abc123def456".to_string())
         );
+    }
+
+    #[test]
+    fn test_download_options_to_map_all_fields() {
+        // Verify that all non-default fields are serialized to the map
+        let opts = DownloadOptions {
+            split: Some(8),
+            max_connection_per_server: Some(4),
+            max_download_limit: Some(102400),
+            max_upload_limit: Some(51200),
+            dir: Some("/downloads".to_string()),
+            out: Some("file.bin".to_string()),
+            seed_time: Some(3600),
+            seed_ratio: Some(2.0),
+            // File allocation
+            file_allocation: Some("trunc".to_string()),
+            mmap_threshold: Some(128 * 1024 * 1024),
+            secure_falloc: true,
+            // Checksum
+            checksum: Some(("sha256".to_string(), "abc123".to_string())),
+            // Cookies
+            cookie_file: Some("/tmp/cookies.txt".to_string()),
+            cookies: Some("key=value".to_string()),
+            // BT
+            bt_force_encrypt: true,
+            bt_require_crypto: true,
+            enable_dht: false,
+            dht_listen_port: Some(6881),
+            dht_entry_point: Some(vec!["router.bittorrent.com:6881".to_string()]),
+            enable_public_trackers: false,
+            bt_piece_selection_strategy: "sequential".to_string(),
+            bt_endgame_threshold: 10,
+            bt_max_upload_slots: Some(4),
+            bt_optimistic_unchoke_interval: Some(30),
+            bt_snubbed_timeout: Some(60),
+            bt_prioritize_piece: "head".to_string(),
+            enable_utp: true,
+            utp_listen_port: Some(6882),
+            // Retry
+            max_retries: 5,
+            retry_wait: 3,
+            // DHT file
+            dht_file_path: Some("/tmp/dht.dat".to_string()),
+            // Proxy
+            http_proxy: Some("http://proxy:8080".to_string()),
+            all_proxy: Some("socks5://proxy:1080".to_string()),
+            https_proxy: Some("http://proxy:8443".to_string()),
+            ftp_proxy: Some("http://proxy:8021".to_string()),
+            no_proxy: Some("localhost,127.0.0.1".to_string()),
+            // HTTP headers
+            header: vec!["X-Custom: foo".to_string(), "X-Other: bar".to_string()],
+            user_agent: Some("aria2-rust/1.0".to_string()),
+            referer: Some("http://example.com".to_string()),
+        };
+
+        let map = download_options_to_map(&opts);
+
+        // File allocation
+        assert_eq!(map.get("file-allocation").unwrap(), "trunc");
+        assert_eq!(map.get("mmap-threshold").unwrap(), "134217728");
+        assert_eq!(map.get("secure-falloc").unwrap(), "true");
+
+        // Checksum
+        assert_eq!(map.get("checksum").unwrap(), "sha256=abc123");
+
+        // Cookies
+        assert_eq!(map.get("cookie-file").unwrap(), "/tmp/cookies.txt");
+        assert_eq!(map.get("cookies").unwrap(), "key=value");
+
+        // BT
+        assert_eq!(map.get("bt-force-encrypt").unwrap(), "true");
+        assert_eq!(map.get("bt-require-crypto").unwrap(), "true");
+        assert_eq!(map.get("enable-dht").unwrap(), "false");
+        assert_eq!(map.get("dht-listen-port").unwrap(), "6881");
+        assert_eq!(
+            map.get("dht-entry-point").unwrap(),
+            "router.bittorrent.com:6881"
+        );
+        assert_eq!(map.get("enable-public-trackers").unwrap(), "false");
+        assert_eq!(
+            map.get("bt-piece-selection-strategy").unwrap(),
+            "sequential"
+        );
+        assert_eq!(map.get("bt-endgame-threshold").unwrap(), "10");
+        assert_eq!(map.get("bt-max-upload-slots").unwrap(), "4");
+        assert_eq!(map.get("bt-optimistic-unchoke-interval").unwrap(), "30");
+        assert_eq!(map.get("bt-snubbed-timeout").unwrap(), "60");
+        assert_eq!(map.get("bt-prioritize-piece").unwrap(), "head");
+        assert_eq!(map.get("enable-utp").unwrap(), "true");
+        assert_eq!(map.get("utp-listen-port").unwrap(), "6882");
+
+        // Retry
+        assert_eq!(map.get("max-retries").unwrap(), "5");
+        assert_eq!(map.get("retry-wait").unwrap(), "3");
+
+        // DHT file
+        assert_eq!(map.get("dht-file-path").unwrap(), "/tmp/dht.dat");
+
+        // Proxy
+        assert_eq!(map.get("http-proxy").unwrap(), "http://proxy:8080");
+        assert_eq!(map.get("all-proxy").unwrap(), "socks5://proxy:1080");
+        assert_eq!(map.get("https-proxy").unwrap(), "http://proxy:8443");
+        assert_eq!(map.get("ftp-proxy").unwrap(), "http://proxy:8021");
+        assert_eq!(map.get("no-proxy").unwrap(), "localhost,127.0.0.1");
+
+        // HTTP headers
+        assert_eq!(map.get("header").unwrap(), "X-Custom: foo,X-Other: bar");
+        assert_eq!(map.get("user-agent").unwrap(), "aria2-rust/1.0");
+        assert_eq!(map.get("referer").unwrap(), "http://example.com");
+    }
+
+    #[test]
+    fn test_download_options_to_map_defaults_excluded() {
+        // Default DownloadOptions (all None/false/empty/zero) should produce
+        // a minimal map. Note: enable_dht and enable_public_trackers default
+        // to false in DownloadOptions::default() but to true in the load path,
+        // so they ARE saved when false to preserve the user's choice.
+        let opts = DownloadOptions::default();
+        let map = download_options_to_map(&opts);
+
+        // secure_falloc defaults to false -> should NOT be in map
+        assert!(!map.contains_key("secure-falloc"));
+        // file_allocation defaults to None -> should NOT be in map
+        assert!(!map.contains_key("file-allocation"));
+        // enable_dht is false (non-default for load path which defaults to true)
+        // -> SHOULD be saved as "false"
+        assert_eq!(map.get("enable-dht"), Some(&"false".to_string()));
+        assert_eq!(map.get("enable-public-trackers"), Some(&"false".to_string()));
     }
 }

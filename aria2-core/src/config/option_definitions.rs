@@ -890,8 +890,35 @@ impl super::OptionRegistry {
             name: "file-allocation".into(),
             opt_type: OptionType::Enum,
             short_name: Some('f'),
-            default_value: OptionValue::Str("prealloc".into()),
-            description: "File allocation method (none/prealloc/falloc/trunc)".into(),
+            default_value: OptionValue::Str("falloc".into()),
+            description: "File allocation method (none/prealloc/falloc/trunc/mmap)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+
+        // --- Secure Falloc ---
+        // Zero-fill allocated space after fallocate on platforms that don't
+        // zero-fill (macOS F_PREALLOCATE, Windows SetFileValidData). Prevents
+        // exposure of residual disk data at a performance cost. Has no effect
+        // on Linux where fallocate(2) always returns zeroed blocks.
+        self.register(OptionDef {
+            name: "secure-falloc".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Zero-fill allocated space after fallocate on platforms that don't zero-fill (macOS, Windows). Prevents exposure of residual disk data at a performance cost.".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+
+        // --- Mmap Threshold ---
+        // Files larger than this threshold use MmapDiskWriter when
+        // --file-allocation=mmap is set. Below the threshold, positioned I/O
+        // is used (avoids address space waste for small files).
+        self.register(OptionDef {
+            name: "mmap-threshold".into(),
+            opt_type: OptionType::Size,
+            default_value: OptionValue::Int(256 * 1024 * 1024), // 256 MiB
+            description: "File size threshold for mmap writes when file-allocation=mmap (default 256 MiB)".into(),
             category: OptionCategory::Advanced,
             ..Default::default()
         });

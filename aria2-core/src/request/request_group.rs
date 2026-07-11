@@ -143,6 +143,18 @@ pub struct DownloadOptions {
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,
     pub out: Option<String>,
+    /// File allocation strategy: "none", "prealloc", "falloc", "trunc", or "mmap".
+    /// When "mmap", `MmapDiskWriter` is used for files above `mmap_threshold`.
+    pub file_allocation: Option<String>,
+    /// File size threshold (bytes) above which mmap writes are used when
+    /// `file_allocation = "mmap"`. Default: 256 MiB.
+    pub mmap_threshold: Option<u64>,
+    /// Zero-fill allocated blocks after fallocate on platforms that don't
+    /// zero-fill (macOS `F_PREALLOCATE`, Windows `SetFileValidData`).
+    /// Prevents exposure of residual disk data at a performance cost.
+    /// Has no effect on Linux. Defaults to `false` (matches
+    /// `constants::DEFAULT_SECURE_FALLOC`).
+    pub secure_falloc: bool,
     pub seed_time: Option<u64>,
     pub seed_ratio: Option<f64>,
     pub checksum: Option<(String, String)>,
