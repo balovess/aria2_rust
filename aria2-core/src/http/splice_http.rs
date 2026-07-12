@@ -157,10 +157,9 @@ pub async fn try_splice_download(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("non-UTF8 headers: {e}")))?;
     let status = parse_status_code(header_str)?;
     if status != 206 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other, // "Other" so caller falls back; reqwest handles 200/416/etc.
-            format!("expected 206 Partial Content, got {status}"),
-        ));
+        return Err(io::Error::other(format!(
+            "expected 206 Partial Content, got {status}"
+        )));
     }
 
     // 7. Parse Content-Length; reject chunked encoding (splice can't handle it).
@@ -322,12 +321,11 @@ fn parse_status_code(header_str: &str) -> io::Result<u16> {
 #[cfg(target_os = "linux")]
 fn is_chunked(header_str: &str) -> bool {
     for line in header_str.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("transfer-encoding")
-                && value.trim().eq_ignore_ascii_case("chunked")
-            {
-                return true;
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("transfer-encoding")
+            && value.trim().eq_ignore_ascii_case("chunked")
+        {
+            return true;
         }
     }
     false
@@ -339,16 +337,16 @@ fn is_chunked(header_str: &str) -> bool {
 #[cfg(target_os = "linux")]
 fn parse_content_length(header_str: &str) -> io::Result<Option<u64>> {
     for line in header_str.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                let value = value.trim();
-                return value.parse::<u64>().map(Some).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid Content-Length: {value}"),
-                    )
-                });
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            let value = value.trim();
+            return value.parse::<u64>().map(Some).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid Content-Length: {value}"),
+                )
+            });
         }
     }
     Ok(None)
@@ -655,7 +653,7 @@ mod tests {
         assert_eq!(find_header_end(b"HTTP/1.1 200 OK\r\n"), None);
         assert_eq!(
             find_header_end(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"),
-            Some(33)
+            Some(34)
         );
         assert_eq!(
             find_header_end(b"HTTP/1.1 200 OK\r\n\r\nbody"),

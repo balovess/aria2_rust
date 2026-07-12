@@ -318,6 +318,7 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
 /// download begins. Keep in sync with [`RequestGroup::update_option`].
 pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     "split",
+    "max-connection-per-server",
     "max-download-limit",
     "max-upload-limit",
     "max-retries",
@@ -325,6 +326,12 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     "header",
     "user-agent",
     "referer",
+    "bt-max-upload-slots",
+    "bt-snubbed-timeout",
+    "bt-optimistic-unchoke-interval",
+    "bt-endgame-threshold",
+    "seed-time",
+    "seed-ratio",
 ];
 
 pub struct RequestGroup {
@@ -497,6 +504,11 @@ impl RequestGroup {
             "split" => {
                 if let Some(v) = value.as_u64() {
                     self.options.split = Some(v as u16);
+                    tracing::warn!(
+                        new_split = v,
+                        "split changed but will take effect on download restart/retry, \
+                         not mid-download (current segments unchanged)"
+                    );
                 }
                 true
             }
@@ -555,6 +567,48 @@ impl RequestGroup {
             }
             "referer" => {
                 self.options.referer = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "max-connection-per-server" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.max_connection_per_server = Some(v as u16);
+                }
+                true
+            }
+            "bt-max-upload-slots" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.bt_max_upload_slots = Some(v as u32);
+                }
+                true
+            }
+            "bt-snubbed-timeout" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.bt_snubbed_timeout = Some(v);
+                }
+                true
+            }
+            "bt-optimistic-unchoke-interval" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.bt_optimistic_unchoke_interval = Some(v);
+                }
+                true
+            }
+            "bt-endgame-threshold" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.bt_endgame_threshold = v as u32;
+                }
+                true
+            }
+            "seed-time" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.seed_time = Some(v);
+                }
+                true
+            }
+            "seed-ratio" => {
+                if let Some(v) = value.as_f64() {
+                    self.options.seed_ratio = Some(v);
+                }
                 true
             }
             _ => false,
@@ -1082,12 +1136,50 @@ mod tests {
             vec!["magnet:?xt=urn:btih:test".to_string()],
             DownloadOptions::default(),
         );
-        
+
         // Set via blocking method
         group.set_bt_metadata(10, 1024, "async_test_hash".to_string());
-        
+
         // Read via async method
         let hash = group.get_bt_info_hash_hex_async().await;
         assert_eq!(hash, Some("async_test_hash".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_option_new_runtime_changeable() {
+        let gid = GroupId::new(1);
+        let uris = vec!["http://example.com/file".to_string()];
+        let mut group = RequestGroup::new(gid, uris, DownloadOptions::default());
+
+        // max-connection-per-server
+        assert!(group.update_option("max-connection-per-server", serde_json::json!(4)).await);
+        assert_eq!(group.options().max_connection_per_server, Some(4));
+
+        // bt-max-upload-slots
+        assert!(group.update_option("bt-max-upload-slots", serde_json::json!(8)).await);
+        assert_eq!(group.options().bt_max_upload_slots, Some(8));
+
+        // bt-snubbed-timeout
+        assert!(group.update_option("bt-snubbed-timeout", serde_json::json!(120)).await);
+        assert_eq!(group.options().bt_snubbed_timeout, Some(120));
+
+        // bt-optimistic-unchoke-interval
+        assert!(group.update_option("bt-optimistic-unchoke-interval", serde_json::json!(45)).await);
+        assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
+
+        // bt-endgame-threshold
+        assert!(group.update_option("bt-endgame-threshold", serde_json::json!(50)).await);
+        assert_eq!(group.options().bt_endgame_threshold, 50);
+
+        // seed-time
+        assert!(group.update_option("seed-time", serde_json::json!(3600)).await);
+        assert_eq!(group.options().seed_time, Some(3600));
+
+        // seed-ratio
+        assert!(group.update_option("seed-ratio", serde_json::json!(2.0)).await);
+        assert_eq!(group.options().seed_ratio, Some(2.0));
+
+        // Unknown option returns false
+        assert!(!group.update_option("unknown-option", serde_json::json!(1)).await);
     }
 }

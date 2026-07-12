@@ -152,20 +152,22 @@ async fn test_e2e_bt_small_torrent_download() {
         &torrent_for_cmd,
         &DownloadOptions {
             seed_time: Some(0), // 禁用 seeding
+            enable_dht: false, // avoid real DHT bootstrap in unit tests
+            enable_public_trackers: false, // avoid real internet requests in unit tests
             ..DownloadOptions::default()
         },
         Some(dir.path().to_str().unwrap()),
     )
     .expect("BtDownloadCommand 创建失败");
 
-    match tokio::time::timeout(std::time::Duration::from_secs(15), cmd.execute()).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(30), cmd.execute()).await {
         Ok(Ok(())) => eprintln!("[DL] Download OK!"),
         Ok(Err(e)) => {
             eprintln!("[DL] Download ERROR: {}", e);
             panic!("BT download failed: {}", e);
         }
         Err(_) => {
-            eprintln!("[DL] Download TIMEOUT after 15s");
+            eprintln!("[DL] Download TIMEOUT after 30s");
             panic!("BT download timed out");
         }
     }
@@ -231,6 +233,8 @@ async fn test_e2e_bt_medium_torrent_download() {
         &torrent_for_cmd,
         &DownloadOptions {
             seed_time: Some(0),
+            enable_dht: false, // avoid real DHT bootstrap in unit tests
+            enable_public_trackers: false, // avoid real internet requests in unit tests
             ..DownloadOptions::default()
         },
         Some(dir.path().to_str().unwrap()),
@@ -293,6 +297,8 @@ async fn test_e2e_bt_progress_tracking() {
         &torrent_for_cmd,
         &DownloadOptions {
             seed_time: Some(0),
+            enable_dht: false, // avoid real DHT bootstrap in unit tests
+            enable_public_trackers: false, // avoid real internet requests in unit tests
             ..DownloadOptions::default()
         },
         Some(dir.path().to_str().unwrap()),

@@ -9,6 +9,7 @@ use std::path::Path;
 /// into `secure-falloc`. In that case residual disk data may be exposed
 /// until the download overwrites those blocks. `std::sync::Once` ensures the
 /// warning is logged only once per process to avoid log spam.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 static SECURE_FALLOC_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -206,6 +207,7 @@ async fn async_zero_fill<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result
 ///   fails for any other reason), it falls back to the sparse file produced
 ///   by `set_len` (SetEndOfFile).
 /// - **Other Unix (BSD, etc.)**: No portable preallocate syscall; uses `set_len`.
+#[cfg_attr(target_os = "linux", allow(unused_variables))]
 async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64, secure: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -245,9 +247,9 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64, secure: bool) -
                 return async_zero_fill(adaptor, length).await;
             }
             // Other errors: return as I/O error
-            return Err(Aria2Error::Io(
+            Err(Aria2Error::Io(
                 std::io::Error::from_raw_os_error(errno).to_string(),
-            ));
+            ))
         } else {
             // Fall back to set_len if no raw fd available
             adaptor.truncate(length).await

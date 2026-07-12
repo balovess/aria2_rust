@@ -370,6 +370,22 @@ async fn regression_change_option_validates_keys() {
     assert_error_code(&invalid_resp, -32602);
 }
 
+/// Test: aria2.changeOption accepts max-connection-per-server (runtime-changeable).
+#[tokio::test]
+async fn regression_change_option_accepts_max_connection_per_server() {
+    let engine = RpcEngine::new();
+
+    // Add a task first
+    let add_req = make_request("aria2.addUri", serde_json::json!(["http://example.com/file"]));
+    let add_resp = engine.handle_request(&add_req).await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    // Change max-connection-per-server — should succeed (not -32602)
+    let req = make_request("aria2.changeOption", serde_json::json!([gid, {"max-connection-per-server": 4}]));
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+}
+
 // =========================================================================
 // BitTorrent Specific Methods (4 methods)
 // =========================================================================
