@@ -263,7 +263,8 @@ async fn test_stress_config_manager_concurrent_access() {
                 let _ = m.set_global_option(
                     "split",
                     aria2_core::config::OptionValue::Int(i as i64),
-                );
+                )
+                .await;
             } else {
                 // Reader
                 let m = manager_clone.read().await;
@@ -280,6 +281,100 @@ async fn test_stress_config_manager_concurrent_access() {
     assert_eq!(success_count, 100, "All 100 config operations should complete");
     
     println!("Config manager stress test: {} operations completed", success_count);
+}
+
+/// Deadlock regression test for `set_global_option` actually executing
+/// (previously the future was dropped via `let _ = ...` without `.await`,
+/// so the write path was never exercised under contention).
+///
+/// This test forces the real write path: outer `RwLock<ConfigManager>` write
+/// lock → inner `global_opts.read()` → drop → inner `global_opts.write()` →
+/// `broadcast::send()`. With 200 concurrent tasks (100 writers × 5 rounds +
+/// 100 readers × 5 rounds) on 8 worker threads, any deadlock or writer
+/// starvation will cause the 15-second timeout to fire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_config_manager_no_deadlock_with_actual_writes() {
+    use aria2_core::config::OptionValue;
+
+    let manager = Arc::new(RwLock::new(ConfigManager::new()));
+
+    // 100 writers, each writing 5 rounds to "split" with a unique value
+    // derived from (task_id, round). 100 readers, each reading 5 rounds.
+    const WRITERS: usize = 100;
+    const READERS: usize = 100;
+    const ROUNDS: usize = 5;
+
+    let timeout = tokio::time::timeout(
+        Duration::from_secs(15),
+        async {
+            let mut handles = Vec::with_capacity(WRITERS + READERS);
+
+            for task_id in 0..WRITERS {
+                let m = manager.clone();
+                handles.push(tokio::spawn(async move {
+                    for round in 0..ROUNDS {
+                        let mut guard = m.write().await;
+                        // Keep value within the "split" option's valid range [1, 16]
+                        // so the validation inside set_global_option passes.
+                        let val = (task_id as i64 + round as i64) % 16 + 1;
+                        guard
+                            .set_global_option("split", OptionValue::Int(val))
+                            .await
+                            .expect("set_global_option should succeed");
+                    }
+                    task_id
+                }));
+            }
+
+            for task_id in 0..READERS {
+                let m = manager.clone();
+                handles.push(tokio::spawn(async move {
+                    for _ in 0..ROUNDS {
+                        let guard = m.read().await;
+                        let _ = guard.get_global_i64("split").await;
+                    }
+                    task_id
+                }));
+            }
+
+            let results: Vec<_> = futures::future::join_all(handles).await;
+            results
+        },
+    )
+    .await;
+
+    // If the timeout fired, the test panics with a clear message — this is
+    // the deadlock signal.
+    let results = timeout.expect(
+        "DEADLOCK DETECTED: config manager operations did not complete within 15s \
+         — likely deadlock or writer starvation in set_global_option write path",
+    );
+
+    let success_count = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(
+        success_count,
+        WRITERS + READERS,
+        "All {} tasks should complete without deadlock or panic",
+        WRITERS + READERS
+    );
+
+    // Verify the last writer's value is visible to a reader — confirms the
+    // write path actually persisted data (not silently dropped like before
+    // the .await fix).
+    {
+        let m = manager.read().await;
+        let val = m.get_global_i64("split").await;
+        assert!(
+            val.is_some(),
+            "split option should exist after writes — write path was silently dropped?"
+        );
+    }
+
+    println!(
+        "Deadlock regression test: {} tasks × {} rounds completed, data persisted",
+        WRITERS + READERS,
+        ROUNDS
+    );
 }
 
 /// Test rapid engine creation and shutdown
@@ -539,7 +634,7 @@ fn get_memory_usage() -> usize {
         };
         
         if result != 0 {
-            counters.WorkingSetSize as usize
+            counters.WorkingSetSize
         } else {
             0
         }

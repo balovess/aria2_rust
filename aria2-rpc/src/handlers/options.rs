@@ -91,11 +91,28 @@ impl RpcEngine {
             }
         }
 
+        // Clone the GID before moving it into `entry(gid)` so it remains
+        // available for the running-task check below.
+        let gid_for_check = gid.clone();
         let mut task_opts = self.task_opts.write().await;
         let entry = task_opts.entry(gid).or_insert_with(HashMap::new);
         for (k, v) in changes {
             entry.insert(k, v);
         }
+        // Release the task_opts write lock before acquiring the tasks read
+        // lock to keep lock hold times short and avoid any lock-ordering risk.
+        drop(task_opts);
+
+        // Warn if the option change targets a currently running task: the
+        // update is persisted to task_opts but will only take effect on the
+        // next session load, not on the in-flight download.
+        if self.tasks.read().await.contains_key(&gid_for_check) {
+            tracing::warn!(
+                "Option change for running task {} will take effect on next session load, not on the current download",
+                gid_for_check
+            );
+        }
+
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             "OK",

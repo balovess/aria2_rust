@@ -411,7 +411,7 @@ async fn regression_get_uris_format() {
     
     assert_success(&resp);
     let uris: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(uris.len() >= 1);
+    assert!(!uris.is_empty());
     
     // Each URI entry should have uri and status
     for entry in &uris {

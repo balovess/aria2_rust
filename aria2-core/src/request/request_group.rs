@@ -135,7 +135,7 @@ impl GroupId {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub split: Option<u16>,
     pub max_connection_per_server: Option<u16>,
@@ -223,6 +223,55 @@ pub struct DownloadOptions {
     /// Override `Referer` header. Also injected into the `header` list by
     /// [`DownloadOptions::parsed_headers`] when set.
     pub referer: Option<String>,
+}
+
+// Manual Default impl: `enable_dht` and `enable_public_trackers` default to
+// `true` (matching the load path in `option_handler.rs` and `task.rs` which
+// use `unwrap_or(true)`). All other fields use their type-level defaults.
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            split: None,
+            max_connection_per_server: None,
+            max_download_limit: None,
+            max_upload_limit: None,
+            dir: None,
+            out: None,
+            file_allocation: None,
+            mmap_threshold: None,
+            secure_falloc: false,
+            seed_time: None,
+            seed_ratio: None,
+            checksum: None,
+            cookie_file: None,
+            cookies: None,
+            bt_force_encrypt: false,
+            bt_require_crypto: false,
+            enable_dht: true,
+            dht_listen_port: None,
+            dht_entry_point: None,
+            enable_public_trackers: true,
+            bt_piece_selection_strategy: String::new(),
+            bt_endgame_threshold: 0,
+            max_retries: 0,
+            retry_wait: 0,
+            http_proxy: None,
+            all_proxy: None,
+            https_proxy: None,
+            ftp_proxy: None,
+            no_proxy: None,
+            dht_file_path: None,
+            bt_max_upload_slots: None,
+            bt_optimistic_unchoke_interval: None,
+            bt_snubbed_timeout: None,
+            bt_prioritize_piece: String::new(),
+            enable_utp: false,
+            utp_listen_port: None,
+            header: Vec::new(),
+            user_agent: None,
+            referer: None,
+        }
+    }
 }
 
 impl DownloadOptions {

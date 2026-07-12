@@ -44,7 +44,7 @@ mod j2_j5_integration_tests {
 
     #[test]
     fn test_connection_limiter_per_host() {
-        let mut limiter = ConnectionLimiter::new(10, 2);
+        let limiter = ConnectionLimiter::new(10, 2);
 
         assert!(
             limiter.try_acquire("example.com"),

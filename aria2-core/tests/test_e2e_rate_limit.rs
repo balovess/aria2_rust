@@ -49,7 +49,7 @@ fn _create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
 
 #[tokio::test]
 async fn test_rate_limiter_token_bucket_refill() {
-    let mut tb = TokenBucket::new(10000, Some(2000));
+    let tb = TokenBucket::new(10000, Some(2000));
     tb.acquire(1500).await;
     assert!(
         tb.available_tokens() < 1000.0,

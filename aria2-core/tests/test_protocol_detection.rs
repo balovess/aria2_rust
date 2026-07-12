@@ -121,10 +121,30 @@ fn test_detect_metalink_meta4_extension() {
 }
 
 #[test]
-fn test_detect_unknown_scheme_returns_http_fallback() {
-    let d = detect("example.com/file.zip").unwrap();
-    assert_eq!(d.input_type, InputType::HttpUrl);
-    assert_eq!(d.raw, "http://example.com/file.zip");
+fn test_detect_unknown_scheme_is_rejected() {
+    // Scheme-less inputs (bare hostname/path) must be rejected, not
+    // reinterpreted as HTTP URLs. This aligns with original aria2c behavior
+    // which never guesses a scheme for ambiguous inputs, and mirrors the lib
+    // test `test_detect_bare_hostname_is_rejected`.
+    let result = detect("example.com/file.zip");
+    assert!(
+        result.is_err(),
+        "Scheme-less input must be rejected, but detect() succeeded"
+    );
+    let err_msg = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => unreachable!("Already asserted is_err()"),
+    };
+    assert!(
+        err_msg.contains("Cannot detect input type"),
+        "Error message should mention detection failure: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("full URL with scheme"),
+        "Error message should suggest using a full URL with scheme: {}",
+        err_msg
+    );
 }
 
 #[test]

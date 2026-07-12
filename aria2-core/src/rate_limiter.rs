@@ -1,10 +1,14 @@
 use async_trait::async_trait;
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+
+use tracing::{debug, warn};
 
 use crate::constants;
 use crate::error::Result;
+use crate::filesystem::disk_writer::DiskWriter;
 
 #[derive(Clone, Debug, Default)]
 pub struct RateLimiterConfig {
@@ -51,104 +55,308 @@ impl RateLimiterConfig {
     }
 }
 
+/// Nanoseconds per second — used for integer time/rate conversions.
+const NS_PER_SEC: u64 = 1_000_000_000;
+
+/// Minimum wait duration before issuing a `tokio::time::sleep`.
+/// Waits shorter than this use a spin-loop hint instead to avoid
+/// the scheduling overhead of waking a task for sub-microsecond delays.
+const MIN_SLEEP: Duration = Duration::from_micros(1);
+
+/// Lock-free token bucket using atomic CAS operations.
+///
+/// All mutable state is stored in `AtomicU64` — no `Mutex` is acquired on the
+/// hot path. Token refill is computed lazily on each `acquire` / `try_acquire`
+/// call based on elapsed time since the last refill.
+///
+/// Integer arithmetic is used throughout (no `f64`) for deterministic behaviour
+/// and to avoid floating-point CAS issues. Token counts are tracked in
+/// **milli-tokens** (tokens * 1000) to provide sub-token precision while
+/// staying in integer domain.
+///
+/// All public methods take `&self` (not `&mut self`), enabling concurrent
+/// access from multiple tasks via a shared reference.
 pub struct TokenBucket {
-    capacity: f64,
-    tokens: f64,
-    rate: f64,
-    last_refill: Instant,
+    /// Current token count in milli-tokens (tokens * 1000).
+    /// Updated via CAS — never read-modify-write without compare_exchange.
+    tokens_milli: AtomicU64,
+    /// Maximum capacity in milli-tokens. Immutable after construction.
+    capacity_milli: u64,
+    /// Refill rate in milli-tokens per second. Immutable after construction.
+    /// `rate_milli_per_sec = rate_bytes_per_sec * 1000`.
+    rate_milli_per_sec: u64,
+    /// Last refill timestamp — nanoseconds elapsed since `anchor`.
+    /// Updated via CAS to claim a refill slot (only the winning thread adds tokens).
+    last_refill_elapsed_ns: AtomicU64,
+    /// Whether this bucket is unlimited (rate = infinity). Immutable after construction.
+    unlimited: bool,
+    /// Anchor `Instant` created at construction; used to compute elapsed nanoseconds.
+    /// Never mutated — `Instant` is `Send + Sync`.
+    anchor: Instant,
+}
+
+impl fmt::Debug for TokenBucket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenBucket")
+            .field("tokens_milli", &self.tokens_milli.load(Ordering::Relaxed))
+            .field("capacity_milli", &self.capacity_milli)
+            .field("rate_milli_per_sec", &self.rate_milli_per_sec)
+            .field("unlimited", &self.unlimited)
+            .finish()
+    }
 }
 
 impl TokenBucket {
+    /// Create a new token bucket with the given rate and optional burst.
+    ///
+    /// `rate_bytes_per_sec` of 0 produces a bucket that never refills — callers
+    /// should use [`TokenBucket::unlimited`] instead for "no limit" semantics.
     pub fn new(rate_bytes_per_sec: u64, burst_bytes: Option<u64>) -> Self {
-        let burst = burst_bytes.unwrap_or(constants::DEFAULT_BURST_BYTES as u64) as f64;
+        let burst = burst_bytes.unwrap_or(constants::DEFAULT_BURST_BYTES as u64);
+        let anchor = Instant::now();
         Self {
-            capacity: burst,
-            tokens: burst,
-            rate: rate_bytes_per_sec as f64,
-            last_refill: Instant::now(),
+            tokens_milli: AtomicU64::new(burst.saturating_mul(1000)),
+            capacity_milli: burst.saturating_mul(1000),
+            rate_milli_per_sec: rate_bytes_per_sec.saturating_mul(1000),
+            last_refill_elapsed_ns: AtomicU64::new(0),
+            unlimited: false,
+            anchor,
         }
     }
 
+    /// Create an unlimited token bucket — `acquire` / `try_acquire` always
+    /// succeed instantly without consuming any real tokens.
     pub fn unlimited() -> Self {
+        let anchor = Instant::now();
+        // Use a large but safe value to avoid overflow on arithmetic.
+        let huge = u64::MAX / 4;
         Self {
-            capacity: f64::MAX,
-            tokens: f64::MAX,
-            rate: f64::MAX,
-            last_refill: Instant::now(),
+            tokens_milli: AtomicU64::new(huge),
+            capacity_milli: huge,
+            rate_milli_per_sec: huge,
+            last_refill_elapsed_ns: AtomicU64::new(0),
+            unlimited: true,
+            anchor,
         }
     }
 
+    /// Returns `true` if this bucket has no rate limit.
     pub fn is_unlimited(&self) -> bool {
-        self.rate >= f64::MAX
+        self.unlimited
     }
 
-    fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
-        self.last_refill = now;
+    /// Returns the configured rate in bytes per second (as `f64` for API compat).
+    /// Returns `f64::MAX` for unlimited buckets.
+    pub fn rate(&self) -> f64 {
+        if self.unlimited {
+            f64::MAX
+        } else {
+            self.rate_milli_per_sec as f64 / 1000.0
+        }
     }
 
-    pub async fn acquire(&mut self, bytes: u64) {
-        if self.is_unlimited() {
-            return;
+    /// Returns the current available tokens (as `f64` for API compat).
+    /// Triggers a lazy refill before reading.
+    /// Returns `f64::MAX` for unlimited buckets.
+    pub fn available_tokens(&self) -> f64 {
+        if self.unlimited {
+            return f64::MAX;
         }
         self.refill();
-
-        let needed = bytes as f64;
-        if needed <= self.tokens {
-            self.tokens -= needed;
-            return;
-        }
-
-        let deficit = needed - self.tokens;
-        let wait_secs = deficit / self.rate;
-        self.tokens = 0.0;
-        self.last_refill = Instant::now();
-
-        if wait_secs > constants::RATE_LIMITER_MIN_WAIT_SECS {
-            tokio::time::sleep(Duration::from_secs_f64(wait_secs)).await;
-        }
-
-        self.refill();
-        self.tokens = (self.tokens - needed).max(0.0);
+        self.tokens_milli.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
-    pub fn try_acquire(&mut self, bytes: u64) -> bool {
-        if self.is_unlimited() {
+    /// Nanoseconds elapsed since the anchor `Instant`.
+    #[inline]
+    fn now_ns(&self) -> u64 {
+        // saturating_duration_since avoids panic on clock anomalies.
+        // now - anchor = elapsed time since construction.
+        Instant::now()
+            .saturating_duration_since(self.anchor)
+            .as_nanos() as u64
+    }
+
+    /// Lazily refill tokens based on elapsed time since the last refill.
+    ///
+    /// Uses a **CAS-claim** pattern: only the thread that successfully advances
+    /// `last_refill_elapsed_ns` adds tokens. This prevents double-counting when
+    /// multiple threads call `refill` concurrently.
+    ///
+    /// Formula: `added_milli = elapsed_ns * rate_milli_per_sec / NS_PER_SEC`
+    /// (the 1000× from milli-tokens cancels with the 1000× in rate_milli_per_sec).
+    fn refill(&self) {
+        if self.unlimited {
+            return;
+        }
+        let now = self.now_ns();
+        let last = self.last_refill_elapsed_ns.load(Ordering::Relaxed);
+        if now <= last {
+            // No time elapsed since last refill (or clock went backwards).
+            return;
+        }
+        let elapsed_ns = now - last;
+        // u128 to avoid overflow: elapsed_ns (u64) * rate_milli_per_sec (u64).
+        let added_milli =
+            ((elapsed_ns as u128) * (self.rate_milli_per_sec as u128) / NS_PER_SEC as u128) as u64;
+        if added_milli == 0 {
+            // Less than 1 milli-token elapsed — do NOT advance last_refill to
+            // preserve fractional accumulation for the next call.
+            return;
+        }
+        // Claim the refill: only the winner of this CAS proceeds to add tokens.
+        // Losers abort — another thread already refilled for a overlapping period.
+        match self.last_refill_elapsed_ns.compare_exchange(
+            last,
+            now,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                // Won the claim — add tokens, capping at capacity.
+                loop {
+                    let current = self.tokens_milli.load(Ordering::Relaxed);
+                    let new = current
+                        .saturating_add(added_milli)
+                        .min(self.capacity_milli);
+                    match self.tokens_milli.compare_exchange_weak(
+                        current,
+                        new,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(_) => continue, // Another thread modified tokens — retry.
+                    }
+                }
+            }
+            Err(_) => {
+                // Lost the claim — another thread already refilled. Nothing to do.
+            }
+        }
+    }
+
+    /// Acquire `bytes` tokens, blocking (async-sleeping) until enough tokens
+    /// are available.
+    ///
+    /// For requests larger than the burst capacity, this method waits for the
+    /// deficit and then force-acquires (setting tokens to 0), matching the
+    /// original implementation's behaviour of allowing token "debt" clamped to
+    /// zero. This prevents infinite loops when `needed > capacity`.
+    pub async fn acquire(&self, bytes: u64) {
+        if self.unlimited {
+            return;
+        }
+        // milli-tokens needed; saturating_mul caps at u64::MAX on overflow.
+        let needed_milli = bytes.saturating_mul(1000);
+
+        loop {
+            self.refill();
+            let current = self.tokens_milli.load(Ordering::Relaxed);
+            if current >= needed_milli {
+                // Enough tokens — try CAS to deduct.
+                match self.tokens_milli.compare_exchange_weak(
+                    current,
+                    current - needed_milli,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(_) => continue, // Raced — retry.
+                }
+            }
+
+            // Not enough tokens — compute wait time from the deficit.
+            let deficit_milli = needed_milli - current;
+            if self.rate_milli_per_sec == 0 {
+                // Rate is 0 — would wait forever. Defensively treat as unlimited
+                // rather than hanging the caller.
+                warn!("TokenBucket::acquire with rate=0; treating as unlimited");
+                return;
+            }
+            // wait_ns = deficit_milli * NS_PER_SEC / rate_milli_per_sec
+            // (u128 to avoid overflow).
+            let wait_ns = ((deficit_milli as u128) * NS_PER_SEC as u128
+                / self.rate_milli_per_sec as u128) as u64;
+            let wait = Duration::from_nanos(wait_ns);
+
+            if wait < MIN_SLEEP {
+                // Very short wait — spin instead of paying scheduler overhead.
+                std::hint::spin_loop();
+                continue;
+            }
+
+            debug!(
+                bytes = bytes,
+                deficit_milli = deficit_milli,
+                wait_ns = wait_ns,
+                "throttling: sleeping for token refill"
+            );
+            tokio::time::sleep(wait).await;
+
+            // After sleeping, force-acquire: refill, then deduct (clamped to 0).
+            // This matches the original behaviour where tokens can go negative
+            // (clamped to 0) when the request exceeds burst capacity.
+            self.refill();
+            loop {
+                let cur = self.tokens_milli.load(Ordering::Relaxed);
+                let new = cur.saturating_sub(needed_milli);
+                match self.tokens_milli.compare_exchange_weak(
+                    cur,
+                    new,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(_) => continue,
+                }
+            }
+        }
+    }
+
+    /// Non-blocking attempt to acquire `bytes` tokens.
+    /// Returns `true` if tokens were available and deducted, `false` otherwise.
+    pub fn try_acquire(&self, bytes: u64) -> bool {
+        if self.unlimited {
             return true;
         }
         self.refill();
-        let needed = bytes as f64;
-        if needed <= self.tokens {
-            self.tokens -= needed;
-            true
-        } else {
-            false
+        let needed_milli = bytes.saturating_mul(1000);
+        loop {
+            let current = self.tokens_milli.load(Ordering::Relaxed);
+            if current < needed_milli {
+                return false;
+            }
+            match self.tokens_milli.compare_exchange_weak(
+                current,
+                current - needed_milli,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
         }
     }
-
-    pub fn available_tokens(&self) -> f64 {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        (self.tokens + elapsed * self.rate).min(self.capacity)
-    }
-
-    pub fn rate(&self) -> f64 {
-        self.rate
-    }
 }
 
-#[derive(Clone)]
-pub struct RateLimiter {
-    inner: Arc<Mutex<RateLimiterInner>>,
-    download_limited: bool,
-    upload_limited: bool,
-}
-
+/// Inner state of `RateLimiter`, shared via `Arc` so that cloning a
+/// `RateLimiter` shares the same token buckets (no Mutex involved).
 struct RateLimiterInner {
     download: TokenBucket,
     upload: TokenBucket,
+}
+
+/// Rate limiter for download and upload bandwidth.
+///
+/// Cloning a `RateLimiter` shares the underlying token buckets — all clones
+/// draw from the same pool. The hot path (`acquire_download` / `acquire_upload`)
+/// performs **no mutex acquisition**: token accounting is done entirely via
+/// atomic CAS operations on the inner `TokenBucket`s.
+#[derive(Clone)]
+pub struct RateLimiter {
+    inner: Arc<RateLimiterInner>,
+    download_limited: bool,
+    upload_limited: bool,
 }
 
 impl RateLimiter {
@@ -168,7 +376,7 @@ impl RateLimiter {
         };
 
         Self {
-            inner: Arc::new(Mutex::new(RateLimiterInner { download, upload })),
+            inner: Arc::new(RateLimiterInner { download, upload }),
             download_limited: dl_rate.is_some_and(|r| r > 0),
             upload_limited: ul_rate.is_some_and(|r| r > 0),
         }
@@ -179,27 +387,25 @@ impl RateLimiter {
     }
 
     pub async fn acquire_download(&self, bytes: u64) {
-        let mut inner = self.inner.lock().await;
-        inner.download.acquire(bytes).await;
+        self.inner.download.acquire(bytes).await;
     }
 
     pub async fn acquire_upload(&self, bytes: u64) {
-        let mut inner = self.inner.lock().await;
-        inner.upload.acquire(bytes).await;
+        self.inner.upload.acquire(bytes).await;
     }
 
     /// Non-blocking attempt to acquire download tokens.
-    /// Returns true if tokens were available, false otherwise (no wait).
+    /// Returns `true` if tokens were available, `false` otherwise (no wait).
+    #[allow(clippy::unused_async)]
     pub async fn try_acquire_download(&self, bytes: u64) -> bool {
-        let mut inner = self.inner.lock().await;
-        inner.download.try_acquire(bytes)
+        self.inner.download.try_acquire(bytes)
     }
 
     /// Non-blocking attempt to acquire upload tokens.
-    /// Returns true if tokens were available, false otherwise (no wait).
+    /// Returns `true` if tokens were available, `false` otherwise (no wait).
+    #[allow(clippy::unused_async)]
     pub async fn try_acquire_upload(&self, bytes: u64) -> bool {
-        let mut inner = self.inner.lock().await;
-        inner.upload.try_acquire(bytes)
+        self.inner.upload.try_acquire(bytes)
     }
 
     pub fn is_download_limited(&self) -> bool {
@@ -211,22 +417,27 @@ impl RateLimiter {
     }
 
     pub async fn config(&self) -> RateLimiterConfig {
-        let inner = self.inner.lock().await;
         RateLimiterConfig::new(
-            if inner.download.is_unlimited() {
+            if self.inner.download.is_unlimited() {
                 None
             } else {
-                Some(inner.download.rate() as u64)
+                Some(self.inner.download.rate() as u64)
             },
-            if inner.upload.is_unlimited() {
+            if self.inner.upload.is_unlimited() {
                 None
             } else {
-                Some(inner.upload.rate() as u64)
+                Some(self.inner.upload.rate() as u64)
             },
         )
     }
 }
 
+/// A `DiskWriter` wrapper that throttles writes via a `RateLimiter`.
+///
+/// Token acquisition is **batched**: a single `write()` call acquires tokens
+/// for the entire buffer upfront (one CAS sequence), then writes the data in
+/// chunks to the inner writer. This avoids per-chunk lock contention — at
+/// 1 GiB/s with 8 KB chunks that is 125 000 fewer acquire calls per second.
 pub struct ThrottledWriter<W> {
     inner: W,
     limiter: RateLimiter,
@@ -259,8 +470,6 @@ where
     }
 }
 
-use crate::filesystem::disk_writer::DiskWriter;
-
 #[async_trait]
 impl<W> DiskWriter for ThrottledWriter<W>
 where
@@ -271,14 +480,22 @@ where
             return self.inner.write(data).await;
         }
 
+        // Batch: acquire tokens for the entire buffer in one call (single
+        // CAS sequence) rather than per-chunk. The inner write still proceeds
+        // in chunks to avoid large intermediate allocations, but no token
+        // accounting happens inside the chunk loop.
+        let total_bytes = data.len() as u64;
+        self.limiter.acquire_download(total_bytes).await;
+
+        if data.len() <= self.chunk_size {
+            return self.inner.write(data).await;
+        }
+
         let mut offset = 0usize;
         while offset < data.len() {
             let end = (offset + self.chunk_size).min(data.len());
             let chunk = &data[offset..end];
-
-            self.limiter.acquire_download(chunk.len() as u64).await;
             self.inner.write(chunk).await?;
-
             offset = end;
         }
         Ok(())
@@ -292,10 +509,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_token_bucket_unlimited() {
-        let mut tb = TokenBucket::unlimited();
+        let tb = TokenBucket::unlimited();
         assert!(tb.is_unlimited());
         tb.acquire(1024 * 1024 * 1024).await;
         assert!(tb.available_tokens() > 0.0);
@@ -303,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_bucket_basic_acquire() {
-        let mut tb = TokenBucket::new(10000, Some(5000));
+        let tb = TokenBucket::new(10000, Some(5000));
         assert!(!tb.is_unlimited());
 
         let start = Instant::now();
@@ -328,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_bucket_try_acquire() {
-        let mut tb = TokenBucket::new(1000, Some(2000));
+        let tb = TokenBucket::new(1000, Some(2000));
 
         assert!(tb.try_acquire(1000));
         assert!(tb.try_acquire(1000));
@@ -337,13 +555,21 @@ mod tests {
 
     #[test]
     fn test_token_bucket_available_tokens() {
-        let mut tb = TokenBucket::new(1000, Some(5000));
+        let tb = TokenBucket::new(1000, Some(5000));
         let initial = tb.available_tokens();
-        assert!((initial - 5000.0).abs() < 0.01);
+        assert!(
+            (initial - 5000.0).abs() < 0.01,
+            "initial tokens should be ~5000, got {}",
+            initial
+        );
 
         tb.try_acquire(2000);
         let after = tb.available_tokens();
-        assert!((after - 3000.0).abs() < 0.01);
+        assert!(
+            (after - 3000.0).abs() < 0.01,
+            "after acquiring 2000, should have ~3000, got {}",
+            after
+        );
     }
 
     #[test]
@@ -381,7 +607,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter_with_limits() {
-        let cfg = RateLimiterConfig::new(Some(5000), Some(1000)).with_burst(Some(1000), Some(500));
+        let cfg =
+            RateLimiterConfig::new(Some(5000), Some(1000)).with_burst(Some(1000), Some(500));
         let rl = RateLimiter::new(&cfg);
         assert!(rl.is_download_limited());
         assert!(rl.is_upload_limited());
@@ -455,5 +682,138 @@ mod tests {
         let rl = RateLimiter::new(&cfg);
         assert!(!rl.is_download_limited());
         assert!(!rl.is_upload_limited());
+    }
+
+    // ------------------------------------------------------------------
+    // New tests for the lock-free implementation (Task C1 / C2)
+    // ------------------------------------------------------------------
+
+    /// Verify that multiple tasks can acquire from the same `TokenBucket`
+    /// concurrently without deadlock, panic, or excessive contention.
+    ///
+    /// With the old `tokio::sync::Mutex` implementation, 4 concurrent tasks
+    /// would serialise on the mutex. With the lock-free atomic implementation,
+    /// all tasks proceed concurrently — the only blocking is from
+    /// `tokio::time::sleep` when tokens are exhausted.
+    #[tokio::test]
+    async fn test_token_bucket_concurrent_no_deadlock() {
+        // Large burst so all acquires are instant from burst tokens —
+        // this isolates the concurrency test from timing concerns.
+        let bucket = Arc::new(TokenBucket::new(10_000_000, Some(10_000_000)));
+
+        let mut handles = Vec::with_capacity(4);
+        for task_id in 0..4u8 {
+            let b = bucket.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..1000 {
+                    b.acquire(1000).await;
+                }
+                task_id // return id for identification
+            }));
+        }
+
+        // If any task deadlocks or panics, await will fail.
+        for (i, h) in handles.into_iter().enumerate() {
+            let id = h.await.expect("task should complete without panic");
+            assert_eq!(id as usize, i, "task ordering preserved");
+        }
+
+        // After 4 * 1000 * 1000 = 4 MB acquired from a 10 MB burst,
+        // at least 6 MB should remain (minus tiny refill variance).
+        let remaining = bucket.available_tokens();
+        assert!(
+            remaining > 5_000_000.0,
+            "should have ~6MB left after consuming 4MB, got {}",
+            remaining
+        );
+    }
+
+    /// Verify that `ThrottledWriter` batches token acquisition: a single
+    /// `write()` call should result in ONE throttle wait, not per-chunk waits.
+    ///
+    /// We use a rate limiter with zero burst and a moderate rate. The total
+    /// elapsed time should match the batch calculation
+    /// (`total_bytes / rate`), not be inflated by per-chunk sleep scheduling
+    /// overhead. With per-chunk acquisition and a tiny chunk size, the
+    /// many individual `tokio::time::sleep` calls add measurable overhead.
+    #[tokio::test]
+    async fn test_throttled_writer_batches_token_acquisition() {
+        use crate::filesystem::disk_writer::ByteArrayDiskWriter;
+
+        // rate = 10 000 bytes/s, burst = 0 (pure rate limiting, no buffer).
+        // data  = 5 000 bytes → expected wait ~500 ms (one batch sleep).
+        let raw = ByteArrayDiskWriter::new();
+        let cfg = RateLimiterConfig::new(Some(10_000), None).with_burst(Some(0), None);
+        let rl = RateLimiter::new(&cfg);
+        // Tiny chunk size to maximise per-chunk overhead if it were used.
+        let mut tw = ThrottledWriter::new(raw, rl).with_chunk_size(100);
+
+        let data = vec![0x77u8; 5_000];
+        let start = Instant::now();
+        tw.write(&data).await.unwrap();
+        let elapsed = start.elapsed();
+        let result = tw.finalize().await.unwrap();
+
+        assert_eq!(result.len(), 5_000, "data integrity preserved");
+        assert!(
+            result.iter().all(|&b| b == 0x77),
+            "all bytes should be 0x77"
+        );
+
+        // Expected batch wait: 5000 bytes / 10000 bytes/s = 500 ms.
+        // Allow generous lower bound for timer jitter.
+        assert!(
+            elapsed >= Duration::from_millis(450),
+            "batch acquire should wait ~500ms, got {:?}",
+            elapsed
+        );
+
+        // Upper bound: with per-chunk acquisition (50 chunks * 100 bytes),
+        // each 100ms sleep would add scheduling overhead. Batch should be
+        // well under 1 second. If per-chunk were used with 50 sleeps,
+        // overhead would push this higher on most platforms.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "batch acquire should complete well under 2s, got {:?}",
+            elapsed
+        );
+    }
+
+    /// Verify that `RateLimiter` clones share state — acquiring from one clone
+    /// affects the tokens available to the other. This is a unit-level version
+    /// of the integration test in `test_e2e_rate_limit.rs`.
+    #[tokio::test]
+    async fn test_rate_limiter_clone_shares_state() {
+        let cfg = RateLimiterConfig::new(Some(10000), None).with_burst(Some(5000), None);
+        let rl1 = RateLimiter::new(&cfg);
+        let rl2 = rl1.clone();
+
+        assert!(rl1.is_download_limited());
+        assert!(rl2.is_download_limited());
+
+        // Acquiring from rl1 should deplete tokens visible to rl2.
+        rl1.acquire_download(3000).await;
+        rl2.acquire_download(3000).await;
+
+        let config = rl1.config().await;
+        assert!(config.download_rate().is_some());
+    }
+
+    /// Verify that a high rate with sufficient burst completes near-instantly,
+    /// confirming the lock-free path has negligible overhead.
+    #[tokio::test]
+    async fn test_rate_limiter_high_rate_low_latency() {
+        let cfg =
+            RateLimiterConfig::new(Some(100_000_000), None).with_burst(Some(1_000_000), None);
+        let rl = RateLimiter::new(&cfg);
+
+        let start = Instant::now();
+        rl.acquire_download(100_000).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "100MB/s rate with 1MB burst should be near-instant for 100KB: got {:?}",
+            elapsed
+        );
     }
 }

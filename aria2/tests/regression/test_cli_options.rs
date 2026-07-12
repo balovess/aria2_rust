@@ -48,8 +48,8 @@ fn regression_short_option_min_split_size() {
     parser.parse_cli_args(&["-k", "10M"]);
     // Check if option exists and was parsed
     let val = parser.get_str("min-split-size");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), "10M");
+    if let Some(v) = val {
+        assert_eq!(v, "10M");
     }
 }
 
@@ -92,8 +92,8 @@ fn regression_short_option_daemon() {
     parser.parse_cli_args(&["-D"]);
     // Check if option exists and was parsed
     let val = parser.get_bool("daemon");
-    if val.is_some() {
-        assert!(val.unwrap());
+    if let Some(v) = val {
+        assert!(v);
     }
 }
 
@@ -162,8 +162,8 @@ fn regression_short_option_seed_ratio() {
     parser.parse_cli_args(&["-g", "2.0"]);
     // Check if option exists and was parsed
     let val = parser.get_str("seed-ratio");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), "2.0");
+    if let Some(v) = val {
+        assert_eq!(v, "2.0");
     }
 }
 
@@ -174,8 +174,8 @@ fn regression_short_option_seed_time() {
     parser.parse_cli_args(&["-G", "60"]);
     // Check if option exists and was parsed
     let val = parser.get_i64("seed-time");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), 60);
+    if let Some(v) = val {
+        assert_eq!(v, 60);
     }
 }
 
@@ -286,8 +286,8 @@ fn regression_long_option_disk_cache() {
     parser.parse_cli_args(&["--disk-cache=16M"]);
     // Check if option exists and was parsed
     let val = parser.get_str("disk-cache");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), "16M");
+    if let Some(v) = val {
+        assert_eq!(v, "16M");
     }
 }
 
@@ -298,8 +298,8 @@ fn regression_long_option_min_split_size() {
     parser.parse_cli_args(&["--min-split-size=20M"]);
     // Check if option exists and was parsed
     let val = parser.get_str("min-split-size");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), "20M");
+    if let Some(v) = val {
+        assert_eq!(v, "20M");
     }
 }
 
@@ -310,8 +310,8 @@ fn regression_long_option_max_download_limit() {
     parser.parse_cli_args(&["--max-download-limit=1M"]);
     // Check if option exists and was parsed
     let val = parser.get_str("max-download-limit");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), "1M");
+    if let Some(v) = val {
+        assert_eq!(v, "1M");
     }
 }
 
@@ -322,8 +322,8 @@ fn regression_long_option_max_overall_download_limit() {
     parser.parse_cli_args(&["--max-overall-download-limit=10M"]);
     // Check if option exists and was parsed
     let val = parser.get_str("max-overall-download-limit");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), "10M");
+    if let Some(v) = val {
+        assert_eq!(v, "10M");
     }
 }
 
@@ -350,8 +350,8 @@ fn regression_long_option_rpc_allow_origin_all() {
     parser.parse_cli_args(&["--rpc-allow-origin-all"]);
     // Check if option exists and was parsed
     let val = parser.get_bool("rpc-allow-origin-all");
-    if val.is_some() {
-        assert!(val.unwrap());
+    if let Some(v) = val {
+        assert!(v);
     }
 }
 
@@ -402,8 +402,8 @@ fn regression_long_option_dht_listen_port() {
     parser.parse_cli_args(&["--dht-listen-port=6881"]);
     // Check if option exists and was parsed
     let val = parser.get_str("dht-listen-port");
-    if val.is_some() {
-        assert_eq!(val.unwrap(), "6881");
+    if let Some(v) = val {
+        assert_eq!(v, "6881");
     }
 }
 
@@ -462,7 +462,7 @@ fn regression_long_option_header_multiple() {
     parser.parse_cli_args(&["--header=X-Custom: value1", "--header=X-Custom: value2"]);
     let val = parser.get("header").unwrap();
     let list = val.as_list().unwrap();
-    assert!(list.len() >= 1);
+    assert!(!list.is_empty());
 }
 
 /// Test: --http-proxy with URL value.
@@ -523,8 +523,8 @@ fn regression_long_option_truncate_console_readout() {
     parser.parse_cli_args(&["--truncate-console-readout"]);
     // Check if option exists and was parsed
     let val = parser.get_bool("truncate-console-readout");
-    if val.is_some() {
-        assert!(val.unwrap());
+    if let Some(v) = val {
+        assert!(v);
     }
 }
 
@@ -890,7 +890,7 @@ fn regression_option_value_int() {
 #[test]
 fn regression_option_value_bool() {
     let val = OptionValue::Bool(true);
-    assert_eq!(val.as_bool().unwrap(), true);
+    assert!(val.as_bool().unwrap());
     assert!(val.as_str().is_none());
     assert!(val.as_i64().is_none());
 }

@@ -357,10 +357,8 @@ impl Bitfield {
 
     /// Set all bits to true.
     pub fn set_all(&mut self) {
-        for byte in &mut self.bits {
-            *byte = 0xFF;
-        }
-        
+        self.bits.fill(0xFF);
+
         // Clear unused bits in the last byte
         let remaining_bits = self.num_bits % 8;
         if remaining_bits > 0 && !self.bits.is_empty() {
@@ -372,9 +370,7 @@ impl Bitfield {
 
     /// Clear all bits.
     pub fn clear_all(&mut self) {
-        for byte in &mut self.bits {
-            *byte = 0;
-        }
+        self.bits.fill(0);
     }
 
     /// Perform a bitwise AND with another bitfield.

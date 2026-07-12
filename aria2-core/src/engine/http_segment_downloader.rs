@@ -1,16 +1,24 @@
+use dashmap::DashMap;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::http::hyper_client::HyperDirectClient;
 
 // Re-export score_source for convenience
 pub use crate::selector::adaptive_uri_selector::{score_source_raw as score_source, score_source_raw};
 
 pub struct HttpSegmentDownloader {
     client: reqwest::Client,
+    /// Direct hyper client for the non-proxy HTTP hot path. `None` when a
+    /// proxy is configured or the caller explicitly opts out (e.g. tests for
+    /// the reqwest-only path). HTTPS URLs always fall back to reqwest even
+    /// when this is `Some`, because `HyperDirectClient` only handles plain
+    /// HTTP in its current form.
+    hyper_client: Option<HyperDirectClient>,
 }
 
 /// Calculate optimal segment size based on download speed and remaining data.
@@ -35,54 +43,141 @@ pub fn calculate_dynamic_segment_size(
 }
 
 /// Track active connections per hostname to enforce max-connection-per-server limit.
+///
+/// Uses `DashMap` + `AtomicUsize` for interior mutability, so every method takes
+/// `&self` and the limiter can be shared via `Arc<ConnectionLimiter>` without any
+/// wrapping `Mutex`/`RwLock`. This is a *soft* limiter: the CAS-with-rollback
+/// pattern in [`ConnectionLimiter::try_acquire`] keeps the global and per-host
+/// counts bounded by their limits at the moment of each successful CAS, but
+/// snapshot readers (e.g. [`ConnectionLimiter::host_count`]) may observe
+/// briefly-stale values.
 pub struct ConnectionLimiter {
-    per_host: HashMap<String, usize>,
+    per_host: DashMap<String, AtomicUsize>,
+    global_count: AtomicUsize,
     global_limit: usize,
     per_host_limit: usize,
 }
 
 impl ConnectionLimiter {
-    /// Create a new ConnectionLimiter with specified limits.
+    /// Create a new `ConnectionLimiter` with the given global and per-host limits.
     pub fn new(global: usize, per_host: usize) -> Self {
         Self {
-            per_host: HashMap::new(),
+            per_host: DashMap::new(),
+            global_count: AtomicUsize::new(0),
             global_limit: global,
             per_host_limit: per_host,
         }
     }
 
     /// Try to acquire a connection slot for the given host.
-    /// Returns true if allowed, false if at limit.
-    pub fn try_acquire(&mut self, host: &str) -> bool {
-        // Check per-host limit first
-        let current_count = *self.per_host.get(host).unwrap_or(&0);
-        if current_count >= self.per_host_limit {
-            return false;
+    ///
+    /// Returns `true` if the slot was acquired, `false` if either the global or
+    /// the per-host limit has been reached.
+    ///
+    /// # Algorithm (CAS-with-rollback)
+    ///
+    /// 1. Atomically increment `global_count` via CAS; abort if at/above limit.
+    /// 2. Atomically increment the per-host counter via CAS; if the per-host
+    ///    limit is hit, roll back the global increment so `global_count` stays
+    ///    accurate.
+    ///
+    /// This guarantees `global_count` never exceeds `global_limit` at the
+    /// moment of a successful CAS, and each host's counter never exceeds
+    /// `per_host_limit`. A brief shard-level write lock is held by the
+    /// `DashMap` `Entry` guard during the per-host CAS — acceptable for a
+    /// connection limiter which is not a hot path.
+    pub fn try_acquire(&self, host: &str) -> bool {
+        // Step 1: Atomically acquire a global slot via CAS. Only threads that
+        // observe `current < global_limit` can succeed, so the global count can
+        // never exceed `global_limit` at the instant of a successful CAS.
+        loop {
+            let current = self.global_count.load(Ordering::Relaxed);
+            if current >= self.global_limit {
+                return false;
+            }
+            match self.global_count.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(_) => continue,
+            }
         }
 
-        // Check global limit (sum of all connections)
-        let global_count: usize = self.per_host.values().sum();
-        if global_count >= self.global_limit {
-            return false;
+        // Step 2: Try to acquire a per-host slot. On failure, roll back the
+        // global increment performed above so the global count stays accurate.
+        // The rollback uses Relaxed ordering: it only needs to eventually
+        // correct the over-count introduced in step 1, which was already
+        // published with AcqRel. A short-lived false-positive on the global
+        // limit (another thread briefly sees the inflated count) is acceptable
+        // for a soft limiter.
+        let entry = self
+            .per_host
+            .entry(host.to_string())
+            .or_insert_with(|| AtomicUsize::new(0));
+        loop {
+            let current = entry.load(Ordering::Relaxed);
+            if current >= self.per_host_limit {
+                // Per-host limit reached — roll back the global increment.
+                self.global_count.fetch_sub(1, Ordering::Relaxed);
+                return false;
+            }
+            match entry.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
         }
-
-        // Acquire the slot
-        *self.per_host.entry(host.to_string()).or_insert(0) += 1;
-        true
     }
 
-    /// Release a slot when a connection completes/fails.
-    pub fn release(&mut self, host: &str) {
-        if let Some(count) = self.per_host.get_mut(host)
-            && *count > 0
-        {
-            *count -= 1;
+    /// Release a previously-acquired connection slot for the given host.
+    ///
+    /// The caller must call this exactly once per successful `try_acquire` for
+    /// the same host. Double-releases are detected via `debug_assert!` in debug
+    /// builds.
+    pub fn release(&self, host: &str) {
+        if let Some(entry) = self.per_host.get(host) {
+            let prev = entry.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(prev > 0, "release called more times than acquire for host");
         }
+        let prev = self.global_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(prev > 0, "global release underflow");
     }
 
-    /// How many slots available for this host?
+    /// Current connection count for a host (snapshot — may be slightly stale).
+    pub fn host_count(&self, host: &str) -> usize {
+        self.per_host
+            .get(host)
+            .map(|e| e.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Total connection count across all hosts (snapshot — may be slightly stale).
+    pub fn global_count(&self) -> usize {
+        self.global_count.load(Ordering::Relaxed)
+    }
+
+    /// The configured global connection limit.
+    pub fn global_limit(&self) -> usize {
+        self.global_limit
+    }
+
+    /// The configured per-host connection limit.
+    pub fn per_host_limit(&self) -> usize {
+        self.per_host_limit
+    }
+
+    /// How many slots are still available for the given host (snapshot).
+    ///
+    /// Returns 0 if the host is at or above its per-host limit.
     pub fn available_for(&self, host: &str) -> usize {
-        let current = self.per_host.get(host).copied().unwrap_or(0);
+        let current = self.host_count(host);
         if current >= self.per_host_limit {
             return 0;
         }
@@ -91,10 +186,30 @@ impl ConnectionLimiter {
 }
 
 impl HttpSegmentDownloader {
-    pub fn new(client: &reqwest::Client) -> Self {
+    /// Create a new `HttpSegmentDownloader`.
+    ///
+    /// When `use_hyper` is `true` and the request URL is plain HTTP, the
+    /// `download_range` hot path will try `HyperDirectClient` first and fall
+    /// back to reqwest on any error. Pass `false` for proxy paths (the
+    /// `HyperDirectClient` does not support proxies, HTTPS, or custom
+    /// headers/cookies).
+    pub fn new(client: &reqwest::Client, use_hyper: bool) -> Self {
         Self {
             client: client.clone(),
+            hyper_client: if use_hyper {
+                Some(HyperDirectClient::new())
+            } else {
+                None
+            },
         }
+    }
+
+    /// Whether the hyper direct client is wired in for this downloader.
+    /// Exposed for tests so they can assert wiring without making the field
+    /// `pub`.
+    #[cfg(test)]
+    pub(crate) fn has_hyper_client(&self) -> bool {
+        self.hyper_client.is_some()
     }
 
     pub async fn supports_range(
@@ -103,6 +218,10 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
     ) -> Result<bool> {
+        // TODO: route HEAD probes through `HyperDirectClient` when available
+        // (it currently has no `supports_range` / HEAD API). Until then the
+        // reqwest path handles headers/cookies correctly, which is the
+        // behaviour we want for range-support negotiation.
         let mut req = self.client.head(url);
         if let Some(ch) = cookie_header {
             req = req.header("Cookie", ch);
@@ -142,6 +261,35 @@ impl HttpSegmentDownloader {
     ) -> Result<bytes::Bytes> {
         if length == 0 {
             return Ok(bytes::Bytes::new());
+        }
+
+        // Use the hyper direct client for the non-proxy plain-HTTP hot path.
+        // `HyperDirectClient` does not support HTTPS, proxies, custom headers,
+        // or cookies — those cases fall through to the reqwest path below.
+        // TODO: extend `HyperDirectClient` to forward custom headers/cookies so
+        // the reqwest fallback is only needed for HTTPS/proxy.
+        if let Some(ref hyper) = self.hyper_client
+            && !url.starts_with("https://")
+        {
+            match hyper.download_range(url, offset, Some(length)).await {
+                Ok(data) => {
+                    debug!(
+                        "HyperDirectClient served range {}-{} ({} bytes) from {}",
+                        offset,
+                        offset + length,
+                        data.len(),
+                        url
+                    );
+                    return Ok(data);
+                }
+                Err(e) => {
+                    warn!(
+                        "HyperDirectClient failed for {} (offset={}, len={}), falling back to reqwest: {}",
+                        url, offset, length, e
+                    );
+                    // Fall through to the reqwest path.
+                }
+            }
         }
 
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
@@ -242,7 +390,9 @@ mod tests {
             .connect_timeout(Duration::from_millis(100))
             .build()
             .unwrap();
-        let dl = HttpSegmentDownloader::new(&client);
+        // use_hyper=false keeps supports_range on the reqwest path it has
+        // always exercised.
+        let dl = HttpSegmentDownloader::new(&client, false);
         let result = dl
             .supports_range("http://127.0.0.1:1/nonexistent", None, &[])
             .await;
@@ -252,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_zero_length() {
         let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client);
+        let dl = HttpSegmentDownloader::new(&client, false);
         let result = dl.download_range("http://example.com", 0, 0, None, &[]).await;
         assert!(result.is_ok(), "zero-length range should return empty vec");
         assert!(result.unwrap().is_empty());
@@ -261,8 +411,8 @@ mod tests {
     #[tokio::test]
     async fn test_downloader_creation() {
         let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client);
-        let _dl2 = HttpSegmentDownloader::new(&dl.client);
+        let dl = HttpSegmentDownloader::new(&client, false);
+        let _dl2 = HttpSegmentDownloader::new(&dl.client, false);
     }
 
     #[tokio::test]
@@ -288,7 +438,10 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let dl = HttpSegmentDownloader::new(&client);
+        // use_hyper=false so the mock server (single accepted connection) is
+        // consumed by reqwest and the 416 status is handled by the reqwest
+        // path, preserving the test's original intent.
+        let dl = HttpSegmentDownloader::new(&client, false);
 
         let result = dl.download_range(&url, 99999, 100, None, &[]).await;
         assert!(result.is_err(), "416 should be an error");
@@ -303,7 +456,7 @@ mod tests {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .unwrap();
-        let dl = HttpSegmentDownloader::new(&client);
+        let dl = HttpSegmentDownloader::new(&client, false);
 
         match dl
             .supports_range(
@@ -325,12 +478,38 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_status_code_handling() {
         let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client);
+        let dl = HttpSegmentDownloader::new(&client, false);
 
         let result_404 = dl
             .download_range("http://httpbin.org/status/404", 0, 100, None, &[])
             .await;
         assert!(result_404.is_err(), "404 should be fatal error");
+    }
+
+    /// When constructed with `use_hyper=true` (the non-proxy hot path), the
+    /// `hyper_client` field must be wired so `download_range` can try hyper
+    /// first for plain HTTP URLs.
+    #[test]
+    fn test_http_segment_downloader_uses_hyper_by_default() {
+        let client = reqwest::Client::new();
+        let dl = HttpSegmentDownloader::new(&client, true);
+        assert!(
+            dl.has_hyper_client(),
+            "use_hyper=true must wire the HyperDirectClient"
+        );
+    }
+
+    /// When constructed with `use_hyper=false` (the proxy path), the
+    /// `hyper_client` field must be `None` so `download_range` always uses
+    /// reqwest (the only client that supports proxies / custom auth).
+    #[test]
+    fn test_http_segment_downloader_no_hyper_with_proxy() {
+        let client = reqwest::Client::new();
+        let dl = HttpSegmentDownloader::new(&client, false);
+        assert!(
+            !dl.has_hyper_client(),
+            "use_hyper=false must NOT wire the HyperDirectClient (proxy path)"
+        );
     }
 
     #[test]
@@ -372,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_connection_limiter_per_host() {
-        let mut limiter = ConnectionLimiter::new(10, 2); // Global limit 10, per-host limit 2
+        let limiter = ConnectionLimiter::new(10, 2); // Global limit 10, per-host limit 2
 
         // Should be able to acquire up to per_host_limit
         assert!(
@@ -420,6 +599,68 @@ mod tests {
             limiter.available_for("example.com"),
             1,
             "One slot available after release"
+        );
+    }
+
+    /// Verify the limiter is safe under concurrency: 20 tasks contend on a
+    /// single host whose per-host limit is 10, so exactly 10 must succeed and
+    /// the limiter must not deadlock. Also verifies `release` correctness.
+    #[tokio::test]
+    async fn test_connection_limiter_concurrent_no_deadlock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let limiter = Arc::new(ConnectionLimiter::new(100, 10));
+        let success_count = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let l = limiter.clone();
+            let s = success_count.clone();
+            handles.push(tokio::spawn(async move {
+                // `try_acquire` is fully synchronous — no `.await` while holding
+                // the DashMap shard guard, so there is no risk of deadlock.
+                if l.try_acquire("example.com") {
+                    s.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // per_host_limit is 10, so at most 10 should succeed; global limit (100)
+        // is not the binding constraint here.
+        assert_eq!(
+            success_count.load(Ordering::Relaxed),
+            10,
+            "per-host limit must cap successful acquires"
+        );
+        assert_eq!(
+            limiter.host_count("example.com"),
+            10,
+            "host_count must reflect the 10 successful acquires"
+        );
+        assert_eq!(
+            limiter.global_count(),
+            10,
+            "global_count must equal the 10 successful acquires"
+        );
+
+        // Release some and verify the counts drop accordingly.
+        for _ in 0..5 {
+            limiter.release("example.com");
+        }
+        assert_eq!(
+            limiter.host_count("example.com"),
+            5,
+            "host_count must drop to 5 after 5 releases"
+        );
+        assert_eq!(
+            limiter.global_count(),
+            5,
+            "global_count must drop to 5 after 5 releases"
         );
     }
 

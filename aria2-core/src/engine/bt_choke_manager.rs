@@ -197,6 +197,10 @@ pub fn select_best_peer_for_request(algo: &Option<ChokingAlgorithm>) -> Option<u
 /// # Arguments
 /// * `algo` - The choking algorithm instance (mutable reference)
 /// * `peer_idx` - Index of the snubbed peer
+// The unit error type is mapped to a proper Aria2Error by the caller in
+// bt_download_command.rs via map_err, so the Result<_, ()> signature is kept
+// to preserve the existing error-handling path.
+#[allow(clippy::result_unit_err)]
 pub async fn handle_snubbed_peer(
     algo: &mut Option<ChokingAlgorithm>,
     peer_idx: usize,

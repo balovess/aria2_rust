@@ -649,7 +649,7 @@ fn test_very_long_torrent_info() {
     // Create a torrent with very long announce URL
     let long_announce = format!("http://tracker.example.com/{}", "a".repeat(10000));
     let mut torrent = b"d8:announce".to_vec();
-    torrent.extend_from_slice(&long_announce.len().to_string().as_bytes());
+    torrent.extend_from_slice(long_announce.len().to_string().as_bytes());
     torrent.push(b':');
     torrent.extend_from_slice(long_announce.as_bytes());
     torrent.extend_from_slice(b"4:infod6:lengthi1000e12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee");

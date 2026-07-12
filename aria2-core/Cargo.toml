@@ -13,9 +13,20 @@ keywords = ["download", "http", "ftp", "bittorrent", "aria2"]
 categories = ["network-programming", "web-programming"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 
+[features]
+# All io_uring code is Linux-only behind this feature flag.
+# Enabling `io_uring` on non-Linux platforms will fail to compile because
+# `tokio-uring` only builds on Linux. This is expected and documented.
+default = []
+io_uring = ["dep:tokio-uring"]
+
 [dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
+# Optional io_uring backend (Linux only). When the `io_uring` feature is
+# enabled, `tokio-uring` provides async positioned I/O via the io_uring
+# syscall interface. Not available on Windows/macOS.
+tokio-uring = { version = "0.4", optional = true }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,6 +36,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
 bytes.workspace = true
+memmap2 = "0.9"
 async-trait.workspace = true
 colored = "2.0"
 atty = "0.2"
@@ -36,6 +48,17 @@ adler32 = "1.2"
 digest = "0.10"
 aria2-protocol = { workspace = true, features = ["bittorrent", "metalink", "sftp"] }
 reqwest = { version = "0.11", features = ["stream", "rustls-tls"], default-features = false }
+# Direct hyper client for the hot HTTP download path. Bypasses reqwest overhead
+# for simple range GETs. The `server` feature is used by the in-crate tests
+# (local hyper server), so hyper is a normal dependency rather than a dev-dep.
+# Note: `hyper-util` / `http-body-util` (which target hyper 1.x) are intentionally
+# NOT added to avoid a dual-hyper-version dependency tree; the v1 client uses
+# hyper 0.14 APIs exclusively.
+hyper = { version = "0.14", features = ["client", "server", "http1", "http2", "stream"] }
+# Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
+# `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
+# TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
+hickory-resolver = { version = "0.24", features = ["tokio-runtime"], default-features = false }
 rand = "0.8"
 regex = "1"
 url = "2.5"
@@ -60,8 +83,12 @@ tempfile = "3.8"
 tokio-test = "0.4"
 criterion.workspace = true
 base64 = "0.21"
-hyper = { version = "0.14", features = ["server", "http1"] }
 aria2-rpc = { path = "../aria2-rpc" }
+# sysinfo is used by the memory-footprint regression test (Phase F6) to sample
+# the process RSS while writing a file via PositionedDiskWriter. Pinned to 0.30
+# where `Process::memory()` returns bytes (in newer versions the API was split
+# into `memory()` / `virtual_memory()` with the same byte semantics).
+sysinfo = "0.30"
 
 [[bench]]
 name = "config_bench"
@@ -81,4 +108,33 @@ harness = false
 
 [[bench]]
 name = "serialization_bench"
+harness = false
+
+# Linux-only io_uring benchmark. Compiles only when both the `io_uring`
+# feature is enabled and the target OS is Linux. The source file itself is
+# guarded by `#![cfg(all(target_os = "linux", feature = "io_uring"))]` so it
+# compiles to an empty crate on other platforms.
+[[bench]]
+name = "io_uring_positioned_write_bench"
+harness = false
+
+# ── Phase F performance benchmarks ──────────────────────────────────────
+# F1: PositionedDiskWriter vs old Arc<Mutex<DirectDiskAdaptor>> for concurrent writes.
+[[bench]]
+name = "positioned_write_bench"
+harness = false
+
+# F2: Lock-free AtomicU64 TokenBucket vs Mutex<TokenBucket> for concurrent acquirers.
+[[bench]]
+name = "lock_free_rate_limiter_bench"
+harness = false
+
+# F3: MmapDiskWriter vs PositionedDiskWriter for sequential writes.
+[[bench]]
+name = "mmap_writer_bench"
+harness = false
+
+# F4: WrDiskCache BTreeMap lookup vs VecDeque linear scan.
+[[bench]]
+name = "disk_cache_lookup_bench"
 harness = false

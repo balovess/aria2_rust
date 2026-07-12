@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -21,6 +21,9 @@ pub struct CacheEntry {
     offset: u64,
     data: bytes::Bytes,  // Zero-copy immutable buffer
     dirty: bool,
+    /// Monotonic insertion sequence number used for LRU eviction ordering.
+    /// Lower `seq` = older insertion = evicted first.
+    seq: u64,
 }
 
 impl CacheEntry {
@@ -36,6 +39,15 @@ impl CacheEntry {
         self.dirty
     }
 
+    /// Consume the entry and return the underlying `Bytes` buffer.
+    ///
+    /// This enables zero-copy transfer of cached data to the disk writer
+    /// without cloning the buffer. The entry's `Bytes` is an `Arc`-backed
+    /// buffer, so moving it out is O(1) — no data copy occurs.
+    pub fn into_data(self) -> bytes::Bytes {
+        self.data
+    }
+
     /// Returns the memory size of this entry's data in bytes
     fn size_bytes(&self) -> usize {
         self.data.len()
@@ -48,15 +60,19 @@ impl CacheEntry {
 /// It uses an LRU (Least Recently Used) eviction policy that **never evicts dirty
 /// (unflushed) entries**, guaranteeing no data loss under memory pressure.
 ///
-/// Entries are stored in insertion order within a `VecDeque`; the oldest entries
-/// are at the front and are the first candidates for eviction.
+/// Entries are keyed by their start offset in a [`BTreeMap`], enabling O(log n)
+/// range lookups for `read()`. LRU ordering is preserved via a per-entry monotonic
+/// `seq` number — during eviction the clean entry with the smallest `seq` (oldest
+/// insertion) is removed first.
 pub struct WrDiskCache {
-    /// Cache entries ordered by insertion time (front = oldest = LRU candidate)
-    entries: Mutex<VecDeque<CacheEntry>>,
+    /// Cache entries keyed by start offset, enabling O(log n) range queries.
+    entries: Mutex<BTreeMap<u64, CacheEntry>>,
     /// Maximum allowed cache size in bytes
     max_size_bytes: usize,
     /// Current total cached data size in bytes (atomic for lock-free reads)
     total_cached_bytes: AtomicUsize,
+    /// Monotonic counter assigning insertion sequence numbers for LRU ordering.
+    next_seq: AtomicU64,
 }
 
 impl WrDiskCache {
@@ -78,9 +94,10 @@ impl WrDiskCache {
         );
 
         WrDiskCache {
-            entries: Mutex::new(VecDeque::new()),
+            entries: Mutex::new(BTreeMap::new()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
+            next_seq: AtomicU64::new(0),
         }
     }
 
@@ -97,9 +114,10 @@ impl WrDiskCache {
         );
 
         WrDiskCache {
-            entries: Mutex::new(VecDeque::new()),
+            entries: Mutex::new(BTreeMap::new()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
+            next_seq: AtomicU64::new(0),
         }
     }
 
@@ -128,6 +146,7 @@ impl WrDiskCache {
     /// The caller can pass a slice of a larger buffer without copying.
     pub async fn write(&self, offset: u64, data: bytes::Bytes) -> Result<()> {
         let entry_size = data.len();
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
 
         // Pre-check: if adding this entry would exceed the limit, try eviction first
         let current = self.total_cached_bytes.load(Ordering::Relaxed);
@@ -144,13 +163,15 @@ impl WrDiskCache {
             self.evict_clean_entries_locked(&mut entries, entry_size);
         }
 
-        let entry = CacheEntry {
-            offset,
-            data,
-            dirty: true,
-        };
-
-        entries.push_back(entry);
+        // Insert the new entry. If an entry already exists at this offset, it
+        // is replaced — the new write supersedes the old one. Subtract the old
+        // entry's size so total_cached_bytes stays accurate.
+        let old_size = entries
+            .insert(offset, CacheEntry { offset, data, dirty: true, seq })
+            .map(|old| old.size_bytes());
+        if let Some(old) = old_size {
+            self.total_cached_bytes.fetch_sub(old, Ordering::Relaxed);
+        }
         self.total_cached_bytes
             .fetch_add(entry_size, Ordering::Relaxed);
 
@@ -170,27 +191,30 @@ impl WrDiskCache {
     /// Returns `Some(data)` if the requested range is fully contained in a cached entry,
     /// or `None` if the data is not in the cache.
     ///
+    /// # Complexity
+    /// O(log n) — a single `BTreeMap::range` lookup finds the unique candidate
+    /// entry (the one with the largest start key `<= offset`). If that entry
+    /// does not fully cover `[offset, offset+length)`, no other entry can
+    /// (entries with smaller keys end before `offset`; entries with larger keys
+    /// start after `offset`).
+    ///
     /// # Zero-Copy
     /// Returns `bytes::Bytes` slice instead of `Vec<u8>`, avoiding memory allocation.
     pub async fn read(&self, offset: u64, length: u64) -> Result<Option<bytes::Bytes>> {
         let entries = self.entries.lock().await;
 
-        for entry in entries.iter() {
-            // Exact offset match with sufficient length
-            if entry.offset == offset && entry.data.len() >= length as usize {
-                // Zero-copy slice
-                return Ok(Some(entry.data.slice(..length as usize)));
-            }
+        let end = offset + length;
 
-            // Range-based match: entry fully covers [offset, offset + length)
-            if entry.offset <= offset
-                && (entry.offset + entry.data.len() as u64) >= (offset + length)
-            {
-                let start = (offset - entry.offset) as usize;
-                let end = start + length as usize;
-                if end <= entry.data.len() {
+        // The only candidate is the entry with the largest key <= offset.
+        // `range(..=offset).next_back()` returns exactly that in O(log n).
+        if let Some((&entry_offset, entry)) = entries.range(..=offset).next_back() {
+            let entry_end = entry_offset + entry.data.len() as u64;
+            if entry_end >= end {
+                let start = (offset - entry_offset) as usize;
+                let slice_end = start + length as usize;
+                if slice_end <= entry.data.len() {
                     // Zero-copy slice
-                    return Ok(Some(entry.data.slice(start..end)));
+                    return Ok(Some(entry.data.slice(start..slice_end)));
                 }
             }
         }
@@ -203,13 +227,20 @@ impl WrDiskCache {
     /// After flushing, entries remain in the cache but are marked as clean
     /// (eligible for future LRU eviction). The caller is responsible for
     /// writing the returned entries to durable storage.
+    ///
+    /// The returned `CacheEntry` clones are O(1): `bytes::Bytes` is an
+    /// `Arc`-backed buffer, so cloning only bumps a reference count — no
+    /// data copy occurs.
     pub async fn flush(&self) -> Result<Vec<CacheEntry>> {
         let mut entries = self.entries.lock().await;
 
-        let flushed: Vec<CacheEntry> = entries.iter().filter(|e| e.dirty).cloned().collect();
-
-        for entry in entries.iter_mut() {
-            entry.dirty = false;
+        let mut flushed = Vec::new();
+        for entry in entries.values_mut() {
+            if entry.dirty {
+                // Clone is O(1): bytes::Bytes is Arc-backed (refcount bump only).
+                flushed.push(entry.clone());
+                entry.dirty = false;
+            }
         }
 
         debug!("Flushed {} dirty cache entries", flushed.len());
@@ -221,7 +252,7 @@ impl WrDiskCache {
     pub async fn clear(&self) -> Result<()> {
         let mut entries = self.entries.lock().await;
 
-        let cleared_bytes: usize = entries.iter().map(|e| e.size_bytes()).sum();
+        let cleared_bytes: usize = entries.values().map(|e| e.size_bytes()).sum();
         entries.clear();
         self.total_cached_bytes
             .fetch_sub(cleared_bytes, Ordering::Relaxed);
@@ -247,7 +278,7 @@ impl WrDiskCache {
 
     /// Returns the number of dirty (unflushed) entries.
     pub async fn dirty_count(&self) -> usize {
-        self.entries.lock().await.iter().filter(|e| e.dirty).count()
+        self.entries.lock().await.values().filter(|e| e.dirty).count()
     }
 
     // -----------------------------------------------------------------------
@@ -269,62 +300,64 @@ impl WrDiskCache {
 
     /// Core eviction logic — must be called with `entries` lock held.
     ///
-    /// Scans the VecDeque from front (oldest/LRU) to back, removing only clean entries
-    /// until either:
+    /// Repeatedly removes the clean (non-dirty) entry with the smallest `seq`
+    /// (oldest insertion = LRU candidate) until either:
     /// - We have freed enough space for `needed_size` new bytes, OR
     /// - We have reached the eviction target (50% of max), OR
     /// - No more clean entries remain
-    fn evict_clean_entries_locked(&self, entries: &mut VecDeque<CacheEntry>, needed_size: usize) {
+    ///
+    /// Unlike the old `VecDeque` front-only eviction, the `BTreeMap` + `seq`
+    /// design can evict ANY clean entry regardless of its offset ordering —
+    /// a dirty entry no longer blocks eviction of newer clean entries behind it.
+    ///
+    /// # Complexity
+    /// Each iteration is O(n) (a full scan to find the min-`seq` clean entry),
+    /// but eviction is infrequent (only when over the memory limit), so this is
+    /// acceptable. The common `read`/`write` paths remain O(log n).
+    fn evict_clean_entries_locked(&self, entries: &mut BTreeMap<u64, CacheEntry>, needed_size: usize) {
         let target = ((self.max_size_bytes as f64) * EVICTION_TARGET_RATIO) as usize;
         let mut evicted_count = 0usize;
         let mut evicted_bytes = 0usize;
 
-        // Keep evicting while:
-        // 1. Current size + needed > target (we still need room), AND
-        // 2. There are entries to examine
+        // Keep evicting while current size + needed > target (we still need room)
         while self
             .total_cached_bytes
             .load(Ordering::Relaxed)
             .saturating_add(needed_size)
             > target
         {
-            // Peek at the front (oldest) entry
-            let should_evict = entries.front().is_some_and(|entry| !entry.dirty);
+            // Find the clean entry with the smallest seq (true LRU order).
+            // Iterating all entries is O(n), but eviction is rare.
+            let evict_key = entries
+                .iter()
+                .filter(|(_, e)| !e.dirty)
+                .min_by_key(|(_, e)| e.seq)
+                .map(|(&k, _)| k);
 
-            if should_evict {
-                // Safe to evict: entry is clean (already flushed)
-                if let Some(entry) = entries.pop_front() {
-                    let entry_size = entry.size_bytes();
-                    self.total_cached_bytes
-                        .fetch_sub(entry_size, Ordering::Relaxed);
-                    evicted_bytes += entry_size;
-                    evicted_count += 1;
+            match evict_key {
+                Some(key) => {
+                    if let Some(entry) = entries.remove(&key) {
+                        let entry_size = entry.size_bytes();
+                        self.total_cached_bytes
+                            .fetch_sub(entry_size, Ordering::Relaxed);
+                        evicted_bytes += entry_size;
+                        evicted_count += 1;
 
-                    debug!(
-                        "Evicted clean cache entry, offset: {}, size: {} bytes",
-                        entry.offset, entry_size
-                    );
-                } else {
-                    break; // No more entries
+                        debug!(
+                            "Evicted clean cache entry (seq {}), offset: {}, size: {} bytes",
+                            entry.seq, entry.offset, entry_size
+                        );
+                    }
                 }
-            } else {
-                // Front entry is dirty — cannot evict it
-                // Check if there's a clean entry further back that we can reach
-                // by scanning forward for the next clean candidate.
-                // However, since VecDeque doesn't support efficient removal from middle,
-                // and we must preserve order, we stop here.
-                //
-                // This means: if oldest entries are dirty, they block eviction of newer
-                // clean entries behind them. This is acceptable because:
-                // - It prevents out-of-order eviction complexity
-                // - Dirty entries should be flushed promptly anyway
-                // - The cache may temporarily overshoot, which is safe
-                debug!(
-                    "Eviction blocked: oldest entry at offset {} is dirty ({} dirty entries blocking)",
-                    entries.front().map(|e| e.offset).unwrap_or(0),
-                    entries.iter().filter(|e| e.dirty).count()
-                );
-                break;
+                None => {
+                    // No clean entries remain — cannot evict without losing data.
+                    // The cache may temporarily overshoot, which is safe.
+                    debug!(
+                        "Eviction blocked: all {} remaining entries are dirty",
+                        entries.len()
+                    );
+                    break;
+                }
             }
         }
 

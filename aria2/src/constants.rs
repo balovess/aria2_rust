@@ -41,7 +41,7 @@ pub const DEFAULT_RETRY_WAIT_SECS: u64 = 1;
 pub const DEFAULT_MAX_UPLOAD_SLOTS: usize = 4;
 pub const DEFAULT_PIECE_STRATEGY: &str = "rarest-first";
 pub const DEFAULT_PIECE_PRIORITY: &str = "rarest";
-pub const DEFAULT_FILE_ALLOCATION: &str = "prealloc";
+pub const DEFAULT_FILE_ALLOCATION: &str = "falloc";
 
 // Session defaults
 pub const DEFAULT_SAVE_SESSION_INTERVAL_SECS: u64 = 60;

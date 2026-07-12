@@ -16,6 +16,11 @@ pub trait DiskAdaptor: Send + Sync {
 
     #[cfg(unix)]
     fn unix_raw_fd(&self) -> Option<std::os::unix::io::RawFd>;
+
+    /// Returns the raw OS file handle on Windows, or `None` if no file is open.
+    /// The handle is borrowed (not owned); callers must not close it.
+    #[cfg(windows)]
+    fn windows_raw_handle(&self) -> Option<std::os::windows::io::RawHandle>;
 }
 
 pub struct DirectDiskAdaptor {
@@ -146,5 +151,11 @@ impl DiskAdaptor for DirectDiskAdaptor {
     fn unix_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
         use std::os::fd::AsRawFd;
         self.file.as_ref().map(|f| f.as_raw_fd())
+    }
+
+    #[cfg(windows)]
+    fn windows_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        use std::os::windows::io::AsRawHandle;
+        self.file.as_ref().map(|f| f.as_raw_handle())
     }
 }

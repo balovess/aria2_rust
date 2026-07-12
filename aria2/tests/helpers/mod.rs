@@ -104,17 +104,15 @@ pub fn assert_file_min_size(path: &Path, min_size: usize) {
 /// Clean up test files in a directory matching a pattern.
 pub fn cleanup_test_files(dir: &Path, pattern: &str) -> usize {
     let mut count = 0;
-    if dir.exists() && dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(file_name) = path.file_name() {
-                    let name = file_name.to_string_lossy();
-                    if name.contains(pattern) || name.ends_with(pattern) {
-                        if std::fs::remove_file(&path).is_ok() {
-                            count += 1;
-                        }
-                    }
+    if dir.exists() && dir.is_dir() && let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(file_name) = path.file_name() {
+                let name = file_name.to_string_lossy();
+                if (name.contains(pattern) || name.ends_with(pattern))
+                    && std::fs::remove_file(&path).is_ok()
+                {
+                    count += 1;
                 }
             }
         }

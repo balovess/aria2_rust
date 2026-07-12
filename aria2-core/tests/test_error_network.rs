@@ -284,7 +284,7 @@ async fn test_dns_resolution_invalid_hostname() {
         );
     } else {
         // If resolution succeeded (unlikely but possible), just verify cache was populated
-        assert!(cache.len() > 0, "Cache should have entry after resolution");
+        assert!(!cache.is_empty(), "Cache should have entry after resolution");
     }
 }
 

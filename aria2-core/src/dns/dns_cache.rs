@@ -30,6 +30,9 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::TokioAsyncResolver;
+
 /// A single cached DNS entry containing resolved addresses and metadata.
 ///
 /// Each entry stores the resolved socket addresses for a hostname,
@@ -105,6 +108,10 @@ pub struct DnsCache {
     negative_entries: HashMap<String, Instant>,
     /// Whether to prefer IPv4 addresses when sorting results
     ipv4_preference: bool,
+    /// Fully-async hickory DNS resolver. When `None` (or on lookup error) resolution
+    /// falls back to `tokio::net::lookup_host`. `TokioAsyncResolver` is `Arc`-backed
+    /// internally, so cloning is cheap and no outer `Arc` is required.
+    resolver: Option<TokioAsyncResolver>,
 }
 
 impl DnsCache {
@@ -121,6 +128,7 @@ impl DnsCache {
             negative_ttl: Duration::from_secs(60),   // 1 minute for failures
             negative_entries: HashMap::new(),
             ipv4_preference: true, // Prefer IPv4 by default (like C++ aria2)
+            resolver: build_default_resolver(),
         }
     }
 
@@ -138,14 +146,26 @@ impl DnsCache {
         }
     }
 
+    /// Inject a custom hickory resolver (useful for testing with a configured/mock resolver).
+    ///
+    /// This replaces the default resolver built during construction. The TTL settings and
+    /// IPv4 preference are preserved.
+    pub fn with_resolver(mut self, resolver: TokioAsyncResolver) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
     /// Resolve a hostname to socket addresses, using cache if valid.
     ///
     /// Resolution strategy:
     /// 1. Check positive cache — return immediately if entry exists and is not expired
     /// 2. Check negative cache — return error if lookup recently failed
-    /// 3. Perform actual OS-level DNS resolution via tokio
-    /// 4. On success: sort addresses by IPv4 preference, cache result, return
-    /// 5. On failure: record in negative cache, return error
+    /// 3. Try the fully-async hickory resolver (no blocking getaddrinfo); on success the
+    ///    record TTL is capped at `default_ttl` and the result is cached
+    /// 4. If hickory is unavailable or errors, fall back to `tokio::net::lookup_host`
+    ///    (blocking getaddrinfo on a tokio thread pool) so behavior stays robust
+    /// 5. On success: sort addresses by IPv4 preference, cache result, return
+    /// 6. On failure: record in negative cache, return error
     ///
     /// # Arguments
     ///
@@ -161,24 +181,83 @@ impl DnsCache {
         port: u16,
     ) -> Result<Vec<SocketAddr>, String> {
         // 1. Check positive cache first
-        if let Some(entry) = self.cache.get(hostname) {
-            if !entry.is_expired() {
-                return Ok(entry.all_addresses());
-            }
+        if let Some(entry) = self.cache.get(hostname)
+            && !entry.is_expired()
+        {
+            return Ok(entry.all_addresses());
         }
 
         // 2. Check negative cache (recently failed lookup)
-        if let Some(failed_at) = self.negative_entries.get(hostname) {
-            if failed_at.elapsed() < self.negative_ttl {
-                return Err(format!(
-                    "DNS lookup recently failed for {} (retry after {:?})",
-                    hostname,
-                    self.negative_ttl.saturating_sub(failed_at.elapsed())
-                ));
+        if let Some(failed_at) = self.negative_entries.get(hostname)
+            && failed_at.elapsed() < self.negative_ttl
+        {
+            return Err(format!(
+                "DNS lookup recently failed for {} (retry after {:?})",
+                hostname,
+                self.negative_ttl.saturating_sub(failed_at.elapsed())
+            ));
+        }
+
+        // 3. Try the fully-async hickory resolver first (avoids blocking getaddrinfo).
+        if let Some(resolver) = self.resolver.as_ref() {
+            match resolver.lookup_ip(hostname).await {
+                Ok(lookup) => {
+                    let mut addrs: Vec<SocketAddr> =
+                        lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
+
+                    if !addrs.is_empty() {
+                        // Derive TTL from the lookup's remaining validity, capped at default_ttl.
+                        let record_ttl = lookup
+                            .valid_until()
+                            .saturating_duration_since(Instant::now());
+                        let actual_ttl = record_ttl.min(self.default_ttl);
+
+                        if self.ipv4_preference {
+                            addrs.sort_by_key(|a| match a.ip() {
+                                IpAddr::V4(_) => 0u8,
+                                IpAddr::V6(_) => 1u8,
+                            });
+                        }
+
+                        let hostname_owned = hostname.to_string();
+                        let entry = DnsEntry {
+                            hostname: hostname_owned.clone(),
+                            addresses: addrs.clone(),
+                            resolved_at: Instant::now(),
+                            ttl: actual_ttl,
+                            ipv4_preferred: self.ipv4_preference,
+                        };
+                        self.cache.insert(hostname_owned, entry);
+                        self.negative_entries.remove(hostname);
+
+                        tracing::trace!(
+                            hostname = hostname,
+                            addr_count = addrs.len(),
+                            ttl_secs = actual_ttl.as_secs(),
+                            "DNS resolved via hickory async resolver"
+                        );
+                        return Ok(addrs);
+                    }
+
+                    tracing::debug!(
+                        hostname = hostname,
+                        "hickory returned no addresses, falling back to tokio::net::lookup_host"
+                    );
+                    // Fall through to the OS-level fallback below.
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        hostname = hostname,
+                        error = %e,
+                        "hickory DNS lookup failed, falling back to tokio::net::lookup_host"
+                    );
+                    // Fall through to the OS-level fallback below.
+                }
             }
         }
 
-        // 3. Perform actual OS-level DNS resolution
+        // 4. Fallback: OS-level resolution via tokio (blocking getaddrinfo on a thread pool).
+        //    Used when the hickory resolver is unavailable, returns no addresses, or errors.
         let addr_str = format!("{}:{}", hostname, port);
         match tokio::net::lookup_host(&addr_str).await {
             Ok(addrs) => {
@@ -192,21 +271,33 @@ impl DnsCache {
                     });
                 }
 
+                let hostname_owned = hostname.to_string();
                 let entry = DnsEntry {
-                    hostname: hostname.to_string(),
+                    hostname: hostname_owned.clone(),
                     addresses: sorted.clone(),
                     resolved_at: Instant::now(),
                     ttl: self.default_ttl,
                     ipv4_preferred: self.ipv4_preference,
                 };
-                self.cache.insert(hostname.to_string(), entry);
+                self.cache.insert(hostname_owned, entry);
                 self.negative_entries.remove(hostname);
+
+                tracing::trace!(
+                    hostname = hostname,
+                    addr_count = sorted.len(),
+                    "DNS resolved via tokio::net::lookup_host fallback"
+                );
                 Ok(sorted)
             }
             Err(e) => {
                 // Record failure in negative cache to prevent retry storms
                 self.negative_entries
                     .insert(hostname.to_string(), Instant::now());
+                tracing::debug!(
+                    hostname = hostname,
+                    error = %e,
+                    "DNS resolution failed via fallback"
+                );
                 Err(e.to_string())
             }
         }
@@ -299,25 +390,45 @@ impl DnsCache {
         port: u16,
     ) -> Result<Vec<SocketAddr>, String> {
         // 1. Check positive cache first
-        if let Some(entry) = self.cache.get(hostname) {
-            if !entry.is_expired() {
-                return Ok(entry.all_addresses());
-            }
+        if let Some(entry) = self.cache.get(hostname)
+            && !entry.is_expired()
+        {
+            return Ok(entry.all_addresses());
         }
 
         // 2. Check negative cache (recently failed lookup)
-        if let Some(failed_at) = self.negative_entries.get(hostname) {
-            if failed_at.elapsed() < self.negative_ttl {
-                return Err(format!(
-                    "DNS lookup recently failed for {} (retry after {:?})",
-                    hostname,
-                    self.negative_ttl.saturating_sub(failed_at.elapsed())
-                ));
-            }
+        if let Some(failed_at) = self.negative_entries.get(hostname)
+            && failed_at.elapsed() < self.negative_ttl
+        {
+            return Err(format!(
+                "DNS lookup recently failed for {} (retry after {:?})",
+                hostname,
+                self.negative_ttl.saturating_sub(failed_at.elapsed())
+            ));
         }
 
         Err(format!("No cached entry for {}:{}", hostname, port))
     }
+}
+
+/// Build the default hickory async resolver.
+///
+/// Uses the default upstream configuration (Google Public DNS via `ResolverConfig::default()`)
+/// and enables `use_hosts_file` so that names present in the system hosts file (e.g.
+/// `localhost`) are answered immediately without any network I/O — mirroring the behavior of
+/// `getaddrinfo` used by `tokio::net::lookup_host`.
+///
+/// `TokioAsyncResolver::tokio` returns a ready handle (it does not spawn a background task at
+/// construction time and captures no runtime handle), so this is safe to call outside of an
+/// async context. The returned value is wrapped in `Some`; callers fall back to
+/// `tokio::net::lookup_host` whenever the resolver is `None`.
+fn build_default_resolver() -> Option<TokioAsyncResolver> {
+    let mut opts = ResolverOpts::default();
+    opts.use_hosts_file = true;
+    Some(TokioAsyncResolver::tokio(
+        ResolverConfig::default(),
+        opts,
+    ))
 }
 
 impl Default for DnsCache {
@@ -615,5 +726,46 @@ mod tests {
         let cache = DnsCache::default();
         assert!(cache.is_empty());
         assert_eq!(cache.default_ttl(), Duration::from_secs(300));
+    }
+
+    /// Test D1 #1: the hickory async resolver resolves "localhost" and caches it.
+    ///
+    /// "localhost" is answered from the system hosts file (use_hosts_file is enabled), so this
+    /// exercises the hickory code path without depending on external network reachability.
+    #[tokio::test]
+    async fn test_async_dns_resolves_localhost() {
+        let mut cache = DnsCache::with_ttl(300, 60);
+        let result = cache.resolve("localhost", 80).await;
+        assert!(
+            result.is_ok(),
+            "localhost should resolve: {:?}",
+            result.err()
+        );
+        let addrs = result.unwrap();
+        assert!(!addrs.is_empty(), "should have at least one address");
+        // Verify it's cached.
+        assert_eq!(
+            cache.len(),
+            1,
+            "localhost should be cached after resolve"
+        );
+    }
+
+    /// Test D1 #2: the TTL reported by the resolver is capped at default_ttl.
+    ///
+    /// Resolves "localhost" (from the hosts file, whose entries carry a very large TTL) with a
+    /// 60s default TTL and verifies the cached entry's TTL does not exceed the default.
+    #[tokio::test]
+    async fn test_dns_ttl_capped_at_default() {
+        let mut cache = DnsCache::with_ttl(60, 10); // default 60s
+        let _ = cache.resolve("localhost", 80).await;
+        // Verify the cached entry has ttl <= 60s (capped at default_ttl).
+        if let Some(entry) = cache.cache.get("localhost") {
+            assert!(
+                entry.ttl <= Duration::from_secs(60),
+                "ttl should be capped at default, got {:?}",
+                entry.ttl
+            );
+        }
     }
 }

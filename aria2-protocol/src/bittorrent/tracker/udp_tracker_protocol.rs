@@ -165,7 +165,11 @@ fn parse_compact_peers(data: &[u8]) -> Vec<(String, u16)> {
         return Vec::new();
     }
     let mut peers = Vec::with_capacity(data.len() / 6);
-    for chunk in data.chunks_exact(6) {
+    // Use as_chunks (stable since Rust 1.88) instead of chunks_exact with a
+    // constant to satisfy clippy::chunks_exact_with_constant. The length is
+    // already verified to be a multiple of 6 above, so the remainder is empty.
+    let (chunks, _remainder) = data.as_chunks::<6>();
+    for chunk in chunks {
         let ip = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let port = u16::from_be_bytes([chunk[4], chunk[5]]);
         let ip_str = format!(

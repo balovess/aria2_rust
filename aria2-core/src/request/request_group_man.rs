@@ -88,7 +88,7 @@ impl RequestGroupMan {
     pub fn all_groups(&self) -> Vec<(GroupId, Arc<RwLock<RequestGroup>>)> {
         self.groups
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .map(|entry| (*entry.key(), entry.value().clone()))
             .collect()
     }
 

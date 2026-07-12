@@ -966,10 +966,10 @@ http://example.com/file
 
     #[test]
     fn test_download_options_to_map_defaults_excluded() {
-        // Default DownloadOptions (all None/false/empty/zero) should produce
-        // a minimal map. Note: enable_dht and enable_public_trackers default
-        // to false in DownloadOptions::default() but to true in the load path,
-        // so they ARE saved when false to preserve the user's choice.
+        // Default DownloadOptions should produce a minimal map.
+        // enable_dht and enable_public_trackers default to true (matching the
+        // load path's `unwrap_or(true)`), so they are NOT saved when at the
+        // default value — the save logic only serializes them when disabled.
         let opts = DownloadOptions::default();
         let map = download_options_to_map(&opts);
 
@@ -977,9 +977,8 @@ http://example.com/file
         assert!(!map.contains_key("secure-falloc"));
         // file_allocation defaults to None -> should NOT be in map
         assert!(!map.contains_key("file-allocation"));
-        // enable_dht is false (non-default for load path which defaults to true)
-        // -> SHOULD be saved as "false"
-        assert_eq!(map.get("enable-dht"), Some(&"false".to_string()));
-        assert_eq!(map.get("enable-public-trackers"), Some(&"false".to_string()));
+        // enable_dht and enable_public_trackers default to true -> NOT saved
+        assert!(!map.contains_key("enable-dht"));
+        assert!(!map.contains_key("enable-public-trackers"));
     }
 }

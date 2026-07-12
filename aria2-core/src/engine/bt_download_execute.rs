@@ -590,6 +590,9 @@ impl BtDownloadCommand {
         Ok(active_connections)
     }
 
+    // Parameters are individually meaningful; grouping into a struct would
+    // reduce clarity for this inner download loop.
+    #[allow(clippy::too_many_arguments)]
     async fn download_pieces_loop(
         &mut self,
         active_connections: &mut [BtPeerConn],

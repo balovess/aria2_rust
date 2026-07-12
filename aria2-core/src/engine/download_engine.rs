@@ -1,20 +1,39 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
-use tokio::time::{interval, timeout as tokio_timeout};
+use tokio::task::{AbortHandle, Id, JoinSet};
+use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use super::command::{Command, CommandStatus};
+use super::command::{Command, ProgressUpdate};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
 use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+use crate::request::request_group::RequestGroup;
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::session::save_session_command::SaveSessionCommand;
+
+/// Bookkeeping the engine retains for each spawned command task so it can
+/// enforce per-command timeouts and abort stalled tasks individually.
+///
+/// The command object itself is moved into the spawned task (it owns the
+/// `Box<dyn Command>` for the duration of `execute()`); v1 does NOT recover
+/// commands for retry on timeout/failure, so the engine only needs the abort
+/// handle and timing metadata.
+struct RunningTask {
+    /// Handle used to cancel the task when its timeout elapses or on shutdown.
+    handle: AbortHandle,
+    /// Instant the task was spawned.
+    started: Instant,
+    /// Per-command timeout. `None` means the command never times out.
+    timeout: Option<Duration>,
+}
 
 pub struct DownloadEngine {
     command_tx: mpsc::UnboundedSender<Box<dyn Command>>,
@@ -92,6 +111,53 @@ impl DownloadEngine {
 
     pub fn take_global_rate_limiter(&mut self) -> Option<RateLimiter> {
         self.global_limiter.take()
+    }
+
+    /// Spawn a progress aggregator task that receives [`ProgressUpdate`]s from
+    /// download commands and applies them to the shared [`RequestGroup`].
+    ///
+    /// This eliminates per-chunk write-lock contention on the download hot
+    /// path: each `DownloadCommand` performs a cheap lock-free
+    /// `mpsc::UnboundedSender::send` and this single aggregator task is the
+    /// only writer of the progress fields.
+    ///
+    /// The aggregator deduplicates consecutive updates with identical
+    /// `completed_bytes` values and only refreshes the speed fields when the
+    /// sender provides a non-zero `download_speed` sample (0 means "no fresh
+    /// sample this tick").
+    ///
+    /// The task exits cleanly when all senders are dropped (the receiver
+    /// returns `None`).
+    ///
+    /// This is intentionally an associated function (not `&self`): it is
+    /// called automatically by
+    /// [`DownloadCommand::spawn_progress_aggregator`](crate::engine::download_command::DownloadCommand::spawn_progress_aggregator)
+    /// during `execute()`, since every `DownloadCommand` now auto-creates a
+    /// progress channel in its constructor. External callers rarely need to
+    /// invoke this directly.
+    pub fn spawn_progress_aggregator(
+        group: Arc<RwLock<RequestGroup>>,
+        mut receiver: mpsc::UnboundedReceiver<ProgressUpdate>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut last_bytes: u64 = 0;
+            while let Some(update) = receiver.recv().await {
+                // Skip no-op updates: identical completed_bytes means nothing changed
+                // since the last applied update (e.g. a stale in-flight send).
+                if update.completed_bytes == last_bytes {
+                    continue;
+                }
+                let g = group.write().await;
+                g.update_progress(update.completed_bytes).await;
+                g.set_completed_length(update.completed_bytes);
+                if update.download_speed > 0 {
+                    g.update_speed(update.download_speed, update.upload_speed)
+                        .await;
+                    g.set_download_speed_cached(update.download_speed);
+                }
+                last_bytes = update.completed_bytes;
+            }
+        })
     }
 
     pub fn set_save_session(
@@ -177,7 +243,16 @@ impl DownloadEngine {
         info!("Download engine started");
 
         let mut pending_commands: Vec<Box<dyn Command>> = Vec::new();
-        let mut running_commands: Vec<Box<dyn Command>> = Vec::new();
+        // Spawned command tasks. Each task owns its `Box<dyn Command>` for the
+        // duration of `execute()`, so commands run CONCURRENTLY instead of
+        // serially blocking the engine loop (Task A2 fix). v1 does NOT recover
+        // commands for retry on timeout/failure; progress is preserved via
+        // session auto-save.
+        let mut running: JoinSet<Result<()>> = JoinSet::new();
+        let mut running_tasks: HashMap<Id, RunningTask> = HashMap::new();
+        // Reserved for future retry support; v1 never populates this (failed /
+        // timed-out commands are dropped, not retried), but the slot is kept so
+        // the exit condition and retry plumbing remain intact.
         let mut failed_commands: Vec<(Box<dyn Command>, u32)> = Vec::new();
 
         let mut ticker = interval(self.tick_interval);
@@ -193,6 +268,7 @@ impl DownloadEngine {
                 _ = ticker.tick() => {
                     debug!("Engine tick triggered");
 
+                    // 1. Retry previously failed commands (v1: always empty).
                     for (cmd, attempt) in failed_commands.drain(..) {
                         if policy.should_retry(attempt, &Aria2Error::Recoverable(RecoverableError::Timeout)) {
                             let wait = policy.wait_duration(attempt);
@@ -204,11 +280,29 @@ impl DownloadEngine {
                         }
                     }
 
-                    self.dispatch_commands(&mut pending_commands, &mut running_commands).await?;
-                    self.check_timeouts(&mut running_commands, &policy, &stats, &mut failed_commands).await?;
-                    self.collect_completed(&mut running_commands).await?;
+                    // 2. Spawn pending commands concurrently (Task A2 fix).
+                    self.dispatch_commands(
+                        &mut pending_commands,
+                        &mut running,
+                        &mut running_tasks,
+                    )
+                    .await?;
 
-                    if !self.keep_alive && pending_commands.is_empty() && running_commands.is_empty() && failed_commands.is_empty() {
+                    // 3. Abort tasks whose per-command timeout elapsed (Task A1 fix).
+                    self.check_timeouts(&mut running_tasks, &stats).await?;
+
+                    // 4. Reap finished / aborted tasks.
+                    self.collect_completed(&mut running, &mut running_tasks).await?;
+
+                    // 5. Exit when nothing remains (unless keep-alive). Use the
+                    //    JoinSet's own emptiness as the source of truth: an
+                    //    aborted-but-not-yet-reaped task still counts as running
+                    //    until collect_completed joins it.
+                    if !self.keep_alive
+                        && pending_commands.is_empty()
+                        && running.is_empty()
+                        && failed_commands.is_empty()
+                    {
                         info!("All tasks completed, engine shutting down");
                         break;
                     }
@@ -216,7 +310,7 @@ impl DownloadEngine {
 
                 Ok(_) = &mut shutdown_rx => {
                     info!("Shutdown signal received");
-                    self.shutdown(&mut running_commands).await;
+                    self.shutdown(&mut running).await;
                     break;
                 }
             }
@@ -232,63 +326,144 @@ impl DownloadEngine {
         Ok(())
     }
 
+    /// Drain newly-arrived commands from the channel and spawn each as an
+    /// independent task on the `JoinSet` so they execute CONCURRENTLY instead
+    /// of serially blocking the engine loop (Task A2 fix).
+    ///
+    /// Each `Box<dyn Command>` is moved into its spawned task, which owns it
+    /// for the duration of `execute()`. This avoids any shared-state locking
+    /// between the engine and the task, maximizing concurrency.
     async fn dispatch_commands(
         &mut self,
         pending: &mut Vec<Box<dyn Command>>,
-        running: &mut Vec<Box<dyn Command>>,
+        running: &mut JoinSet<Result<()>>,
+        running_tasks: &mut HashMap<Id, RunningTask>,
     ) -> Result<()> {
+        // Pull any commands that arrived since the last tick.
         while let Ok(cmd) = self.command_rx.try_recv() {
             pending.push(cmd);
         }
+
         while !pending.is_empty() {
             let mut cmd = pending.remove(0);
-            if let Err(e) = cmd.execute().await {
-                error!("Command execution failed: {}", e);
-            }
-            running.push(cmd);
-            debug!("Dispatching command, running: {}", running.len());
+            // Inform the command of its start instant (no-op by default) so
+            // commands that override set_started_at can self-report elapsed.
+            cmd.set_started_at(Instant::now());
+            let timeout = cmd.timeout();
+
+            // The command is moved into the spawned task. The task calls
+            // `execute(&mut self)` on its owned command and returns the
+            // `Result<()>`. On abort the command is dropped with the task.
+            let handle = running.spawn(async move {
+                let mut cmd = cmd;
+                cmd.execute().await
+            });
+            let id = handle.id();
+            running_tasks.insert(
+                id,
+                RunningTask {
+                    handle,
+                    started: Instant::now(),
+                    timeout,
+                },
+            );
+            debug!("Dispatched command (task {}), running: {}", id, running.len());
         }
         Ok(())
     }
 
+    /// Abort any running task whose per-command timeout has elapsed (Task A1
+    /// fix).
+    ///
+    /// The previous implementation awaited `tokio::time::timeout(dur, async
+    /// {})` on an EMPTY future that resolved instantly, so no command ever
+    /// timed out. This rewrite tracks each task's start instant and aborts the
+    /// spawned task via its `AbortHandle` once the elapsed time exceeds the
+    /// command's `timeout()`.
+    ///
+    /// v1 limitation: a timed-out command is owned by its spawned task and
+    /// cannot be safely recovered for retry, so it is dropped when the aborted
+    /// task is reaped by `collect_completed`. Progress is preserved via session
+    /// auto-save. Auto-retry on timeout is deferred to a follow-up that retains
+    /// command ownership in the engine.
     async fn check_timeouts(
         &self,
-        running: &mut Vec<Box<dyn Command>>,
-        _policy: &RetryPolicy,
+        running_tasks: &mut HashMap<Id, RunningTask>,
         stats: &RetryStats,
-        failed: &mut Vec<(Box<dyn Command>, u32)>,
     ) -> Result<()> {
-        let mut still_running = Vec::new();
-        for cmd in running.drain(..) {
-            if let Some(timeout_dur) = cmd.timeout()
-                && let Err(_) = tokio_timeout(timeout_dur, async {}).await
-            {
-                let status = cmd.status();
-                if matches!(status, CommandStatus::Running | CommandStatus::Pending) {
-                    error!("Command execution timeout, will be added to retry queue");
-                    stats.record_retry(&Aria2Error::Recoverable(RecoverableError::Timeout));
-                    failed.push((cmd, 0));
-                    continue;
+        let now = Instant::now();
+        // Collect ids whose timeout has elapsed. We cannot mutate
+        // running_tasks while iterating it, so gather first.
+        let timed_out: Vec<Id> = running_tasks
+            .iter()
+            .filter_map(|(id, task)| {
+                let dur = task.timeout?;
+                if now.duration_since(task.started) > dur {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for id in timed_out {
+            if let Some(task) = running_tasks.remove(&id) {
+                warn!("Command (task {}) timed out, aborting", id);
+                // Abort the spawned task. The task's owned command is dropped
+                // when the runtime reaps the cancelled future (reaped by
+                // collect_completed on a subsequent tick).
+                task.handle.abort();
+                stats.record_retry(&Aria2Error::Recoverable(RecoverableError::Timeout));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reap all tasks that have finished or been aborted since the last tick.
+    ///
+    /// `try_join_next_with_id` is non-blocking: it returns `None` when no task
+    /// is ready, leaving in-flight tasks running. On abort/panic,
+    /// `JoinError::id()` recovers the task id so we can clean up our
+    /// bookkeeping even when the task did not return a value.
+    async fn collect_completed(
+        &self,
+        running: &mut JoinSet<Result<()>>,
+        running_tasks: &mut HashMap<Id, RunningTask>,
+    ) -> Result<()> {
+        while let Some(join_result) = running.try_join_next_with_id() {
+            match join_result {
+                Ok((id, Ok(()))) => {
+                    running_tasks.remove(&id);
+                    debug!("Command (task {}) completed successfully", id);
+                }
+                Ok((id, Err(e))) => {
+                    running_tasks.remove(&id);
+                    // v1: execute() failures are not auto-retried (the command
+                    // is owned by the task and has been dropped). Log and rely
+                    // on session auto-save for progress.
+                    error!("Command (task {}) execution failed: {}", id, e);
+                }
+                Err(join_err) => {
+                    let id = join_err.id();
+                    running_tasks.remove(&id);
+                    if join_err.is_cancelled() {
+                        // Cancelled by check_timeouts (timeout) or shutdown.
+                        debug!("Command (task {}) was cancelled", id);
+                    } else if join_err.is_panic() {
+                        error!("Command (task {}) panicked: {}", id, join_err);
+                    } else {
+                        warn!("Command (task {}) joined with error: {}", id, join_err);
+                    }
                 }
             }
-            still_running.push(cmd);
         }
-        *running = still_running;
         Ok(())
     }
 
-    async fn collect_completed(&self, running: &mut Vec<Box<dyn Command>>) -> Result<()> {
-        running.retain(|cmd| {
-            matches!(
-                cmd.status(),
-                CommandStatus::Running | CommandStatus::Pending
-            )
-        });
-        Ok(())
-    }
-
-    async fn shutdown(&self, running: &mut Vec<Box<dyn Command>>) {
+    async fn shutdown(&self, running: &mut JoinSet<Result<()>>) {
         info!("Shutting down running commands...");
+        // Persist session state before tearing down tasks so partial progress
+        // is not lost.
         if let (Some(path), Some(man)) = (&self.save_session_path, &self.request_group_man) {
             let mut cmd = SaveSessionCommand::new(path.clone(), man.clone());
             match cmd.execute().await {
@@ -296,7 +471,8 @@ impl DownloadEngine {
                 Err(e) => warn!("Failed to save session on shutdown: {}", e),
             }
         }
-        running.clear();
+        // Abort every still-running command task.
+        running.abort_all();
     }
 
     pub async fn shutdown_engine(&mut self) -> Result<()> {
@@ -304,5 +480,314 @@ impl DownloadEngine {
             let _ = tx.send(());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::command::CommandStatus;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A command that sleeps far longer than its reported timeout, so the
+    /// engine must abort it. Sets `completed` only if `execute()` runs to
+    /// completion; an abort cancels the sleep and leaves it `false`.
+    struct StalledCommand {
+        timeout_dur: Duration,
+        completed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Command for StalledCommand {
+        async fn execute(&mut self) -> Result<()> {
+            // Sleep far beyond the test bound so only an abort can finish us.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            self.completed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn status(&self) -> CommandStatus {
+            CommandStatus::Running
+        }
+
+        fn timeout(&self) -> Option<Duration> {
+            Some(self.timeout_dur)
+        }
+    }
+
+    /// Regression test for Task A1: the old `check_timeouts` awaited an EMPTY
+    /// future (`async {}`) that resolved instantly, so no command ever timed
+    /// out. This test verifies a stalled command is actually aborted once its
+    /// per-command timeout elapses, and that `RetryStats::timeouts()` is
+    /// incremented.
+    #[tokio::test]
+    async fn test_check_timeouts_actually_times_out_stalled_command() {
+        // 10ms tick so timeouts are detected promptly.
+        let engine = DownloadEngine::new(10);
+        // Clone the stats Arc before run() consumes the engine so we can
+        // inspect counters after the loop exits.
+        let stats = engine.retry_stats.clone();
+
+        let completed = Arc::new(AtomicBool::new(false));
+        let cmd = StalledCommand {
+            timeout_dur: Duration::from_millis(50),
+            completed: completed.clone(),
+        };
+        engine.add_command(Box::new(cmd)).unwrap();
+
+        // The engine exits once the stalled command is aborted and reaped
+        // (pending/running/failed all empty). Bound at 2s to fail loudly if it
+        // hangs (which would indicate the timeout was NOT enforced).
+        let run_result = tokio::time::timeout(Duration::from_secs(2), engine.run()).await;
+
+        assert!(
+            run_result.is_ok(),
+            "engine.run() should complete within 2s, not hang (timeout not enforced?)"
+        );
+        assert!(
+            stats.timeouts() >= 1,
+            "expected at least 1 recorded timeout, got {} (Task A1 bug: empty future)",
+            stats.timeouts()
+        );
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "stalled command should have been aborted before completing"
+        );
+    }
+
+    /// A command that sleeps for `delay` then increments a shared counter.
+    /// Used to verify the engine dispatches commands concurrently (Task A2).
+    struct SlowCommand {
+        delay: Duration,
+        completed: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl Command for SlowCommand {
+        async fn execute(&mut self) -> Result<()> {
+            tokio::time::sleep(self.delay).await;
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn status(&self) -> CommandStatus {
+            CommandStatus::Running
+        }
+    }
+
+    /// Regression test for Task A2: the old `dispatch_commands` awaited
+    /// `cmd.execute()` inline in the engine loop, serializing all commands.
+    /// With 5 commands x 100ms that would take ~500ms+. This test verifies
+    /// they run concurrently (well under 300ms).
+    #[tokio::test]
+    async fn test_engine_dispatches_commands_concurrently() {
+        // 10ms tick so dispatch happens promptly on the first tick.
+        let engine = DownloadEngine::new(10);
+        let completed = Arc::new(AtomicU32::new(0));
+        for _ in 0..5 {
+            let cmd = SlowCommand {
+                delay: Duration::from_millis(100),
+                completed: completed.clone(),
+            };
+            engine.add_command(Box::new(cmd)).unwrap();
+        }
+
+        let start = Instant::now();
+        let run_result =
+            tokio::time::timeout(Duration::from_millis(500), engine.run()).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            run_result.is_ok(),
+            "engine.run() should complete within 500ms, not hang"
+        );
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            5,
+            "all 5 commands should have completed"
+        );
+        // 5 commands x 100ms serialized = ~500ms + tick overhead. Concurrent
+        // execution should finish in ~100ms + a couple of ticks. A 300ms bound
+        // still proves concurrency beyond doubt while tolerating CI jitter.
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "5x100ms commands took {:?}, indicating serialization (concurrent should be ~150ms)",
+            elapsed
+        );
+    }
+
+    // ==================== Progress channel (Task E3) tests ====================
+
+    use crate::engine::command::ProgressUpdate;
+    use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+
+    /// Helper: build a fresh `RequestGroup` wrapped in an `Arc<RwLock<..>>`,
+    /// the same shape `DownloadCommand` and the aggregator use.
+    fn make_group() -> Arc<RwLock<RequestGroup>> {
+        Arc::new(RwLock::new(RequestGroup::new(
+            GroupId::new(1),
+            vec!["http://example.com/file.bin".to_string()],
+            DownloadOptions::default(),
+        )))
+    }
+
+    /// Verify the aggregator receives `ProgressUpdate`s sent through the
+    /// channel and applies them to the `RequestGroup` (both the RwLock-backed
+    /// `completed_length` via `update_progress` and the atomic mirror via
+    /// `set_completed_length`).
+    #[tokio::test]
+    async fn test_progress_channel_updates_request_group() {
+        let group = make_group();
+        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+
+        let group_clone = Arc::clone(&group);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+
+        // Send a sequence of strictly increasing updates.
+        tx.send(ProgressUpdate {
+            completed_bytes: 1000,
+            download_speed: 0,
+            upload_speed: 0,
+        })
+        .unwrap();
+        tx.send(ProgressUpdate {
+            completed_bytes: 5000,
+            download_speed: 0,
+            upload_speed: 0,
+        })
+        .unwrap();
+
+        // Drop the sender: the aggregator drains all queued messages (unbounded
+        // channel recv only returns None after the queue is empty and all
+        // senders are gone), then exits. Awaiting the handle is therefore a
+        // deterministic synchronization point — no sleep-based polling needed.
+        drop(tx);
+        handle.await.expect("aggregator task should exit cleanly");
+
+        // The atomic mirror is set by `set_completed_length`; verify final value.
+        let atomic_val = { group.read().await.get_completed_length() };
+        assert_eq!(
+            atomic_val, 5000,
+            "aggregator should have applied the latest completed_bytes (5000)"
+        );
+    }
+
+    /// Verify the aggregator skips no-op updates with identical
+    /// `completed_bytes` (deduplication), so a flood of stale in-flight sends
+    /// does not cause redundant write-lock acquisitions.
+    #[tokio::test]
+    async fn test_progress_aggregator_dedupes_identical_bytes() {
+        let group = make_group();
+        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+
+        let group_clone = Arc::clone(&group);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+
+        // First real update.
+        tx.send(ProgressUpdate {
+            completed_bytes: 2048,
+            download_speed: 0,
+            upload_speed: 0,
+        })
+        .unwrap();
+        // Several duplicates with the same completed_bytes (and a speed that
+        // must NOT be applied because the dedup `continue`s before reaching
+        // the speed branch).
+        for _ in 0..5 {
+            tx.send(ProgressUpdate {
+                completed_bytes: 2048,
+                download_speed: 9999,
+                upload_speed: 0,
+            })
+            .unwrap();
+        }
+        // A real advance with a speed sample that SHOULD be applied.
+        tx.send(ProgressUpdate {
+            completed_bytes: 4096,
+            download_speed: 1234,
+            upload_speed: 0,
+        })
+        .unwrap();
+
+        // Deterministic drain: drop sender + await handle guarantees all
+        // queued messages have been processed by the aggregator.
+        drop(tx);
+        handle.await.expect("aggregator task should exit cleanly");
+
+        let g = group.read().await;
+        assert_eq!(
+            g.get_completed_length(),
+            4096,
+            "final completed_bytes should be 4096"
+        );
+        assert_eq!(
+            g.get_download_speed_cached(),
+            1234,
+            "speed from the advancing update should be cached"
+        );
+    }
+
+    /// Verify the aggregator only refreshes the speed fields when a non-zero
+    /// `download_speed` is provided (0 means "no fresh sample this tick" and
+    /// must not zero out a previously cached speed).
+    #[tokio::test]
+    async fn test_progress_aggregator_preserves_speed_on_zero_sample() {
+        let group = make_group();
+        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+
+        // Seed the group with a known cached speed before starting the aggregator.
+        {
+            let g = group.read().await;
+            g.set_download_speed_cached(5555);
+        }
+
+        let group_clone = Arc::clone(&group);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+
+        // Advance bytes but send a 0 speed sample (no fresh measurement).
+        tx.send(ProgressUpdate {
+            completed_bytes: 8192,
+            download_speed: 0,
+            upload_speed: 0,
+        })
+        .unwrap();
+
+        // Deterministic drain.
+        drop(tx);
+        handle.await.expect("aggregator task should exit cleanly");
+
+        let g = group.read().await;
+        assert_eq!(g.get_completed_length(), 8192, "bytes should advance");
+        assert_eq!(
+            g.get_download_speed_cached(),
+            5555,
+            "cached speed must be preserved when download_speed sample is 0"
+        );
+    }
+
+    /// Verify the aggregator task exits cleanly (JoinHandle resolves) once all
+    /// senders are dropped, with no hang or resource leak.
+    #[tokio::test]
+    async fn test_progress_aggregator_exits_on_sender_drop() {
+        let group = make_group();
+        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+
+        let handle = DownloadEngine::spawn_progress_aggregator(group, rx);
+
+        // Drop the only sender; the aggregator's `recv().await` returns None.
+        drop(tx);
+
+        // The handle should resolve promptly without needing to abort.
+        let result = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        assert!(
+            result.is_ok(),
+            "aggregator should exit within 500ms after senders are dropped"
+        );
+        result
+            .expect("aggregator task should exit cleanly")
+            .expect("aggregator task should not panic");
     }
 }

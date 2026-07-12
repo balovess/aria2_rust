@@ -1,12 +1,12 @@
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::debug;
 
-use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use super::disk_cache::WrDiskCache;
+use super::mmap_disk_writer::MmapDiskWriter;
+use super::positioned_disk_writer::PositionedDiskWriter;
 
 #[async_trait]
 pub trait DiskWriter: Send + Sync {
@@ -125,10 +125,23 @@ pub trait SeekableDiskWriter: Send + Sync {
     async fn flush(&mut self) -> Result<()>;
     async fn len(&self) -> Result<u64>;
     fn path(&self) -> &Path;
+    /// Close the writer and release underlying file resources.
+    ///
+    /// Default implementation is a no-op; implementors should override to
+    /// truly release file handles and memory mappings. After `close`, the
+    /// writer can be reopened with `open()`.
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct CachedDiskWriter {
-    adaptor: Arc<Mutex<DirectDiskAdaptor>>,
+    /// The underlying positioned/mmap writer. Held as a trait object so the
+    /// concrete strategy (PositionedDiskWriter vs MmapDiskWriter) can be
+    /// selected at construction time. Unlike the legacy `Arc<Mutex<>>` design,
+    /// there is NO internal async mutex — writes go directly to the writer,
+    /// eliminating lock contention across `.await` points.
+    writer: Box<dyn SeekableDiskWriter>,
     cache: Option<Arc<WrDiskCache>>,
     path: PathBuf,
     total_size: Option<u64>,
@@ -138,10 +151,37 @@ pub struct CachedDiskWriter {
 }
 
 impl CachedDiskWriter {
+    /// Create a new `CachedDiskWriter` using [`PositionedDiskWriter`] (pwrite/seek_write)
+    /// as the underlying I/O strategy.
+    ///
+    /// This is the default constructor; use [`new_with_mmap`](Self::new_with_mmap)
+    /// to select the memory-mapped strategy instead.
     pub fn new(path: &Path, total_size: Option<u64>, cache_size_mb: Option<usize>) -> Self {
+        Self::new_with_mmap(path, total_size, cache_size_mb, false)
+    }
+
+    /// Create a new `CachedDiskWriter` with explicit control over the I/O strategy.
+    ///
+    /// # Arguments
+    /// * `path` - Output file path.
+    /// * `total_size` - Expected total file size, used for pre-allocation.
+    /// * `cache_size_mb` - Optional write-back cache size in megabytes.
+    /// * `use_mmap` - If `true`, use [`MmapDiskWriter`] (memory-mapped I/O);
+    ///   otherwise use [`PositionedDiskWriter`] (positioned `pwrite`/`seek_write`).
+    pub fn new_with_mmap(
+        path: &Path,
+        total_size: Option<u64>,
+        cache_size_mb: Option<usize>,
+        use_mmap: bool,
+    ) -> Self {
+        let writer: Box<dyn SeekableDiskWriter> = if use_mmap {
+            Box::new(MmapDiskWriter::new(path, total_size))
+        } else {
+            Box::new(PositionedDiskWriter::new(path, total_size))
+        };
         let cache = cache_size_mb.map(|mb| Arc::new(WrDiskCache::new(mb)));
         Self {
-            adaptor: Arc::new(Mutex::new(DirectDiskAdaptor::new())),
+            writer,
             cache,
             path: path.to_path_buf(),
             total_size,
@@ -174,27 +214,10 @@ impl SeekableDiskWriter for CachedDiskWriter {
         if self.opened {
             return Ok(());
         }
-        {
-            let mut adaptor = self.adaptor.lock().await;
-            if self.path.exists() {
-                adaptor.open(&self.path).await?;
-            } else {
-                if let Some(parent) = self.path.parent() {
-                    let parent: &Path = parent;
-                    if !parent.exists() {
-                        tokio::fs::create_dir_all(parent)
-                            .await
-                            .map_err(|e: std::io::Error| Aria2Error::Io(e.to_string()))?;
-                    }
-                }
-                adaptor.open(&self.path).await?;
-                if let Some(size) = self.total_size
-                    && size > 0
-                {
-                    adaptor.truncate(size).await?;
-                }
-            }
-        }
+        // Delegate to the underlying writer (PositionedDiskWriter or
+        // MmapDiskWriter). Both handle parent-dir creation, file creation,
+        // and pre-allocation internally — no external logic needed here.
+        self.writer.open().await?;
         self.opened = true;
         Ok(())
     }
@@ -214,19 +237,24 @@ impl SeekableDiskWriter for CachedDiskWriter {
         }
 
         if data.len() >= DIRECT_WRITE_THRESHOLD {
-            let mut adaptor = self.adaptor.lock().await;
-            adaptor.write(offset, data).await?;
+            // Large writes bypass the cache and go directly to the writer.
+            self.writer.write_at(offset, data).await?;
         } else if let Some(ref cache) = self.cache {
+            // Small writes go to the write-back cache.
+            // copy_from_slice is unavoidable here: we only have a &[u8],
+            // and the cache stores Bytes (Arc-backed).
             cache.write(offset, bytes::Bytes::copy_from_slice(data)).await?;
         } else {
-            let mut adaptor = self.adaptor.lock().await;
-            adaptor.write(offset, data).await?;
+            // No cache configured — write directly.
+            self.writer.write_at(offset, data).await?;
         }
 
         Ok(())
     }
 
-    /// Zero-copy write: accepts Bytes directly and passes to cache without intermediate copy.
+    /// Zero-copy write: accepts Bytes directly. When caching, the Bytes is
+    /// moved into the cache (O(1) refcount bump). When direct-writing, the
+    /// Bytes is passed by reference to pwrite (no copy).
     async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
         self.open().await?;
 
@@ -242,40 +270,36 @@ impl SeekableDiskWriter for CachedDiskWriter {
         }
 
         if data.len() >= DIRECT_WRITE_THRESHOLD {
-            let mut adaptor = self.adaptor.lock().await;
-            adaptor.write(offset, &data).await?;
+            // Large writes bypass the cache — zero-copy to pwrite.
+            self.writer.write_bytes_at(offset, data).await?;
         } else if let Some(ref cache) = self.cache {
+            // Small writes go to the cache — zero-copy (move Bytes).
             cache.write(offset, data).await?;
         } else {
-            let mut adaptor = self.adaptor.lock().await;
-            adaptor.write(offset, &data).await?;
+            // No cache configured — zero-copy to pwrite.
+            self.writer.write_bytes_at(offset, data).await?;
         }
 
         Ok(())
     }
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        // Flush any cached dirty entries before reading so the read sees
+        // the most recent writes.
         self.flush_cache().await?;
-
-        let mut adaptor = self.adaptor.lock().await;
-        let data: Vec<u8> = adaptor.read(offset, buf.len() as u64).await?;
-        let copy_len = data.len().min(buf.len());
-        buf[..copy_len].copy_from_slice(&data[..copy_len]);
-        Ok(copy_len)
+        // The underlying writer reads directly into buf — no intermediate
+        // Vec allocation (unlike the legacy DirectDiskAdaptor::read).
+        self.writer.read_at(offset, buf).await
     }
 
     async fn truncate(&mut self, length: u64) -> Result<()> {
         self.flush_cache().await?;
-
-        let mut adaptor = self.adaptor.lock().await;
-        adaptor.truncate(length).await
+        self.writer.truncate(length).await
     }
 
     async fn flush(&mut self) -> Result<()> {
         self.flush_cache().await?;
-
-        let mut adaptor = self.adaptor.lock().await;
-        adaptor.flush().await
+        self.writer.flush().await
     }
 
     async fn len(&self) -> Result<u64> {
@@ -285,38 +309,41 @@ impl SeekableDiskWriter for CachedDiskWriter {
             }
             return Ok(0);
         }
-
-        let adaptor = self.adaptor.lock().await;
-        adaptor.size().await
+        self.writer.len().await
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
+
+    async fn close(&mut self) -> Result<()> {
+        self.flush().await?;
+        self.writer.close().await?;
+        self.opened = false;
+        Ok(())
+    }
 }
 
 impl CachedDiskWriter {
-    async fn flush_cache(&self) -> Result<()> {
+    /// Flush all dirty cache entries to the underlying writer.
+    ///
+    /// Uses `CacheEntry::into_data()` to move the `Bytes` buffer out of each
+    /// entry without copying — the bytes are passed directly to
+    /// `write_bytes_at` which forwards to `pwrite` (zero-copy from cache to disk).
+    async fn flush_cache(&mut self) -> Result<()> {
         if let Some(ref cache) = self.cache {
             let entries = cache.flush().await?;
             if !entries.is_empty() {
-                let mut adaptor = self.adaptor.lock().await;
-                for entry in &entries {
-                    if entry.is_dirty() || !entry.data().is_empty() {
-                        adaptor.write(entry.offset(), entry.data()).await?;
+                for entry in entries {
+                    let offset = entry.offset();
+                    let data = entry.into_data();
+                    if !data.is_empty() {
+                        self.writer.write_bytes_at(offset, data).await?;
                     }
                 }
-                adaptor.flush().await?;
+                self.writer.flush().await?;
             }
         }
-        Ok(())
-    }
-
-    pub async fn close(&mut self) -> Result<()> {
-        self.flush().await?;
-        let mut adaptor = self.adaptor.lock().await;
-        adaptor.close().await?;
-        self.opened = false;
         Ok(())
     }
 
@@ -695,6 +722,65 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Verify that 8 concurrent tasks writing 64 KiB chunks to non-overlapping
+    /// offsets on a single `CachedDiskWriter` (wrapped in
+    /// `Arc<tokio::sync::Mutex<>>`) complete without deadlock and with full
+    /// data integrity.
+    ///
+    /// Since `write_at` takes `&mut self`, the external `tokio::sync::Mutex`
+    /// serializes calls — but each call is now fast (no internal async mutex
+    /// held across `.await` points), so 8 tasks should complete in roughly
+    /// 1× single-write latency with no contention bottleneck.
+    #[tokio::test]
+    async fn test_concurrent_writes_no_mutex_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_no_contention.bin");
+
+        let chunk_size: usize = 64 * 1024;
+        let num_tasks: usize = 8;
+        let total_size = (chunk_size * num_tasks) as u64;
+
+        let mut writer = CachedDiskWriter::new(&path, Some(total_size), None);
+        writer.open().await.unwrap();
+        let writer = Arc::new(tokio::sync::Mutex::new(writer));
+
+        let mut handles = Vec::with_capacity(num_tasks);
+        for i in 0..num_tasks {
+            let offset = (i as u64) * chunk_size as u64;
+            let fill = (i as u8) + 1;
+            let data = bytes::Bytes::from(vec![fill; chunk_size]);
+            let w = writer.clone();
+            handles.push(tokio::spawn(async move {
+                let mut guard = w.lock().await;
+                guard.write_bytes_at(offset, data).await.unwrap();
+            }));
+        }
+
+        // If there were a deadlock, this join would hang forever.
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        {
+            let mut guard = writer.lock().await;
+            guard.flush().await.unwrap();
+        }
+
+        // Verify data integrity: each chunk should contain its fill byte.
+        let content = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(content.len(), total_size as usize);
+        for i in 0..num_tasks {
+            let start = i * chunk_size;
+            let expected = (i as u8) + 1;
+            let chunk = &content[start..start + chunk_size];
+            assert!(
+                chunk.iter().all(|&b| b == expected),
+                "data mismatch in task {} chunk",
+                i
+            );
         }
     }
 }

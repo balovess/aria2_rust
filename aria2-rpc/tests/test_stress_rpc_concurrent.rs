@@ -301,10 +301,10 @@ fn test_stress_notification_batcher_high_throughput() {
         }
         
         // Manual flush check every 100 events
-        if i % 100 == 99 {
-            if let Some(batch) = batcher.maybe_flush() {
-                total_sent += batch.len();
-            }
+        if i % 100 == 99
+            && let Some(batch) = batcher.maybe_flush()
+        {
+            total_sent += batch.len();
         }
     }
     
@@ -662,7 +662,7 @@ async fn test_stress_event_publish_subscribe_mixed() {
             let start = Instant::now();
             
             while start.elapsed() < timeout {
-                if let Ok(_) = rx.try_recv() {
+                if rx.try_recv().is_ok() {
                     count += 1;
                 }
                 tokio::time::sleep(Duration::from_micros(10)).await;
@@ -735,7 +735,7 @@ fn get_memory_usage() -> usize {
         };
         
         if result != 0 {
-            counters.WorkingSetSize as usize
+            counters.WorkingSetSize
         } else {
             0
         }

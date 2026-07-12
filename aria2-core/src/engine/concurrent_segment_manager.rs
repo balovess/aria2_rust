@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -82,6 +83,14 @@ pub struct ConcurrentSegmentManager {
     stat_man: Option<Arc<ServerStatMan>>,
     /// Optional URI selector for intelligent mirror selection
     uri_selector: Option<Box<dyn UriSelector>>,
+    /// Atomic hint pointing at the next candidate segment index for allocation.
+    ///
+    /// This enables O(1) amortized segment allocation: scans start from the last
+    /// assigned position instead of re-scanning already-assigned segments from
+    /// the beginning. Updated with `Ordering::Relaxed` since it is only a hint;
+    /// the linear scan with wraparound always preserves correctness even if the
+    /// hint races or points at an already-assigned segment.
+    next_segment_idx: AtomicU32,
 }
 
 impl ConcurrentSegmentManager {
@@ -118,6 +127,7 @@ impl ConcurrentSegmentManager {
             max_mirror_failures: constants::MAX_MIRROR_FAILURES as usize,
             stat_man: None,
             uri_selector: None,
+            next_segment_idx: AtomicU32::new(0),
         }
     }
 
@@ -188,6 +198,7 @@ impl ConcurrentSegmentManager {
             max_mirror_failures: constants::MAX_MIRROR_FAILURES as usize,
             stat_man: Some(stat_man),
             uri_selector: Some(uri_selector),
+            next_segment_idx: AtomicU32::new(0),
         }
     }
 
@@ -206,9 +217,24 @@ impl ConcurrentSegmentManager {
     }
 
     fn find_pending_segment(&mut self) -> Option<&mut Segment> {
-        self.segments
-            .iter_mut()
-            .find(|s| s.status == SegmentStatus::Pending)
+        let len = self.segments.len();
+        if len == 0 {
+            return None;
+        }
+        // Start scanning from the atomic hint to skip already-assigned segments.
+        // The wraparound scan guarantees correctness even if the hint is stale.
+        let start = (self.next_segment_idx.load(Ordering::Relaxed) as usize) % len;
+        for i in 0..len {
+            let idx = (start + i) % len;
+            if self.segments[idx].status == SegmentStatus::Pending {
+                // Advance the hint past this segment; the caller marks it
+                // Downloading immediately so it won't be selected again.
+                self.next_segment_idx
+                    .store((idx + 1) as u32, Ordering::Relaxed);
+                return Some(&mut self.segments[idx]);
+            }
+        }
+        None
     }
 
     pub fn next_pending_segment_for_mirror(
@@ -223,10 +249,22 @@ impl ConcurrentSegmentManager {
             return None;
         }
 
-        for seg in &mut self.segments {
+        let len = self.segments.len();
+        if len == 0 {
+            return None;
+        }
+        // Start scanning from the atomic hint to skip already-assigned segments.
+        // This yields O(1) amortized allocation: each segment is visited at most
+        // once before the hint catches up to it.
+        let start = (self.next_segment_idx.load(Ordering::Relaxed) as usize) % len;
+        for i in 0..len {
+            let idx = (start + i) % len;
+            let seg = &mut self.segments[idx];
             if seg.status == SegmentStatus::Pending {
                 seg.status = SegmentStatus::Downloading;
                 seg.assigned_mirror = Some(mirror_idx);
+                self.next_segment_idx
+                    .store((idx + 1) as u32, Ordering::Relaxed);
                 if let Some(m) = self.mirrors.get_mut(mirror_idx) {
                     m.active_segments += 1;
                 }
@@ -238,6 +276,44 @@ impl ConcurrentSegmentManager {
 
     pub fn next_pending_segment(&mut self) -> Option<(u32, u64, u64)> {
         self.next_pending_segment_for_mirror(0)
+    }
+
+    /// Atomically allocate the next segment index for lock-free assignment.
+    ///
+    /// Returns the index of the next segment to claim, or `None` if all segments
+    /// have been allocated. This uses `fetch_add` for O(1) lock-free allocation.
+    /// The caller is responsible for checking the segment status and claiming it.
+    ///
+    /// Unlike [`next_pending_segment_for_mirror`](Self::next_pending_segment_for_mirror),
+    /// this method takes only `&self` and is therefore safe to call concurrently
+    /// from multiple threads through an `Arc<ConcurrentSegmentManager>`.
+    ///
+    /// # Concurrency
+    ///
+    /// Each successful call returns a distinct index. Once all segments have been
+    /// issued, subsequent calls return `None` (the counter keeps growing but is
+    /// bounded by the number of callers, so it cannot overflow in practice).
+    pub fn allocate_next_index(&self) -> Option<u32> {
+        let idx = self.next_segment_idx.fetch_add(1, Ordering::Relaxed);
+        if (idx as usize) < self.segments.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Reset the allocation index to 0.
+    ///
+    /// This is useful for retry scenarios where segments that previously failed
+    /// need to be reconsidered for assignment from the beginning of the vector.
+    ///
+    /// # Safety of use
+    ///
+    /// This must not be called concurrently with [`allocate_next_index`](Self::allocate_next_index)
+    /// if unique indices are required; it is intended for reset points where the
+    /// caller has exclusive access (e.g. between download attempts).
+    pub fn reset_allocation_index(&self) {
+        self.next_segment_idx.store(0, Ordering::Relaxed);
     }
 
     pub fn complete_segment(&mut self, index: u32, data: bytes::Bytes) -> bool {
@@ -1008,5 +1084,116 @@ mod tests {
         );
 
         assert!(!mgr.has_intelligent_selection());
+    }
+
+    // ======================================================================
+    // Tests for atomic / lock-free segment allocation (Phase E1)
+    // ======================================================================
+
+    /// Verify that `allocate_next_index` is lock-free and never issues a
+    /// duplicate or missing index when hammered from many threads.
+    ///
+    /// 16 threads each call `allocate_next_index` 1000 times against a shared
+    /// `Arc<ConcurrentSegmentManager>` (16000 segments of 1 byte each). Because
+    /// `allocate_next_index` takes only `&self` and uses `fetch_add`, every call
+    /// must receive a distinct index in `0..16000` with no duplicates and no gaps.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn test_segment_allocation_is_lock_free() {
+        use std::collections::HashSet;
+
+        // 16000 segments of size 1 byte = 16000 segments.
+        let manager = Arc::new(ConcurrentSegmentManager::new(
+            16000,
+            vec!["http://test".into()],
+            Some(1),
+        ));
+        assert_eq!(manager.num_segments(), 16000);
+
+        let collected: Arc<tokio::sync::Mutex<Vec<u32>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let mut handles = Vec::with_capacity(16);
+        for _ in 0..16 {
+            let m = manager.clone();
+            let c = collected.clone();
+            handles.push(tokio::spawn(async move {
+                // Collect locally first to minimize lock contention on `collected`.
+                let mut local = Vec::with_capacity(1000);
+                for _ in 0..1000 {
+                    if let Some(idx) = m.allocate_next_index() {
+                        local.push(idx);
+                    }
+                }
+                c.lock().await.extend(local);
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let indices = collected.lock().await.clone();
+        assert_eq!(
+            indices.len(),
+            16000,
+            "should have allocated all 16000 segments"
+        );
+
+        // Verify no duplicates.
+        let set: HashSet<u32> = indices.iter().copied().collect();
+        assert_eq!(set.len(), 16000, "all indices must be unique (no duplicates)");
+
+        // Verify all indices 0..16000 are present.
+        for i in 0..16000u32 {
+            assert!(set.contains(&i), "missing index {}", i);
+        }
+    }
+
+    /// Verify the allocation hint advances indices in order and that
+    /// `reset_allocation_index` rewinds the scan start position.
+    ///
+    /// The hint optimization must (a) return segments in ascending index order
+    /// without re-scanning from 0 each call, (b) use wraparound to find a
+    /// Pending segment that lies behind the current hint, and (c) be rewound
+    /// to 0 by `reset_allocation_index`.
+    #[test]
+    fn test_allocation_hint_advances_and_resets() {
+        let mut mgr = ConcurrentSegmentManager::new(
+            500,
+            vec!["http://a.com/f".to_string()],
+            Some(100),
+        );
+        // 5 segments; let the single mirror accept all of them.
+        mgr.set_max_connections_per_mirror(10);
+        assert_eq!(mgr.num_segments(), 5);
+
+        // Claim segments one at a time. The hint advances so each allocation
+        // starts scanning right after the last claim, yielding indices 0..5
+        // in order without re-scanning already-assigned segments.
+        let mut claimed = Vec::new();
+        while let Some((idx, _, _)) = mgr.next_pending_segment_for_mirror(0) {
+            claimed.push(idx);
+        }
+        assert_eq!(claimed, vec![0, 1, 2, 3, 4]);
+
+        // All segments are Downloading; no pending segment remains.
+        assert!(mgr.next_pending_segment_for_mirror(0).is_none());
+
+        // Simulate a retry: re-mark segment 1 as Pending. The hint currently
+        // points past the end (5 -> wraps to 0), so the wraparound scan must
+        // visit index 1 to find it.
+        mgr.segments[1].status = SegmentStatus::Pending;
+        let next = mgr.next_pending_segment_for_mirror(0);
+        assert!(next.is_some());
+        assert_eq!(next.unwrap().0, 1);
+
+        // reset_allocation_index rewinds the hint to 0 without touching statuses.
+        mgr.reset_allocation_index();
+        // Mark segment 3 as Pending; with the hint rewound to 0 the scan walks
+        // forward from index 0 and finds segment 3 (the only Pending one).
+        mgr.segments[3].status = SegmentStatus::Pending;
+        let next = mgr.next_pending_segment_for_mirror(0);
+        assert!(next.is_some());
+        assert_eq!(next.unwrap().0, 3);
     }
 }
