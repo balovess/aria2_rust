@@ -98,6 +98,11 @@ pub struct BtDownloadCommand {
     // Seeding mode (Phase 16 - Complete BitTorrent seeding)
     /// Seed manager for uploading after download completes
     pub(crate) seed_manager: Option<super::bt_seed_manager::BtSeedManager>,
+
+    // BEP 0027 (Private Torrent): when true, DHT/PEX/LPD and public tracker
+    // announcement are disabled to enforce the privacy guarantees of the
+    // torrent's `private` flag.
+    pub(crate) is_private: bool,
 }
 
 impl BtDownloadCommand {
@@ -111,6 +116,16 @@ impl BtDownloadCommand {
             .map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {}", e)))
         })?;
+
+        // BEP 0027 (Private Torrent): capture the private flag at parse time.
+        // When true, the engine must disable DHT, PEX, LPD and public tracker
+        // announcement to honour the privacy contract.
+        let is_private = meta.is_private();
+        if is_private {
+            info!(
+                "[BT] Private torrent detected (BEP 0027): DHT/PEX/LPD and public trackers will be disabled"
+            );
+        }
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -264,6 +279,9 @@ impl BtDownloadCommand {
 
             // Seeding mode
             seed_manager: None,
+
+            // BEP 0027 (Private Torrent) enforcement flag
+            is_private,
         })
     }
 

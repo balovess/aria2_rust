@@ -167,8 +167,13 @@ impl Command for BtDownloadCommand {
             .connect_to_peers(&peer_addrs, &meta.info_hash.bytes, num_pieces)
             .await?;
 
-        // Initialize PEX known peers list from discovered peers for BEP 11 exchange
-        {
+        // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
+        // BEP 0027 (Private Torrent): PEX must be disabled for private torrents
+        // because it exchanges peer lists with connected peers, which would leak
+        // the swarm membership beyond the tracker-controlled peer set.
+        if self.is_private {
+            info!("[BT] Private torrent: PEX disabled (BEP 0027)");
+        } else {
             let pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = peer_addrs
                 .iter()
                 .map(|pa| {
@@ -198,20 +203,24 @@ impl Command for BtDownloadCommand {
         };
 
         // PEX Integration: Initialize PEX state tracking for active connections
-        // Each peer may support ut_pex extension (BEP 11) for peer discovery
+        // Each peer may support ut_pex extension (BEP 11) for peer discovery.
+        // BEP 0027 (Private Torrent): leave pex_enabled_peers empty so no PEX
+        // messages are ever sent.
         let mut pex_enabled_peers: HashSet<usize> = HashSet::new();
         let mut last_pex_send = Instant::now();
         const PEX_SEND_INTERVAL_SECS: u64 = 60;
 
-        // Check PEX support for each connection (simplified - assume all peers support PEX)
-        // In a full implementation, this would check extension handshake results
-        for (idx, _conn) in active_connections.iter().enumerate() {
-            pex_enabled_peers.insert(idx);
+        if !self.is_private {
+            // Check PEX support for each connection (simplified - assume all peers support PEX)
+            // In a full implementation, this would check extension handshake results
+            for (idx, _conn) in active_connections.iter().enumerate() {
+                pex_enabled_peers.insert(idx);
+            }
+            info!(
+                "[PEX] Initialized PEX tracking for {} peers (assuming ut_pex support)",
+                pex_enabled_peers.len()
+            );
         }
-        info!(
-            "[PEX] Initialized PEX tracking for {} peers (assuming ut_pex support)",
-            pex_enabled_peers.len()
-        );
 
         self.download_pieces_loop(
             &mut active_connections,
@@ -356,7 +365,13 @@ impl BtDownloadCommand {
             tracing::error!("[BT] ERROR: No peers from tracker");
         }
 
-        let enable_dht = { self.group.read().await.options().enable_dht };
+        // BEP 0027 (Private Torrent): DHT must be disabled for private torrents
+        // to prevent leaking the info_hash to the public DHT network.
+        let enable_dht =
+            { self.group.read().await.options().enable_dht } && !self.is_private;
+        if self.is_private {
+            info!("[BT] Private torrent: DHT disabled (BEP 0027)");
+        }
         if enable_dht && self.dht_engine.is_none() {
             let dht_port = { self.group.read().await.options().dht_listen_port };
             let dht_file_path = { self.group.read().await.options().dht_file_path.clone() };
@@ -433,7 +448,14 @@ impl BtDownloadCommand {
             }
         }
 
-        let enable_public_trackers = { self.group.read().await.options().enable_public_trackers };
+        // BEP 0027 (Private Torrent): public tracker announcement is forbidden
+        // for private torrents because it would leak the info_hash to trackers
+        // not explicitly listed in the torrent's announce list.
+        let enable_public_trackers =
+            { self.group.read().await.options().enable_public_trackers } && !self.is_private;
+        if self.is_private {
+            info!("[BT] Private torrent: public trackers disabled (BEP 0027)");
+        }
         if enable_public_trackers
             && self.public_trackers.is_none()
             && peer_addrs.len() < PUBLIC_TRACKER_PEER_THRESHOLD
@@ -490,7 +512,14 @@ impl BtDownloadCommand {
         }
 
         // P2: Integrate LPD-discovered LAN peers
-        if let Some(ref lpd) = self.lpd_manager {
+        // BEP 0027 (Private Torrent): LPD (Local Peer Discovery) uses UDP
+        // multicast which would leak the info_hash to the local network, so it
+        // must be disabled for private torrents.
+        if self.is_private {
+            if self.lpd_manager.is_some() {
+                info!("[BT] Private torrent: LPD disabled (BEP 0027)");
+            }
+        } else if let Some(ref lpd) = self.lpd_manager {
             // Convert raw 20-byte info_hash to 40-char hex string for LPD
             let info_hash_hex = hex::encode(*info_hash_raw);
             let lpd_peers = lpd.get_peers_for(&info_hash_hex).await;
@@ -1186,6 +1215,13 @@ impl BtDownloadCommand {
         &mut self,
         remote_peer_addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
     ) -> Option<Vec<u8>> {
+        // BEP 0027 (Private Torrent): PEX must never be sent for private
+        // torrents. This is a defense-in-depth guard; the download loop also
+        // leaves pex_known_peers empty for private torrents.
+        if self.is_private {
+            return None;
+        }
+
         if !self.should_send_pex() {
             return None;
         }
@@ -1226,6 +1262,14 @@ impl BtDownloadCommand {
         Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
         Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     )> {
+        // BEP 0027 (Private Torrent): ignore any incoming PEX message for
+        // private torrents. We must not incorporate peers learned through PEX
+        // because the swarm is supposed to be tracker-controlled only.
+        if self.is_private {
+            debug!("[PEX] Ignoring incoming PEX message for private torrent (BEP 0027)");
+            return Ok((Vec::new(), Vec::new()));
+        }
+
         match PexHandler::process_received_pex(pex_data, local_addr) {
             Ok((added, dropped)) => {
                 if !added.is_empty() {
@@ -1271,7 +1315,9 @@ impl BtDownloadCommand {
         _num_pieces: u32,
         active_connections: &[BtPeerConn],
     ) -> usize {
-        if new_peers.is_empty() {
+        // BEP 0027 (Private Torrent): never connect to peers discovered via PEX
+        // for private torrents.
+        if self.is_private || new_peers.is_empty() {
             return 0;
         }
 

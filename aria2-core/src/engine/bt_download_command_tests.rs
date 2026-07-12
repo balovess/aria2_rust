@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::engine::bt_download_command::BtDownloadCommand;
     use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
     use crate::engine::bt_upload_session::PieceDataProvider;
@@ -9,7 +9,10 @@ mod tests {
     use crate::request::request_group::{DownloadOptions, GroupId};
     use std::net::SocketAddr;
 
-    fn build_test_torrent() -> Vec<u8> {
+    /// Build a minimal single-file public torrent (no `private` flag).
+    /// Shared across BT/magnet test modules to avoid duplicating bencode
+    /// fixtures.
+    pub(crate) fn build_test_torrent() -> Vec<u8> {
         let mut v = Vec::new();
 
         v.push(b'd');
@@ -46,6 +49,51 @@ mod tests {
         let gid = GroupId::new(1);
         BtDownloadCommand::new(gid, &torrent_bytes, &options, None)
             .expect("Failed to create test command")
+    }
+
+    /// Build a minimal single-file torrent with the `private` flag set to 1
+    /// (BEP 0027). The info dict keys are emitted in sorted bencode order:
+    /// length, name, piece length, pieces, private.
+    /// Shared across BT/magnet test modules.
+    pub(crate) fn build_private_test_torrent() -> Vec<u8> {
+        let mut v = Vec::new();
+
+        v.push(b'd');
+
+        let url = b"http://tracker.example.com/announce";
+        v.extend_from_slice(format!("8:announce{}:", url.len()).as_bytes());
+        v.extend_from_slice(url);
+
+        v.extend_from_slice(b"4:info");
+        v.push(b'd');
+
+        v.extend_from_slice(b"6:lengthi0e");
+
+        v.extend_from_slice(b"4:name4:test");
+
+        v.extend_from_slice(b"12:piece lengthi16384e");
+
+        v.extend_from_slice(b"6:pieces20:");
+        v.extend_from_slice(&[
+            0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60,
+            0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
+        ]);
+
+        // private flag (BEP 0027): placed last in sorted key order
+        v.extend_from_slice(b"7:privatei1e");
+
+        v.push(b'e'); // close info dict
+        v.push(b'e'); // close root dict
+
+        v
+    }
+
+    fn create_private_test_command() -> BtDownloadCommand {
+        let torrent_bytes = build_private_test_torrent();
+        let options = DownloadOptions::default();
+        let gid = GroupId::new(1);
+        BtDownloadCommand::new(gid, &torrent_bytes, &options, None)
+            .expect("Failed to create private test command")
     }
 
     #[test]
@@ -1162,5 +1210,124 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir_orig);
         let _ = std::fs::remove_dir_all(&dir_coal);
+    }
+
+    // ==================================================================
+    // BEP 0027 (Private Torrent) enforcement tests
+    // ==================================================================
+
+    #[test]
+    fn test_private_torrent_is_private_flag_set() {
+        let cmd = create_private_test_command();
+        assert!(
+            cmd.is_private,
+            "is_private must be true for a torrent with private=1 in the info dict"
+        );
+    }
+
+    #[test]
+    fn test_non_private_torrent_is_private_flag_false() {
+        let cmd = create_test_command();
+        assert!(
+            !cmd.is_private,
+            "is_private must be false for a torrent without the private flag"
+        );
+    }
+
+    #[test]
+    fn test_private_torrent_dht_engine_not_started() {
+        let cmd = create_private_test_command();
+        // DHT engine is never initialized for private torrents. Even though it
+        // starts as None by default, asserting here documents the BEP 0027
+        // invariant: the download loop will never start DHT for this command.
+        assert!(
+            cmd.dht_engine.is_none(),
+            "DHT engine must not be started for private torrents (BEP 0027)"
+        );
+    }
+
+    #[test]
+    fn test_private_torrent_lpd_manager_not_started() {
+        let cmd = create_private_test_command();
+        // LPD manager is never initialized for private torrents.
+        assert!(
+            cmd.lpd_manager.is_none(),
+            "LPD manager must not be started for private torrents (BEP 0027)"
+        );
+    }
+
+    #[test]
+    fn test_private_torrent_pex_known_peers_empty() {
+        let cmd = create_private_test_command();
+        // PEX known peers list is never populated for private torrents.
+        assert!(
+            cmd.pex_known_peers.is_empty(),
+            "PEX known peers must be empty for private torrents (BEP 0027)"
+        );
+    }
+
+    #[test]
+    fn test_private_torrent_maybe_send_pex_returns_none() {
+        use aria2_protocol::bittorrent::peer::connection::PeerAddr;
+
+        let mut cmd = create_private_test_command();
+
+        // Even if peers were somehow added, maybe_send_pex must refuse to
+        // build a PEX message for private torrents.
+        cmd.set_pex_known_peers(vec![
+            PeerAddr::new("10.0.0.1", 6881),
+            PeerAddr::new("10.0.0.2", 6881),
+        ]);
+
+        let remote = PeerAddr::new("10.0.0.99", 6881);
+        let result = cmd.maybe_send_pex(&remote);
+        assert!(
+            result.is_none(),
+            "maybe_send_pex must return None for private torrents (BEP 0027) \
+             even when pex_known_peers is populated"
+        );
+    }
+
+    #[test]
+    fn test_private_torrent_handle_incoming_pex_ignored() {
+        use aria2_protocol::bittorrent::peer::connection::PeerAddr;
+
+        let mut cmd = create_private_test_command();
+
+        // Construct a minimal valid PEX message (empty added/dropped lists).
+        // The bencode for an empty PEX dict is "de".
+        let pex_data = b"de";
+        let local_addr = PeerAddr::new("127.0.0.1", 6881);
+
+        let result = cmd.handle_incoming_pex(pex_data, &local_addr);
+        assert!(
+            result.is_ok(),
+            "handle_incoming_pex should return Ok (with empty lists) for private torrents, \
+             not an error"
+        );
+        let (added, dropped) = result.unwrap();
+        assert!(
+            added.is_empty() && dropped.is_empty(),
+            "handle_incoming_pex must return empty lists for private torrents (BEP 0027)"
+        );
+    }
+
+    #[test]
+    fn test_non_private_torrent_maybe_send_pex_can_proceed() {
+        use aria2_protocol::bittorrent::peer::connection::PeerAddr;
+
+        let mut cmd = create_test_command();
+        assert!(!cmd.is_private);
+
+        // For a non-private torrent with peers populated, maybe_send_pex should
+        // be allowed to build a PEX message (it returns Some when ready).
+        cmd.set_pex_known_peers(vec![PeerAddr::new("10.0.0.1", 6881)]);
+
+        let remote = PeerAddr::new("10.0.0.99", 6881);
+        let result = cmd.maybe_send_pex(&remote);
+        assert!(
+            result.is_some(),
+            "maybe_send_pex should return Some for non-private torrents with known peers"
+        );
     }
 }

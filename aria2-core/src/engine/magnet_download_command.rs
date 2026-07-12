@@ -64,6 +64,51 @@ impl MagnetDownloadCommand {
     pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
         self.group.read().await
     }
+
+    /// BEP 0027 (Private Torrent) enforcement after metadata exchange.
+    ///
+    /// For magnet links, the DHT engine is started BEFORE metadata arrives
+    /// because DHT-based peer discovery is required to find peers that can
+    /// serve the metadata via BEP 0010 (Extension for Peers to Send Metadata
+    /// File). Once the metadata has been fetched, if the torrent's `private`
+    /// flag is set, DHT must be shut down to comply with BEP 0027 which
+    /// forbids DHT, PEX, and LPD for private torrents.
+    ///
+    /// This method parses the fetched `torrent_bytes`, checks `is_private()`,
+    /// and if true, shuts down the DHT engine asynchronously and clears the
+    /// `dht_engine` field so the downstream `BtDownloadCommand` (created from
+    /// the same bytes) will not see a running DHT engine and will itself
+    /// honour BEP 0027 by not starting a new one.
+    ///
+    /// Extracted as a standalone async method so the policy logic can be
+    /// unit tested without mocking the BEP 0010 metadata exchange network I/O.
+    async fn enforce_bep0027_after_metadata(&mut self, torrent_bytes: &[u8]) -> Result<()> {
+        let is_private =
+            aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!(
+                        "Fetched metadata parse failed: {}",
+                        e
+                    )))
+                })?
+                .is_private();
+
+        if is_private {
+            info!(
+                "Private torrent detected after metadata exchange: shutting down DHT (BEP 0027)"
+            );
+            if let Some(ref engine) = self.dht_engine {
+                engine.shutdown_async().await;
+            }
+            // Clear the field so the trailing shutdown() call in execute()
+            // does not attempt to shut down an already-stopped engine, and
+            // so the downstream BtDownloadCommand cannot accidentally reuse
+            // the engine.
+            self.dht_engine = None;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -152,6 +197,13 @@ impl Command for MagnetDownloadCommand {
 
         info!("Fetched torrent metadata: {} bytes", torrent_bytes.len());
 
+        // BEP 0027 (Private Torrent): DHT was started before metadata exchange
+        // for peer discovery. Now that the metadata is available, parse it and
+        // shut down DHT if the torrent is private. The downstream
+        // BtDownloadCommand (created from the same bytes) will also enforce
+        // BEP 0027 by refusing to start its own DHT when is_private is set.
+        self.enforce_bep0027_after_metadata(&torrent_bytes).await?;
+
         use crate::engine::bt_download_command::BtDownloadCommand;
         let mut bt_cmd = BtDownloadCommand::new(
             self.group.read().await.gid(),
@@ -184,3 +236,122 @@ impl Command for MagnetDownloadCommand {
         Some(Duration::from_secs(900))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::bt_download_command_tests::tests::{
+        build_private_test_torrent, build_test_torrent,
+    };
+
+    /// Valid 40-char hex info-hash magnet link used by all test cases.
+    const TEST_MAGNET_URI: &str =
+        "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&dn=test_file";
+
+    fn make_test_command() -> MagnetDownloadCommand {
+        MagnetDownloadCommand::new(
+            GroupId::new(1),
+            TEST_MAGNET_URI,
+            &DownloadOptions::default(),
+            None,
+        )
+        .expect("Failed to create test MagnetDownloadCommand")
+    }
+
+    /// Start a real DhtEngine on an ephemeral port (port 0) for testing.
+    async fn start_test_dht_engine() -> std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine> {
+        aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::default(),
+        )
+        .await
+        .expect("Failed to start DhtEngine for test")
+    }
+
+    /// BEP 0027: After metadata exchange, a private torrent must cause the
+    /// DHT engine (started for peer discovery) to be shut down and the
+    /// `dht_engine` field cleared so the downstream `BtDownloadCommand`
+    /// cannot accidentally reuse it.
+    #[tokio::test]
+    async fn test_magnet_private_torrent_dht_shutdown_after_metadata() {
+        let mut cmd = make_test_command();
+        cmd.dht_engine = Some(start_test_dht_engine().await);
+        assert!(cmd.dht_engine.is_some(), "precondition: DHT engine present");
+
+        let torrent_bytes = build_private_test_torrent();
+
+        cmd.enforce_bep0027_after_metadata(&torrent_bytes)
+            .await
+            .expect("enforce_bep0027 should succeed for private torrent");
+
+        assert!(
+            cmd.dht_engine.is_none(),
+            "DHT engine must be None after private torrent metadata (BEP 0027)"
+        );
+    }
+
+    /// BEP 0027: A public torrent (no `private` flag) must NOT trigger DHT
+    /// shutdown — the DHT engine started for peer discovery remains active
+    /// so the downstream download can continue using it.
+    #[tokio::test]
+    async fn test_magnet_public_torrent_dht_continues() {
+        let mut cmd = make_test_command();
+        let engine = start_test_dht_engine().await;
+        cmd.dht_engine = Some(engine.clone());
+
+        let torrent_bytes = build_test_torrent();
+
+        cmd.enforce_bep0027_after_metadata(&torrent_bytes)
+            .await
+            .expect("enforce_bep0027 should succeed for public torrent");
+
+        assert!(
+            cmd.dht_engine.is_some(),
+            "DHT engine must remain active for public torrent"
+        );
+
+        // Clean up: shut down the still-running engine to release the socket.
+        engine.shutdown_async().await;
+    }
+
+    /// When DHT was never started (e.g. enable_dht = false), the enforcement
+    /// method must still parse the metadata and succeed without error. There
+    /// is nothing to shut down, so `dht_engine` stays `None`.
+    #[tokio::test]
+    async fn test_magnet_enforce_bep0027_no_dht_engine() {
+        let mut cmd = make_test_command();
+        assert!(cmd.dht_engine.is_none(), "precondition: no DHT engine");
+
+        let torrent_bytes = build_private_test_torrent();
+
+        cmd.enforce_bep0027_after_metadata(&torrent_bytes)
+            .await
+            .expect("should succeed even when DHT engine is absent");
+
+        assert!(cmd.dht_engine.is_none());
+    }
+
+    /// Corrupt metadata bytes must produce a fatal config error rather than
+    /// silently treating the torrent as public (which would leak DHT usage
+    /// for what might actually be a private torrent).
+    #[tokio::test]
+    async fn test_magnet_enforce_bep0027_invalid_metadata_errors() {
+        let mut cmd = make_test_command();
+
+        let bad_bytes: &[u8] = b"this is not valid bencode";
+
+        let result = cmd.enforce_bep0027_after_metadata(bad_bytes).await;
+        assert!(
+            result.is_err(),
+            "Invalid metadata bytes must return an error, not silently default to public"
+        );
+
+        // DHT engine should be untouched when parsing fails (fail-closed on
+        // the parse error, but we do not preemptively shut down DHT since the
+        // caller may want to retry metadata fetch from a different peer).
+        assert!(
+            cmd.dht_engine.is_none(),
+            "DHT engine field should be unchanged on parse error"
+        );
+    }
+}
+
