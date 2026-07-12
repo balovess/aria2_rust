@@ -1458,14 +1458,14 @@ mod tests {
         assert!(nodes_bytes.is_some(), "find_node response should have nodes field");
 
         // The known node is IPv4, so it should be in the compact nodes (26 bytes)
-        if let Some(nodes) = nodes_bytes {
-            if !nodes.is_empty() {
-                assert_eq!(
-                    nodes.len() % 26,
-                    0,
-                    "compact nodes should be 26-byte aligned"
-                );
-            }
+        if let Some(nodes) = nodes_bytes
+            && !nodes.is_empty()
+        {
+            assert_eq!(
+                nodes.len() % 26,
+                0,
+                "compact nodes should be 26-byte aligned"
+            );
         }
 
         engine.shutdown();

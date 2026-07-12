@@ -317,6 +317,7 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
 /// All other options are startup-only and cannot be modified after the
 /// download begins. Keep in sync with [`RequestGroup::update_option`].
 pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
+    "split",
     "max-download-limit",
     "max-upload-limit",
     "max-retries",
@@ -493,6 +494,12 @@ impl RequestGroup {
     /// immediately on the live download.
     pub async fn update_option(&mut self, key: &str, value: serde_json::Value) -> bool {
         match key {
+            "split" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.split = Some(v as u16);
+                }
+                true
+            }
             "max-download-limit" => {
                 let rate = value.as_u64();
                 self.options.max_download_limit = rate;

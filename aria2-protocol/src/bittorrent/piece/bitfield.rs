@@ -1,6 +1,6 @@
 //! Compressed bitfield storage for BitTorrent piece tracking.
 //!
-//! Uses 1 bit per piece instead of 1 byte (Vec<bool>), providing 8x memory reduction.
+//! Uses 1 bit per piece instead of 1 byte (`Vec<bool>`), providing 8x memory reduction.
 //! This is critical for large torrents with thousands of pieces.
 
 /// A memory-efficient bitfield using 1 bit per element.
@@ -337,16 +337,16 @@ impl Bitfield {
         self.bits.len()
     }
 
-    /// Calculate memory usage if using Vec<bool> for the same number of bits.
+    /// Calculate memory usage if using `Vec<bool>` for the same number of bits.
     ///
     /// This is useful for comparing memory savings.
     pub fn vec_bool_memory_usage(&self) -> usize {
         self.num_bits
     }
 
-    /// Calculate memory savings ratio compared to Vec<bool>.
+    /// Calculate memory savings ratio compared to `Vec<bool>`.
     ///
-    /// Returns the ratio of Vec<bool> memory to Bitfield memory.
+    /// Returns the ratio of `Vec<bool>` memory to Bitfield memory.
     /// A value of 8.0 means Bitfield uses 8x less memory.
     pub fn memory_savings_ratio(&self) -> f64 {
         if self.bits.is_empty() {

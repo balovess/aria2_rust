@@ -130,10 +130,10 @@ impl TestServer {
         // client knows the resource size, but no body bytes are sent. This
         // prevents the server from blocking on write_all when the client
         // (e.g. reqwest HEAD probe) closes the connection after reading headers.
-        if is_head {
-            if let Some(pos) = response.windows(4).position(|w| w == b"\r\n\r\n") {
-                return response[..pos + 4].to_vec();
-            }
+        if is_head
+            && let Some(pos) = response.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            return response[..pos + 4].to_vec();
         }
 
         response

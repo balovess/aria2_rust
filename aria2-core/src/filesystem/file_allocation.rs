@@ -221,7 +221,10 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64, secure: bool) -
             let ret = unsafe {
                 libc::fallocate(
                     fd,
-                    libc::FALLOC_FL_NONE as libc::c_int,
+                    // FALLOC_FL_NONE is 0 in the Linux kernel headers but is
+                    // not exported by the libc crate. Literal 0 == default
+                    // allocate-and-zero-fill behavior.
+                    0 as libc::c_int,
                     0,
                     length as libc::off_t,
                 )

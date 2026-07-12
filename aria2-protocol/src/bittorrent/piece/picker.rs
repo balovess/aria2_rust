@@ -546,7 +546,7 @@ impl PiecePicker {
     
     /// Export completed pieces as a compact bitfield (MSB-first ordering)
     ///
-    /// Returns Vec<u8> where each byte represents 8 pieces.
+    /// Returns `Vec<u8>` where each byte represents 8 pieces.
     /// Bit ordering is MSB-first: piece 0 is bit 7 of byte 0, piece 7 is bit 0 of byte 0.
     /// This matches the BitTorrent protocol bitfield format.
     ///
