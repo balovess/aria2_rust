@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use dashmap::DashMap;
@@ -127,6 +128,39 @@ impl RequestGroupMan {
             }
         }
 
+        Ok(())
+    }
+
+    /// Update runtime-changeable options on a running download task.
+    ///
+    /// # Arguments
+    /// * `gid_hex` - Hex string GID of the target group
+    /// * `changes` - Map of option key → JSON value to update
+    ///
+    /// # Returns
+    /// * `Ok(())` if all options were applied successfully
+    /// * `Err(String)` if the GID was not found or an option was not recognized
+    ///
+    /// # Locking
+    /// Acquires the write lock on the target `RequestGroup`. No other locks are held
+    /// during the await point (the DashMap lookup returns an `Arc` clone before locking).
+    pub async fn update_group_options(
+        &self,
+        gid_hex: &str,
+        changes: HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<(), String> {
+        let group = self
+            .group_by_hex(gid_hex)
+            .ok_or_else(|| format!("GID {} not found", gid_hex))?;
+
+        let mut g = group.write().await;
+        for (key, value) in changes {
+            let applied = g.update_option(&key, value).await;
+            if !applied {
+                // Option not recognized as runtime-changeable — return error
+                return Err(format!("Option '{}' cannot be changed at runtime", key));
+            }
+        }
         Ok(())
     }
 

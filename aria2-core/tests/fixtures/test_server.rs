@@ -60,13 +60,13 @@ impl TestServer {
 
     fn handle_request(request: &[u8]) -> Vec<u8> {
         let request_str = String::from_utf8_lossy(request);
-        let path = request_str
-            .lines()
-            .next()
-            .and_then(|line| line.split(' ').nth(1))
-            .unwrap_or("/");
+        let first_line = request_str.lines().next().unwrap_or("");
+        let mut parts = first_line.split(' ');
+        let method = parts.next().unwrap_or("GET");
+        let path = parts.next().unwrap_or("/");
+        let is_head = method.eq_ignore_ascii_case("HEAD");
 
-        match path {
+        let response = match path {
             "/files/small.bin" => {
                 let body = SMALL_CONTENT;
                 http_response(200, "application/octet-stream", body)
@@ -123,7 +123,20 @@ impl TestServer {
                 header.into_bytes()
             }
             _ => http_404(),
+        };
+
+        // For HEAD requests, return only the headers (up to and including the
+        // blank-line separator). The Content-Length header is preserved so the
+        // client knows the resource size, but no body bytes are sent. This
+        // prevents the server from blocking on write_all when the client
+        // (e.g. reqwest HEAD probe) closes the connection after reading headers.
+        if is_head {
+            if let Some(pos) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                return response[..pos + 4].to_vec();
+            }
         }
+
+        response
     }
 }
 

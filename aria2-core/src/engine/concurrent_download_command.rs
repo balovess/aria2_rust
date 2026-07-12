@@ -205,6 +205,11 @@ impl Command for ConcurrentDownloadCommand {
             use crate::rate_limiter::RateLimiterConfig;
             RateLimiter::new(&RateLimiterConfig::new(Some(r), None))
         });
+        // Register clone with RequestGroup for runtime rate updates
+        if let Some(ref limiter) = limiter {
+            let g = self.group.read().await;
+            g.set_rate_limiter(limiter.clone()).await;
+        }
 
         Self::download_concurrent_to_disk(
             &self.client,

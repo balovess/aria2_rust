@@ -1,6 +1,12 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use aria2_core::request::request_group::DownloadOptions;
+use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::server::{AuthConfig, ServerConfig};
+use tokio::sync::RwLock;
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {
     JsonRpcRequest {
@@ -267,4 +273,130 @@ async fn test_force_pause_all_empty_tasks() {
 
     let result: String = serde_json::from_value(force_pause_all_resp.result.unwrap()).unwrap();
     assert_eq!(result, "OK");
+}
+
+// =========================================================================
+// changeOption Runtime-Changeable Propagation Tests
+// =========================================================================
+
+/// Register a group in a fresh `RequestGroupMan` and return the hex GID
+/// plus the shared manager. The group is registered directly (not via
+/// `aria2.addUri`) so no download engine / command channel is required.
+async fn setup_group_man_with_group() -> (Arc<RwLock<RequestGroupMan>>, String) {
+    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let gid = {
+        let guard = man.read().await;
+        guard
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("add_group should succeed")
+    };
+    (man, gid.to_hex_string())
+}
+
+#[tokio::test]
+async fn test_change_option_propagates_to_running_group() {
+    let (man, gid_hex) = setup_group_man_with_group().await;
+    let engine = RpcEngine::new().with_group_man(man.clone());
+
+    // changeOption with a runtime-changeable key should succeed and propagate
+    // to the running RequestGroup.
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid_hex.clone(), {"max-download-limit": 102400}]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success(), "changeOption should succeed");
+
+    // getOption should return the new value from task_opts.
+    let get_req =
+        JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid_hex.clone()])).with_id(2);
+    let get_resp = engine.handle_request(&get_req).await;
+    assert!(get_resp.is_success());
+    let opts: HashMap<String, serde_json::Value> =
+        serde_json::from_value(get_resp.result.unwrap()).unwrap();
+    assert_eq!(
+        opts.get("max-download-limit").and_then(|v| v.as_u64()),
+        Some(102400),
+        "getOption should reflect the new max-download-limit"
+    );
+
+    // The running RequestGroup should also have the updated option, proving
+    // that update_group_options propagated the change to the live download.
+    let gid = aria2_core::request::request_group::GroupId::from_hex_string(&gid_hex)
+        .expect("GID hex should parse");
+    let group = man
+        .read()
+        .await
+        .group_by_id(gid)
+        .expect("group should still exist");
+    let g = group.read().await;
+    assert_eq!(
+        g.options().max_download_limit,
+        Some(102400),
+        "running group should have the propagated max-download-limit"
+    );
+}
+
+#[tokio::test]
+async fn test_change_option_rejects_startup_only_with_group_man() {
+    let (man, gid_hex) = setup_group_man_with_group().await;
+    let engine = RpcEngine::new().with_group_man(man);
+
+    // `dir` is a known option (in VALID_OPTION_KEYS) but startup-only, so
+    // changeOption must reject it with InvalidParams even when a running
+    // group exists.
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid_hex, {"dir": "/tmp/downloads"}]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(
+        resp.is_error(),
+        "changeOption with a startup-only key should fail"
+    );
+    assert_eq!(
+        resp.error.unwrap().code,
+        -32602,
+        "error code should be InvalidParams (-32602)"
+    );
+}
+
+#[tokio::test]
+async fn test_change_option_unknown_gid_stores_in_task_opts() {
+    // When group_man is set but the GID is not registered (task not started
+    // yet), changeOption should still succeed and store in task_opts so the
+    // change applies when the task starts later.
+    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let engine = RpcEngine::new().with_group_man(man);
+
+    let unknown_gid = "0000000000000001".to_string();
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([unknown_gid.clone(), {"max-retries": 7}]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(
+        resp.is_success(),
+        "changeOption for unregistered GID should still succeed (stored in task_opts)"
+    );
+
+    // getOption should return the stored value.
+    let get_req =
+        JsonRpcRequest::new("aria2.getOption", serde_json::json!([unknown_gid])).with_id(2);
+    let get_resp = engine.handle_request(&get_req).await;
+    assert!(get_resp.is_success());
+    let opts: HashMap<String, serde_json::Value> =
+        serde_json::from_value(get_resp.result.unwrap()).unwrap();
+    assert_eq!(
+        opts.get("max-retries").and_then(|v| v.as_u64()),
+        Some(7),
+        "getOption should return the stored max-retries"
+    );
 }

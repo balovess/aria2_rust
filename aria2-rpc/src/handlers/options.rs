@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use aria2_core::RUNTIME_CHANGEABLE_OPTIONS;
+
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
@@ -58,26 +60,65 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.getOption` - Get per-task options.
+    ///
+    /// Resolution order:
+    /// 1. Per-task options stored via `aria2.changeOption` (returned as-is).
+    /// 2. If no per-task overrides exist but the task is registered in the
+    ///    shared `RequestGroupMan`, fall back to the current global options.
+    /// 3. Otherwise return `MethodNotFound`.
     pub async fn handle_get_option(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
+
+        // Step 1: per-task overrides.
         let task_opts = self.task_opts.read().await;
-        match task_opts.get(&gid) {
-            Some(opts) => Ok(JsonRpcResponse::success(
+        if let Some(opts) = task_opts.get(&gid) {
+            return Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
-                serde_json::to_value(opts)
-                    .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
-            )),
-            None => Err(JsonRpcError::MethodNotFound(format!(
-                "GID {} not found",
-                gid
-            ))),
+                serde_json::to_value(opts).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                })?,
+            ));
         }
+        // Release the task_opts read lock before awaiting on group_man to
+        // avoid holding it across an await point and keep lock hold times short.
+        drop(task_opts);
+
+        // Step 2: fall back to global options if the task is known to the
+        // shared RequestGroupMan.
+        if let Some(group_man) = self.group_man.as_ref() {
+            let task_exists = group_man.read().await.group_by_hex(&gid).is_some();
+            if task_exists {
+                let global_opts = self.global_opts.read().await;
+                return Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::to_value(&*global_opts).map_err(|e| {
+                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                    })?,
+                ));
+            }
+        }
+
+        // Step 3: task does not exist anywhere.
+        Err(JsonRpcError::MethodNotFound(format!(
+            "GID {} not found",
+            gid
+        )))
     }
 
     /// Handle `aria2.changeOption` - Modify per-task options.
+    ///
+    /// Only runtime-changeable options (see [`RUNTIME_CHANGEABLE_OPTIONS`])
+    /// may be modified via this method; startup-only options are rejected
+    /// with `InvalidParams`. Accepted changes are:
+    ///
+    /// 1. Propagated to the running `RequestGroup` via `RequestGroupMan`
+    ///    (when the engine is wired to a live download engine), so they take
+    ///    effect immediately on the in-flight download.
+    /// 2. Stored in `task_opts` so `aria2.getOption` returns the current
+    ///    values and so they persist across session reloads.
     pub async fn handle_change_option(
         &self,
         req: &JsonRpcRequest,
@@ -85,33 +126,54 @@ impl RpcEngine {
         let gid: String = req.get_param(0)?;
         let changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
 
+        // Step 1: reject unknown option keys entirely.
         for key in changes.keys() {
             if !VALID_OPTION_KEYS.contains(&key.as_str()) {
                 return Err(JsonRpcError::InvalidParams(format!("Unknown option: {}", key)));
             }
         }
 
-        // Clone the GID before moving it into `entry(gid)` so it remains
-        // available for the running-task check below.
-        let gid_for_check = gid.clone();
+        // Step 2: reject startup-only options. Per spec, only runtime-changeable
+        // options may be modified via aria2.changeOption on a live task.
+        for key in changes.keys() {
+            if !RUNTIME_CHANGEABLE_OPTIONS.contains(&key.as_str()) {
+                return Err(JsonRpcError::InvalidParams(format!(
+                    "Option '{}' cannot be changed at runtime",
+                    key
+                )));
+            }
+        }
+
+        // Step 3: propagate to the running RequestGroup (if any). The GID may
+        // not be known to RequestGroupMan yet (e.g., the task was added via
+        // RPC but the download has not started); in that case we still store
+        // the change in task_opts so it applies when the task starts.
+        // `changes` is cloned because we also consume it for task_opts below.
+        if let Some(ref group_man) = self.group_man {
+            let gm = group_man.read().await;
+            if let Err(e) = gm.update_group_options(&gid, changes.clone()).await {
+                // "not found" means the task isn't registered in group_man yet
+                // — that's acceptable, the change will apply from task_opts on
+                // start. Any other error is propagated as InvalidParams.
+                if !e.contains("not found") {
+                    return Err(JsonRpcError::InvalidParams(e));
+                }
+                tracing::debug!(
+                    "changeOption for GID {} not applied to a running group (not registered yet); storing in task_opts only",
+                    gid
+                );
+            }
+        }
+
+        // Step 4: persist in task_opts for getOption retrieval and session
+        // reload. This runs after propagation so a failed propagate (non-
+        // not-found error) returns early without mutating task_opts.
         let mut task_opts = self.task_opts.write().await;
         let entry = task_opts.entry(gid).or_insert_with(HashMap::new);
         for (k, v) in changes {
             entry.insert(k, v);
         }
-        // Release the task_opts write lock before acquiring the tasks read
-        // lock to keep lock hold times short and avoid any lock-ordering risk.
         drop(task_opts);
-
-        // Warn if the option change targets a currently running task: the
-        // update is persisted to task_opts but will only take effect on the
-        // next session load, not on the in-flight download.
-        if self.tasks.read().await.contains_key(&gid_for_check) {
-            tracing::warn!(
-                "Option change for running task {} will take effect on next session load, not on the current download",
-                gid_for_check
-            );
-        }
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),

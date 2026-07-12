@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::error::Result;
+use crate::rate_limiter::RateLimiter;
 use crate::segment::Segment;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -312,6 +313,19 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
 
+/// Options that can be changed at runtime via `aria2.changeOption`.
+/// All other options are startup-only and cannot be modified after the
+/// download begins. Keep in sync with [`RequestGroup::update_option`].
+pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
+    "max-download-limit",
+    "max-upload-limit",
+    "max-retries",
+    "retry-wait",
+    "header",
+    "user-agent",
+    "referer",
+];
+
 pub struct RequestGroup {
     gid: GroupId,
     uris: Vec<String>,
@@ -339,6 +353,13 @@ pub struct RequestGroup {
     /// Info hash hex string for torrent identification (None for non-BT downloads)
     /// Uses std::sync::RwLock instead of tokio::sync::RwLock for non-async access
     pub bt_info_hash_hex: std::sync::RwLock<Option<String>>,
+
+    /// Handle to the download's `RateLimiter` so that runtime option updates
+    /// (e.g. via `aria2.changeOption`) can dynamically adjust the rate.
+    /// `None` until the download engine wires up a `ThrottledWriter`.
+    /// Uses its own `RwLock` (independent of the `RequestGroupMan` write lock)
+    /// so that `set_rate_limiter` can take `&self`.
+    pub rate_limiter: RwLock<Option<RateLimiter>>,
 }
 
 impl RequestGroup {
@@ -368,6 +389,10 @@ impl RequestGroup {
             bt_num_pieces: AtomicU32::new(0),
             bt_piece_length: AtomicU32::new(0),
             bt_info_hash_hex: std::sync::RwLock::new(None),
+
+            // Rate limiter is wired up later by the download engine via
+            // `set_rate_limiter` once a `ThrottledWriter` is constructed.
+            rate_limiter: RwLock::new(None),
         }
     }
 
@@ -442,6 +467,91 @@ impl RequestGroup {
 
     pub fn options(&self) -> &DownloadOptions {
         &self.options
+    }
+
+    /// Store a handle to the download's `RateLimiter` so that runtime option
+    /// updates (e.g. via `aria2.changeOption`) can dynamically adjust the rate.
+    /// The `RateLimiter` is `Clone` and shares `Arc<RateLimiterInner>`, so both
+    /// the `ThrottledWriter` and `RequestGroup` see the same token buckets.
+    ///
+    /// Takes `&self` because `rate_limiter` has its own `RwLock`, independent
+    /// of the `RequestGroupMan` outer write lock.
+    pub async fn set_rate_limiter(&self, limiter: RateLimiter) {
+        *self.rate_limiter.write().await = Some(limiter);
+    }
+
+    /// Update a single runtime-changeable option by key (using aria2's
+    /// kebab-case option names, e.g. `"max-download-limit"`).
+    ///
+    /// Returns `true` if the option was recognized and updated, `false` if the
+    /// key is not a runtime-changeable option (see [`RUNTIME_CHANGEABLE_OPTIONS`]).
+    ///
+    /// Takes `&mut self` because `options` is a plain field — the caller
+    /// (`RequestGroupMan`) holds the outer `Arc<RwLock<RequestGroup>>` write
+    /// lock. For `max-download-limit` / `max-upload-limit`, the stored
+    /// `RateLimiter` (if any) is also updated so the change takes effect
+    /// immediately on the live download.
+    pub async fn update_option(&mut self, key: &str, value: serde_json::Value) -> bool {
+        match key {
+            "max-download-limit" => {
+                let rate = value.as_u64();
+                self.options.max_download_limit = rate;
+                if let Some(ref limiter) = *self.rate_limiter.read().await {
+                    limiter.set_download_rate(rate);
+                }
+                true
+            }
+            "max-upload-limit" => {
+                let rate = value.as_u64();
+                self.options.max_upload_limit = rate;
+                if let Some(ref limiter) = *self.rate_limiter.read().await {
+                    limiter.set_upload_rate(rate);
+                }
+                true
+            }
+            "max-retries" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.max_retries = v as u32;
+                }
+                true
+            }
+            "retry-wait" => {
+                if let Some(v) = value.as_u64() {
+                    self.options.retry_wait = v;
+                }
+                true
+            }
+            "header" => {
+                // Accept both a JSON array of strings and a newline-separated
+                // string (matching aria2's wire format).
+                match &value {
+                    serde_json::Value::Array(arr) => {
+                        self.options.header = arr
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                    }
+                    serde_json::Value::String(s) => {
+                        self.options.header = s
+                            .split('\n')
+                            .map(|l| l.trim().to_string())
+                            .filter(|l| !l.is_empty())
+                            .collect();
+                    }
+                    _ => {}
+                }
+                true
+            }
+            "user-agent" => {
+                self.options.user_agent = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "referer" => {
+                self.options.referer = value.as_str().map(|s| s.to_string());
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn total_length(&self) -> u64 {

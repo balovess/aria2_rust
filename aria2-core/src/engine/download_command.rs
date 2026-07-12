@@ -693,6 +693,11 @@ impl DownloadCommand {
                 let cfg = RateLimiterConfig::new(Some(rate), None);
                 let limiter = RateLimiter::new(&cfg);
                 debug!("Download speed limit enabled: {} bytes/s", rate);
+                // Register clone with RequestGroup for runtime rate updates
+                {
+                    let g = self.group.read().await;
+                    g.set_rate_limiter(limiter.clone()).await;
+                }
                 Box::new(ThrottledWriter::new(raw_writer, limiter))
             }
             _ => Box::new(raw_writer),
@@ -703,65 +708,84 @@ impl DownloadCommand {
         let mut last_completed = 0u64;
         let mut last_progress_update = 0u64; // Track last progress update for batch updates
 
+        // Size of each write piece. reqwest's `bytes_stream()` yields chunks
+        // whose sizes grow adaptively (8K → 16K → 32K → … → 256K+) on fast
+        // links. If we passed the entire chunk to `writer.write()` in one go,
+        // `completed_bytes` would only advance after the full chunk is
+        // throttled and written — at 80 KB/s a 417 KB chunk takes 5.2 s,
+        // during which no progress update is sent and the download appears
+        // stalled. By splitting into small pieces here, `completed_bytes`
+        // advances after each piece, and progress updates fire every 256 KB
+        // as intended. The `ThrottledWriter` still handles per-piece token
+        // acquisition, so rate limiting remains accurate.
+        let write_piece = constants::RATE_LIMITER_CHUNK_SIZE;
+
         while let Some(chunk) = stream.next().await {
             let data: bytes::Bytes = chunk.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                     message: e.to_string(),
                 })
             })?;
-            writer.write(&data).await?;
-            self.completed_bytes += data.len() as u64;
 
-            // Batch progress updates to reduce lock contention
-            // Only update progress every PROGRESS_UPDATE_BYTES (256KB)
-            if self.completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
-                // Compute speed sample lock-free (refreshed every HTTP_SPEED_UPDATE_INTERVAL_MS).
-                // `speed` is 0 when not enough time has elapsed since the last sample; in that
-                // case neither the channel nor the fallback path should touch the speed fields.
-                let elapsed = last_speed_update.elapsed();
-                let speed = if elapsed.as_millis() >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128 {
-                    let delta = self.completed_bytes - last_completed;
-                    let s = (delta as f64 / elapsed.as_secs_f64()) as u64;
-                    last_speed_update = Instant::now();
-                    last_completed = self.completed_bytes;
-                    s
-                } else {
-                    0
-                };
+            let mut offset = 0usize;
+            while offset < data.len() {
+                let end = (offset + write_piece).min(data.len());
+                let piece = &data[offset..end];
+                writer.write(piece).await?;
+                self.completed_bytes += piece.len() as u64;
+                offset = end;
 
-                if let Some(ref sender) = self.progress_sender {
-                    // Lock-free: send via channel, engine aggregator applies to RequestGroup.
-                    // A failed send (receiver dropped) is silently ignored; the final
-                    // completion path still writes progress directly.
-                    let _ = sender.send(ProgressUpdate {
-                        completed_bytes: self.completed_bytes,
-                        download_speed: speed,
-                        upload_speed: 0,
-                    });
-                } else {
-                    // Fallback: direct write (backward compatible when no channel is set)
-                    let g = self.group.write().await;
-                    g.update_progress(self.completed_bytes).await;
-                    // Export to atomic fields for session persistence
-                    g.set_completed_length(self.completed_bytes);
+                // Batch progress updates to reduce lock contention
+                // Only update progress every PROGRESS_UPDATE_BYTES (256KB)
+                if self.completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
+                    // Compute speed sample lock-free (refreshed every HTTP_SPEED_UPDATE_INTERVAL_MS).
+                    // `speed` is 0 when not enough time has elapsed since the last sample; in that
+                    // case neither the channel nor the fallback path should touch the speed fields.
+                    let elapsed = last_speed_update.elapsed();
+                    let speed = if elapsed.as_millis() >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128 {
+                        let delta = self.completed_bytes - last_completed;
+                        let s = (delta as f64 / elapsed.as_secs_f64()) as u64;
+                        last_speed_update = Instant::now();
+                        last_completed = self.completed_bytes;
+                        s
+                    } else {
+                        0
+                    };
+
+                    if let Some(ref sender) = self.progress_sender {
+                        // Lock-free: send via channel, engine aggregator applies to RequestGroup.
+                        // A failed send (receiver dropped) is silently ignored; the final
+                        // completion path still writes progress directly.
+                        let _ = sender.send(ProgressUpdate {
+                            completed_bytes: self.completed_bytes,
+                            download_speed: speed,
+                            upload_speed: 0,
+                        });
+                    } else {
+                        // Fallback: direct write (backward compatible when no channel is set)
+                        let g = self.group.write().await;
+                        g.update_progress(self.completed_bytes).await;
+                        // Export to atomic fields for session persistence
+                        g.set_completed_length(self.completed_bytes);
+                        if speed > 0 {
+                            g.update_speed(speed, 0).await;
+                            // Update cached download speed for session persistence
+                            g.set_download_speed_cached(speed);
+                        }
+                    }
+
+                    // Record performance metrics (minimal overhead, lock-free).
+                    // Only recorded when a fresh speed sample was taken this tick.
                     if speed > 0 {
-                        g.update_speed(speed, 0).await;
-                        // Update cached download speed for session persistence
-                        g.set_download_speed_cached(speed);
+                        self.atomic_metrics.record_throughput(speed);
+                        if let Some(ref monitor) = self.perf_monitor {
+                            let metrics = Metrics::new(speed, elapsed.as_millis() as u64, 0, 0)
+                                .with_label("download_speed");
+                            monitor.record_metric("download_speed", metrics);
+                        }
                     }
+                    last_progress_update = self.completed_bytes;
                 }
-
-                // Record performance metrics (minimal overhead, lock-free).
-                // Only recorded when a fresh speed sample was taken this tick.
-                if speed > 0 {
-                    self.atomic_metrics.record_throughput(speed);
-                    if let Some(ref monitor) = self.perf_monitor {
-                        let metrics = Metrics::new(speed, elapsed.as_millis() as u64, 0, 0)
-                            .with_label("download_speed");
-                        monitor.record_metric("download_speed", metrics);
-                    }
-                }
-                last_progress_update = self.completed_bytes;
             }
         }
 
@@ -892,6 +916,11 @@ impl DownloadCommand {
             .max_download_limit
             .filter(|&r| r > 0)
             .map(|r| RateLimiter::new(&RateLimiterConfig::new(Some(r), None)));
+        // Register clone with RequestGroup for runtime rate updates
+        if let Some(ref limiter) = limiter {
+            let g = self.group.read().await;
+            g.set_rate_limiter(limiter.clone()).await;
+        }
 
         // FuturesUnordered drives all in-flight segment fetches concurrently.
         // Wakeup is driven by FuturesUnordered::next() — no polling delay

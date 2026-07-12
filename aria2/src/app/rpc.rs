@@ -7,12 +7,14 @@
 //! - Shared engine state (RequestGroupMan + command channel)
 
 use super::App;
+use aria2_core::config::OptionValue;
 use aria2_core::engine::command::Command;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::server::{
     AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info};
@@ -77,10 +79,27 @@ impl App {
         // aria2.addUri starts real downloads and tellStatus/getGlobalStat
         // read live progress.
         let secret = self.get_opt_str("rpc-secret").await.unwrap_or_default();
+
+        // Collect user-set global options from ConfigManager and merge them
+        // over the OptionRegistry defaults inside the RPC engine. User values
+        // take precedence; null values fall back to defaults.
+        let config_snapshot = self.config.read().await;
+        let user_opts = config_snapshot.get_all_global_options().await;
+        drop(config_snapshot);
+
+        // Convert HashMap<String, OptionValue> to HashMap<String, serde_json::Value>.
+        // Only `From<&OptionValue>` is implemented, so borrow each value during
+        // conversion instead of consuming it.
+        let user_opts_json: HashMap<String, serde_json::Value> = user_opts
+            .into_iter()
+            .map(|(k, v)| (k, <&OptionValue as Into<serde_json::Value>>::into(&v)))
+            .collect();
+
         let rpc_engine = RpcEngine::new()
             .with_auth_middleware(RpcAuthMiddleware::new(&secret))
             .with_group_man(group_man)
-            .with_cmd_tx(cmd_tx);
+            .with_cmd_tx(cmd_tx)
+            .with_global_opts(user_opts_json);
 
         // Build server config
         let mut config = ServerConfig::default()

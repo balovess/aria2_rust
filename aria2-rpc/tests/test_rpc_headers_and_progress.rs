@@ -316,3 +316,82 @@ async fn test_progress_changes_reflected_in_tell_status() {
     assert_eq!(s2["completed_length"], 500_000, "progress should update");
     assert_eq!(s2["download_speed"], 120_000, "speed should update");
 }
+
+// =========================================================================
+// Test 7: aria2.getOption falls back to global options for tasks that exist
+// in RequestGroupMan but have no per-task overrides stored via changeOption.
+// =========================================================================
+
+#[tokio::test]
+async fn test_get_option_falls_back_to_global_for_group_man_task() {
+    let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
+
+    // Add a download — this registers the GID in RequestGroupMan but does
+    // NOT create a task_opts entry (changeOption is never called).
+    let add_req =
+        JsonRpcRequest::new("aria2.addUri", json!(["http://example.com/fallback.bin"])).with_id(1);
+    let resp = engine.handle_request(&add_req).await;
+    assert!(resp.is_success());
+    let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+
+    // Sanity check: the task really is in RequestGroupMan.
+    assert!(
+        group_man.read().await.group_by_hex(&gid).is_some(),
+        "task should be registered in RequestGroupMan"
+    );
+
+    // Set a known global option value so we can verify the fallback returns
+    // the live global options (not a stale snapshot or an error).
+    let change_global = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        json!([{"dir": "/tmp/fallback-test"}]),
+    )
+    .with_id(2);
+    let cg_resp = engine.handle_request(&change_global).await;
+    assert!(cg_resp.is_success(), "changeGlobalOption should succeed");
+
+    // getOption on the task (no per-task overrides) should succeed and
+    // return the global options, including the value we just set.
+    let get_req = JsonRpcRequest::new("aria2.getOption", json!([gid.clone()])).with_id(3);
+    let get_resp = engine.handle_request(&get_req).await;
+    assert!(
+        get_resp.is_success(),
+        "getOption should fall back to global options, not error"
+    );
+
+    let opts = get_resp.result.unwrap();
+    let opts_map = opts
+        .as_object()
+        .expect("getOption result should be a JSON object");
+    assert!(
+        opts_map.contains_key("dir"),
+        "fallback result should contain global 'dir' option"
+    );
+    assert_eq!(
+        opts_map["dir"], "/tmp/fallback-test",
+        "fallback should reflect the current global option value"
+    );
+}
+
+// =========================================================================
+// Test 8: aria2.getOption returns MethodNotFound for a GID that exists
+// neither in task_opts nor in RequestGroupMan.
+// =========================================================================
+
+#[tokio::test]
+async fn test_get_option_errors_for_unknown_gid() {
+    let (engine, _group_man, _cmd_rx) = create_engine_with_shared_state();
+
+    let get_req =
+        JsonRpcRequest::new("aria2.getOption", json!(["00000000000000ff"])).with_id(1);
+    let resp = engine.handle_request(&get_req).await;
+    assert!(
+        resp.is_error(),
+        "getOption for an unknown GID should return an error"
+    );
+    assert_eq!(
+        resp.error.unwrap().code,
+        -32601,
+        "unknown GID should yield MethodNotFound (-32601)"
+    );
+}

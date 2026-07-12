@@ -312,24 +312,54 @@ async fn test_change_option_accepts_valid_keys() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
+    // Only runtime-changeable options are accepted by changeOption; startup-
+    // only options like `split` and `dir` are rejected with InvalidParams.
     let valid_changes = serde_json::json!({
         "max-download-limit": 1048576,
-        "split": 5,
-        "dir": "/tmp/downloads"
+        "max-upload-limit": 512000,
+        "max-retries": 5
     });
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
         serde_json::json!([gid, valid_changes]),
     ).with_id(2);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success(), "changeOption with valid keys should succeed");
+    assert!(resp.is_success(), "changeOption with runtime-changeable keys should succeed");
 
     let get_req = JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid])).with_id(3);
     let get_resp = engine.handle_request(&get_req).await;
     assert!(get_resp.is_success());
     let opts: HashMap<String, serde_json::Value> = serde_json::from_value(get_resp.result.unwrap()).unwrap();
     assert!(opts.contains_key("max-download-limit"), "max-download-limit should be stored");
-    assert!(opts.contains_key("split"), "split should be stored");
+    assert!(opts.contains_key("max-upload-limit"), "max-upload-limit should be stored");
+    assert!(opts.contains_key("max-retries"), "max-retries should be stored");
+}
+
+#[tokio::test]
+async fn test_change_option_rejects_startup_only_key() {
+    let engine = RpcEngine::new();
+    let add_req =
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+    let add_resp = engine.handle_request(&add_req).await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    // `dir` is a known option (in VALID_OPTION_KEYS) but startup-only, so
+    // changeOption must reject it with InvalidParams.
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid, {"dir": "/tmp/downloads"}]),
+    )
+    .with_id(2);
+    let resp = engine.handle_request(&req).await;
+    assert!(
+        resp.is_error(),
+        "changeOption with a startup-only key should fail"
+    );
+    assert_eq!(
+        resp.error.unwrap().code,
+        -32602,
+        "error code should be InvalidParams (-32602)"
+    );
 }
 
 #[tokio::test]

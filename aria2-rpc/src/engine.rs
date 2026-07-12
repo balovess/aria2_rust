@@ -148,6 +148,11 @@ impl RpcEngine {
         let registry = OptionRegistry::new();
         let mut defaults = HashMap::new();
         for (name, def) in registry.all() {
+            // Skip deprecated and hidden options so RPC clients don't see
+            // internal/legacy options via aria2.getGlobalOption.
+            if def.deprecated || def.hidden {
+                continue;
+            }
             let json_val: serde_json::Value = serde_json::Value::from(def.default_value());
             // Skip None/Null defaults to keep the map compact
             if !json_val.is_null() {
@@ -199,6 +204,31 @@ impl RpcEngine {
     /// When set, `aria2.addUri` sends real `DownloadCommand`s to the engine.
     pub fn with_cmd_tx(mut self, tx: mpsc::UnboundedSender<Box<dyn Command>>) -> Self {
         self.cmd_tx = Some(tx);
+        self
+    }
+
+    /// Chainable builder method to merge user-specified global options
+    /// over the OptionRegistry defaults. User values take precedence.
+    ///
+    /// Null values in `user_opts` are skipped so that the corresponding
+    /// default (if any) is preserved.
+    ///
+    /// Uses `try_write()` because the engine is freshly constructed and
+    /// not yet shared across tasks, so lock contention is impossible.
+    pub fn with_global_opts(self, user_opts: HashMap<String, serde_json::Value>) -> Self {
+        // Scope the write guard so it is dropped before `self` is returned.
+        {
+            let mut defaults = self
+                .global_opts
+                .try_write()
+                .expect("no contention on fresh engine");
+            for (k, v) in user_opts {
+                // Only insert non-null values; null means "use default"
+                if !v.is_null() {
+                    defaults.insert(k, v);
+                }
+            }
+        }
         self
     }
 
