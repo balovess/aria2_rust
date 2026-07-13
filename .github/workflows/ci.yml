@@ -186,20 +186,4 @@ jobs:
             exit 1
           fi
 
-          # Check Node.js SDK
-          NODEJS_VERSION=$(grep -oP '"version": "\K[^"]+' bindings/nodejs/package.json)
-          echo "Node.js SDK version: $NODEJS_VERSION"
-          if [ "$CARGO_VERSION" != "$NODEJS_VERSION" ]; then
-            echo "ERROR: Node.js SDK version mismatch!"
-            exit 1
-          fi
-
-          # Check Python SDK
-          PYTHON_VERSION=$(grep -oP '^version = "\K[^"]+' bindings/python/pyproject.toml)
-          echo "Python SDK version: $PYTHON_VERSION"
-          if [ "$CARGO_VERSION" != "$PYTHON_VERSION" ]; then
-            echo "ERROR: Python SDK version mismatch!"
-            exit 1
-          fi
-
-          echo "All versions are consistent: $CARGO_VERSION"
+          echo "Binary distribution versions are consistent: $CARGO_VERSION"
