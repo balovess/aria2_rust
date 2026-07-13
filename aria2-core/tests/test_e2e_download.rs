@@ -26,20 +26,20 @@ async fn test_e2e_http_download_small_file() {
         dir.path().to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
     let result = cmd.execute().await;
-    assert!(result.is_ok(), "下载失败: {:?}", result.err());
+    assert!(result.is_ok(), "Download failed: {:?}", result.err());
 
     let output_path = Path::new(dir.path()).join("small.bin");
     assert!(
         output_path.exists(),
-        "输出文件不存在: {}",
+        "Output file does not exist: {}",
         output_path.display()
     );
 
-    let data = std::fs::read(&output_path).expect("读取下载文件失败");
-    assert_eq!(data, small_content(), "内容不匹配");
+    let data = std::fs::read(&output_path).expect("Failed to read downloaded file");
+    assert_eq!(data, small_content(), "Content mismatch");
 }
 
 #[tokio::test]
@@ -55,9 +55,9 @@ async fn test_e2e_http_download_medium_file() {
         dir.path().to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
-    cmd.execute().await.expect("下载失败");
+    cmd.execute().await.expect("Download failed");
 
     let output_path = Path::new(dir.path()).join("medium.bin");
     assert!(output_path.exists());
@@ -79,9 +79,9 @@ async fn test_e2e_http_download_large_file() {
         dir.path().to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
-    cmd.execute().await.expect("大文件下载失败");
+    cmd.execute().await.expect("Large file download failed");
 
     let output_path = Path::new(dir.path()).join("large.bin");
     assert!(output_path.exists());
@@ -102,10 +102,10 @@ async fn test_e2e_http_404_handling() {
         dir.path().to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
     let result = cmd.execute().await;
-    assert!(result.is_err(), "404应该返回错误");
+    assert!(result.is_err(), "404 should return error");
 }
 
 #[tokio::test]
@@ -121,10 +121,10 @@ async fn test_e2e_http_500_error() {
         dir.path().to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
     let result = cmd.execute().await;
-    assert!(result.is_err(), "500应该返回错误");
+    assert!(result.is_err(), "500 should return error");
 }
 
 #[tokio::test]
@@ -141,14 +141,14 @@ async fn test_e2e_custom_output_dir() {
         subdir.to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
-    cmd.execute().await.expect("自定义目录下载失败");
+    cmd.execute().await.expect("Custom directory download failed");
 
     let output_path = subdir.join("small.bin");
     assert!(
         output_path.exists(),
-        "文件应在子目录中: {}",
+        "File should be in subdirectory: {}",
         output_path.display()
     );
 }
@@ -166,14 +166,14 @@ async fn test_e2e_custom_output_filename() {
         dir.path().to_str(),
         Some("custom_name.dat"),
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
-    cmd.execute().await.expect("自定义文件名下载失败");
+    cmd.execute().await.expect("Custom filename download failed");
 
     let output_path = Path::new(dir.path()).join("custom_name.dat");
     assert!(
         output_path.exists(),
-        "自定义名称文件不存在: {}",
+        "Custom name file does not exist: {}",
         output_path.display()
     );
 }
@@ -191,20 +191,20 @@ async fn test_e2e_request_group_progress_tracking() {
         dir.path().to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
     let progress_before = cmd.group().await.progress().await;
     assert!(
         (progress_before - 0.0).abs() < f64::EPSILON,
-        "下载前进度应为0"
+        "Progress should be 0 before download"
     );
 
-    cmd.execute().await.expect("下载失败");
+    cmd.execute().await.expect("Download failed");
 
     let progress_after = cmd.group().await.progress().await;
     assert!(
         (progress_after - 100.0).abs() < 1.0,
-        "下载后进度应接近100%, got: {}",
+        "Progress should be near 100% after download, got: {}",
         progress_after
     );
 
@@ -225,12 +225,12 @@ async fn test_e2e_download_speed_reported() {
         dir.path().to_str(),
         None,
     )
-    .expect("创建DownloadCommand失败");
+    .expect("Failed to create DownloadCommand");
 
-    cmd.execute().await.expect("下载失败");
+    cmd.execute().await.expect("Download failed");
 
     let speed = cmd.group().await.download_speed().await;
-    assert!(speed > 0, "下载速度应大于0, got: {}", speed);
+    assert!(speed > 0, "Download speed should be > 0, got: {}", speed);
 }
 
 #[tokio::test]
@@ -258,7 +258,7 @@ async fn test_e2e_concurrent_downloads() -> Result<(), Box<dyn std::error::Error
     }
 
     for h in handles {
-        h.await.expect("任务panic")?;
+        h.await.expect("Task panicked")?;
     }
     Ok(())
 }

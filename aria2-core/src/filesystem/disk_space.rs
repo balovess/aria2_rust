@@ -453,7 +453,22 @@ pub fn has_enough_space(path: &Path, required: u64) -> bool {
 pub fn check_with_margin(path: &Path, required: u64, margin_mb: Option<u64>) -> Result<()> {
     let margin = margin_mb.unwrap_or(DEFAULT_MARGIN_MB) * 1024 * 1024;
     let total_needed = required.saturating_add(margin);
-    let avail = available_space(path)?;
+    // If available space cannot be queried (e.g. statvfs fails with ENOENT on
+    // some CI tempdir paths), skip the check instead of failing the operation.
+    // This mirrors the graceful degradation already performed in
+    // `check_disk_space` and `check_disk_space_typed`.
+    let avail = match available_space(path) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                required = total_needed,
+                "available_space failed, skipping disk space check: {}",
+                err
+            );
+            return Ok(());
+        }
+    };
     if avail < total_needed {
         Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted))
     } else {

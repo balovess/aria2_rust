@@ -1672,6 +1672,13 @@ impl Command for DownloadCommand {
 
         if download_result.is_ok() {
             self.completed = true;
+            // Re-sync final progress after aggregator drain.
+            // Stale updates queued before the final completion may have
+            // overwritten the completed_length; re-apply the correct value.
+            let g = self.group.write().await;
+            let total = g.total_length();
+            g.update_progress(total).await;
+            g.set_completed_length(total);
         }
         release_path(&self.output_path);
         download_result

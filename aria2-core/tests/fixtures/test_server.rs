@@ -17,7 +17,7 @@ impl TestServer {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
             .await
-            .expect("绑定测试服务器端口失败");
+            .expect("Failed to bind test server port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 

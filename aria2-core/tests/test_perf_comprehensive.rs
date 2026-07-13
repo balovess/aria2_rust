@@ -1711,8 +1711,8 @@ mod stability_tests {
         let result = measure_repeated("stability_test", &config, || {
             // Use a more complex operation that takes longer to execute
             // This reduces the relative impact of measurement noise
-            let mut v = Vec::with_capacity(50000);
-            for i in 0..50000 {
+            let mut v = Vec::with_capacity(500000);
+            for i in 0..500000 {
                 v.push((i * 7) % 1000);
             }
             // Do some actual computation
