@@ -5,12 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-performance download engine core library with multi-protocol support (HTTP/HTTPS, FTP/SFTP, BitTorrent, Metalink)"
+description = "High-performance download engine core: multi-protocol segmented downloads, rate limiting, config management, session persistence, and BitTorrent seeding"
 documentation = "https://docs.rs/aria2-core"
-homepage = "https://github.com/balovess/aria2-rust"
+homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
-keywords = ["download", "http", "ftp", "bittorrent", "aria2"]
-categories = ["network-programming", "web-programming"]
+keywords = ["download", "http", "ftp", "bittorrent", "aria2", "concurrent-download", "rate-limiting", "segmented-download", "resume"]
+categories = ["network-programming", "web-programming::http-client"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [features]

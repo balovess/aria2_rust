@@ -12,10 +12,10 @@ version = "0.2.1"
 edition = "2024"
 authors = ["aria2-rust contributors"]
 license = "GPL-2.0-or-later"
-repository = "https://github.com/aria2/aria2-rust"
+repository = "https://github.com/balovess/aria2_rust/"
 readme = "README.md"
-keywords = ["download", "bittorrent", "http", "ftp", "rpc", "aria2", "cli"]
-categories = ["command-line-utilities", "network-programming"]
+keywords = ["download", "bittorrent", "http", "ftp", "rpc", "aria2", "cli", "concurrent-download", "rate-limiting"]
+categories = ["command-line-utilities", "network-programming", "web-programming::http-client"]
 
 [workspace.dependencies]
 tokio = { version = "1.35", features = ["full"] }

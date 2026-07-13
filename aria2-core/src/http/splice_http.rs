@@ -223,8 +223,8 @@ pub async fn try_splice_download(
             splice_transfer(socket_fd, None, file_fd, Some(splice_file_offset), splice_len)
         })
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("blocking task failed: {e}")))?
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("splice failed: {e}")))?;
+        .map_err(|e| io::Error::other(format!("blocking task failed: {e}")))?
+        .map_err(|e| io::Error::other(format!("splice failed: {e}")))?;
 
         let spliced = splice_result as u64;
         if spliced < remaining {

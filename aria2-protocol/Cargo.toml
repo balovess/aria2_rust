@@ -5,12 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Protocol implementations for aria2-rust (HTTP/HTTPS, FTP/SFTP, BitTorrent, Metalink)"
+description = "Multi-protocol networking stack for aria2-rust: HTTP/HTTPS client, FTP/SFTP, full BitTorrent (DHT/PEX/MSE), and Metalink V3/V4 parser"
 documentation = "https://docs.rs/aria2-protocol"
-homepage = "https://github.com/balovess/aria2-rust"
+homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
-keywords = ["http", "ftp", "bittorrent", "metalink", "protocol"]
-categories = ["network-programming", "web-programming"]
+keywords = ["http", "ftp", "bittorrent", "metalink", "protocol", "dht", "bencode", "peer-to-peer", "torrent", "networking"]
+categories = ["network-programming", "web-programming::http-client"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [dependencies]
