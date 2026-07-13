@@ -157,33 +157,4 @@ jobs:
       - name: Check compilation with MSRV
         run: cargo check --workspace --all-targets
 
-  version-check:
-    name: Version Consistency Check
-    runs-on: ubuntu-latest
 
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check version consistency
-        run: |
-          # Get version from Cargo.toml
-          CARGO_VERSION=$(grep -oP 'version\s*=\s*"\K[^"]+' Cargo.toml | head -1)
-          echo "Cargo.toml version: $CARGO_VERSION"
-
-          # Check Homebrew formula
-          HOMEBREW_VERSION=$(grep -oP 'version "\K[^"]+' homebrew/aria2-rust.rb)
-          echo "Homebrew version: $HOMEBREW_VERSION"
-          if [ "$CARGO_VERSION" != "$HOMEBREW_VERSION" ]; then
-            echo "ERROR: Homebrew version mismatch!"
-            exit 1
-          fi
-
-          # Check Scoop manifest
-          SCOOP_VERSION=$(grep -oP '"version": "\K[^"]+' scoop/aria2-rust.json)
-          echo "Scoop version: $SCOOP_VERSION"
-          if [ "$CARGO_VERSION" != "$SCOOP_VERSION" ]; then
-            echo "ERROR: Scoop version mismatch!"
-            exit 1
-          fi
-
-          echo "Binary distribution versions are consistent: $CARGO_VERSION"

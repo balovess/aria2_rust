@@ -7,10 +7,9 @@
 # This script will:
 # 1. Run tests
 # 2. Bump version with cargo-release
-# 3. Sync versions to all files
-# 4. Update CHANGELOG
-# 5. Commit and tag
-# 6. Push to trigger GitHub Actions
+# 3. Update CHANGELOG
+# 4. Commit and tag
+# 5. Push to trigger GitHub Actions
 
 param(
     [Parameter(Mandatory=$true)]
@@ -39,20 +38,14 @@ cargo release $Level --no-confirm --execute
 Write-Host "  ✓ Version bumped"
 Write-Host ""
 
-# Step 3: Sync versions to all files
-Write-Host "Step 3: Syncing versions..."
-& "$SCRIPT_DIR/sync-version.ps1"
-Write-Host "  ✓ Versions synchronized"
-Write-Host ""
-
-# Step 4: Update CHANGELOG
-Write-Host "Step 4: Please update CHANGELOG.md with the changes for this release."
+# Step 3: Update CHANGELOG
+Write-Host "Step 3: Please update CHANGELOG.md with the changes for this release."
 Read-Host "Press Enter when done"
 Write-Host "  ✓ CHANGELOG updated"
 Write-Host ""
 
-# Step 5: Commit changes
-Write-Host "Step 5: Committing changes..."
+# Step 4: Commit changes
+Write-Host "Step 4: Committing changes..."
 $cargoContent = Get-Content "$PROJECT_ROOT/Cargo.toml" -Raw
 if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
     $Version = $matches[1]
@@ -63,8 +56,8 @@ git tag "v$Version"
 Write-Host "  ✓ Committed and tagged"
 Write-Host ""
 
-# Step 6: Push to trigger GitHub Actions
-Write-Host "Step 6: Pushing to remote..."
+# Step 5: Push to trigger GitHub Actions
+Write-Host "Step 5: Pushing to remote..."
 git push origin main
 git push origin "v$Version"
 Write-Host "  ✓ Pushed"

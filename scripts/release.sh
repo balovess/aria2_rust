@@ -7,10 +7,9 @@
 # This script will:
 # 1. Run tests
 # 2. Bump version with cargo-release
-# 3. Sync versions to all files
-# 4. Update CHANGELOG
-# 5. Commit and tag
-# 6. Push to trigger GitHub Actions
+# 3. Update CHANGELOG
+# 4. Commit and tag
+# 5. Push to trigger GitHub Actions
 
 set -e
 
@@ -41,21 +40,15 @@ cargo release "$LEVEL" --no-confirm --execute
 echo "  ✓ Version bumped"
 echo ""
 
-# Step 3: Sync versions to all files
-echo "Step 3: Syncing versions..."
-"$SCRIPT_DIR/sync-version.sh"
-echo "  ✓ Versions synchronized"
-echo ""
-
-# Step 4: Update CHANGELOG
-echo "Step 4: Please update CHANGELOG.md with the changes for this release."
+# Step 3: Update CHANGELOG
+echo "Step 3: Please update CHANGELOG.md with the changes for this release."
 echo "Press Enter when done..."
 read -r
 echo "  ✓ CHANGELOG updated"
 echo ""
 
-# Step 5: Commit changes
-echo "Step 5: Committing changes..."
+# Step 4: Commit changes
+echo "Step 4: Committing changes..."
 VERSION=$(grep -oP 'version\s*=\s*"\K[^"]+' "$PROJECT_ROOT/Cargo.toml" | head -1)
 git add -A
 git commit -m "chore: release v$VERSION"
@@ -63,8 +56,8 @@ git tag "v$VERSION"
 echo "  ✓ Committed and tagged"
 echo ""
 
-# Step 6: Push to trigger GitHub Actions
-echo "Step 6: Pushing to remote..."
+# Step 5: Push to trigger GitHub Actions
+echo "Step 5: Pushing to remote..."
 git push origin main
 git push origin "v$VERSION"
 echo "  ✓ Pushed"
