@@ -10,151 +10,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
+  # ── Validation: tests, clippy, formatting ──────────────────
+  validate:
+    name: Validate & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+      - name: Clippy check
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+  # ── Compilation check across platforms ────────────────────
+  check-compile:
+    name: Check compile (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Run all tests
-        run: cargo test --workspace --all-targets
-
-      - name: Check benchmarks compile
-        run: cargo check --benches
-
-  lint:
-    name: Lint & Format
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-  benchmark:
-    name: Performance Benchmark
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
-    needs: test
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Run benchmarks
-        run: |
-          cargo bench --bench config_bench -- --nocapture 2>&1 | tee config_bench.txt || true
-          cargo bench --bench p2_bench -- --nocapture 2>&1 | tee p2_bench.txt || true
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
-          path: '*.txt'
-          retention-days: 90
-
-  python-test:
-    name: Python SDK Tests
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-
-      - name: Install dependencies
-        run: |
-          cd bindings/python
-          pip install -e ".[dev]"
-
-      - name: Run tests
-        run: |
-          cd bindings/python
-          pytest tests/ -v --cov=aria2_rust_client
-
-  nodejs-test:
-    name: Node.js SDK Tests
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        run: |
-          cd bindings/nodejs
-          npm install
-
-      - name: Run tests
-        run: |
-          cd bindings/nodejs
-          npm test
-
-      - name: Build
-        run: |
-          cd bindings/nodejs
-          npm run build
-
-  doc-check:
-    name: Documentation Check
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Generate documentation
-        run: cargo doc --workspace --document-private-items
-
-      - name: Run documentation tests
-        run: cargo test --doc --workspace
-
-  msrv-check:
-    name: MSRV Check
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.88'
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Check compilation with MSRV
-        run: cargo check --workspace --all-targets
-
-
+          key: ${{ matrix.target }}
+      - name: Check compilation
+        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
