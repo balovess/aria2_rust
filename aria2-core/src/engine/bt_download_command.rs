@@ -219,8 +219,13 @@ impl BtDownloadCommand {
         // Acquire download path lock (J6): prevents concurrent instances from
         // writing to the same output directory. If acquisition fails, log a
         // warning but do not fail the download -- the lock is a best-effort guard.
+        // NOTE: always pass the output DIRECTORY, not the file path. For
+        // single-file torrents `effective_output_path` is `dir/filename` (a file
+        // path); passing it to acquire_for_download would cause create_dir_all to
+        // create `filename` as a directory, which then makes File::create fail
+        // with "Access denied" (os error 5) on Windows.
         let download_path_lock =
-            match DownloadPathLock::acquire_for_download(&effective_output_path) {
+            match DownloadPathLock::acquire_for_download(std::path::Path::new(&dir)) {
                 Ok(lock) => Some(lock),
                 Err(e) => {
                     warn!(

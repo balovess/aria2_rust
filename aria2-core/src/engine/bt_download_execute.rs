@@ -903,7 +903,7 @@ impl BtDownloadCommand {
                             )
                             .await?;
                         } else {
-                            writer.write(&piece_data).await.ok();
+                            writer.write(&piece_data).await?;
                         }
 
                         // Sync bitfield to RequestGroup for session persistence

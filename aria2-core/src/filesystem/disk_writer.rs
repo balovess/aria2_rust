@@ -36,13 +36,11 @@ impl DefaultDiskWriter {
 impl DiskWriter for DefaultDiskWriter {
     async fn write(&mut self, data: &[u8]) -> Result<()> {
         if self.file.is_none() {
-            self.file = Some(
-                tokio::fs::File::create(&self.path)
-                    .await
-                    .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?,
-            );
+            let f = tokio::fs::File::create(&self.path)
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            self.file = Some(f);
         }
-
         if let Some(ref mut file) = self.file {
             use tokio::io::AsyncWriteExt;
             file.write_all(data)
@@ -53,11 +51,16 @@ impl DiskWriter for DefaultDiskWriter {
     }
 
     async fn finalize(&mut self) -> Result<Vec<u8>> {
-        if let Some(ref mut file) = self.file {
+        if let Some(mut file) = self.file.take() {
             use tokio::io::AsyncWriteExt;
             file.flush()
                 .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            // Close the file synchronously by converting to std::fs::File.
+            // tokio::fs::File's Drop spawns a background close task, which on
+            // Windows can leave the handle open briefly and cause "Access denied"
+            // (os error 5) when the caller immediately reads the file.
+            drop(file.into_std().await);
         }
         Ok(vec![])
     }
