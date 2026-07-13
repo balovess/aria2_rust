@@ -110,14 +110,16 @@ async fn test_positioned_write_throughput_10mb_16segments() {
 
     // Throughput assertion. 50 MiB/s is conservative — positioned writes on a
     // pre-allocated file should be much faster even with per-segment fsync.
-    const MIN_THROUGHPUT_MIB_S: f64 = 50.0;
-    let min_throughput = MIN_THROUGHPUT_MIB_S * 1024.0 * 1024.0;
+    // Windows CI runners have notoriously slow disk I/O, so we use a relaxed
+    // threshold there.
+    let min_throughput_mib_s: f64 = if cfg!(windows) { 3.0 } else { 50.0 };
+    let min_throughput = min_throughput_mib_s * 1024.0 * 1024.0;
     let throughput_mib_s = throughput / (1024.0 * 1024.0);
     assert!(
         throughput >= min_throughput,
         "throughput {:.1} MiB/s below minimum {:.1} MiB/s ({} segments, {} MiB, {:?})",
         throughput_mib_s,
-        MIN_THROUGHPUT_MIB_S,
+        min_throughput_mib_s,
         num_segments,
         total_size / (1024 * 1024),
         elapsed

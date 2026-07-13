@@ -42,17 +42,27 @@ fn get_addr(socket: &UdpSocket) -> std::net::SocketAddr {
     socket.local_addr().expect("Failed to get local address")
 }
 
-/// Wait for packet with timeout
+/// Wait for packet with timeout using polling.
+///
+/// Uses non-blocking `recv_from` with a busy-poll loop instead of
+/// `set_read_timeout` on a blocking socket. This is more portable:
+/// macOS `set_read_timeout` + non-blocking mode is unreliable, and
+/// changing the blocking mode momentarily introduces races.
 fn recv_with_timeout(socket: &UdpSocket, timeout_ms: u64) -> Option<(Vec<u8>, std::net::SocketAddr)> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
     let mut buf = vec![0u8; 65535];
-    socket
-        .set_read_timeout(Some(Duration::from_millis(timeout_ms)))
-        .ok();
 
-    match socket.recv_from(&mut buf) {
-        Ok((len, addr)) => Some((buf[..len].to_vec(), addr)),
-        Err(_) => None,
+    while start.elapsed() < timeout {
+        match socket.recv_from(&mut buf) {
+            Ok((len, addr)) => return Some((buf[..len].to_vec(), addr)),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return None,
+        }
     }
+    None
 }
 
 /// Send raw packet to address
