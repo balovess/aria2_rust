@@ -21,9 +21,14 @@ use super::App;
 // =========================================================================
 
 /// Command-line arguments for aria2-rust.
+///
+/// `name = "aria2"` matches the upstream `aria2c` binary's `--version` output
+/// format (`aria2 VERSION`). The binary itself is still `aria2c` via `[[bin]]`
+/// in `aria2/Cargo.toml`; only the clap display name is overridden so that
+/// `--version` prints `aria2 0.2.1` instead of `aria2c 0.2.1`.
 #[derive(Parser, Debug)]
 #[command(
-    name = "aria2c",
+    name = "aria2",
     version,
     about = "aria2-rust - The ultra fast download utility",
     long_about = None
