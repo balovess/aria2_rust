@@ -1,13 +1,26 @@
-mod app;
-pub mod constants;
-use app::App;
+//! aria2-rust CLI entry point.
+//!
+//! Uses clap derive API for argument parsing. The `--help` and `--version`
+//! flags are handled by clap before `App::run` is called. The `completions`
+//! subcommand is handled early here and exits before the download engine starts.
+
+use aria2::app::App;
+use aria2::app::cli::{CliArgs, Commands};
+use clap::{CommandFactory, Parser};
 
 #[tokio::main]
 async fn main() {
-    // Skip argv[0] (the program path). On Windows the executable path contains
-    // backslashes, which detect() would otherwise turn into an http:// URL and
-    // cause the app to download its own binary on every launch.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let exit_code = App::new().run(&args).await;
+    let cli = CliArgs::parse();
+
+    // Handle `completions <SHELL>` subcommand early — print completion script
+    // to stdout and exit 0 without starting the download engine.
+    if let Some(Commands::Completions { shell }) = cli.command {
+        let mut cmd = CliArgs::command();
+        let bin_name = "aria2c";
+        clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+        std::process::exit(0);
+    }
+
+    let exit_code = App::new().run(cli).await;
     std::process::exit(exit_code);
 }

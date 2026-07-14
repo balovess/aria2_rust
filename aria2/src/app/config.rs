@@ -1,96 +1,225 @@
 //! Configuration loading and management for the App
 //!
 //! This module handles all configuration-related operations:
-//! - Command-line argument parsing
+//! - Command-line argument loading (from clap `CliArgs`)
 //! - Environment variable loading
 //! - Configuration file loading
 //! - Option retrieval helpers
 
 use super::App;
+use super::cli::CliArgs;
 use aria2_core::config::{OptionValue, UriListFile};
 use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
 
 impl App {
-    /// Load command-line arguments into the configuration.
+    /// Load parsed CLI arguments (from clap `CliArgs`) into the configuration.
     ///
-    /// Parses both short (-d) and long (--dir) options, handles:
-    /// - Boolean flags (--daemon)
-    /// - String values (--dir=/downloads or --dir /downloads)
-    /// - Negation (--no-check-certificate)
-    /// - URI list files (@file.txt)
-    /// - Positional URIs
-    pub async fn load_args(&mut self, args: &[String]) -> std::result::Result<(), String> {
+    /// Each option that was explicitly set on the command line is applied to
+    /// `ConfigManager` with the highest priority (overriding env/file/defaults).
+    /// Options not present (`None` / `false` for bools) are skipped so that
+    /// config-file or env values are preserved.
+    ///
+    /// Negation flags (`--no-check-certificate`, `--no-continue`, `--no-enable-dht`)
+    /// take precedence over their positive counterparts.
+    ///
+    /// Positional URIs are collected from `cli.uris`, with `@file` references
+    /// expanded via `UriListFile`. `--input-file` URIs are also appended.
+    pub async fn load_cli_args(&mut self, cli: CliArgs) -> std::result::Result<(), String> {
         let mut conf = self.config.write().await;
 
+        // Helper macros: set option only if value is present; ignore unknown
+        // options (they may be CLI-only flags like verbose/no-color not in registry)
+        macro_rules! set_str {
+            ($name:expr, $value:expr) => {
+                if let Some(v) = $value {
+                    let _ = conf.set_global_option($name, OptionValue::Str(v)).await;
+                }
+            };
+        }
+        macro_rules! set_path {
+            ($name:expr, $value:expr) => {
+                if let Some(v) = $value {
+                    let _ = conf
+                        .set_global_option(
+                            $name,
+                            OptionValue::Str(v.to_string_lossy().into_owned()),
+                        )
+                        .await;
+                }
+            };
+        }
+        macro_rules! set_u64 {
+            ($name:expr, $value:expr) => {
+                if let Some(v) = $value {
+                    let _ = conf
+                        .set_global_option($name, OptionValue::Int(v as i64))
+                        .await;
+                }
+            };
+        }
+        macro_rules! set_u16 {
+            ($name:expr, $value:expr) => {
+                if let Some(v) = $value {
+                    let _ = conf
+                        .set_global_option($name, OptionValue::Int(v as i64))
+                        .await;
+                }
+            };
+        }
+        macro_rules! set_f64 {
+            ($name:expr, $value:expr) => {
+                if let Some(v) = $value {
+                    let _ = conf.set_global_option($name, OptionValue::Float(v)).await;
+                }
+            };
+        }
+        macro_rules! set_bool_true {
+            ($name:expr, $value:expr) => {
+                if $value {
+                    let _ = conf.set_global_option($name, OptionValue::Bool(true)).await;
+                }
+            };
+        }
+        macro_rules! set_bool_false {
+            ($name:expr, $value:expr) => {
+                if $value {
+                    let _ = conf
+                        .set_global_option($name, OptionValue::Bool(false))
+                        .await;
+                }
+            };
+        }
+
+        let g = cli.general;
+        let h = cli.http_ftp;
+        let b = cli.bittorrent;
+        let r = cli.rpc;
+        let a = cli.advanced;
+
+        // --- General options ---
+        set_path!("dir", g.dir);
+        set_str!("out", g.out);
+        set_path!("log", g.log);
+        set_str!("log-level", g.log_level);
+        set_str!("console-log-level", g.console_log_level);
+        set_u64!("summary-interval", g.summary_interval);
+        set_path!("input-file", g.input_file);
+        set_path!("save-session", g.save_session);
+        set_u64!("save-session-interval", g.save_session_interval);
+        set_u64!("auto-save-interval", g.auto_save_interval);
+        set_bool_true!("enable-color", g.enable_color);
+        set_bool_true!("quiet", g.quiet);
+        set_bool_true!("dry-run", g.dry_run);
+        set_bool_true!("daemon", g.daemon);
+        set_path!("pid-file", g.pid_file);
+
+        // --- HTTP/FTP options ---
+        set_str!("all-proxy", h.all_proxy);
+        set_str!("http-proxy", h.http_proxy);
+        set_str!("https-proxy", h.https_proxy);
+        set_str!("ftp-proxy", h.ftp_proxy);
+        set_str!("no-proxy", h.no_proxy);
+        set_str!("user-agent", h.user_agent);
+        set_str!("referer", h.referer);
+        if !h.header.is_empty() {
+            let _ = conf
+                .set_global_option("header", OptionValue::List(h.header))
+                .await;
+        }
+        set_path!("load-cookies", h.load_cookies);
+        set_path!("save-cookies", h.save_cookies);
+        set_u64!("connect-timeout", h.connect_timeout);
+        set_u64!("timeout", h.timeout);
+        set_u64!("max-tries", h.max_tries);
+        set_u64!("retry-wait", h.retry_wait);
+        set_u64!("split", h.split);
+        set_str!("min-split-size", h.min_split_size);
+        set_u64!("max-connection-per-server", h.max_connection_per_server);
+        // Negation: --no-check-certificate takes precedence over --check-certificate
+        if h.no_check_certificate {
+            set_bool_false!("check-certificate", true);
+        } else {
+            set_bool_true!("check-certificate", h.check_certificate);
+        }
+        set_path!("ca-certificate", h.ca_certificate);
+        set_bool_true!("allow-overwrite", h.allow_overwrite);
+        set_bool_true!("auto-file-renaming", h.auto_file_renaming);
+        if h.no_continue {
+            set_bool_false!("continue", true);
+        } else {
+            set_bool_true!("continue", h.continue_dl);
+        }
+        set_bool_true!("remote-time", h.remote_time);
+
+        // --- BitTorrent options ---
+        set_f64!("seed-time", b.seed_time);
+        set_f64!("seed-ratio", b.seed_ratio);
+        set_u64!("bt-max-peers", b.bt_max_peers);
+        set_str!("bt-request-peer-speed-limit", b.bt_request_peer_speed_limit);
+        set_u64!("bt-max-open-files", b.bt_max_open_files);
+        set_bool_true!("bt-seed-unverified", b.bt_seed_unverified);
+        set_bool_true!("bt-save-metadata", b.bt_save_metadata);
+        set_bool_true!("bt-force-encryption", b.bt_force_encryption);
+        set_str!("bt-min-crypto-level", b.bt_min_crypto_level);
+        set_bool_true!("bt-enable-lpd", b.bt_enable_lpd);
+        set_bool_true!("enable-lpd", b.enable_lpd);
+        set_u64!("lpd-listen-port", b.lpd_listen_port);
+        set_bool_true!("bt-enable-web-seed", b.bt_enable_web_seed);
+        if b.no_enable_dht {
+            set_bool_false!("enable-dht", true);
+        } else {
+            set_bool_true!("enable-dht", b.enable_dht);
+        }
+        set_u64!("dht-listen-port", b.dht_listen_port);
+        set_str!("dht-entry-point", b.dht_entry_point);
+        set_path!("dht-file-path", b.dht_file_path);
+        set_path!("dht-message-path", b.dht_message_path);
+        set_bool_true!("enable-peer-exchange", b.enable_peer_exchange);
+        set_str!("follow-torrent", b.follow_torrent);
+        set_str!("on-bt-download-complete", b.on_bt_download_complete);
+        set_str!("on-bt-download-error", b.on_bt_download_error);
+        set_str!("listen-port", b.listen_port);
+        set_str!("bt-prioritize-piece", b.bt_prioritize_piece);
+        set_bool_true!("enable-utp", b.enable_utp);
+        set_u64!("utp-listen-port", b.utp_listen_port);
+
+        // --- RPC options ---
+        set_bool_true!("enable-rpc", r.enable_rpc);
+        set_bool_true!("rpc-listen-all", r.rpc_listen_all);
+        set_u16!("rpc-listen-port", r.rpc_listen_port);
+        set_str!("rpc-listen-address", r.rpc_listen_address);
+        set_str!("rpc-secret", r.rpc_secret);
+        set_str!("rpc-user", r.rpc_user);
+        set_str!("rpc-passwd", r.rpc_passwd);
+        set_str!("rpc-allow-origin", r.rpc_allow_origin);
+        set_str!("rpc-cors-domain", r.rpc_cors_domain);
+        set_bool_true!("rpc-secure", r.rpc_secure);
+        set_path!("rpc-certificate", r.rpc_certificate);
+        set_path!("rpc-private-key", r.rpc_private_key);
+
+        // --- Advanced options ---
+        set_str!("file-allocation", a.file_allocation);
+        set_bool_true!("secure-falloc", a.secure_falloc);
+        set_str!("mmap-threshold", a.mmap_threshold);
+        set_u64!("max-concurrent-downloads", a.max_concurrent_downloads);
+        set_str!("max-overall-download-limit", a.max_overall_download_limit);
+        set_str!("max-download-limit", a.max_download_limit);
+        set_str!("max-overall-upload-limit", a.max_overall_upload_limit);
+        set_str!("max-upload-limit", a.max_upload_limit);
+        set_str!("piece-length", a.piece_length);
+        set_str!("disk-cache", a.disk_cache);
+        set_u64!("stop", a.stop);
+        set_bool_true!("force-save", a.force_save);
+        set_path!("server-stat-file", a.server_stat_file);
+        set_u64!("save-server-stat-interval", a.save_server_stat_interval);
+
+        drop(conf);
+
+        // Collect positional URIs, expanding @file references
         let mut positional_uris = Vec::new();
-        let mut i = 0;
-        while i < args.len() {
-            let arg = &args[i];
-            if arg.starts_with('-') && !arg.starts_with("--") && arg.len() == 2 {
-                let c = arg.chars().nth(1).unwrap_or('\0');
-                if let Some(opt_name) = self.map_short_option(c) {
-                    if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                        conf.set_global_option(opt_name, OptionValue::Str(args[i + 1].clone()))
-                            .await
-                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
-                        i += 2;
-                        continue;
-                    } else {
-                        conf.set_global_option(opt_name, OptionValue::Bool(true))
-                            .await
-                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
-                        i += 1;
-                        continue;
-                    }
-                }
-            } else if let Some(opt_str) = arg.strip_prefix("--") {
-                if opt_str == "help" || opt_str == "h" || opt_str == "version" || opt_str == "V" {
-                    i += 1;
-                    continue;
-                }
-                let (opt_name, value) = if let Some(eq_pos) = opt_str.find('=') {
-                    (&opt_str[..eq_pos], Some(&opt_str[eq_pos + 1..]))
-                } else {
-                    (opt_str, None)
-                };
-
-                let actual_name = if opt_name.starts_with("no-") && opt_name.len() > 3 {
-                    &opt_name[3..]
-                } else {
-                    opt_name
-                };
-
-                if let Some(val) = value {
-                    if opt_name.starts_with("no-") {
-                        conf.set_global_option(actual_name, OptionValue::Bool(false))
-                            .await
-                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
-                    } else {
-                        conf.set_global_option(actual_name, OptionValue::Str(val.to_string()))
-                            .await
-                            .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
-                    }
-                } else if opt_name.starts_with("no-") {
-                    conf.set_global_option(actual_name, OptionValue::Bool(false))
-                        .await
-                        .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
-                } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                    conf.set_global_option(opt_name, OptionValue::Str(args[i + 1].clone()))
-                        .await
-                        .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
-                    i += 1;
-                    i += 1;
-                    continue;
-                } else {
-                    conf.set_global_option(opt_name, OptionValue::Bool(true))
-                        .await
-                        .map_err(|e| format!("Option {} error: {}", opt_name, e))?;
-                }
-
-                i += 1;
-                continue;
-            } else if let Some(path) = arg.strip_prefix('@') {
+        for uri in cli.uris {
+            if let Some(path) = uri.strip_prefix('@') {
                 match UriListFile::from_file(path) {
                     Ok(uri_list) => {
                         for entry in uri_list.entries() {
@@ -103,16 +232,12 @@ impl App {
                         warn!("Failed to load URI list file {}: {}", path, e);
                     }
                 }
-                i += 1;
-                continue;
             } else {
-                positional_uris.push(arg.clone());
+                positional_uris.push(uri);
             }
-            i += 1;
         }
 
-        drop(conf);
-
+        // Append URIs from --input-file
         let input_file = self.get_opt_str("input-file").await;
         if let Some(path) = input_file {
             match UriListFile::from_file(&path) {
