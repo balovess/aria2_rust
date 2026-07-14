@@ -9,7 +9,9 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::hyper_client::HyperDirectClient;
 
 // Re-export score_source for convenience
-pub use crate::selector::adaptive_uri_selector::{score_source_raw as score_source, score_source_raw};
+pub use crate::selector::adaptive_uri_selector::{
+    score_source_raw as score_source, score_source_raw,
+};
 
 pub struct HttpSegmentDownloader {
     client: reqwest::Client,
@@ -295,11 +297,13 @@ impl HttpSegmentDownloader {
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
         debug!("HTTP Range request: {} ({})", range_header, url);
 
-        let mut req = self
-            .client
-            .get(url)
-            .header("Range", &range_header)
-            .timeout(Duration::from_secs(constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS));
+        let mut req =
+            self.client
+                .get(url)
+                .header("Range", &range_header)
+                .timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                ));
         if let Some(ch) = cookie_header {
             req = req.header("Cookie", ch);
         }
@@ -403,7 +407,9 @@ mod tests {
     async fn test_download_range_zero_length() {
         let client = reqwest::Client::new();
         let dl = HttpSegmentDownloader::new(&client, false);
-        let result = dl.download_range("http://example.com", 0, 0, None, &[]).await;
+        let result = dl
+            .download_range("http://example.com", 0, 0, None, &[])
+            .await;
         assert!(result.is_ok(), "zero-length range should return empty vec");
         assert!(result.unwrap().is_empty());
     }
@@ -467,7 +473,10 @@ mod tests {
             .await
         {
             Ok(supports) => {
-                eprintln!("[WARN] Unexpected success for invalid host, supports={:?}", supports);
+                eprintln!(
+                    "[WARN] Unexpected success for invalid host, supports={:?}",
+                    supports
+                );
             }
             Err(e) => {
                 println!("Expected network error for invalid host: {:?}", e);

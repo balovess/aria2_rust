@@ -4,8 +4,8 @@
 //! edge cases in hash verification, mirror failover, authentication, rate limiting,
 //! disk space management, session persistence, and filename collision handling.
 
-mod fixtures;
 mod e2e_helpers;
+mod fixtures;
 
 use aria2_core::engine::command::Command;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;

@@ -30,8 +30,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
 /// A single cached DNS entry containing resolved addresses and metadata.
 ///
@@ -125,7 +125,7 @@ impl DnsCache {
         Self {
             cache: HashMap::new(),
             default_ttl: Duration::from_secs(300), // 5 minutes default
-            negative_ttl: Duration::from_secs(60),   // 1 minute for failures
+            negative_ttl: Duration::from_secs(60), // 1 minute for failures
             negative_entries: HashMap::new(),
             ipv4_preference: true, // Prefer IPv4 by default (like C++ aria2)
             resolver: build_default_resolver(),
@@ -175,11 +175,7 @@ impl DnsCache {
     /// # Returns
     ///
     /// A vector of resolved `SocketAddr` on success, or an error string on failure.
-    pub async fn resolve(
-        &mut self,
-        hostname: &str,
-        port: u16,
-    ) -> Result<Vec<SocketAddr>, String> {
+    pub async fn resolve(&mut self, hostname: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
         // 1. Check positive cache first
         if let Some(entry) = self.cache.get(hostname)
             && !entry.is_expired()
@@ -376,7 +372,8 @@ impl DnsCache {
     /// This is useful for testing negative cache behavior without
     /// depending on network DNS resolution.
     pub fn record_failure(&mut self, hostname: &str) {
-        self.negative_entries.insert(hostname.to_string(), Instant::now());
+        self.negative_entries
+            .insert(hostname.to_string(), Instant::now());
     }
 
     /// Check cache only (no network resolution).
@@ -425,10 +422,7 @@ impl DnsCache {
 fn build_default_resolver() -> Option<TokioAsyncResolver> {
     let mut opts = ResolverOpts::default();
     opts.use_hosts_file = true;
-    Some(TokioAsyncResolver::tokio(
-        ResolverConfig::default(),
-        opts,
-    ))
+    Some(TokioAsyncResolver::tokio(ResolverConfig::default(), opts))
 }
 
 impl Default for DnsCache {
@@ -543,7 +537,8 @@ mod tests {
             ipv4_preferred: true,
         };
         cache.cache.insert("example.com".to_string(), entry);
-        cache.negative_entries
+        cache
+            .negative_entries
             .insert("failed.com".to_string(), Instant::now());
 
         assert_eq!(cache.len(), 1);
@@ -570,7 +565,10 @@ mod tests {
             result1.err()
         );
         let addrs1 = result1.unwrap();
-        assert!(!addrs1.is_empty(), "localhost should resolve to at least one address");
+        assert!(
+            !addrs1.is_empty(),
+            "localhost should resolve to at least one address"
+        );
 
         // Second resolve should hit cache (same result, no network call)
         let result2 = cache.resolve("localhost", 80).await;
@@ -627,7 +625,9 @@ mod tests {
             ttl: Duration::from_secs(1),
             ipv4_preferred: true,
         };
-        cache.cache.insert("expired.example.com".to_string(), expired_entry);
+        cache
+            .cache
+            .insert("expired.example.com".to_string(), expired_entry);
 
         // Insert a still-valid entry
         let fresh_entry = DnsEntry {
@@ -637,7 +637,9 @@ mod tests {
             ttl: Duration::from_secs(3600), // 1 hour TTL
             ipv4_preferred: true,
         };
-        cache.cache.insert("fresh.example.com".to_string(), fresh_entry);
+        cache
+            .cache
+            .insert("fresh.example.com".to_string(), fresh_entry);
 
         assert_eq!(cache.len(), 2, "Should have 2 entries before purge");
 
@@ -744,11 +746,7 @@ mod tests {
         let addrs = result.unwrap();
         assert!(!addrs.is_empty(), "should have at least one address");
         // Verify it's cached.
-        assert_eq!(
-            cache.len(),
-            1,
-            "localhost should be cached after resolve"
-        );
+        assert_eq!(cache.len(), 1, "localhost should be cached after resolve");
     }
 
     /// Test D1 #2: the TTL reported by the resolver is capped at default_ttl.

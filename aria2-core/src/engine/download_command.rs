@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -29,8 +29,6 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::selector::adaptive_uri_selector::AdaptiveUriSelector;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
-
-
 
 pub struct DownloadCommand {
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -149,13 +147,23 @@ impl DownloadCommand {
         } else {
             // Proxy configuration present - create custom client
             let mut builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS))
-                .timeout(Duration::from_secs(constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS))
+                .connect_timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                ))
+                .timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                ))
                 .user_agent(constants::USER_AGENT)
-                .redirect(reqwest::redirect::Policy::limited(constants::HTTP_DEFAULT_MAX_REDIRECTS))
+                .redirect(reqwest::redirect::Policy::limited(
+                    constants::HTTP_DEFAULT_MAX_REDIRECTS,
+                ))
                 .pool_max_idle_per_host(constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
-                .pool_idle_timeout(Some(std::time::Duration::from_secs(constants::HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS)))
-                .tcp_keepalive(Some(std::time::Duration::from_secs(constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS)));
+                .pool_idle_timeout(Some(std::time::Duration::from_secs(
+                    constants::HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS,
+                )))
+                .tcp_keepalive(Some(std::time::Duration::from_secs(
+                    constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+                )));
 
             if let Some(ref proxy) = options.http_proxy
                 && let Ok(proxy_url) = proxy.parse::<reqwest::Url>()
@@ -257,9 +265,7 @@ impl DownloadCommand {
                 .file_allocation
                 .clone()
                 .unwrap_or_else(|| constants::DEFAULT_FILE_ALLOCATION.to_string()),
-            mmap_threshold: options
-                .mmap_threshold
-                .unwrap_or(256 * 1024 * 1024),
+            mmap_threshold: options.mmap_threshold.unwrap_or(256 * 1024 * 1024),
             secure_falloc: options.secure_falloc,
             cookie_storage,
             cookie_file,
@@ -317,7 +323,11 @@ impl DownloadCommand {
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
         let headers = options.parsed_headers();
-        info!("DownloadCommand created (shared client): {} -> {}", uri, path.display());
+        info!(
+            "DownloadCommand created (shared client): {} -> {}",
+            uri,
+            path.display()
+        );
 
         // Mirror the proxy-detection condition used by `new_with_group`: the
         // `HyperDirectClient` hot path is only enabled when no proxy is
@@ -375,9 +385,7 @@ impl DownloadCommand {
                 .file_allocation
                 .clone()
                 .unwrap_or_else(|| constants::DEFAULT_FILE_ALLOCATION.to_string()),
-            mmap_threshold: options
-                .mmap_threshold
-                .unwrap_or(256 * 1024 * 1024),
+            mmap_threshold: options.mmap_threshold.unwrap_or(256 * 1024 * 1024),
             secure_falloc: options.secure_falloc,
             cookie_storage,
             cookie_file,
@@ -437,7 +445,10 @@ impl DownloadCommand {
     /// so this method is rarely needed. It is kept `pub(crate)` for internal
     /// test harnesses that need to override the auto-created sender.
     #[allow(dead_code)]
-    pub(crate) fn with_progress_sender(mut self, sender: mpsc::UnboundedSender<ProgressUpdate>) -> Self {
+    pub(crate) fn with_progress_sender(
+        mut self,
+        sender: mpsc::UnboundedSender<ProgressUpdate>,
+    ) -> Self {
         self.progress_sender = Some(sender);
         // Clear the auto-created receiver so it does not linger; the caller
         // is responsible for spawning the aggregator.
@@ -464,10 +475,7 @@ impl DownloadCommand {
             return;
         }
         if let Some(rx) = self.progress_receiver.take() {
-            let handle = DownloadEngine::spawn_progress_aggregator(
-                Arc::clone(&self.group),
-                rx,
-            );
+            let handle = DownloadEngine::spawn_progress_aggregator(Arc::clone(&self.group), rx);
             self.progress_aggregator_handle = Some(handle);
         }
         // If progress_receiver is None, either with_progress_sender was used
@@ -568,12 +576,7 @@ impl DownloadCommand {
     /// I/O). Otherwise uses positioned I/O (`PositionedDiskWriter`).
     fn create_writer(&self, total_length: u64) -> CachedDiskWriter {
         let use_mmap = self.file_allocation == "mmap" && total_length >= self.mmap_threshold;
-        CachedDiskWriter::new_with_mmap(
-            &self.output_path,
-            Some(total_length),
-            None,
-            use_mmap,
-        )
+        CachedDiskWriter::new_with_mmap(&self.output_path, Some(total_length), None, use_mmap)
     }
 
     async fn execute_sequential_download(
@@ -737,12 +740,16 @@ impl DownloadCommand {
 
                 // Batch progress updates to reduce lock contention
                 // Only update progress every PROGRESS_UPDATE_BYTES (256KB)
-                if self.completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
+                if self.completed_bytes - last_progress_update
+                    >= constants::PROGRESS_UPDATE_BYTES as u64
+                {
                     // Compute speed sample lock-free (refreshed every HTTP_SPEED_UPDATE_INTERVAL_MS).
                     // `speed` is 0 when not enough time has elapsed since the last sample; in that
                     // case neither the channel nor the fallback path should touch the speed fields.
                     let elapsed = last_speed_update.elapsed();
-                    let speed = if elapsed.as_millis() >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128 {
+                    let speed = if elapsed.as_millis()
+                        >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128
+                    {
                         let delta = self.completed_bytes - last_completed;
                         let s = (delta as f64 / elapsed.as_secs_f64()) as u64;
                         last_speed_update = Instant::now();
@@ -881,7 +888,10 @@ impl DownloadCommand {
     async fn execute_concurrent_download(&mut self, uri: &str, total_length: u64) -> Result<()> {
         let options = self.group.read().await.options().clone();
         let split = options.split.unwrap_or(1) as usize;
-        let max_conn = options.max_connection_per_server.unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16) as usize;
+        let max_conn = options
+            .max_connection_per_server
+            .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+            as usize;
         let seg_size = total_length / split as u64;
         let mut last_progress_update = 0u64; // Track last progress update for batch updates
 
@@ -929,8 +939,7 @@ impl DownloadCommand {
         let mut active: FuturesUnordered<SegmentFetchFuture> = FuturesUnordered::new();
         // Track the write offset for each in-flight future so we know where
         // to write the downloaded data when the future completes.
-        let mut active_segs: std::collections::HashMap<u32, u64> =
-            std::collections::HashMap::new();
+        let mut active_segs: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
 
         loop {
             // Fill slots up to max_conn concurrent segment fetches.
@@ -976,9 +985,7 @@ impl DownloadCommand {
                 }
                 // Defensive: no active, no pending, not complete, not all-failed.
                 // Break to avoid an infinite loop.
-                warn!(
-                    "Concurrent download stuck: no active or pending segments but not complete"
-                );
+                warn!("Concurrent download stuck: no active or pending segments but not complete");
                 break;
             }
 
@@ -1083,7 +1090,10 @@ impl DownloadCommand {
             if attempt > 0
                 && let Some(wait) = retry_policy.compute_wait(attempt - 1)
             {
-                info!("Sequential download retry #{} (waiting {:?})...", attempt, wait);
+                info!(
+                    "Sequential download retry #{} (waiting {:?})...",
+                    attempt, wait
+                );
                 tokio::time::sleep(wait).await;
             }
 
@@ -1171,7 +1181,14 @@ impl DownloadCommand {
     ) -> Result<()> {
         let split = self.group.read().await.options().split.unwrap_or(1) as u64;
         let segment_size = total_length.div_ceil(split);
-        let max_conn = self.group.read().await.options().max_connection_per_server.unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16) as usize;
+        let max_conn = self
+            .group
+            .read()
+            .await
+            .options()
+            .max_connection_per_server
+            .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+            as usize;
 
         // Create mirror configuration
         let mirror_config = MirrorConfig {
@@ -1246,7 +1263,17 @@ impl DownloadCommand {
                 };
 
                 let result = downloader
-                    .download_range(&mirror_url, offset, length, if cookie_hdr.is_empty() { None } else { Some(&cookie_hdr) }, &self.headers)
+                    .download_range(
+                        &mirror_url,
+                        offset,
+                        length,
+                        if cookie_hdr.is_empty() {
+                            None
+                        } else {
+                            Some(&cookie_hdr)
+                        },
+                        &self.headers,
+                    )
                     .await;
 
                 match result {
@@ -1258,7 +1285,12 @@ impl DownloadCommand {
                             0
                         };
 
-                        debug!("Segment {} complete: {} bytes, speed={} B/s", seg_idx, data.len(), speed);
+                        debug!(
+                            "Segment {} complete: {} bytes, speed={} B/s",
+                            seg_idx,
+                            data.len(),
+                            speed
+                        );
 
                         // Zero-copy write: writer consumes the original Bytes;
                         // coordinator gets a cheap Arc-refcount-bumped clone.
@@ -1271,10 +1303,18 @@ impl DownloadCommand {
                         })?;
 
                         // Report success to coordinator for speed feedback
-                        coordinator.on_segment_complete(mirror_idx, seg_idx, data_for_coordinator, speed);
+                        coordinator.on_segment_complete(
+                            mirror_idx,
+                            seg_idx,
+                            data_for_coordinator,
+                            speed,
+                        );
                     }
                     Err(e) => {
-                        warn!("Segment {} download failed (mirror={}): {}", seg_idx, mirror_idx, e);
+                        warn!(
+                            "Segment {} download failed (mirror={}): {}",
+                            seg_idx, mirror_idx, e
+                        );
 
                         // Default error code for network errors
                         let error_code = constants::HTTP_DEFAULT_ERROR_CODE;
@@ -1297,10 +1337,14 @@ impl DownloadCommand {
                 };
 
                 // Batch progress updates to reduce lock contention
-                if self.completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
+                if self.completed_bytes - last_progress_update
+                    >= constants::PROGRESS_UPDATE_BYTES as u64
+                {
                     // Compute speed sample lock-free (refreshed every HTTP_SPEED_UPDATE_INTERVAL_MS).
                     let elapsed = last_speed_update.elapsed();
-                    let speed = if elapsed.as_millis() >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128 {
+                    let speed = if elapsed.as_millis()
+                        >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128
+                    {
                         let delta = self.completed_bytes - last_completed;
                         let s = (delta as f64 / elapsed.as_secs_f64()) as u64;
                         last_speed_update = Instant::now();
@@ -1420,7 +1464,9 @@ impl DownloadCommand {
                 );
                 let downloader = HttpSegmentDownloader::new(&self.client, self.use_hyper);
                 let seg_start = Instant::now();
-                let result = downloader.download_range(uri, offset, length, None, &self.headers).await;
+                let result = downloader
+                    .download_range(uri, offset, length, None, &self.headers)
+                    .await;
 
                 match result {
                     Ok(data) => {
@@ -1430,7 +1476,12 @@ impl DownloadCommand {
                         } else {
                             0
                         };
-                        debug!("Segment {} complete: {} bytes, speed={} B/s", seg_idx, data.len(), speed);
+                        debug!(
+                            "Segment {} complete: {} bytes, speed={} B/s",
+                            seg_idx,
+                            data.len(),
+                            speed
+                        );
 
                         // Zero-copy write: writer consumes the original Bytes;
                         // manager gets a cheap Arc-refcount-bumped clone.
@@ -1443,11 +1494,17 @@ impl DownloadCommand {
                         })?;
 
                         // Report completion with speed feedback
-                        manager.report_segment_complete(seg_idx_u32, data_for_manager, speed, false);
+                        manager.report_segment_complete(
+                            seg_idx_u32,
+                            data_for_manager,
+                            speed,
+                            false,
+                        );
                     }
                     Err(e) => {
                         warn!("Segment {} download failed: {}", seg_idx, e);
-                        manager.report_segment_failed(seg_idx_u32, constants::HTTP_DEFAULT_ERROR_CODE);
+                        manager
+                            .report_segment_failed(seg_idx_u32, constants::HTTP_DEFAULT_ERROR_CODE);
                     }
                 }
 
@@ -1522,7 +1579,11 @@ impl Command for DownloadCommand {
             )));
         }
 
-        debug!("Starting download: {} -> {}", uri, self.output_path.display());
+        debug!(
+            "Starting download: {} -> {}",
+            uri,
+            self.output_path.display()
+        );
 
         if let Some(parent) = self.output_path.parent()
             && !parent.exists()
@@ -1695,7 +1756,9 @@ impl Command for DownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS))
+        Some(Duration::from_secs(
+            constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS,
+        ))
     }
 }
 

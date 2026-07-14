@@ -132,7 +132,9 @@ impl LedbatController {
 
     /// Get the queuing delay (current - base)
     pub fn get_queuing_delay(&self) -> Duration {
-        let queuing_us = self.current_delay.saturating_sub(self.base_delay.unwrap_or(0));
+        let queuing_us = self
+            .current_delay
+            .saturating_sub(self.base_delay.unwrap_or(0));
         Duration::from_micros(queuing_us)
     }
 
@@ -174,7 +176,8 @@ impl LedbatController {
         // We need at least 3 samples to reliably calculate queuing delay
         let has_enough_samples = self.delay_history.len() >= 3;
         let queuing_delay_us = if has_enough_samples {
-            self.current_delay.saturating_sub(self.base_delay.unwrap_or(0))
+            self.current_delay
+                .saturating_sub(self.base_delay.unwrap_or(0))
         } else {
             // Not enough samples, assume no queuing delay
             0
@@ -428,7 +431,10 @@ mod tests {
         controller.on_ack_received(48_000, 1500); // 48ms
 
         // Now we have 3 samples, base_delay should be ~45ms
-        assert_eq!(controller.get_base_delay(), Some(Duration::from_micros(45_000)));
+        assert_eq!(
+            controller.get_base_delay(),
+            Some(Duration::from_micros(45_000))
+        );
 
         // ACK with high delay (above target)
         let high_delay = LEDBAT_TARGET_DELAY.as_micros() as u64 + 50_000; // 150ms
@@ -485,7 +491,10 @@ mod tests {
         controller.on_ack_received(22_000, 1500); // 22ms
 
         // Now we have 3 samples, base_delay should be 20ms
-        assert_eq!(controller.get_base_delay(), Some(Duration::from_micros(20_000)));
+        assert_eq!(
+            controller.get_base_delay(),
+            Some(Duration::from_micros(20_000))
+        );
 
         // Get cwnd after establishing base delay
         let cwnd_before_high_delay = controller.get_window_size();
@@ -573,18 +582,36 @@ mod tests {
 
         // First ACK
         controller.on_ack_received(50_000, 1500);
-        assert_eq!(controller.get_base_delay(), Some(Duration::from_micros(50_000)));
-        assert_eq!(controller.get_current_delay(), Duration::from_micros(50_000));
+        assert_eq!(
+            controller.get_base_delay(),
+            Some(Duration::from_micros(50_000))
+        );
+        assert_eq!(
+            controller.get_current_delay(),
+            Duration::from_micros(50_000)
+        );
 
         // Second ACK with higher delay
         controller.on_ack_received(80_000, 1500);
-        assert_eq!(controller.get_base_delay(), Some(Duration::from_micros(50_000))); // Min stays
-        assert_eq!(controller.get_current_delay(), Duration::from_micros(80_000));
+        assert_eq!(
+            controller.get_base_delay(),
+            Some(Duration::from_micros(50_000))
+        ); // Min stays
+        assert_eq!(
+            controller.get_current_delay(),
+            Duration::from_micros(80_000)
+        );
 
         // Third ACK with lower delay
         controller.on_ack_received(30_000, 1500);
-        assert_eq!(controller.get_base_delay(), Some(Duration::from_micros(30_000))); // New min
-        assert_eq!(controller.get_current_delay(), Duration::from_micros(30_000));
+        assert_eq!(
+            controller.get_base_delay(),
+            Some(Duration::from_micros(30_000))
+        ); // New min
+        assert_eq!(
+            controller.get_current_delay(),
+            Duration::from_micros(30_000)
+        );
     }
 
     #[test]
@@ -663,9 +690,13 @@ mod tests {
         for i in 0..3 {
             controller.on_data_sent(1500);
             controller.on_ack_received(50_000 - i * 1000, 1500); // Decreasing delays
-            println!("Iteration {}: cwnd = {}, slow_start = {}, base_delay = {:?}",
-                     i, controller.get_window_size(), controller.is_slow_start(),
-                     controller.get_base_delay());
+            println!(
+                "Iteration {}: cwnd = {}, slow_start = {}, base_delay = {:?}",
+                i,
+                controller.get_window_size(),
+                controller.is_slow_start(),
+                controller.get_base_delay()
+            );
         }
 
         // Should have grown cwnd in slow start
@@ -678,9 +709,13 @@ mod tests {
         for i in 0..3 {
             controller.on_data_sent(1500);
             controller.on_ack_received(150_000, 1500); // 150ms delay, queuing = 103ms > target
-            println!("Congestion {}: cwnd = {}, slow_start = {}, queuing_delay = {:?}",
-                     i, controller.get_window_size(), controller.is_slow_start(),
-                     controller.get_queuing_delay());
+            println!(
+                "Congestion {}: cwnd = {}, slow_start = {}, queuing_delay = {:?}",
+                i,
+                controller.get_window_size(),
+                controller.is_slow_start(),
+                controller.get_queuing_delay()
+            );
         }
 
         // cwnd should have decreased due to high delay
@@ -701,7 +736,10 @@ mod tests {
         controller.on_ack_received(22_000, 1500); // 22ms
 
         // Now we have 3 samples, base_delay should be 20ms
-        assert_eq!(controller.get_base_delay(), Some(Duration::from_micros(20_000)));
+        assert_eq!(
+            controller.get_base_delay(),
+            Some(Duration::from_micros(20_000))
+        );
 
         let initial_cwnd = controller.get_window_size();
 

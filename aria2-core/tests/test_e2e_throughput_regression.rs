@@ -94,7 +94,9 @@ async fn test_positioned_write_throughput_10mb_16segments() {
     // Verify data integrity: each segment must contain its distinct fill byte.
     // This proves the concurrent non-overlapping writes did not corrupt each
     // other (which a buggy shared-cursor seek+write path would do).
-    let content = tokio::fs::read(&path).await.expect("failed to read back file");
+    let content = tokio::fs::read(&path)
+        .await
+        .expect("failed to read back file");
     assert_eq!(content.len(), total_size, "file size mismatch after writes");
     for i in 0..num_segments {
         let seg_start = i * segment_size;

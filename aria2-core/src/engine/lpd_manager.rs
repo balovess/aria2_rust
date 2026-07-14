@@ -33,7 +33,10 @@ use tracing::{debug, info, warn};
 use crate::constants;
 
 // Re-export LPD constants for backward compatibility with test imports
-pub use constants::{LPD_MULTICAST_ADDRESS as LPD_MULTICAST_ADDR, LPD_PORT, LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS as DEFAULT_ANNOUNCE_INTERVAL_SECS};
+pub use constants::{
+    LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS as DEFAULT_ANNOUNCE_INTERVAL_SECS,
+    LPD_MULTICAST_ADDRESS as LPD_MULTICAST_ADDR, LPD_PORT,
+};
 
 // =========================================================================
 // Constants
@@ -175,9 +178,13 @@ impl LpdAnnouncer {
         }
 
         // Parse multicast address
-        let multicast_addr: SocketAddr = format!("{}:{}", constants::LPD_MULTICAST_ADDRESS, constants::LPD_PORT)
-            .parse()
-            .map_err(|e| format!("Invalid LPD multicast address: {}", e))?;
+        let multicast_addr: SocketAddr = format!(
+            "{}:{}",
+            constants::LPD_MULTICAST_ADDRESS,
+            constants::LPD_PORT
+        )
+        .parse()
+        .map_err(|e| format!("Invalid LPD multicast address: {}", e))?;
 
         // Join multicast group
         let multicast_ip: Ipv4Addr = constants::LPD_MULTICAST_ADDRESS
@@ -466,7 +473,8 @@ impl LpdManager {
 
     /// Discover peers for a specific info_hash via LPD
     pub async fn discover_peers(&self, _info_hash: &str, timeout_ms: Option<u64>) -> Vec<LpdPeer> {
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(constants::LPD_DEFAULT_RECEIVE_TIMEOUT_MS));
+        let timeout =
+            Duration::from_millis(timeout_ms.unwrap_or(constants::LPD_DEFAULT_RECEIVE_TIMEOUT_MS));
         self.announcer.receive_announcements(timeout)
     }
 

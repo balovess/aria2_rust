@@ -12,13 +12,23 @@ use std::time::Duration;
 /// Global HTTP client instance for connection reuse.
 static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
     let client = Client::builder()
-        .connect_timeout(Duration::from_secs(crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(crate::constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(
+            crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+        ))
+        .timeout(Duration::from_secs(
+            crate::constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+        ))
         .user_agent(crate::constants::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(crate::constants::HTTP_DEFAULT_MAX_REDIRECTS))
+        .redirect(reqwest::redirect::Policy::limited(
+            crate::constants::HTTP_DEFAULT_MAX_REDIRECTS,
+        ))
         .pool_max_idle_per_host(crate::constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
-        .pool_idle_timeout(Some(Duration::from_secs(crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS)))
-        .tcp_keepalive(Some(Duration::from_secs(crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS)))
+        .pool_idle_timeout(Some(Duration::from_secs(
+            crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
+        )))
+        .tcp_keepalive(Some(Duration::from_secs(
+            crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+        )))
         .build()
         .expect("Failed to create global HTTP client");
 
@@ -47,10 +57,16 @@ pub fn create_custom_client(
         .connect_timeout(connect_timeout)
         .timeout(timeout)
         .user_agent(crate::constants::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(crate::constants::HTTP_DEFAULT_MAX_REDIRECTS))
+        .redirect(reqwest::redirect::Policy::limited(
+            crate::constants::HTTP_DEFAULT_MAX_REDIRECTS,
+        ))
         .pool_max_idle_per_host(pool_max_idle_per_host)
-        .pool_idle_timeout(Some(Duration::from_secs(crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS)))
-        .tcp_keepalive(Some(Duration::from_secs(crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS)))
+        .pool_idle_timeout(Some(Duration::from_secs(
+            crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
+        )))
+        .tcp_keepalive(Some(Duration::from_secs(
+            crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+        )))
         .build()
         .expect("Failed to create custom HTTP client");
 
@@ -73,11 +89,7 @@ mod tests {
     #[test]
     fn test_custom_client_is_different() {
         let global = get_global_client();
-        let custom = create_custom_client(
-            Duration::from_secs(10),
-            Duration::from_secs(60),
-            8,
-        );
+        let custom = create_custom_client(Duration::from_secs(10), Duration::from_secs(60), 8);
 
         // Should be different instances
         assert!(!Arc::ptr_eq(&global, &custom));

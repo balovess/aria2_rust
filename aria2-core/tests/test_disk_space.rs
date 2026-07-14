@@ -1,6 +1,7 @@
 use aria2_core::filesystem::disk_space::{
     available_space, check_with_margin, has_enough_space, total_space,
 };
+use std::path::Path;
 use tempfile::TempDir;
 
 #[test]
@@ -37,9 +38,15 @@ fn test_check_with_margin_passes() {
 
 #[test]
 fn test_check_with_margin_rejects_huge_request() {
-    let dir = TempDir::new().unwrap();
+    // Use current directory instead of TempDir: on some CI runners
+    // (especially Linux with tmpfs), statvfs on /tmp paths can fail
+    // or report unexpected values, causing graceful degradation to
+    // return Ok(()) even for impossibly large requests.
     let huge_request: u64 = u64::MAX;
-    assert!(check_with_margin(dir.path(), huge_request, None).is_err());
+    assert!(
+        check_with_margin(Path::new("."), huge_request, None).is_err(),
+        "u64::MAX bytes should always exceed available disk space"
+    );
 }
 
 #[test]

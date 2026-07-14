@@ -404,7 +404,10 @@ impl OptionHandler {
             if v > 0 { Some(v as u64) } else { None }
         };
         let get_str = |key: &str| -> Option<String> {
-            self.get(key).as_str().map(|s| s.to_string()).filter(|s| !s.is_empty())
+            self.get(key)
+                .as_str()
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
         };
 
         DownloadOptions {
@@ -431,7 +434,12 @@ impl OptionHandler {
                 if v.is_empty() {
                     None
                 } else {
-                    Some(v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                    Some(
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
                 }
             },
             enable_public_trackers: self.get("enable-public-trackers").as_bool().unwrap_or(true),
@@ -461,7 +469,11 @@ impl OptionHandler {
                 let v = self.get("bt-snubbed-timeout").as_usize();
                 if v > 0 { Some(v as u64) } else { None }
             },
-            bt_prioritize_piece: self.get("bt-prioritize-piece").as_str().unwrap_or("").to_string(),
+            bt_prioritize_piece: self
+                .get("bt-prioritize-piece")
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             enable_utp: self.get("enable-utp").as_bool().unwrap_or(false),
             utp_listen_port: get_usize("utp-listen-port"),
             header: {
@@ -546,7 +558,10 @@ mod tests {
         assert!(!handler.get("quiet").as_bool().unwrap_or(false));
         assert_eq!(handler.get("seed-ratio").as_f64().unwrap_or(0.0), 0.0);
         assert_eq!(handler.get("rpc-listen-port").as_usize(), 6800);
-        assert_eq!(handler.get("console-log-level").as_str().unwrap_or(""), "notice");
+        assert_eq!(
+            handler.get("console-log-level").as_str().unwrap_or(""),
+            "notice"
+        );
     }
 
     #[test]
@@ -616,7 +631,10 @@ allow-overwrite=false
         );
 
         // Verify loaded values override defaults
-        assert_eq!(handler.get("dir").as_str().unwrap_or(""), "/home/user/downloads");
+        assert_eq!(
+            handler.get("dir").as_str().unwrap_or(""),
+            "/home/user/downloads"
+        );
         assert_eq!(handler.get("split").as_usize(), 16);
         assert_eq!(handler.get("max-connection-per-server").as_usize(), 8);
         assert!(handler.get("quiet").as_bool().unwrap_or(false));
@@ -768,11 +786,7 @@ quiet=false
         );
         assert_eq!(
             OptionHandler::detect_value_type("['a','b','c']"),
-            Some(OptionValue::List(vec![
-                "a".into(),
-                "b".into(),
-                "c".into()
-            ]))
+            Some(OptionValue::List(vec!["a".into(), "b".into(), "c".into()]))
         );
         assert_eq!(
             OptionHandler::detect_value_type(""),
@@ -814,7 +828,10 @@ quiet=false
         assert!(map.contains_key("dir"));
         assert!(map.contains_key("split"));
         assert!(map.contains_key("custom-key"));
-        assert_eq!(map.get("custom-key").unwrap().as_str().unwrap_or(""), "custom-value");
+        assert_eq!(
+            map.get("custom-key").unwrap().as_str().unwrap_or(""),
+            "custom-value"
+        );
         // Map size >= defaults count
         assert!(map.len() >= built_in_defaults().len());
     }

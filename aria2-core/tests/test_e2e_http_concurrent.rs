@@ -118,7 +118,9 @@ fn test_concurrent_segment_manager_fail_marks_failed() {
 async fn test_http_segment_downloader_zero_length() {
     let client = reqwest::Client::new();
     let dl = HttpSegmentDownloader::new(&client, false);
-    let result = dl.download_range("http://example.com", 0, 0, None, &[]).await;
+    let result = dl
+        .download_range("http://example.com", 0, 0, None, &[])
+        .await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
 }

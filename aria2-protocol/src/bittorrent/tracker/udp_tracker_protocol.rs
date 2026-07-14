@@ -501,10 +501,7 @@ impl UdpTrackerClient {
     ///
     /// # Arguments
     /// * `params` - Announce parameters
-    pub fn announce(
-        &self,
-        params: &AnnounceParams<'_>,
-    ) -> Result<AnnounceResponse, String> {
+    pub fn announce(&self, params: &AnnounceParams<'_>) -> Result<AnnounceResponse, String> {
         // Get connection ID
         let conn_id = self.connect()?;
 
@@ -615,10 +612,7 @@ impl AsyncUdpTrackerClient {
     }
 
     /// Async announce
-    pub async fn announce(
-        &self,
-        params: &AnnounceParams<'_>,
-    ) -> Result<AnnounceResponse, String> {
+    pub async fn announce(&self, params: &AnnounceParams<'_>) -> Result<AnnounceResponse, String> {
         let inner = self.inner.clone();
         let info_hash = *params.info_hash;
         let peer_id = *params.peer_id;

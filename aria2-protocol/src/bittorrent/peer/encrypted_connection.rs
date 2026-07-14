@@ -62,7 +62,10 @@ impl EncryptedConnection {
         if MseHandshake::should_negotiate(local_supports_mse, &remote_hs.reserved) {
             Self::complete_mse_handshake(stream, info_hash, &remote_hs, require_encryption).await
         } else if require_encryption {
-            Err(format!("Peer {} does not support encryption, but encryption is required", socket_addr))
+            Err(format!(
+                "Peer {} does not support encryption, but encryption is required",
+                socket_addr
+            ))
         } else {
             Ok(Self::from_plain_connection(stream, remote_hs.peer_id))
         }
@@ -122,7 +125,10 @@ impl EncryptedConnection {
         let _method = initiator.receive_step2(&step2_r_buf)?;
         let crypto = initiator.finalize()?;
 
-        info!("MSE handshake complete: encrypted={}", crypto.is_encrypted());
+        info!(
+            "MSE handshake complete: encrypted={}",
+            crypto.is_encrypted()
+        );
 
         let peer_id = remote_hs.peer_id;
         let conn = PeerConnection::from_stream_with_peer(stream, peer_id);

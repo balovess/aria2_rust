@@ -151,8 +151,8 @@ async fn test_e2e_bt_small_torrent_download() {
         GroupId::new(100),
         &torrent_for_cmd,
         &DownloadOptions {
-            seed_time: Some(0), // 禁用 seeding
-            enable_dht: false, // avoid real DHT bootstrap in unit tests
+            seed_time: Some(0),            // 禁用 seeding
+            enable_dht: false,             // avoid real DHT bootstrap in unit tests
             enable_public_trackers: false, // avoid real internet requests in unit tests
             ..DownloadOptions::default()
         },
@@ -233,7 +233,7 @@ async fn test_e2e_bt_medium_torrent_download() {
         &torrent_for_cmd,
         &DownloadOptions {
             seed_time: Some(0),
-            enable_dht: false, // avoid real DHT bootstrap in unit tests
+            enable_dht: false,             // avoid real DHT bootstrap in unit tests
             enable_public_trackers: false, // avoid real internet requests in unit tests
             ..DownloadOptions::default()
         },
@@ -297,7 +297,7 @@ async fn test_e2e_bt_progress_tracking() {
         &torrent_for_cmd,
         &DownloadOptions {
             seed_time: Some(0),
-            enable_dht: false, // avoid real DHT bootstrap in unit tests
+            enable_dht: false,             // avoid real DHT bootstrap in unit tests
             enable_public_trackers: false, // avoid real internet requests in unit tests
             ..DownloadOptions::default()
         },

@@ -336,10 +336,7 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64, secure: bool) -
             // Extend the valid data length up to `length`, forcing the
             // filesystem to allocate real blocks rather than a sparse hole.
             let ok = unsafe {
-                windows_sys::Win32::Storage::FileSystem::SetFileValidData(
-                    handle,
-                    length as i64,
-                )
+                windows_sys::Win32::Storage::FileSystem::SetFileValidData(handle, length as i64)
             };
             if ok == 0 {
                 let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
@@ -355,11 +352,7 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64, secure: bool) -
                          writer instead of being pre-allocated."
                     );
                 } else {
-                    tracing::warn!(
-                        length,
-                        err,
-                        "SetFileValidData failed; file remains sparse"
-                    );
+                    tracing::warn!(length, err, "SetFileValidData failed; file remains sparse");
                 }
                 false
             } else {
@@ -646,7 +639,9 @@ mod tests {
             .unwrap();
 
         // Truncate to 1MB using Trunc strategy
-        preallocate_file(&path, 1024 * 1024, "trunc", false).await.unwrap();
+        preallocate_file(&path, 1024 * 1024, "trunc", false)
+            .await
+            .unwrap();
 
         // Verify size
         let metadata = tokio::fs::metadata(&path).await.unwrap();
@@ -660,7 +655,9 @@ mod tests {
         let path = dir.path().join("test_alloc_none.bin");
 
         // Try to allocate with None strategy - should not create file
-        preallocate_file(&path, 1024 * 1024, "none", false).await.unwrap();
+        preallocate_file(&path, 1024 * 1024, "none", false)
+            .await
+            .unwrap();
 
         // File should not exist
         assert!(!path.exists());
@@ -826,7 +823,9 @@ mod tests {
         let mut adaptor = DirectDiskAdaptor::new();
         adaptor.open(&path).await.unwrap();
         adaptor.truncate(5 * 1024 * 1024).await.unwrap(); // 5 MiB
-        async_zero_fill(&mut adaptor, 5 * 1024 * 1024).await.unwrap();
+        async_zero_fill(&mut adaptor, 5 * 1024 * 1024)
+            .await
+            .unwrap();
         adaptor.close().await.unwrap();
 
         // Verify size

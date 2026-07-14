@@ -12,9 +12,11 @@
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
+use aria2_protocol::bittorrent::utp::congestion::{
+    LEDBAT_MAX_CWND, LEDBAT_MIN_CWND, LEDBAT_TARGET_DELAY, LedbatController,
+};
 use aria2_protocol::bittorrent::utp::connection::{ConnectionState, UtpConnection};
-use aria2_protocol::bittorrent::utp::congestion::{LedbatController, LEDBAT_MIN_CWND, LEDBAT_MAX_CWND, LEDBAT_TARGET_DELAY};
-use aria2_protocol::bittorrent::utp::metrics::{RttEstimator, DelayEstimator};
+use aria2_protocol::bittorrent::utp::metrics::{DelayEstimator, RttEstimator};
 use aria2_protocol::bittorrent::utp::packet::{PacketType, UtpPacket};
 use aria2_protocol::bittorrent::utp::socket::UtpSocket;
 
@@ -48,7 +50,10 @@ fn get_addr(socket: &UdpSocket) -> std::net::SocketAddr {
 /// `set_read_timeout` on a blocking socket. This is more portable:
 /// macOS `set_read_timeout` + non-blocking mode is unreliable, and
 /// changing the blocking mode momentarily introduces races.
-fn recv_with_timeout(socket: &UdpSocket, timeout_ms: u64) -> Option<(Vec<u8>, std::net::SocketAddr)> {
+fn recv_with_timeout(
+    socket: &UdpSocket,
+    timeout_ms: u64,
+) -> Option<(Vec<u8>, std::net::SocketAddr)> {
     let start = std::time::Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
     let mut buf = vec![0u8; 65535];
@@ -260,7 +265,8 @@ fn test_utp_connection_graceful_close() {
 
     // Simulate SYN-ACK received
     let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
-    conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    conn.on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     assert!(conn.is_established());
 
@@ -298,7 +304,8 @@ fn test_utp_connection_handle_reset_packet() {
     .expect("Connect failed");
 
     let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
-    conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    conn.on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     assert!(conn.is_established());
 
@@ -327,7 +334,8 @@ fn test_utp_connection_send_data() {
     .expect("Connect failed");
 
     let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
-    conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    conn.on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     // Send data
     let data = vec![1, 2, 3, 4, 5];
@@ -349,13 +357,15 @@ fn test_utp_connection_receive_data() {
     .expect("Connect failed");
 
     let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
-    conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    conn.on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     // Receive DATA packet - seq_nr must match expected_recv_seq (1)
     let payload = vec![10, 20, 30, 40, 50];
     let data_packet = UtpPacket::data(conn.local_connection_id(), 1, 1, payload.clone());
 
-    conn.on_packet_received(&data_packet).expect("Handle DATA failed");
+    conn.on_packet_received(&data_packet)
+        .expect("Handle DATA failed");
 
     // Verify data received
     let received = conn.recv_data();
@@ -374,7 +384,8 @@ fn test_utp_connection_ack_handling() {
     .expect("Connect failed");
 
     let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
-    conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    conn.on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     // Send some data
     conn.send_data(&[1, 2, 3]).expect("Send failed");
@@ -643,7 +654,8 @@ fn test_utp_real_udp_syn_exchange() {
     assert!(send_raw(&client, &syn_bytes, server_addr));
 
     // Server receives SYN
-    let (received, from_addr) = recv_with_timeout(&server, 1000).expect("Server should receive SYN");
+    let (received, from_addr) =
+        recv_with_timeout(&server, 1000).expect("Server should receive SYN");
 
     // Parse received packet
     let parsed = UtpPacket::from_bytes(&received).expect("Should parse SYN");
@@ -680,7 +692,8 @@ fn test_utp_real_udp_data_exchange() {
     assert!(send_raw(&client, &data_bytes, server_addr));
 
     // Server receives DATA
-    let (received, from_addr) = recv_with_timeout(&server, 1000).expect("Server should receive DATA");
+    let (received, from_addr) =
+        recv_with_timeout(&server, 1000).expect("Server should receive DATA");
 
     let parsed = UtpPacket::from_bytes(&received).expect("Should parse DATA");
     assert_eq!(parsed.packet_type().unwrap(), PacketType::StData);
@@ -1014,22 +1027,28 @@ fn test_utp_connection_bit_torrent_handshake() {
 
     // Simulate SYN-ACK
     let syn_ack = UtpPacket::syn(client_conn.local_connection_id(), 1);
-    client_conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    client_conn
+        .on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     assert!(client_conn.is_established());
 
     // Send BitTorrent handshake (68 bytes)
     let bt_handshake: Vec<u8> = vec![
         19, // Protocol name length
-        b'B', b'i', b't', b'T', b'o', b'r', b'r', b'e', b'n', b't', b' ', b'p', b'r', b'o', b't', b'o', b'c', b'o', b'l', // "BitTorrent protocol"
+        b'B', b'i', b't', b'T', b'o', b'r', b'r', b'e', b'n', b't', b' ', b'p', b'r', b'o', b't',
+        b'o', b'c', b'o', b'l', // "BitTorrent protocol"
         0, 0, 0, 0, 0, 0, 0, 0, // Reserved bytes
         // Info hash (20 bytes)
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
         // Peer ID (20 bytes)
-        b'A', b'R', b'I', b'A', b'2', b'R', b'S', b'T', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0',
+        b'A', b'R', b'I', b'A', b'2', b'R', b'S', b'T', b'0', b'0', b'0', b'0', b'0', b'0', b'0',
+        b'0', b'0', b'0', b'0', b'0',
     ];
 
-    client_conn.send_data(&bt_handshake).expect("Send BT handshake failed");
+    client_conn
+        .send_data(&bt_handshake)
+        .expect("Send BT handshake failed");
 
     // Verify data was queued
     assert!(client_conn.current_seq_nr() > 1);
@@ -1049,18 +1068,20 @@ fn test_utp_connection_bit_torrent_piece_request() {
     .expect("Connect failed");
 
     let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
-    conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    conn.on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     // Send piece request (ID=6, index=0, begin=0, length=16384)
     let piece_request: Vec<u8> = vec![
         0, 0, 0, 13, // Length prefix (13 bytes)
-        6, // Message ID (request)
+        6,  // Message ID (request)
         0, 0, 0, 0, // Piece index
         0, 0, 0, 0, // Begin offset
         0, 0, 64, 0, // Length (16384)
     ];
 
-    conn.send_data(&piece_request).expect("Send piece request failed");
+    conn.send_data(&piece_request)
+        .expect("Send piece request failed");
 }
 
 #[test]
@@ -1077,12 +1098,13 @@ fn test_utp_connection_bit_torrent_piece_data() {
     .expect("Connect failed");
 
     let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
-    conn.on_packet_received(&syn_ack).expect("Handle SYN-ACK failed");
+    conn.on_packet_received(&syn_ack)
+        .expect("Handle SYN-ACK failed");
 
     // Receive piece data (ID=7)
     let piece_data_header: Vec<u8> = vec![
         0, 0, 64, 21, // Length prefix (16389 bytes = 9 + 16384)
-        7, // Message ID (piece)
+        7,  // Message ID (piece)
         0, 0, 0, 0, // Piece index
         0, 0, 0, 0, // Begin offset
     ];
@@ -1090,7 +1112,8 @@ fn test_utp_connection_bit_torrent_piece_data() {
     // Simulate receiving header - seq_nr must match expected_recv_seq (1)
     let data_packet = UtpPacket::data(conn.local_connection_id(), 1, 1, piece_data_header.clone());
 
-    conn.on_packet_received(&data_packet).expect("Handle piece header failed");
+    conn.on_packet_received(&data_packet)
+        .expect("Handle piece header failed");
 
     // Verify data received
     let received = conn.recv_data();

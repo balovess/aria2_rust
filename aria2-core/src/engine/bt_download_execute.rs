@@ -367,8 +367,7 @@ impl BtDownloadCommand {
 
         // BEP 0027 (Private Torrent): DHT must be disabled for private torrents
         // to prevent leaking the info_hash to the public DHT network.
-        let enable_dht =
-            { self.group.read().await.options().enable_dht } && !self.is_private;
+        let enable_dht = { self.group.read().await.options().enable_dht } && !self.is_private;
         if self.is_private {
             info!("[BT] Private torrent: DHT disabled (BEP 0027)");
         }
@@ -376,23 +375,24 @@ impl BtDownloadCommand {
             let dht_port = { self.group.read().await.options().dht_listen_port };
             let dht_file_path = { self.group.read().await.options().dht_file_path.clone() };
             let dht_entry_points = { self.group.read().await.options().dht_entry_point.clone() };
-            
+
             // Parse custom bootstrap nodes if provided
-            let bootstrap_nodes: Vec<std::net::SocketAddr> = if let Some(ref entry_points) = dht_entry_points {
-                entry_points
-                    .iter()
-                    .filter_map(|ep| ep.parse::<std::net::SocketAddr>().ok())
-                    .collect()
-            } else {
-                vec![]
-            };
-            
+            let bootstrap_nodes: Vec<std::net::SocketAddr> =
+                if let Some(ref entry_points) = dht_entry_points {
+                    entry_points
+                        .iter()
+                        .filter_map(|ep| ep.parse::<std::net::SocketAddr>().ok())
+                        .collect()
+                } else {
+                    vec![]
+                };
+
             let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
                 port: dht_port.unwrap_or(0),
                 dht_file_path,
                 ..Default::default()
             };
-            
+
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
                     // Add custom bootstrap nodes to routing table
@@ -405,9 +405,12 @@ impl BtDownloadCommand {
                             let node = DhtNode::new(id, *addr);
                             engine.add_node(node).await;
                         }
-                        tracing::info!("[BT] Added {} custom DHT bootstrap nodes", bootstrap_nodes.len());
+                        tracing::info!(
+                            "[BT] Added {} custom DHT bootstrap nodes",
+                            bootstrap_nodes.len()
+                        );
                     }
-                    
+
                     self.dht_engine = Some(engine);
                     tracing::info!("[BT] DHT engine started");
                     if let Some(dht) = self.dht_engine.as_ref() {
@@ -796,10 +799,11 @@ impl BtDownloadCommand {
                 for peer_idx in pex_enabled_peers.iter() {
                     if let Some(_conn) = active_connections.get(*peer_idx) {
                         // Build PEX message for this peer
-                        let _remote_addr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                            "0.0.0.0", // Placeholder - actual address would come from connection
-                            0,
-                        );
+                        let _remote_addr =
+                            aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                                "0.0.0.0", // Placeholder - actual address would come from connection
+                                0,
+                            );
 
                         // Note: In a full implementation, we would:
                         // 1. Get the actual remote address from the connection
@@ -808,8 +812,7 @@ impl BtDownloadCommand {
 
                         debug!(
                             "[PEX] Would send PEX to peer {} ({} known peers available)",
-                            peer_idx,
-                            pex_peers_count
+                            peer_idx, pex_peers_count
                         );
                     }
                 }
@@ -1017,8 +1020,13 @@ impl BtDownloadCommand {
                                 web_seed_data.len()
                             );
                             // Verify hash
-                            if piece_manager.verify_piece_hash(next_piece_idx as u32, &web_seed_data) {
-                                tracing::info!("[BT] Piece {} from web seed verified OK", next_piece_idx);
+                            if piece_manager
+                                .verify_piece_hash(next_piece_idx as u32, &web_seed_data)
+                            {
+                                tracing::info!(
+                                    "[BT] Piece {} from web seed verified OK",
+                                    next_piece_idx
+                                );
                                 piece_manager.mark_piece_complete(next_piece_idx as u32);
                                 piece_picker.mark_completed(next_piece_idx as u32);
 
@@ -1334,9 +1342,7 @@ impl BtDownloadCommand {
         let peers_to_connect: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
             new_peers
                 .iter()
-                .filter(|peer| {
-                    !already_connected.contains(&(peer.ip.clone(), peer.port))
-                })
+                .filter(|peer| !already_connected.contains(&(peer.ip.clone(), peer.port)))
                 .take(10) // Limit to 10 new connections per PEX batch
                 .cloned()
                 .collect();
@@ -1358,10 +1364,7 @@ impl BtDownloadCommand {
 
         // For now, we log the intent and return the count
         for peer in &peers_to_connect {
-            debug!(
-                "[PEX] Would connect to peer {}:{}",
-                peer.ip, peer.port
-            );
+            debug!("[PEX] Would connect to peer {}:{}", peer.ip, peer.port);
         }
 
         peers_to_connect.len()

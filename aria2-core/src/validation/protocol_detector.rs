@@ -220,8 +220,7 @@ mod tests {
         // contained a separator and matched the bare-hostname fallback).
         let dir = tempfile::tempdir().expect("create temp dir");
         let file_path = dir.path().join("aria2c.exe");
-        std::fs::write(&file_path, b"this is a plain binary, not a torrent")
-            .expect("write file");
+        std::fs::write(&file_path, b"this is a plain binary, not a torrent").expect("write file");
 
         let detected = detect(file_path.to_str().unwrap());
         assert!(

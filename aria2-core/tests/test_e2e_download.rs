@@ -143,7 +143,9 @@ async fn test_e2e_custom_output_dir() {
     )
     .expect("Failed to create DownloadCommand");
 
-    cmd.execute().await.expect("Custom directory download failed");
+    cmd.execute()
+        .await
+        .expect("Custom directory download failed");
 
     let output_path = subdir.join("small.bin");
     assert!(
@@ -168,7 +170,9 @@ async fn test_e2e_custom_output_filename() {
     )
     .expect("Failed to create DownloadCommand");
 
-    cmd.execute().await.expect("Custom filename download failed");
+    cmd.execute()
+        .await
+        .expect("Custom filename download failed");
 
     let output_path = Path::new(dir.path()).join("custom_name.dat");
     assert!(

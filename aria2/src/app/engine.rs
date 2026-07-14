@@ -126,17 +126,35 @@ impl App {
             bt_endgame_threshold: self
                 .get_opt_i64("bt-endgame-threshold")
                 .await
-                .map(|v| if v > 0 { v as u32 } else { crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32 })
+                .map(|v| {
+                    if v > 0 {
+                        v as u32
+                    } else {
+                        crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32
+                    }
+                })
                 .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
             max_retries: self
                 .get_opt_i64("max-retries")
                 .await
-                .map(|v| if v >= 0 { v as u32 } else { crate::constants::DEFAULT_MAX_RETRIES })
+                .map(|v| {
+                    if v >= 0 {
+                        v as u32
+                    } else {
+                        crate::constants::DEFAULT_MAX_RETRIES
+                    }
+                })
                 .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
             retry_wait: self
                 .get_opt_i64("retry-wait")
                 .await
-                .map(|v| if v > 0 { v as u64 } else { crate::constants::DEFAULT_RETRY_WAIT_SECS })
+                .map(|v| {
+                    if v > 0 {
+                        v as u64
+                    } else {
+                        crate::constants::DEFAULT_RETRY_WAIT_SECS
+                    }
+                })
                 .unwrap_or(crate::constants::DEFAULT_RETRY_WAIT_SECS),
             http_proxy: self.get_opt_str("http-proxy").await,
             all_proxy: self.get_opt_str("all-proxy").await,
@@ -282,7 +300,10 @@ impl App {
                 });
             }
             drop(engine_lock);
-            info!("Starting download engine, {} tasks total", self.detected_inputs.len());
+            info!(
+                "Starting download engine, {} tasks total",
+                self.detected_inputs.len()
+            );
             let result: Result<(), _> = engine.run().await;
             result.map_err(|e| format!("Engine runtime error: {}", e))
         } else {

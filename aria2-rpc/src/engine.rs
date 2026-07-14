@@ -431,7 +431,6 @@ impl RpcEngine {
             _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),
         }
     }
-
 }
 
 impl Default for RpcEngine {

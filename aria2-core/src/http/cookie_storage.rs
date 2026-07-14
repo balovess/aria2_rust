@@ -93,7 +93,10 @@ impl CookieStorage {
     }
 
     pub fn clear(&self) {
-        self.cookies.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.cookies
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     pub fn to_header_string(&self, host: &str, path: &str, secure: bool) -> String {
@@ -109,7 +112,10 @@ impl CookieStorage {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cookies.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+        self.cookies
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 }
 

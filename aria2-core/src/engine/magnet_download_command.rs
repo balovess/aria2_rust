@@ -94,9 +94,7 @@ impl MagnetDownloadCommand {
                 .is_private();
 
         if is_private {
-            info!(
-                "Private torrent detected after metadata exchange: shutting down DHT (BEP 0027)"
-            );
+            info!("Private torrent detected after metadata exchange: shutting down DHT (BEP 0027)");
             if let Some(ref engine) = self.dht_engine {
                 engine.shutdown_async().await;
             }
@@ -259,7 +257,8 @@ mod tests {
     }
 
     /// Start a real DhtEngine on an ephemeral port (port 0) for testing.
-    async fn start_test_dht_engine() -> std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine> {
+    async fn start_test_dht_engine()
+    -> std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine> {
         aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
             aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::default(),
         )
@@ -354,4 +353,3 @@ mod tests {
         );
     }
 }
-

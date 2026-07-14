@@ -153,7 +153,10 @@ impl ActiveSessionManager {
     pub fn start_auto_save(self: &Arc<Self>, groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>>) {
         let mgr = Arc::clone(self);
 
-        tracing::info!("Starting auto-save task, interval: {:?}", mgr.auto_save_interval);
+        tracing::info!(
+            "Starting auto-save task, interval: {:?}",
+            mgr.auto_save_interval
+        );
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(mgr.auto_save_interval);

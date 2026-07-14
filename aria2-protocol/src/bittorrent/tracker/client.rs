@@ -1,7 +1,9 @@
 use tracing::{debug, warn};
 
 use super::response::{TrackerEvent, TrackerResponse};
-use super::udp_tracker_protocol::{AnnounceParams, AsyncUdpTrackerClient, AnnounceResponse, UdpEvent};
+use super::udp_tracker_protocol::{
+    AnnounceParams, AnnounceResponse, AsyncUdpTrackerClient, UdpEvent,
+};
 
 #[derive(Debug, Clone)]
 pub struct TrackerAnnounceParams {

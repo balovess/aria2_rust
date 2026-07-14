@@ -277,10 +277,8 @@ fn bench_mse_handshake_full_3phase(c: &mut Criterion) {
     c.bench_function("mse_handshake_full_3phase", |b| {
         b.iter(|| {
             // Phase 1: Method selection
-            let mut mgr_a =
-                MseHandshakeManager::new(black_box(info_hash)).unwrap();
-            let mut mgr_b =
-                MseHandshakeManager::new(black_box(info_hash)).unwrap();
+            let mut mgr_a = MseHandshakeManager::new(black_box(info_hash)).unwrap();
+            let mut mgr_b = MseHandshakeManager::new(black_box(info_hash)).unwrap();
 
             let method_sel_a = black_box(mgr_a.build_method_selection());
             let method_sel_b = black_box(mgr_b.build_method_selection());

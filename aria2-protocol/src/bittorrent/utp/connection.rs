@@ -43,7 +43,10 @@ impl std::fmt::Display for ConnectionState {
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionError {
     #[error("Invalid state transition: cannot {operation} in state {state}")]
-    InvalidStateTransition { state: ConnectionState, operation: String },
+    InvalidStateTransition {
+        state: ConnectionState,
+        operation: String,
+    },
 
     #[error("Connection already exists")]
     AlreadyConnected,
@@ -236,7 +239,9 @@ impl UtpConnection {
 
     /// Get the available send window (min of congestion window and receive window)
     pub fn available_send_window(&self) -> u32 {
-        self.congestion_controller.available_window().min(self.recv_window)
+        self.congestion_controller
+            .available_window()
+            .min(self.recv_window)
     }
 
     /// Get bytes in flight
@@ -307,7 +312,9 @@ impl UtpConnection {
         }
 
         // Validate SYN packet
-        if syn_packet.packet_type().map_err(|e| ConnectionError::InvalidPacket(e.to_string()))?
+        if syn_packet
+            .packet_type()
+            .map_err(|e| ConnectionError::InvalidPacket(e.to_string()))?
             != PacketType::StSyn
         {
             return Err(ConnectionError::UnexpectedPacketType(
@@ -514,7 +521,8 @@ impl UtpConnection {
                 if acked_bytes > 0 {
                     // Use timestamp difference for LEDBAT
                     let timestamp_diff = packet.timestamp_difference_microseconds as u64;
-                    self.congestion_controller.on_ack_received(timestamp_diff, acked_bytes);
+                    self.congestion_controller
+                        .on_ack_received(timestamp_diff, acked_bytes);
                 }
 
                 // Update RTT estimate
@@ -700,7 +708,8 @@ impl UtpConnection {
         match self.state {
             ConnectionState::Connected => {
                 // Create FIN packet (use receiver's connection_id)
-                let fin_packet = UtpPacket::fin(self.remote_connection_id, self.seq_nr, self.ack_nr);
+                let fin_packet =
+                    UtpPacket::fin(self.remote_connection_id, self.seq_nr, self.ack_nr);
 
                 // Store for retransmission
                 self.store_pending_packet(self.seq_nr, fin_packet.clone());
@@ -1199,7 +1208,9 @@ mod tests {
         assert_eq!(data_packets.len(), 1);
 
         // Server receives data
-        let ack = server.on_packet_received(data_packets.first().unwrap()).unwrap();
+        let ack = server
+            .on_packet_received(data_packets.first().unwrap())
+            .unwrap();
         assert_eq!(ack.len(), 1);
         assert_eq!(ack[0].packet_type().unwrap(), PacketType::StAck);
 

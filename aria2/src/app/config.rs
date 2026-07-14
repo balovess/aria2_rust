@@ -131,7 +131,9 @@ impl App {
 
         self.detected_inputs = positional_uris
             .into_iter()
-            .map(|uri| detect(&uri).map_err(|e| format!("Cannot detect input type '{}': {}", uri, e)))
+            .map(|uri| {
+                detect(&uri).map_err(|e| format!("Cannot detect input type '{}': {}", uri, e))
+            })
             .collect::<std::result::Result<Vec<_>, String>>()?;
         Ok(())
     }
@@ -157,7 +159,12 @@ impl App {
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| ".".to_string());
 
-            let candidate = format!("{}/{}/{}", home, crate::constants::CONFIG_DIR_NAME, crate::constants::CONFIG_FILE_NAME);
+            let candidate = format!(
+                "{}/{}/{}",
+                home,
+                crate::constants::CONFIG_DIR_NAME,
+                crate::constants::CONFIG_FILE_NAME
+            );
             if std::path::Path::new(&candidate).exists() {
                 candidate
             } else {

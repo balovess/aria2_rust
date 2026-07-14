@@ -41,7 +41,7 @@ impl PeerBitfieldTracker {
                     self.piece_peer_count[i] = self.piece_peer_count[i].saturating_sub(1);
                 }
             }
-            
+
             // Update with new bitfield
             let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
             for i in have.iter_set() {
@@ -49,7 +49,7 @@ impl PeerBitfieldTracker {
                     self.piece_peer_count[i] += 1;
                 }
             }
-            
+
             existing.have_pieces = have;
             existing.raw_bitfield = bitfield.to_vec();
             existing.last_updated = Instant::now();
@@ -263,7 +263,7 @@ mod tests {
         mostly_done.clear(97).unwrap();
         mostly_done.clear(98).unwrap();
         mostly_done.clear(99).unwrap();
-        
+
         assert!(
             tracker.should_enter_endgame(20, &mostly_done),
             "5 missing ≤ 20 → endgame"
@@ -298,7 +298,7 @@ mod tests {
     fn test_empty_tracker_no_crash() {
         let tracker = PeerBitfieldTracker::new(50);
         let completed = Bitfield::new(50);
-        
+
         assert_eq!(tracker.peer_count(), 0);
         assert_eq!(tracker.missing_pieces(&completed).len(), 50);
         assert!(tracker.peers_having_piece(0).is_empty());

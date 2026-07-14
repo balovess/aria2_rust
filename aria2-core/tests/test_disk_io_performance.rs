@@ -11,8 +11,8 @@ use aria2_core::filesystem::disk_cache::WrDiskCache;
 use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use aria2_core::filesystem::file_allocation::preallocate_file;
 use aria2_core::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -117,11 +117,17 @@ async fn test_cache_hit_rate_sequential() {
     println!("Hit rate: {:.2}%", hit_rate * 100.0);
     println!("Write duration: {:?}", write_duration);
     println!("Read duration: {:?}", read_duration);
-    println!("Write throughput: {:.2} MB/s",
-        (total_writes * block_size as u64) as f64 / write_duration.as_secs_f64() / 1_000_000.0);
+    println!(
+        "Write throughput: {:.2} MB/s",
+        (total_writes * block_size as u64) as f64 / write_duration.as_secs_f64() / 1_000_000.0
+    );
 
     // With 4MB cache and 400KB total data, all reads should hit cache
-    assert!(hit_rate > 0.8, "Expected high hit rate, got {:.2}%", hit_rate * 100.0);
+    assert!(
+        hit_rate > 0.8,
+        "Expected high hit rate, got {:.2}%",
+        hit_rate * 100.0
+    );
 }
 
 /// Test cache hit rate with random access pattern
@@ -215,7 +221,10 @@ async fn test_cache_eviction_dirty_safety() {
 
     println!("\n=== Cache Eviction Dirty Safety Test ===");
     println!("Cache size: 256 KB");
-    println!("Total data written: {} KB", (num_blocks * block_size) / 1024);
+    println!(
+        "Total data written: {} KB",
+        (num_blocks * block_size) / 1024
+    );
     println!("Entries in cache: {}", count);
     println!("Dirty entries: {}", dirty_count);
     println!("Write duration: {:?}", write_duration);
@@ -228,9 +237,16 @@ async fn test_cache_eviction_dirty_safety() {
     for i in 0..num_blocks {
         let offset = (i * block_size) as u64;
         let result = cache.read(offset, block_size as u64).await.unwrap();
-        assert!(result.is_some(), "Dirty entry at offset {} should exist", offset);
+        assert!(
+            result.is_some(),
+            "Dirty entry at offset {} should exist",
+            offset
+        );
         let data = result.unwrap();
-        assert!(data.iter().all(|&b| b == i as u8), "Data integrity check failed");
+        assert!(
+            data.iter().all(|&b| b == i as u8),
+            "Data integrity check failed"
+        );
     }
 }
 
@@ -245,7 +261,11 @@ async fn test_lock_contention_single_mutex() {
     let path = dir.path().join("lock_single.bin");
 
     let metrics = Arc::new(AtomicMetrics::new());
-    let writer = Arc::new(Mutex::new(CachedDiskWriter::new(&path, Some(10 * 1024 * 1024), None)));
+    let writer = Arc::new(Mutex::new(CachedDiskWriter::new(
+        &path,
+        Some(10 * 1024 * 1024),
+        None,
+    )));
 
     // Open the writer first
     {
@@ -292,10 +312,16 @@ async fn test_lock_contention_single_mutex() {
     println!("Total writes: {}", num_tasks * writes_per_task);
     println!("Total duration: {:?}", total_duration);
     println!("Total lock wait time: {} ms", snapshot.lock_wait_time);
-    println!("Average lock wait: {:.2} ms",
-        snapshot.lock_wait_time as f64 / (num_tasks * writes_per_task) as f64);
-    println!("Throughput: {:.2} MB/s",
-        (num_tasks * writes_per_task * block_size) as f64 / total_duration.as_secs_f64() / 1_000_000.0);
+    println!(
+        "Average lock wait: {:.2} ms",
+        snapshot.lock_wait_time as f64 / (num_tasks * writes_per_task) as f64
+    );
+    println!(
+        "Throughput: {:.2} MB/s",
+        (num_tasks * writes_per_task * block_size) as f64
+            / total_duration.as_secs_f64()
+            / 1_000_000.0
+    );
 
     // Flush and verify
     {
@@ -315,7 +341,11 @@ async fn test_lock_contention_striped_locks() {
     let stripes: Vec<Arc<Mutex<CachedDiskWriter>>> = (0..num_stripes)
         .map(|i| {
             let path = dir.path().join(format!("stripe_{}.bin", i));
-            Arc::new(Mutex::new(CachedDiskWriter::new(&path, Some(2 * 1024 * 1024), None)))
+            Arc::new(Mutex::new(CachedDiskWriter::new(
+                &path,
+                Some(2 * 1024 * 1024),
+                None,
+            )))
         })
         .collect();
 
@@ -371,10 +401,16 @@ async fn test_lock_contention_striped_locks() {
     println!("Total writes: {}", num_tasks * writes_per_task);
     println!("Total duration: {:?}", total_duration);
     println!("Total lock wait time: {} ms", snapshot.lock_wait_time);
-    println!("Average lock wait: {:.2} ms",
-        snapshot.lock_wait_time as f64 / (num_tasks * writes_per_task) as f64);
-    println!("Throughput: {:.2} MB/s",
-        (num_tasks * writes_per_task * block_size) as f64 / total_duration.as_secs_f64() / 1_000_000.0);
+    println!(
+        "Average lock wait: {:.2} ms",
+        snapshot.lock_wait_time as f64 / (num_tasks * writes_per_task) as f64
+    );
+    println!(
+        "Throughput: {:.2} MB/s",
+        (num_tasks * writes_per_task * block_size) as f64
+            / total_duration.as_secs_f64()
+            / 1_000_000.0
+    );
 
     // Flush all stripes
     for stripe in &stripes {
@@ -402,7 +438,9 @@ async fn test_preallocation_strategy_performance() {
         let path = dir.path().join(format!("prealloc_{}.bin", strategy));
 
         let start = Instant::now();
-        preallocate_file(&path, file_size, strategy, false).await.unwrap();
+        preallocate_file(&path, file_size, strategy, false)
+            .await
+            .unwrap();
         let duration = start.elapsed();
 
         let metadata = tokio::fs::metadata(&path).await;
@@ -415,8 +453,10 @@ async fn test_preallocation_strategy_performance() {
         println!("\nStrategy: {}", strategy);
         println!("  Allocation time: {:?}", duration);
         println!("  Actual size: {} bytes", actual_size);
-        println!("  Throughput: {:.2} MB/s",
-            actual_size as f64 / duration.as_secs_f64() / 1_000_000.0);
+        println!(
+            "  Throughput: {:.2} MB/s",
+            actual_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
 
         // Clean up
         if *strategy != "none" {
@@ -455,14 +495,18 @@ async fn test_write_performance_with_preallocation() {
 
         println!("\nWithout preallocation:");
         println!("  Write time: {:?}", duration);
-        println!("  Throughput: {:.2} MB/s",
-            file_size as f64 / duration.as_secs_f64() / 1_000_000.0);
+        println!(
+            "  Throughput: {:.2} MB/s",
+            file_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
     }
 
     // Test with preallocation
     {
         let path = dir.path().join("with_preallocation.bin");
-        preallocate_file(&path, file_size as u64, "falloc", false).await.unwrap();
+        preallocate_file(&path, file_size as u64, "falloc", false)
+            .await
+            .unwrap();
 
         let mut writer = CachedDiskWriter::new(&path, Some(file_size as u64), None);
         writer.open().await.unwrap();
@@ -478,8 +522,10 @@ async fn test_write_performance_with_preallocation() {
 
         println!("\nWith preallocation:");
         println!("  Write time: {:?}", duration);
-        println!("  Throughput: {:.2} MB/s",
-            file_size as f64 / duration.as_secs_f64() / 1_000_000.0);
+        println!(
+            "  Throughput: {:.2} MB/s",
+            file_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
     }
 }
 
@@ -528,10 +574,14 @@ async fn test_fsync_frequency_impact() {
         println!("\nfsync every {} blocks:", interval);
         println!("  Total fsyncs: {}", num_fsyncs);
         println!("  Write time: {:?}", duration);
-        println!("  Throughput: {:.2} MB/s",
-            file_size as f64 / duration.as_secs_f64() / 1_000_000.0);
-        println!("  Time per fsync: {:.2} ms",
-            duration.as_millis() as f64 / num_fsyncs as f64);
+        println!(
+            "  Throughput: {:.2} MB/s",
+            file_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
+        println!(
+            "  Time per fsync: {:.2} ms",
+            duration.as_millis() as f64 / num_fsyncs as f64
+        );
 
         // Clean up
         tokio::fs::remove_file(&path).await.ok();
@@ -615,8 +665,10 @@ async fn test_write_strategy_throughput_comparison() {
         println!("\n1. Direct write (no cache):");
         println!("   Block size: {} KB", block_size / 1024);
         println!("   Time: {:?}", duration);
-        println!("   Throughput: {:.2} MB/s",
-            total_size as f64 / duration.as_secs_f64() / 1_000_000.0);
+        println!(
+            "   Throughput: {:.2} MB/s",
+            total_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
     }
 
     // Strategy 2: Cached write (with cache)
@@ -640,8 +692,10 @@ async fn test_write_strategy_throughput_comparison() {
         println!("\n2. Cached write (4 MB cache):");
         println!("   Block size: {} KB", block_size / 1024);
         println!("   Time: {:?}", duration);
-        println!("   Throughput: {:.2} MB/s",
-            total_size as f64 / duration.as_secs_f64() / 1_000_000.0);
+        println!(
+            "   Throughput: {:.2} MB/s",
+            total_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
     }
 
     // Strategy 3: Large block direct write
@@ -665,16 +719,17 @@ async fn test_write_strategy_throughput_comparison() {
         println!("\n3. Large block direct write:");
         println!("   Block size: {} KB", block_size / 1024);
         println!("   Time: {:?}", duration);
-        println!("   Throughput: {:.2} MB/s",
-            total_size as f64 / duration.as_secs_f64() / 1_000_000.0);
+        println!(
+            "   Throughput: {:.2} MB/s",
+            total_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
     }
 
     // Strategy 4: Batched writes
     {
         use aria2_core::engine::batched_disk_writer::BatchedDiskWriter;
         let path = dir.path().join("batched_write.bin");
-        let mut writer = BatchedDiskWriter::new(&path)
-            .with_threshold(256 * 1024); // 256 KB batch threshold
+        let mut writer = BatchedDiskWriter::new(&path).with_threshold(256 * 1024); // 256 KB batch threshold
 
         let block_size = 16 * 1024; // 16 KB
         let num_blocks = total_size / block_size;
@@ -691,8 +746,10 @@ async fn test_write_strategy_throughput_comparison() {
         println!("\n4. Batched write (256 KB threshold):");
         println!("   Block size: {} KB", block_size / 1024);
         println!("   Time: {:?}", duration);
-        println!("   Throughput: {:.2} MB/s",
-            total_size as f64 / duration.as_secs_f64() / 1_000_000.0);
+        println!(
+            "   Throughput: {:.2} MB/s",
+            total_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
     }
 }
 
@@ -775,10 +832,19 @@ async fn test_generate_disk_io_performance_report() {
     println!("SUMMARY");
     println!("{}", "=".repeat(80));
     println!("Total samples: {}", report.summary.total_samples);
-    println!("Average throughput: {} bytes/sec", report.summary.avg_throughput);
+    println!(
+        "Average throughput: {} bytes/sec",
+        report.summary.avg_throughput
+    );
     println!("Average latency: {} ms", report.summary.avg_latency);
-    println!("Average memory usage: {} bytes", report.summary.avg_memory_usage);
-    println!("Average lock wait time: {} ms", report.summary.avg_lock_wait_time);
+    println!(
+        "Average memory usage: {} bytes",
+        report.summary.avg_memory_usage
+    );
+    println!(
+        "Average lock wait time: {} ms",
+        report.summary.avg_lock_wait_time
+    );
     println!("{}", "=".repeat(80));
 }
 
@@ -796,13 +862,22 @@ async fn test_cache_performance(_dir: &tempfile::TempDir) -> Metrics {
     let duration = start.elapsed();
 
     let throughput = (num_blocks * block_size) as f64 / duration.as_secs_f64();
-    Metrics::new(throughput as u64, duration.as_millis() as u64, cache.current_size_bytes() as u64, 0)
-        .with_label("cache_write")
+    Metrics::new(
+        throughput as u64,
+        duration.as_millis() as u64,
+        cache.current_size_bytes() as u64,
+        0,
+    )
+    .with_label("cache_write")
 }
 
 async fn test_lock_performance(dir: &tempfile::TempDir) -> Metrics {
     let path = dir.path().join("lock_test.bin");
-    let writer = Arc::new(Mutex::new(CachedDiskWriter::new(&path, Some(1024 * 1024), None)));
+    let writer = Arc::new(Mutex::new(CachedDiskWriter::new(
+        &path,
+        Some(1024 * 1024),
+        None,
+    )));
 
     {
         let mut w = writer.lock().await;
@@ -831,11 +906,12 @@ async fn test_preallocation_performance(dir: &tempfile::TempDir) -> Metrics {
     let size = 10 * 1024 * 1024;
 
     let start = Instant::now();
-    preallocate_file(&path, size, "falloc", false).await.unwrap();
+    preallocate_file(&path, size, "falloc", false)
+        .await
+        .unwrap();
     let duration = start.elapsed();
 
-    Metrics::new(size, duration.as_millis() as u64, 0, 0)
-        .with_label("preallocation")
+    Metrics::new(size, duration.as_millis() as u64, 0, 0).with_label("preallocation")
 }
 
 async fn test_fsync_performance(dir: &tempfile::TempDir) -> Metrics {
@@ -854,8 +930,7 @@ async fn test_fsync_performance(dir: &tempfile::TempDir) -> Metrics {
     writer.flush().await.unwrap();
     let duration = start.elapsed();
 
-    Metrics::new(100 * 1024, duration.as_millis() as u64, 0, 0)
-        .with_label("fsync_test")
+    Metrics::new(100 * 1024, duration.as_millis() as u64, 0, 0).with_label("fsync_test")
 }
 
 async fn test_throughput_performance(dir: &tempfile::TempDir) -> Metrics {
@@ -869,12 +944,14 @@ async fn test_throughput_performance(dir: &tempfile::TempDir) -> Metrics {
     let start = Instant::now();
     for i in 0..num_blocks {
         let data = vec![i as u8; block_size];
-        writer.write_at((i * block_size) as u64, &data).await.unwrap();
+        writer
+            .write_at((i * block_size) as u64, &data)
+            .await
+            .unwrap();
     }
     writer.flush().await.unwrap();
     let duration = start.elapsed();
 
     let throughput = (num_blocks * block_size) as f64 / duration.as_secs_f64();
-    Metrics::new(throughput as u64, duration.as_millis() as u64, 0, 0)
-        .with_label("throughput_test")
+    Metrics::new(throughput as u64, duration.as_millis() as u64, 0, 0).with_label("throughput_test")
 }

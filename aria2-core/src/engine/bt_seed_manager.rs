@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -176,7 +176,7 @@ pub struct BtSeedManager {
     /// Choking algorithm for tit-for-tat peer selection during seeding.
     /// When present, drives intelligent choke/unchoke decisions every rotation interval.
     pub choking_algo: Option<ChokingAlgorithm>,
-    
+
     // Upload statistics (atomic for thread-safe access)
     /// Total uploaded bytes (atomic for concurrent access)
     uploaded_bytes_atomic: AtomicU64,
@@ -186,19 +186,19 @@ pub struct BtSeedManager {
     /// Uses std::sync::Mutex because the lock is only held for short synchronous
     /// reads/writes of an Instant and never across .await points.
     last_upload_time: std::sync::Mutex<Instant>,
-    
+
     // Seeding control
     /// Target seed ratio (upload/download)
     seed_ratio: f64,
     /// Target seed duration
     seed_time: Duration,
-    
+
     // Active upload tracking
     /// Map of peer address to upload session
     active_uploads: HashMap<SocketAddr, UploadSession>,
     /// Maximum number of concurrent uploads
     max_uploads: usize,
-    
+
     // Upload speed limiting
     /// Maximum upload speed in bytes/sec (None = unlimited)
     max_upload_speed: Option<u64>,
@@ -296,7 +296,13 @@ impl BtSeedManager {
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
     ) -> Self {
-        let mut manager = Self::new(connections, piece_data, config, exit_condition, total_downloaded);
+        let mut manager = Self::new(
+            connections,
+            piece_data,
+            config,
+            exit_condition,
+            total_downloaded,
+        );
         manager.info_hash = info_hash;
         manager
     }
@@ -454,10 +460,7 @@ impl BtSeedManager {
         if self.seed_time > Duration::ZERO {
             let elapsed = self.seeding_start_time.elapsed();
             if elapsed >= self.seed_time {
-                info!(
-                    "Seed time reached: {:?} >= {:?}",
-                    elapsed, self.seed_time
-                );
+                info!("Seed time reached: {:?} >= {:?}", elapsed, self.seed_time);
                 return true;
             }
         }
@@ -1134,18 +1137,18 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_should_stop_seeding_ratio() {
         let manager = make_test_manager(SeedExitCondition::with_ratio(1.0), 1000, 0);
-        
+
         // Should not stop initially (uploaded = 0)
         assert!(!manager.should_stop_seeding(1000));
-        
+
         // Simulate uploading 500 bytes (ratio = 0.5)
         manager.uploaded_bytes_atomic.store(500, Ordering::Relaxed);
         assert!(!manager.should_stop_seeding(1000));
-        
+
         // Simulate uploading 1000 bytes (ratio = 1.0)
         manager.uploaded_bytes_atomic.store(1000, Ordering::Relaxed);
         assert!(manager.should_stop_seeding(1000));
-        
+
         // Simulate uploading 1500 bytes (ratio = 1.5)
         manager.uploaded_bytes_atomic.store(1500, Ordering::Relaxed);
         assert!(manager.should_stop_seeding(1000));
@@ -1154,10 +1157,10 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_should_stop_seeding_time() {
         let mut manager = make_test_manager(SeedExitCondition::with_time(1), 1000, 0);
-        
+
         // Should not stop immediately
         assert!(!manager.should_stop_seeding(1000));
-        
+
         // Simulate time passing by modifying seeding_start_time
         manager.seeding_start_time = Instant::now() - Duration::from_secs(2);
         assert!(manager.should_stop_seeding(1000));
@@ -1166,7 +1169,7 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_should_stop_seeding_infinite() {
         let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Should never stop with infinite seeding
         assert!(!manager.should_stop_seeding(1000));
         assert!(!manager.should_stop_seeding(0));
@@ -1175,10 +1178,10 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_info_hash() {
         let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Default info_hash should be all zeros
         assert_eq!(manager.info_hash(), &[0u8; 20]);
-        
+
         // Set a custom info_hash
         let custom_hash = [0x12u8; 20];
         manager.set_info_hash(custom_hash);
@@ -1191,7 +1194,7 @@ mod tests {
         let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
         let config = BtSeedingConfig::default();
         let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
-        
+
         let manager = BtSeedManager::new_with_info_hash(
             custom_hash,
             conns,
@@ -1200,17 +1203,17 @@ mod tests {
             SeedExitCondition::infinite(),
             1000,
         );
-        
+
         assert_eq!(manager.info_hash(), &custom_hash);
     }
 
     #[test]
     fn test_bt_seed_manager_max_uploads() {
         let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Default max_uploads should match config
         assert_eq!(manager.max_uploads(), 4); // BtSeedingConfig::default().max_peers_to_unchoke
-        
+
         // Set a new max
         manager.set_max_uploads(8);
         assert_eq!(manager.max_uploads(), 8);
@@ -1219,7 +1222,7 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_seed_ratio_and_time() {
         let manager = make_test_manager(SeedExitCondition::with_time_and_ratio(60, 2.0), 1000, 0);
-        
+
         assert_eq!(manager.seed_ratio(), 2.0);
         assert_eq!(manager.seed_time(), Duration::from_secs(60));
     }
@@ -1233,7 +1236,7 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_num_active_uploads() {
         let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Initially no active uploads
         assert_eq!(manager.num_active_uploads(), 0);
     }
@@ -1243,11 +1246,11 @@ mod tests {
         let mut provider = InMemoryPieceProvider::new(16384, 10);
         // Set up some test data
         provider.set_piece_data(0, vec![0xABu8; 16384]);
-        
+
         let provider_arc = Arc::new(provider);
         let config = BtSeedingConfig::default();
         let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
-        
+
         let mut manager = BtSeedManager::new(
             conns,
             provider_arc,
@@ -1255,21 +1258,21 @@ mod tests {
             SeedExitCondition::infinite(),
             1000,
         );
-        
+
         let peer_addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
-        
+
         // Request a piece
         let result = manager.handle_piece_request(peer_addr, 0, 0, 1024).await;
         assert!(result.is_ok());
-        
+
         let data = result.unwrap();
         assert_eq!(data.len(), 1024);
         assert!(data.iter().all(|&b| b == 0xAB));
-        
+
         // Check that upload stats were updated
         let (uploaded, _) = manager.get_upload_stats();
         assert_eq!(uploaded, 1024);
-        
+
         // Check that active uploads were tracked
         assert_eq!(manager.num_active_uploads(), 1);
     }
@@ -1279,17 +1282,12 @@ mod tests {
         let provider = Arc::new(InMemoryPieceProvider::new(16384, 10));
         let config = BtSeedingConfig::default();
         let conns: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> = vec![];
-        
-        let mut manager = BtSeedManager::new(
-            conns,
-            provider,
-            config,
-            SeedExitCondition::infinite(),
-            1000,
-        );
-        
+
+        let mut manager =
+            BtSeedManager::new(conns, provider, config, SeedExitCondition::infinite(), 1000);
+
         let peer_addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
-        
+
         // Request a piece that doesn't exist (piece 0 has no data)
         let result = manager.handle_piece_request(peer_addr, 0, 0, 1024).await;
         assert!(result.is_err());
@@ -1302,18 +1300,18 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_max_upload_speed() {
         let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Initially no limit
         assert!(manager.max_upload_speed().is_none());
-        
+
         // Set a limit
         manager.set_max_upload_speed(Some(100000));
         assert_eq!(manager.max_upload_speed(), Some(100000));
-        
+
         // Set to 0 should be treated as unlimited
         manager.set_max_upload_speed(Some(0));
         assert!(manager.max_upload_speed().is_none());
-        
+
         // Set to None should be unlimited
         manager.set_max_upload_speed(None);
         assert!(manager.max_upload_speed().is_none());
@@ -1322,10 +1320,10 @@ mod tests {
     #[test]
     fn test_bt_seed_manager_current_upload_speed() {
         let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Initially 0
         assert_eq!(manager.current_upload_speed(), 0);
-        
+
         // Update speed
         manager.update_upload_speed(50000);
         assert_eq!(manager.current_upload_speed(), 50000);
@@ -1334,7 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn test_bt_seed_manager_throttle_upload_no_limit() {
         let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // No limit set, should return immediately
         let result = manager.throttle_upload(0, 10000).await;
         assert!(result.is_ok());
@@ -1343,11 +1341,11 @@ mod tests {
     #[tokio::test]
     async fn test_bt_seed_manager_throttle_upload_within_limit() {
         let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Within limit, should not throttle
         let result = manager.throttle_upload(100000, 1000).await;
         assert!(result.is_ok());
-        
+
         // Check that bytes were tracked
         assert_eq!(manager.throttle_window_bytes.load(Ordering::Relaxed), 1000);
     }
@@ -1359,14 +1357,14 @@ mod tests {
     #[test]
     fn test_seed_stats_calculation() {
         let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Simulate some uploads
         manager.uploaded_bytes_atomic.store(500, Ordering::Relaxed);
         manager.total_uploaded = 500;
-        
+
         let (uploaded, _) = manager.get_upload_stats();
         assert_eq!(uploaded, 500);
-        
+
         // Calculate ratio
         let ratio = uploaded as f64 / manager.total_downloaded as f64;
         assert!((ratio - 0.5).abs() < 0.001);
@@ -1375,7 +1373,7 @@ mod tests {
     #[test]
     fn test_seed_stats_with_elapsed_time() {
         let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         let duration = manager.seeding_duration();
         // Should be very small (just created)
         assert!(duration.as_secs() < 1);
@@ -1409,19 +1407,16 @@ mod tests {
     #[test]
     fn test_should_stop_seeding_with_both_conditions() {
         // Test with both time and ratio set
-        let mut manager = make_test_manager(
-            SeedExitCondition::with_time_and_ratio(60, 1.0),
-            1000,
-            0,
-        );
-        
+        let mut manager =
+            make_test_manager(SeedExitCondition::with_time_and_ratio(60, 1.0), 1000, 0);
+
         // Neither condition met yet
         assert!(!manager.should_stop_seeding(1000));
-        
+
         // Meet ratio condition
         manager.uploaded_bytes_atomic.store(1000, Ordering::Relaxed);
         assert!(manager.should_stop_seeding(1000));
-        
+
         // Reset and meet time condition
         manager.uploaded_bytes_atomic.store(0, Ordering::Relaxed);
         manager.seeding_start_time = Instant::now() - Duration::from_secs(120);
@@ -1431,14 +1426,14 @@ mod tests {
     #[test]
     fn test_max_uploads_enforcement() {
         let mut manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Default max uploads
         assert_eq!(manager.max_uploads(), 4);
-        
+
         // Increase max uploads
         manager.set_max_uploads(10);
         assert_eq!(manager.max_uploads(), 10);
-        
+
         // Decrease max uploads
         manager.set_max_uploads(2);
         assert_eq!(manager.max_uploads(), 2);
@@ -1447,7 +1442,7 @@ mod tests {
     #[test]
     fn test_active_uploads_tracking() {
         let manager = make_test_manager(SeedExitCondition::infinite(), 1000, 0);
-        
+
         // Initially no active uploads
         assert_eq!(manager.num_active_uploads(), 0);
         assert!(manager.active_uploads().is_empty());

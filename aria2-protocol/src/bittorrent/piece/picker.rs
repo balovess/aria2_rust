@@ -52,7 +52,8 @@ pub struct PiecePicker {
     /// Priority mode for piece selection (RarestFirst / SequentialHead / SequentialTail)
     priority_mode: PiecePriorityMode,
     peer_availability: HashMap<u32, HashSet<u32>>,
-    #[allow(dead_code)] // Seed for deterministic piece selection; must remain to support future reproducible/deterministic piece picking (e.g., for testing or reproducible downloads)
+    #[allow(dead_code)]
+    // Seed for deterministic piece selection; must remain to support future reproducible/deterministic piece picking (e.g., for testing or reproducible downloads)
     rng_seed: u64,
     /// Cursor for sequential piece selection (O(1) optimization)
     /// Points to the next piece index to check for sequential selection
@@ -233,7 +234,7 @@ impl PiecePicker {
     fn select_sequential_head(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
         // O(1) optimization: start from cursor position instead of beginning
         let start_pos = self.sequential_head_cursor as usize;
-        
+
         // First, check from cursor to end
         for i in start_pos..max_pieces {
             let piece = &self.pieces[i];
@@ -244,7 +245,7 @@ impl PiecePicker {
                 return Some(i as u32);
             }
         }
-        
+
         // If not found after cursor, check from beginning to cursor
         for i in 0..start_pos {
             let piece = &self.pieces[i];
@@ -255,7 +256,7 @@ impl PiecePicker {
                 return Some(i as u32);
             }
         }
-        
+
         None
     }
 
@@ -268,7 +269,7 @@ impl PiecePicker {
         } else {
             self.sequential_tail_cursor as usize
         };
-        
+
         // First, check from cursor down to 0
         for i in (0..=start_pos).rev() {
             let piece = &self.pieces[i];
@@ -279,7 +280,7 @@ impl PiecePicker {
                 return Some(i as u32);
             }
         }
-        
+
         // If not found before cursor, check from end to cursor
         if start_pos + 1 < max_pieces {
             for i in ((start_pos + 1)..max_pieces).rev() {
@@ -292,7 +293,7 @@ impl PiecePicker {
                 }
             }
         }
-        
+
         None
     }
 
@@ -337,7 +338,7 @@ impl PiecePicker {
     fn select_sequential_with_bitfield(&self, bitfield: &[u8], max_pieces: usize) -> Option<u32> {
         // O(1) optimization: start from cursor position instead of beginning
         let start_pos = self.sequential_cursor as usize;
-        
+
         // First, check from cursor to end
         for i in start_pos..max_pieces {
             let piece = &self.pieces[i];
@@ -350,7 +351,7 @@ impl PiecePicker {
                 return Some(piece.index);
             }
         }
-        
+
         // If not found after cursor, check from beginning to cursor (in case cursor was reset)
         for i in 0..start_pos {
             let piece = &self.pieces[i];
@@ -363,7 +364,7 @@ impl PiecePicker {
                 return Some(piece.index);
             }
         }
-        
+
         None
     }
 
@@ -543,7 +544,7 @@ impl PiecePicker {
     pub fn pieces_iter(&self) -> impl Iterator<Item = &PieceInfo> {
         self.pieces.iter()
     }
-    
+
     /// Export completed pieces as a compact bitfield (MSB-first ordering)
     ///
     /// Returns `Vec<u8>` where each byte represents 8 pieces.
@@ -555,14 +556,14 @@ impl PiecePicker {
         if self.total_pieces == 0 {
             return vec![];
         }
-        
+
         let num_bytes = (self.total_pieces as usize).div_ceil(8);
         let mut bitfield = vec![0u8; num_bytes];
-        
+
         for (i, piece) in self.pieces.iter().enumerate() {
             if piece.completed {
                 let byte_idx = i / 8;
-                let bit_idx = 7 - (i % 8);  // MSB-first ordering
+                let bit_idx = 7 - (i % 8); // MSB-first ordering
                 if byte_idx < bitfield.len() {
                     bitfield[byte_idx] |= 1 << bit_idx;
                 }
@@ -570,7 +571,7 @@ impl PiecePicker {
         }
         bitfield
     }
-    
+
     /// Import bitfield to mark pieces as completed
     ///
     /// Parses a compact bitfield (MSB-first ordering) and marks
@@ -580,7 +581,7 @@ impl PiecePicker {
     pub fn import_bitfield(&mut self, bitfield: &[u8]) {
         for (i, piece) in self.pieces.iter_mut().enumerate() {
             let byte_idx = i / 8;
-            let bit_idx = 7 - (i % 8);  // MSB-first ordering
+            let bit_idx = 7 - (i % 8); // MSB-first ordering
             if byte_idx < bitfield.len() && (bitfield[byte_idx] & (1 << bit_idx)) != 0 {
                 piece.completed = true;
             }
@@ -1035,8 +1036,12 @@ mod tests {
         let picked = picker.pick_next();
         let duration = start.elapsed();
 
-        assert_eq!(picked, Some(5000), "Should pick piece 5000 after completing 0-4999");
-        
+        assert_eq!(
+            picked,
+            Some(5000),
+            "Should pick piece 5000 after completing 0-4999"
+        );
+
         // With O(1) optimization, this should be very fast (< 1 microsecond)
         // Even with 10000 pieces, cursor-based lookup is constant time
         println!("Sequential pick time for 10000 pieces: {:?}", duration);
@@ -1142,16 +1147,27 @@ mod tests {
         }
 
         // Verify all pieces were picked
-        assert_eq!(picked_pieces.len(), 90, "Should have picked 90 remaining pieces");
-        
+        assert_eq!(
+            picked_pieces.len(),
+            90,
+            "Should have picked 90 remaining pieces"
+        );
+
         // Verify no completed pieces were picked
         for &completed in &completed_indices {
-            assert!(!picked_pieces.contains(&completed), "Completed piece {} should not be picked", completed);
+            assert!(
+                !picked_pieces.contains(&completed),
+                "Completed piece {} should not be picked",
+                completed
+            );
         }
 
         // Verify pieces are in order (sequential)
         for i in 1..picked_pieces.len() {
-            assert!(picked_pieces[i] > picked_pieces[i-1], "Pieces should be picked in order");
+            assert!(
+                picked_pieces[i] > picked_pieces[i - 1],
+                "Pieces should be picked in order"
+            );
         }
     }
 
@@ -1174,11 +1190,18 @@ mod tests {
 
         // Count completed pieces: 0, 3, 6, ..., 99 = 34 pieces (0 to 99 inclusive, step 3)
         // Remaining: 100 - 34 = 66 pieces
-        assert_eq!(picked_pieces.len(), 66, "Should have picked 66 remaining pieces");
-        
+        assert_eq!(
+            picked_pieces.len(),
+            66,
+            "Should have picked 66 remaining pieces"
+        );
+
         // Verify pieces are in ascending order
         for i in 1..picked_pieces.len() {
-            assert!(picked_pieces[i] > picked_pieces[i-1], "Pieces should be in ascending order");
+            assert!(
+                picked_pieces[i] > picked_pieces[i - 1],
+                "Pieces should be in ascending order"
+            );
         }
     }
 
@@ -1201,38 +1224,49 @@ mod tests {
 
         // Count completed pieces: 0, 3, 6, ..., 99 = 34 pieces
         // Remaining: 100 - 34 = 66 pieces
-        assert_eq!(picked_pieces.len(), 66, "Should have picked 66 remaining pieces");
-        
+        assert_eq!(
+            picked_pieces.len(),
+            66,
+            "Should have picked 66 remaining pieces"
+        );
+
         // Verify pieces are in descending order
         for i in 1..picked_pieces.len() {
-            assert!(picked_pieces[i] < picked_pieces[i-1], "Pieces should be in descending order");
+            assert!(
+                picked_pieces[i] < picked_pieces[i - 1],
+                "Pieces should be in descending order"
+            );
         }
     }
-    
+
     // ==================== Export/Import Bitfield Tests ====================
-    
+
     #[test]
     fn test_export_bitfield_empty() {
         let picker = PiecePicker::new(10);
         let bitfield = picker.export_bitfield();
-        
+
         // All pieces incomplete -> all zeros
         assert_eq!(bitfield.len(), 2, "10 pieces should need 2 bytes");
-        assert_eq!(bitfield, vec![0x00, 0x00], "Empty bitfield should be all zeros");
+        assert_eq!(
+            bitfield,
+            vec![0x00, 0x00],
+            "Empty bitfield should be all zeros"
+        );
     }
-    
+
     #[test]
     fn test_export_bitfield_all_complete() {
         let mut picker = PiecePicker::new(8);
         for i in 0..8 {
             picker.mark_completed(i);
         }
-        
+
         let bitfield = picker.export_bitfield();
         assert_eq!(bitfield.len(), 1, "8 pieces should need 1 byte");
         assert_eq!(bitfield, vec![0xFF], "All complete should be 0xFF");
     }
-    
+
     #[test]
     fn test_export_bitfield_partial() {
         let mut picker = PiecePicker::new(16);
@@ -1242,74 +1276,109 @@ mod tests {
         picker.mark_completed(7);
         picker.mark_completed(10);
         picker.mark_completed(15);
-        
+
         let bitfield = picker.export_bitfield();
         assert_eq!(bitfield.len(), 2, "16 pieces should need 2 bytes");
-        
+
         // Byte 0: pieces 0-7
         // piece 0 -> bit 7 (MSB) -> 0x80
         // piece 3 -> bit 4 -> 0x10
         // piece 7 -> bit 0 -> 0x01
         // Byte 0 = 0x80 | 0x10 | 0x01 = 0x91
         assert_eq!(bitfield[0], 0x91, "Byte 0 should have pieces 0,3,7 set");
-        
+
         // Byte 1: pieces 8-15
         // piece 10 -> bit 5 (in byte 1, piece 10 is index 2, bit 7-2=5) -> 0x20
         // piece 15 -> bit 0 -> 0x01
         // Byte 1 = 0x20 | 0x01 = 0x21
         assert_eq!(bitfield[1], 0x21, "Byte 1 should have pieces 10,15 set");
     }
-    
+
     #[test]
     fn test_import_bitfield() {
         let mut picker = PiecePicker::new(8);
-        
+
         // Import bitfield with pieces 0, 2, 5, 7 complete
         // 0x80 | 0x20 | 0x04 | 0x01 = 0xA5
         picker.import_bitfield(&[0xA5]);
-        
-        assert!(picker.get_piece_info(0).unwrap().completed, "Piece 0 should be complete");
-        assert!(picker.get_piece_info(2).unwrap().completed, "Piece 2 should be complete");
-        assert!(picker.get_piece_info(5).unwrap().completed, "Piece 5 should be complete");
-        assert!(picker.get_piece_info(7).unwrap().completed, "Piece 7 should be complete");
-        
-        assert!(!picker.get_piece_info(1).unwrap().completed, "Piece 1 should not be complete");
-        assert!(!picker.get_piece_info(3).unwrap().completed, "Piece 3 should not be complete");
-        assert!(!picker.get_piece_info(4).unwrap().completed, "Piece 4 should not be complete");
-        assert!(!picker.get_piece_info(6).unwrap().completed, "Piece 6 should not be complete");
-        
-        assert_eq!(picker.completed_count(), 4, "Should have 4 completed pieces");
+
+        assert!(
+            picker.get_piece_info(0).unwrap().completed,
+            "Piece 0 should be complete"
+        );
+        assert!(
+            picker.get_piece_info(2).unwrap().completed,
+            "Piece 2 should be complete"
+        );
+        assert!(
+            picker.get_piece_info(5).unwrap().completed,
+            "Piece 5 should be complete"
+        );
+        assert!(
+            picker.get_piece_info(7).unwrap().completed,
+            "Piece 7 should be complete"
+        );
+
+        assert!(
+            !picker.get_piece_info(1).unwrap().completed,
+            "Piece 1 should not be complete"
+        );
+        assert!(
+            !picker.get_piece_info(3).unwrap().completed,
+            "Piece 3 should not be complete"
+        );
+        assert!(
+            !picker.get_piece_info(4).unwrap().completed,
+            "Piece 4 should not be complete"
+        );
+        assert!(
+            !picker.get_piece_info(6).unwrap().completed,
+            "Piece 6 should not be complete"
+        );
+
+        assert_eq!(
+            picker.completed_count(),
+            4,
+            "Should have 4 completed pieces"
+        );
     }
-    
+
     #[test]
     fn test_export_import_roundtrip() {
         let mut picker = PiecePicker::new(24);
-        
+
         // Mark various pieces as complete
         for i in [0, 5, 10, 15, 20, 23] {
             picker.mark_completed(i);
         }
-        
+
         let exported = picker.export_bitfield();
-        
+
         // Create new picker and import
         let mut picker2 = PiecePicker::new(24);
         picker2.import_bitfield(&exported);
-        
+
         // Verify same pieces are complete
         for i in 0..24 {
             let p1 = picker.get_piece_info(i).unwrap().completed;
             let p2 = picker2.get_piece_info(i).unwrap().completed;
-            assert_eq!(p1, p2, "Piece {} completion should match after roundtrip", i);
+            assert_eq!(
+                p1, p2,
+                "Piece {} completion should match after roundtrip",
+                i
+            );
         }
-        
+
         assert_eq!(picker.completed_count(), picker2.completed_count());
     }
-    
+
     #[test]
     fn test_export_bitfield_zero_pieces() {
         let picker = PiecePicker::new(0);
         let bitfield = picker.export_bitfield();
-        assert!(bitfield.is_empty(), "Zero pieces should produce empty bitfield");
+        assert!(
+            bitfield.is_empty(),
+            "Zero pieces should produce empty bitfield"
+        );
     }
 }

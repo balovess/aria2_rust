@@ -333,7 +333,10 @@ impl BtMessageHandler {
             );
 
             // Small delay before retry
-            tokio::time::sleep(std::time::Duration::from_millis(constants::BT_RETRY_DELAY_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                constants::BT_RETRY_DELAY_MS,
+            ))
+            .await;
         }
 
         Err(Aria2Error::Fatal(FatalError::Config(format!(

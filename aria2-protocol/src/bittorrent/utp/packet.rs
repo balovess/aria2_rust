@@ -299,7 +299,10 @@ impl UtpPacket {
 
 impl std::fmt::Display for UtpPacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let packet_type = self.packet_type().map(|t| t.to_string()).unwrap_or_else(|_| "INVALID".to_string());
+        let packet_type = self
+            .packet_type()
+            .map(|t| t.to_string())
+            .unwrap_or_else(|_| "INVALID".to_string());
         write!(
             f,
             "UtpPacket {{ type: {}, conn_id: {}, seq: {}, ack: {}, wnd: {}, ts: {}, ts_diff: {}, payload: {} bytes }}",
@@ -410,7 +413,10 @@ mod tests {
         assert_eq!(decoded.type_ver, original.type_ver);
         assert_eq!(decoded.extension, original.extension);
         assert_eq!(decoded.connection_id, original.connection_id);
-        assert_eq!(decoded.timestamp_microseconds, original.timestamp_microseconds);
+        assert_eq!(
+            decoded.timestamp_microseconds,
+            original.timestamp_microseconds
+        );
         assert_eq!(
             decoded.timestamp_difference_microseconds,
             original.timestamp_difference_microseconds

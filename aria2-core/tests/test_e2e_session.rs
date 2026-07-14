@@ -221,16 +221,34 @@ fn test_e2e_secure_falloc_roundtrip() {
     let text = entry.serialize();
 
     // Verify serialized text contains the options
-    assert!(text.contains("secure-falloc=true"), "secure-falloc should be serialized");
-    assert!(text.contains("file-allocation=trunc"), "file-allocation should be serialized");
-    assert!(text.contains("mmap-threshold=67108864"), "mmap-threshold should be serialized");
+    assert!(
+        text.contains("secure-falloc=true"),
+        "secure-falloc should be serialized"
+    );
+    assert!(
+        text.contains("file-allocation=trunc"),
+        "file-allocation should be serialized"
+    );
+    assert!(
+        text.contains("mmap-threshold=67108864"),
+        "mmap-threshold should be serialized"
+    );
 
     // Deserialize back
     let entries = deserialize(&text).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].options.get("secure-falloc"), Some(&"true".to_string()));
-    assert_eq!(entries[0].options.get("file-allocation"), Some(&"trunc".to_string()));
-    assert_eq!(entries[0].options.get("mmap-threshold"), Some(&"67108864".to_string()));
+    assert_eq!(
+        entries[0].options.get("secure-falloc"),
+        Some(&"true".to_string())
+    );
+    assert_eq!(
+        entries[0].options.get("file-allocation"),
+        Some(&"trunc".to_string())
+    );
+    assert_eq!(
+        entries[0].options.get("mmap-threshold"),
+        Some(&"67108864".to_string())
+    );
 }
 
 #[tokio::test]
@@ -261,8 +279,14 @@ async fn test_e2e_full_options_roundtrip_file_io() {
 
     let loaded = load_from_file(&path).await.unwrap();
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].options.get("secure-falloc"), Some(&"true".to_string()));
-    assert_eq!(loaded[0].options.get("file-allocation"), Some(&"trunc".to_string()));
+    assert_eq!(
+        loaded[0].options.get("secure-falloc"),
+        Some(&"true".to_string())
+    );
+    assert_eq!(
+        loaded[0].options.get("file-allocation"),
+        Some(&"trunc".to_string())
+    );
     assert_eq!(loaded[0].options.get("split"), Some(&"4".to_string()));
     assert_eq!(loaded[0].options.get("max-retries"), Some(&"5".to_string()));
 

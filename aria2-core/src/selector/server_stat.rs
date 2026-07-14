@@ -256,9 +256,9 @@ impl ServerStat {
             last_updated: self.last_updated.load(Ordering::Relaxed),
             status: self.status.load(Ordering::Relaxed),
             counter: self.counter.load(Ordering::Relaxed),
-            last_error_time: self.last_error_time.and_then(|t| {
-                t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-            }),
+            last_error_time: self
+                .last_error_time
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())),
             last_error_code: self.last_error_code.unwrap_or(0),
             consecutive_failures: self.consecutive_failures,
         }
@@ -304,9 +304,9 @@ impl ServerStat {
             last_updated: AtomicU64::new(snapshot.last_updated),
             status: AtomicU32::new(snapshot.status),
             counter: AtomicU32::new(snapshot.counter),
-            last_error_time: snapshot.last_error_time.and_then(|ts| {
-                UNIX_EPOCH.checked_add(std::time::Duration::from_secs(ts))
-            }),
+            last_error_time: snapshot
+                .last_error_time
+                .and_then(|ts| UNIX_EPOCH.checked_add(std::time::Duration::from_secs(ts))),
             last_error_code: if snapshot.last_error_code > 0 {
                 Some(snapshot.last_error_code)
             } else {
@@ -564,8 +564,14 @@ mod tests {
         let restored = ServerStat::from_snapshot(&snapshot);
         assert_eq!(restored.host, snapshot.host);
         assert_eq!(restored.get_download_speed(), snapshot.download_speed);
-        assert_eq!(restored.get_single_avg_speed(), snapshot.single_connection_avg_speed);
-        assert_eq!(restored.get_multi_avg_speed(), snapshot.multi_connection_avg_speed);
+        assert_eq!(
+            restored.get_single_avg_speed(),
+            snapshot.single_connection_avg_speed
+        );
+        assert_eq!(
+            restored.get_multi_avg_speed(),
+            snapshot.multi_connection_avg_speed
+        );
         assert_eq!(restored.get_counter(), snapshot.counter);
         assert!(!restored.is_ok()); // Should have error status
     }

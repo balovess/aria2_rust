@@ -15,9 +15,7 @@
 //! - Quick for CI and full benchmark suite
 //! - Integrated with the performance monitoring tool
 
-use aria2_core::util::perf_monitor::{
-    AtomicMetrics, Metrics, PerformanceMonitor,
-};
+use aria2_core::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -131,11 +129,7 @@ impl PerfTestResult {
 }
 
 /// Helper to measure a function multiple times
-fn measure_repeated<F: FnMut()>(
-    name: &str,
-    config: &PerfTestConfig,
-    mut f: F,
-) -> PerfTestResult {
+fn measure_repeated<F: FnMut()>(name: &str, config: &PerfTestConfig, mut f: F) -> PerfTestResult {
     // Warm-up
     for _ in 0..config.warmup_iterations {
         f();
@@ -190,11 +184,7 @@ mod http_concurrent_tests {
 
         // Test 2: New client per request (no reuse)
         let result_new = measure_repeated("new_client", &config, || {
-            let _client = create_custom_client(
-                Duration::from_secs(10),
-                Duration::from_secs(60),
-                8,
-            );
+            let _client = create_custom_client(Duration::from_secs(10), Duration::from_secs(60), 8);
         });
 
         result_new.print_summary();
@@ -316,7 +306,12 @@ mod http_concurrent_tests {
         result.print_summary();
         monitor.record_metric(
             "header_parse",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         println!("\n{}", monitor.export_text());
@@ -349,12 +344,20 @@ mod ftp_connection_tests {
         result.print_summary();
         monitor.record_metric(
             "ftp_connect",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         println!("\n--- Connection Reuse Benefit ---");
         println!("Connection reuse avoids this overhead for each subsequent transfer");
-        println!("Expected benefit: ~{}ms per reused connection", result.mean.as_millis());
+        println!(
+            "Expected benefit: ~{}ms per reused connection",
+            result.mean.as_millis()
+        );
     }
 
     /// Test FTP passive mode data connection performance
@@ -380,7 +383,12 @@ mod ftp_connection_tests {
         result.print_summary();
         monitor.record_metric(
             "pasv_parse",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         println!("\nDefault FTP mode: {:?}", FtpMode::default());
@@ -417,7 +425,12 @@ mod ftp_connection_tests {
         result.print_summary();
         monitor.record_metric(
             "unix_list_parse",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         // Test MLSD format parsing
@@ -433,7 +446,12 @@ mod ftp_connection_tests {
         result_mlsd.print_summary();
         monitor.record_metric(
             "mlsd_parse",
-            Metrics::new(result_mlsd.throughput as u64, result_mlsd.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result_mlsd.throughput as u64,
+                result_mlsd.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         println!("\n{}", monitor.export_text());
@@ -765,7 +783,10 @@ mod disk_io_tests {
 
             let result_read = PerfTestResult::new("cache_read", durations_read);
             result_read.print_summary();
-            println!("  Cache read throughput: {:.2} ops/s", result_read.throughput);
+            println!(
+                "  Cache read throughput: {:.2} ops/s",
+                result_read.throughput
+            );
 
             monitor.record_metric(
                 "cache_read",
@@ -803,7 +824,9 @@ mod disk_io_tests {
 
                 // Warm-up
                 for _ in 0..config.warmup_iterations {
-                    preallocate_file(&path, file_size, strategy, false).await.unwrap();
+                    preallocate_file(&path, file_size, strategy, false)
+                        .await
+                        .unwrap();
                     tokio::fs::remove_file(&path).await.ok();
                 }
 
@@ -811,7 +834,9 @@ mod disk_io_tests {
                 let mut durations = Vec::new();
                 for _ in 0..config.measured_iterations {
                     let start = Instant::now();
-                    preallocate_file(&path, file_size, strategy, false).await.unwrap();
+                    preallocate_file(&path, file_size, strategy, false)
+                        .await
+                        .unwrap();
                     durations.push(start.elapsed());
                     tokio::fs::remove_file(&path).await.ok();
                 }
@@ -1198,7 +1223,8 @@ mod lock_contention_tests {
                 durations_write_heavy.push(start.elapsed());
             }
 
-            let result_write_heavy = PerfTestResult::new("rwlock_write_heavy", durations_write_heavy);
+            let result_write_heavy =
+                PerfTestResult::new("rwlock_write_heavy", durations_write_heavy);
             result_write_heavy.print_summary();
             let snapshot = metrics.snapshot();
             println!("  Total lock wait: {} ms", snapshot.lock_wait_time);
@@ -1229,9 +1255,8 @@ mod lock_contention_tests {
         println!("{}", "=".repeat(80));
 
         let num_stripes = 4;
-        let stripes: Vec<Arc<Mutex<u64>>> = (0..num_stripes)
-            .map(|_| Arc::new(Mutex::new(0)))
-            .collect();
+        let stripes: Vec<Arc<Mutex<u64>>> =
+            (0..num_stripes).map(|_| Arc::new(Mutex::new(0))).collect();
         let stripes = Arc::new(stripes);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1346,7 +1371,9 @@ mod serialization_tests {
             .collect();
         let mut entry_large = SessionEntry::new(2, uris_large);
         for i in 0..50 {
-            entry_large.options.insert(format!("opt{}", i), format!("val{}", i));
+            entry_large
+                .options
+                .insert(format!("opt{}", i), format!("val{}", i));
         }
         entry_large.bitfield = Some((0..10000).map(|i| (i % 256) as u8).collect());
 
@@ -1381,7 +1408,10 @@ mod serialization_tests {
         // Create test data
         let mut dict = BTreeMap::new();
         for i in 0..100 {
-            dict.insert(format!("key{}", i).into_bytes(), BencodeValue::Int(i as i64));
+            dict.insert(
+                format!("key{}", i).into_bytes(),
+                BencodeValue::Int(i as i64),
+            );
         }
         let bencode = BencodeValue::Dict(dict);
 
@@ -1503,7 +1533,12 @@ mod serialization_tests {
         result.print_summary();
         monitor.record_metric(
             "config_parse",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         println!("\n{}", monitor.export_text());
@@ -1582,7 +1617,8 @@ mod regression_tests {
 
         // Test BT piece state creation
         let result = measure_repeated("bt_piece_state_create", &config, || {
-            let _ = aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
+            let _ =
+                aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
         });
         if result.mean.as_micros() as u64 > baselines.bt_piece_state_create_us * 2 {
             regressions.push(format!(
@@ -1637,16 +1673,27 @@ mod regression_tests {
         });
         monitor.record_metric(
             "http",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         // BT
         let result = measure_repeated("bt_piece_state", &config, || {
-            let _ = aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
+            let _ =
+                aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
         });
         monitor.record_metric(
             "bt",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         // Memory
@@ -1655,7 +1702,12 @@ mod regression_tests {
         });
         monitor.record_metric(
             "memory",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 64 * 1024, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                64 * 1024,
+                0,
+            ),
         );
 
         // Serialization
@@ -1666,7 +1718,12 @@ mod regression_tests {
         });
         monitor.record_metric(
             "serialize",
-            Metrics::new(result.throughput as u64, result.mean.as_millis() as u64, 0, 0),
+            Metrics::new(
+                result.throughput as u64,
+                result.mean.as_millis() as u64,
+                0,
+                0,
+            ),
         );
 
         // Generate final report
@@ -1677,7 +1734,10 @@ mod regression_tests {
         println!("SUMMARY");
         println!("{}", "=".repeat(80));
         println!("Total samples: {}", report.summary.total_samples);
-        println!("Average throughput: {} ops/s", report.summary.avg_throughput);
+        println!(
+            "Average throughput: {} ops/s",
+            report.summary.avg_throughput
+        );
         println!("Average latency: {} ms", report.summary.avg_latency);
         println!("Average memory: {} bytes", report.summary.avg_memory_usage);
         println!("{}", "=".repeat(80));
@@ -1736,7 +1796,10 @@ mod stability_tests {
 
         // Report
         if unstable_tests.is_empty() {
-            println!("\n✓ All tests are stable (CV < {:.0}%)", stability_threshold * 100.0);
+            println!(
+                "\n✓ All tests are stable (CV < {:.0}%)",
+                stability_threshold * 100.0
+            );
         } else {
             println!("\n✗ Unstable tests detected:");
             for t in &unstable_tests {

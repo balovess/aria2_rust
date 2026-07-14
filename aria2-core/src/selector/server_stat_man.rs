@@ -134,7 +134,8 @@ impl ServerStatMan {
     pub fn save_to_file(&self, path: &Path) -> Result<usize, String> {
         let map = self.stats.read().unwrap();
 
-        let servers: Vec<ServerStatSnapshot> = map.values().map(|stat| stat.to_snapshot()).collect();
+        let servers: Vec<ServerStatSnapshot> =
+            map.values().map(|stat| stat.to_snapshot()).collect();
 
         let file_content = ServerStatFile {
             version: "1.0".to_string(),
@@ -428,7 +429,8 @@ mod tests {
 
         // Verify file content is valid JSON
         let content = std::fs::read_to_string(&temp_file).expect("Should read file");
-        let parsed: serde_json::Value = serde_json::from_str(&content).expect("Should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("Should be valid JSON");
         assert!(parsed.get("version").is_some());
         assert!(parsed.get("saved_at").is_some());
         assert!(parsed.get("servers").is_some());
@@ -447,11 +449,15 @@ mod tests {
 
         // Load into a new manager
         let man2 = ServerStatMan::new();
-        let loaded = man2.load_from_file(&temp_file).expect("Load should succeed");
+        let loaded = man2
+            .load_from_file(&temp_file)
+            .expect("Load should succeed");
 
         assert_eq!(loaded, 1, "Should load 1 server");
 
-        let stat = man2.find_stat("load.test.com").expect("Should find loaded server");
+        let stat = man2
+            .find_stat("load.test.com")
+            .expect("Should find loaded server");
         assert!(stat.get_avg_speed() > 0);
         assert_eq!(stat.get_consecutive_failures(), 1);
 
@@ -493,7 +499,9 @@ mod tests {
         let man = ServerStatMan::new();
         let nonexistent = std::path::Path::new("/tmp/nonexistent_server_stat_12345.json");
 
-        let loaded = man.load_from_file(nonexistent).expect("Should return Ok(0) for nonexistent file");
+        let loaded = man
+            .load_from_file(nonexistent)
+            .expect("Should return Ok(0) for nonexistent file");
         assert_eq!(loaded, 0);
         assert_eq!(man.count(), 0);
     }
@@ -503,12 +511,15 @@ mod tests {
         let man = ServerStatMan::new();
         let temp_file = std::env::temp_dir().join("test_server_stat_empty.json");
 
-        let saved = man.save_to_file(&temp_file).expect("Should save empty manager");
+        let saved = man
+            .save_to_file(&temp_file)
+            .expect("Should save empty manager");
         assert_eq!(saved, 0);
 
         // Verify file is still valid JSON
         let content = std::fs::read_to_string(&temp_file).expect("Should read file");
-        let parsed: serde_json::Value = serde_json::from_str(&content).expect("Should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("Should be valid JSON");
         let servers = parsed.get("servers").unwrap().as_array().unwrap();
         assert!(servers.is_empty());
 

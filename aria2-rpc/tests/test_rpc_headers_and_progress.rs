@@ -22,8 +22,7 @@ use tokio::sync::{RwLock, mpsc};
 
 /// Create an `RpcEngine` wired to a real `RequestGroupMan` + command channel,
 /// simulating the shared-state setup that the app uses in RPC mode.
-fn create_engine_with_shared_state(
-) -> (
+fn create_engine_with_shared_state() -> (
     RpcEngine,
     Arc<RwLock<RequestGroupMan>>,
     mpsc::UnboundedReceiver<Box<dyn Command>>,
@@ -194,10 +193,8 @@ async fn test_get_global_stat_aggregates_live_data() {
     assert_eq!(stat["numActive"], 0);
 
     // Add two downloads with different speeds
-    let add1 =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(2);
-    let add2 =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(3);
+    let add1 = JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(2);
+    let add2 = JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(3);
     let gid1: String =
         serde_json::from_value(engine.handle_request(&add1).await.result.unwrap()).unwrap();
     let gid2: String =
@@ -235,10 +232,8 @@ async fn test_tell_active_lists_active_downloads() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
     // Add two downloads
-    let add1 =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(1);
-    let add2 =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(2);
+    let add1 = JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(1);
+    let add2 = JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(2);
     let gid1: String =
         serde_json::from_value(engine.handle_request(&add1).await.result.unwrap()).unwrap();
     let _gid2: String =
@@ -261,10 +256,7 @@ async fn test_tell_active_lists_active_downloads() {
     assert_eq!(arr.len(), 2, "both downloads should be active/waiting");
 
     // Verify GIDs are present
-    let gids: Vec<&str> = arr
-        .iter()
-        .map(|v| v["gid"].as_str().unwrap())
-        .collect();
+    let gids: Vec<&str> = arr.iter().map(|v| v["gid"].as_str().unwrap()).collect();
     assert!(gids.contains(&gid1.as_str()));
 }
 
@@ -277,8 +269,11 @@ async fn test_progress_changes_reflected_in_tell_status() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
     // Add a download
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://example.com/progressive.bin"])).with_id(1);
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        json!(["http://example.com/progressive.bin"]),
+    )
+    .with_id(1);
     let resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
 
@@ -382,8 +377,7 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
 async fn test_get_option_errors_for_unknown_gid() {
     let (engine, _group_man, _cmd_rx) = create_engine_with_shared_state();
 
-    let get_req =
-        JsonRpcRequest::new("aria2.getOption", json!(["00000000000000ff"])).with_id(1);
+    let get_req = JsonRpcRequest::new("aria2.getOption", json!(["00000000000000ff"])).with_id(1);
     let resp = engine.handle_request(&get_req).await;
     assert!(
         resp.is_error(),

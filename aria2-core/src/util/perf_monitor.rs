@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Performance metrics snapshot
@@ -188,10 +188,26 @@ impl PerformanceReport {
         }
 
         ReportSummary {
-            avg_throughput: if count > 0 { total_throughput / count as u64 } else { 0 },
-            avg_latency: if count > 0 { total_latency / count as u64 } else { 0 },
-            avg_memory_usage: if count > 0 { total_memory / count as u64 } else { 0 },
-            avg_lock_wait_time: if count > 0 { total_lock_wait / count as u64 } else { 0 },
+            avg_throughput: if count > 0 {
+                total_throughput / count as u64
+            } else {
+                0
+            },
+            avg_latency: if count > 0 {
+                total_latency / count as u64
+            } else {
+                0
+            },
+            avg_memory_usage: if count > 0 {
+                total_memory / count as u64
+            } else {
+                0
+            },
+            avg_lock_wait_time: if count > 0 {
+                total_lock_wait / count as u64
+            } else {
+                0
+            },
             total_samples: count,
         }
     }
@@ -246,7 +262,10 @@ impl PerformanceMonitor {
         // This is a trade-off: we might miss some metrics under high contention
         // but it ensures minimal overhead
         if let Ok(mut guard) = self.metrics.try_write() {
-            guard.entry(label.to_string()).or_insert_with(Vec::new).push(metrics);
+            guard
+                .entry(label.to_string())
+                .or_insert_with(Vec::new)
+                .push(metrics);
         }
     }
 
@@ -254,7 +273,9 @@ impl PerformanceMonitor {
     pub fn generate_report(&self) -> PerformanceReport {
         // Use try_read to avoid blocking in async contexts
         // If we can't get the lock, return an empty report
-        let metrics = self.metrics.try_read()
+        let metrics = self
+            .metrics
+            .try_read()
             .map(|g| g.clone())
             .unwrap_or_else(|_| HashMap::new());
         PerformanceReport::new(metrics, self.elapsed().as_millis() as u64)
@@ -278,19 +299,40 @@ impl PerformanceMonitor {
 
         output.push_str("Summary:\n");
         output.push_str("--------\n");
-        output.push_str(&format!("  Total samples: {}\n", report.summary.total_samples));
-        output.push_str(&format!("  Avg throughput: {} bytes/sec\n", report.summary.avg_throughput));
-        output.push_str(&format!("  Avg latency: {} ms\n", report.summary.avg_latency));
-        output.push_str(&format!("  Avg memory usage: {} bytes\n", report.summary.avg_memory_usage));
-        output.push_str(&format!("  Avg lock wait time: {} ms\n\n", report.summary.avg_lock_wait_time));
+        output.push_str(&format!(
+            "  Total samples: {}\n",
+            report.summary.total_samples
+        ));
+        output.push_str(&format!(
+            "  Avg throughput: {} bytes/sec\n",
+            report.summary.avg_throughput
+        ));
+        output.push_str(&format!(
+            "  Avg latency: {} ms\n",
+            report.summary.avg_latency
+        ));
+        output.push_str(&format!(
+            "  Avg memory usage: {} bytes\n",
+            report.summary.avg_memory_usage
+        ));
+        output.push_str(&format!(
+            "  Avg lock wait time: {} ms\n\n",
+            report.summary.avg_lock_wait_time
+        ));
 
         output.push_str("Detailed Metrics:\n");
         output.push_str("-----------------\n");
         for (label, metrics_list) in &report.metrics {
             output.push_str(&format!("\n[{}]\n", label));
             for (i, m) in metrics_list.iter().enumerate() {
-                output.push_str(&format!("  Sample {}: throughput={} B/s, latency={} ms, memory={} B, lock_wait={} ms\n",
-                    i + 1, m.throughput, m.latency, m.memory_usage, m.lock_wait_time));
+                output.push_str(&format!(
+                    "  Sample {}: throughput={} B/s, latency={} ms, memory={} B, lock_wait={} ms\n",
+                    i + 1,
+                    m.throughput,
+                    m.latency,
+                    m.memory_usage,
+                    m.lock_wait_time
+                ));
             }
         }
 

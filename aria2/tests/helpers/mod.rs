@@ -66,11 +66,7 @@ pub fn wait_for_download_complete(
 
 /// Assert that a file exists and its contents match expected bytes exactly.
 pub fn assert_file_content(path: &Path, expected: &[u8]) {
-    assert!(
-        path.exists(),
-        "File does not exist: {:?}",
-        path
-    );
+    assert!(path.exists(), "File does not exist: {:?}", path);
     let actual = std::fs::read(path).unwrap_or_default();
     assert_eq!(
         actual,
@@ -84,11 +80,7 @@ pub fn assert_file_content(path: &Path, expected: &[u8]) {
 
 /// Assert that a file exists and has at least the expected minimum size.
 pub fn assert_file_min_size(path: &Path, min_size: usize) {
-    assert!(
-        path.exists(),
-        "File does not exist: {:?}",
-        path
-    );
+    assert!(path.exists(), "File does not exist: {:?}", path);
     let size = std::fs::metadata(path)
         .map(|m| m.len() as usize)
         .unwrap_or(0);
@@ -104,7 +96,10 @@ pub fn assert_file_min_size(path: &Path, min_size: usize) {
 /// Clean up test files in a directory matching a pattern.
 pub fn cleanup_test_files(dir: &Path, pattern: &str) -> usize {
     let mut count = 0;
-    if dir.exists() && dir.is_dir() && let Ok(entries) = std::fs::read_dir(dir) {
+    if dir.exists()
+        && dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name() {

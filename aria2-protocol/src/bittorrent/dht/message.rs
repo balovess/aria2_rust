@@ -294,11 +294,7 @@ impl DhtMessageBuilder {
     ///
     /// `compact_nodes` is a concatenation of 26-byte compact node entries
     /// (20 bytes node ID + 6 bytes IPv4 compact addr) per BEP 0005.
-    pub fn find_node_response(
-        tx: &[u8],
-        self_id: &[u8; 20],
-        compact_nodes: &[u8],
-    ) -> DhtMessage {
+    pub fn find_node_response(tx: &[u8], self_id: &[u8; 20], compact_nodes: &[u8]) -> DhtMessage {
         let mut r_dict = std::collections::BTreeMap::new();
         r_dict.insert(b"id".to_vec(), BencodeValue::Bytes(self_id.to_vec()));
         r_dict.insert(
@@ -424,7 +420,8 @@ mod tests {
         let bytes = encode_compact_peer(addr);
         assert_eq!(bytes.len(), 18);
         // First 16 bytes are the IPv6 address octets
-        let expected_octets: [u8; 16] = std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1).octets();
+        let expected_octets: [u8; 16] =
+            std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1).octets();
         assert_eq!(&bytes[0..16], &expected_octets[..]);
         assert_eq!(u16::from_be_bytes([bytes[16], bytes[17]]), 443);
     }
@@ -509,8 +506,7 @@ mod tests {
             "10.0.0.2:6881".parse().unwrap(),
         ];
 
-        let msg =
-            DhtMessageBuilder::get_peers_response_with_peers(&tx, &self_id, token, &peers);
+        let msg = DhtMessageBuilder::get_peers_response_with_peers(&tx, &self_id, token, &peers);
 
         let encoded = msg.encode().unwrap();
         let decoded = DhtMessage::decode(&encoded).unwrap();
@@ -552,8 +548,7 @@ mod tests {
         let token = b"";
         let peers: Vec<std::net::SocketAddr> = vec![];
 
-        let msg =
-            DhtMessageBuilder::get_peers_response_with_peers(&tx, &self_id, token, &peers);
+        let msg = DhtMessageBuilder::get_peers_response_with_peers(&tx, &self_id, token, &peers);
 
         let encoded = msg.encode().unwrap();
         let decoded = DhtMessage::decode(&encoded).unwrap();

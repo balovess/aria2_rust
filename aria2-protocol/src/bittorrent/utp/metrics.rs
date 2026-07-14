@@ -161,7 +161,7 @@ impl DelayEstimator {
             base_delay: None,
             current_delay: 0,
             delay_history: Vec::with_capacity(60),
-            max_history: 60, // ~1 minute of samples at 1 sample/second
+            max_history: 60,          // ~1 minute of samples at 1 sample/second
             target_delay_us: 100_000, // 100ms target delay
         }
     }
@@ -215,7 +215,8 @@ impl DelayEstimator {
     ///
     /// This represents the time packets spend waiting in queues
     pub fn queuing_delay_us(&self) -> u64 {
-        self.current_delay.saturating_sub(self.base_delay.unwrap_or(0))
+        self.current_delay
+            .saturating_sub(self.base_delay.unwrap_or(0))
     }
 
     /// Get the queuing delay as Duration

@@ -13,8 +13,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 use tracing::debug;
@@ -256,8 +256,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let connect_task =
-            tokio::spawn(async move { connect_first_available(vec![addr]).await });
+        let connect_task = tokio::spawn(async move { connect_first_available(vec![addr]).await });
 
         let _conn = listener.accept().await.unwrap();
         let result = connect_task.await.unwrap();

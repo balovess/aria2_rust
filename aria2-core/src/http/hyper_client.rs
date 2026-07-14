@@ -21,11 +21,11 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::stream::Stream;
 use futures::StreamExt;
+use futures::stream::Stream;
+use hyper::StatusCode;
 use hyper::body::HttpBody;
 use hyper::client::{Client, HttpConnector};
-use hyper::StatusCode;
 use tracing::{debug, warn};
 
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -112,13 +112,11 @@ impl HyperDirectClient {
 
         let request = build_range_request(url, &range_header)?;
 
-        let response = self
-            .client
-            .request(request)
-            .await
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+        let response = self.client.request(request).await.map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("hyper request failed: {e}"),
-            }))?;
+            })
+        })?;
 
         let status = response.status();
         match status.as_u16() {
@@ -141,15 +139,15 @@ impl HyperDirectClient {
                 ))));
             }
             code if code >= 500 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError { code }));
+                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
+                    code,
+                }));
             }
             _ => {}
         }
 
         // Accumulate body chunks into a BytesMut, then freeze to Bytes.
-        let initial_cap = length
-            .unwrap_or(0)
-            .min(MAX_INITIAL_CAPACITY) as usize;
+        let initial_cap = length.unwrap_or(0).min(MAX_INITIAL_CAPACITY) as usize;
         let mut buf = bytes::BytesMut::with_capacity(initial_cap);
         let mut body = response.into_body();
         while let Some(chunk) = body.data().await {
@@ -166,9 +164,7 @@ impl HyperDirectClient {
         if buf.is_empty() && matches!(length, Some(l) if l > 0) {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {
-                    message: format!(
-                        "Empty response for range {range_header} from {url}"
-                    ),
+                    message: format!("Empty response for range {range_header} from {url}"),
                 },
             ));
         }
@@ -203,13 +199,11 @@ impl HyperDirectClient {
 
         let request = build_range_request(url, &range_header)?;
 
-        let response = self
-            .client
-            .request(request)
-            .await
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+        let response = self.client.request(request).await.map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("hyper request failed: {e}"),
-            }))?;
+            })
+        })?;
 
         let status = response.status();
         if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
@@ -339,9 +333,7 @@ mod tests {
     /// Spawn a local hyper server on an ephemeral port and return its address.
     async fn spawn_server() -> SocketAddr {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-        let make_svc = make_service_fn(|_conn| async {
-            Ok::<_, Infallible>(service_fn(handle))
-        });
+        let make_svc = make_service_fn(|_conn| async { Ok::<_, Infallible>(service_fn(handle)) });
         let server = Server::bind(&addr).serve(make_svc);
         let local_addr = server.local_addr();
         tokio::spawn(async move {

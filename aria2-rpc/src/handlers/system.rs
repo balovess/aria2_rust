@@ -115,8 +115,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_notifications() {
         let engine = RpcEngine::new();
-        let req =
-            JsonRpcRequest::new("system.listNotifications", serde_json::json!([])).with_id(1);
+        let req = JsonRpcRequest::new("system.listNotifications", serde_json::json!([])).with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_success());
 

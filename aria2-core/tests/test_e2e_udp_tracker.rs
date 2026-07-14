@@ -196,7 +196,12 @@ async fn test_udp_tracker_multiple_events() {
     let peer_id = [0xCDu8; 20];
 
     // Test different events
-    for event in [UdpEvent::Started, UdpEvent::None, UdpEvent::Completed, UdpEvent::Stopped] {
+    for event in [
+        UdpEvent::Started,
+        UdpEvent::None,
+        UdpEvent::Completed,
+        UdpEvent::Stopped,
+    ] {
         let result = client.announce(&AnnounceParams {
             info_hash: &info_hash,
             peer_id: &peer_id,

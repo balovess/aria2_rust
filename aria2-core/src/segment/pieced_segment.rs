@@ -1,5 +1,5 @@
-use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 use crate::error::{Aria2Error, Result};
+use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 
 pub struct PiecedSegment {
     piece_index: usize,

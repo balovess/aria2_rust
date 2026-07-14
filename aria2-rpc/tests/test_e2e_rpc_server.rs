@@ -40,9 +40,7 @@ async fn test_server_creation() {
 
 #[tokio::test]
 async fn test_server_with_config() {
-    let config = ServerConfig::default()
-        .with_host("0.0.0.0")
-        .with_port(8080);
+    let config = ServerConfig::default().with_host("0.0.0.0").with_port(8080);
 
     let server = RpcServer::new(config).expect("Failed to create server");
     assert_eq!(server.addr(), "0.0.0.0:8080");

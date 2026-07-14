@@ -227,7 +227,10 @@ async fn test_save_session_on_shutdown() {
     // Verify result
     assert!(result.is_ok(), "Save should succeed");
     let saved_count = result.expect("Should have a return value");
-    assert!(saved_count.is_some(), "Should return Some when save-session is configured");
+    assert!(
+        saved_count.is_some(),
+        "Should return Some when save-session is configured"
+    );
     assert_eq!(saved_count.unwrap(), 2, "Should save 2 active tasks");
 
     // Verify file was created and contains correct URIs
@@ -283,13 +286,20 @@ fn test_map_entry_to_download_options() {
         Some("/tmp/downloads".to_string()),
         "dir should map correctly"
     );
-    assert_eq!(opts.out, Some("output.bin".to_string()), "out should map correctly");
+    assert_eq!(
+        opts.out,
+        Some("output.bin".to_string()),
+        "out should map correctly"
+    );
     assert_eq!(
         opts.max_download_limit,
         Some(102400),
         "max-download-limit should map correctly"
     );
-    assert!(opts.bt_force_encrypt, "bt-force-encrypt=true should map correctly");
+    assert!(
+        opts.bt_force_encrypt,
+        "bt-force-encrypt=true should map correctly"
+    );
     assert!(!opts.enable_dht, "enable-dht=false should map correctly");
 }
 
@@ -313,7 +323,11 @@ async fn test_restore_nonexistent_session_file() {
 
     // Should return Ok(0) when file doesn't exist, not error
     assert!(result.is_ok(), "Should return Ok when file does not exist");
-    assert_eq!(result.unwrap(), 0, "Should return 0 restored entries when file does not exist");
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "Should return 0 restored entries when file does not exist"
+    );
 }
 
 /// Test 7: No restore when input-file is not configured
@@ -326,7 +340,11 @@ async fn test_restore_without_input_file() {
     let result = app.restore_session().await;
 
     assert!(result.is_ok(), "Should return Ok when not configured");
-    assert_eq!(result.unwrap(), 0, "Should return 0 when input-file is not configured");
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "Should return 0 when input-file is not configured"
+    );
 }
 
 /// Test 8: BT bitfield preserved on restore
@@ -408,7 +426,11 @@ async fn test_restore_empty_session_file() {
 
     let result = app.restore_session().await;
     assert!(result.is_ok(), "Empty file should return Ok");
-    assert_eq!(result.unwrap(), 0, "Empty file should return 0 restored entries");
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "Empty file should return 0 restored entries"
+    );
 }
 
 /// Test 10: Skip entries with zero progress
@@ -461,7 +483,11 @@ http://example.com/new2.iso
 
     let result = app.restore_session().await;
     assert!(result.is_ok(), "Should return Ok");
-    assert_eq!(result.unwrap(), 0, "Entries with no progress should all be skipped");
+    assert_eq!(
+        result.unwrap(),
+        0,
+        "Entries with no progress should all be skipped"
+    );
 
     let man = app.request_man.read().await;
     let group_count = man.count().await;

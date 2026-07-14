@@ -7,13 +7,16 @@
 //!
 //! The goal is to identify serialization bottlenecks and provide optimization recommendations.
 
-use criterion::{criterion_group, Criterion, black_box};
+use criterion::{Criterion, black_box, criterion_group};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 // ==================== Session Serialization Benchmarks ====================
 
-fn gen_session_entry(n_uris: usize, n_options: usize) -> aria2_core::session::session_entry::SessionEntry {
+fn gen_session_entry(
+    n_uris: usize,
+    n_options: usize,
+) -> aria2_core::session::session_entry::SessionEntry {
     let uris: Vec<String> = (0..n_uris)
         .map(|i| format!("http://mirror{}.example.com/large-file-{}.iso", i, i))
         .collect();
@@ -71,21 +74,27 @@ fn bench_session_entry_deserialize(c: &mut Criterion) {
 
     c.bench_function("session_deserialize_small", |b| {
         b.iter(|| {
-            let entry = aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_small);
+            let entry = aria2_core::session::session_entry::SessionEntry::deserialize_line(
+                &serialized_small,
+            );
             black_box(entry.is_ok())
         })
     });
 
     c.bench_function("session_deserialize_medium", |b| {
         b.iter(|| {
-            let entry = aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_medium);
+            let entry = aria2_core::session::session_entry::SessionEntry::deserialize_line(
+                &serialized_medium,
+            );
             black_box(entry.is_ok())
         })
     });
 
     c.bench_function("session_deserialize_large", |b| {
         b.iter(|| {
-            let entry = aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_large);
+            let entry = aria2_core::session::session_entry::SessionEntry::deserialize_line(
+                &serialized_large,
+            );
             black_box(entry.is_ok())
         })
     });
@@ -145,7 +154,8 @@ fn bench_session_with_bitfield(c: &mut Criterion) {
     let serialized = entry.serialize();
     c.bench_function("session_deserialize_with_large_bitfield", |b| {
         b.iter(|| {
-            let result = aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized);
+            let result =
+                aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized);
             black_box(result.is_ok())
         })
     });
@@ -167,7 +177,10 @@ fn gen_bencode_dict(n_keys: usize) -> aria2_protocol::bittorrent::bencode::codec
     BencodeValue::Dict(dict)
 }
 
-fn gen_bencode_nested_dict(depth: usize, width: usize) -> aria2_protocol::bittorrent::bencode::codec::BencodeValue {
+fn gen_bencode_nested_dict(
+    depth: usize,
+    width: usize,
+) -> aria2_protocol::bittorrent::bencode::codec::BencodeValue {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
     use std::collections::BTreeMap;
 
@@ -187,9 +200,7 @@ fn gen_bencode_nested_dict(depth: usize, width: usize) -> aria2_protocol::bittor
 fn gen_bencode_list(n_items: usize) -> aria2_protocol::bittorrent::bencode::codec::BencodeValue {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 
-    let items: Vec<BencodeValue> = (0..n_items)
-        .map(|i| BencodeValue::Int(i as i64))
-        .collect();
+    let items: Vec<BencodeValue> = (0..n_items).map(|i| BencodeValue::Int(i as i64)).collect();
     BencodeValue::List(items)
 }
 

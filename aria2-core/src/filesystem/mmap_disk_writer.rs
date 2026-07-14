@@ -196,9 +196,9 @@ impl SeekableDiskWriter for MmapDiskWriter {
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
                 let start = offset as usize;
-                let end = start.checked_add(data.len()).ok_or_else(|| {
-                    Aria2Error::Io("write offset + length overflow".into())
-                })?;
+                let end = start
+                    .checked_add(data.len())
+                    .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
                 if end > mmap.len() {
                     return Err(Aria2Error::Io(format!(
                         "write at offset {} len {} exceeds mmap size {}",
@@ -225,9 +225,9 @@ impl SeekableDiskWriter for MmapDiskWriter {
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
                 let start = offset as usize;
-                let end = start.checked_add(data.len()).ok_or_else(|| {
-                    Aria2Error::Io("write offset + length overflow".into())
-                })?;
+                let end = start
+                    .checked_add(data.len())
+                    .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
                 if end > mmap.len() {
                     return Err(Aria2Error::Io(format!(
                         "write at offset {} len {} exceeds mmap size {}",

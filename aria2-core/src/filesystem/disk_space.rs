@@ -332,9 +332,7 @@ pub fn check_disk_space_typed(
         // Get absolute path for GetDiskFreeSpaceEx
         let abs_path = match std::fs::canonicalize(check_path) {
             Ok(p) => p,
-            Err(_) => {
-                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-            }
+            Err(_) => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
         };
 
         // Convert path to wide string with null terminator
@@ -408,9 +406,7 @@ pub fn available_space(path: &Path) -> Result<u64> {
         // Get absolute path for GetDiskFreeSpaceEx
         let abs_path = match std::fs::canonicalize(path) {
             Ok(p) => p,
-            Err(_) => {
-                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-            }
+            Err(_) => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
         };
 
         // Convert path to wide string with null terminator
@@ -432,7 +428,7 @@ pub fn available_space(path: &Path) -> Result<u64> {
 
         if result == 0 {
             return Err(Aria2Error::Fatal(FatalError::Config(
-                "GetDiskFreeSpaceExW failed".to_string()
+                "GetDiskFreeSpaceExW failed".to_string(),
             )));
         }
 
@@ -505,9 +501,7 @@ pub fn total_space(path: &Path) -> Result<u64> {
         // Get absolute path for GetDiskFreeSpaceEx
         let abs_path = match std::fs::canonicalize(path) {
             Ok(p) => p,
-            Err(_) => {
-                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-            }
+            Err(_) => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
         };
 
         // Convert path to wide string with null terminator
@@ -529,7 +523,7 @@ pub fn total_space(path: &Path) -> Result<u64> {
 
         if result == 0 {
             return Err(Aria2Error::Fatal(FatalError::Config(
-                "GetDiskFreeSpaceExW failed".to_string()
+                "GetDiskFreeSpaceExW failed".to_string(),
             )));
         }
 

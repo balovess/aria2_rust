@@ -179,7 +179,11 @@ mod tests {
         storage.add_peer(info_hash, addr);
 
         let peers = storage.get_peers(&info_hash);
-        assert_eq!(peers.len(), 1, "duplicate add should not create a new entry");
+        assert_eq!(
+            peers.len(),
+            1,
+            "duplicate add should not create a new entry"
+        );
         assert_eq!(peers, vec![addr]);
         assert_eq!(storage.total_peer_count(), 1);
     }
@@ -195,10 +199,7 @@ mod tests {
         storage.add_peer_with_timestamp(info_hash, addr, expired_ts);
 
         let peers = storage.get_peers(&info_hash);
-        assert!(
-            peers.is_empty(),
-            "peer older than TTL must not be returned"
-        );
+        assert!(peers.is_empty(), "peer older than TTL must not be returned");
     }
 
     #[test]

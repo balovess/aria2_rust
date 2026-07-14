@@ -203,12 +203,15 @@ impl DhtClient {
         let socket = self.get_socket().await?;
         let tx_id = rand::random::<u32>();
         let msg = DhtMessageBuilder::ping(tx_id, &self.config.self_id);
-        
+
         let encoded = msg.encode()?;
         socket.send_to(node.addr, &encoded).await?;
-        
+
         let mut buf = [0u8; 4096];
-        match socket.recv_with_timeout(&mut buf, self.config.query_timeout).await {
+        match socket
+            .recv_with_timeout(&mut buf, self.config.query_timeout)
+            .await
+        {
             Ok((len, _)) => {
                 if len == 0 {
                     return Ok(false);
@@ -237,23 +240,26 @@ impl DhtClient {
     pub async fn send_find_node(&mut self, target: &[u8; 20]) -> Result<Vec<DhtNode>, String> {
         let socket = self.get_socket().await?;
         let mut all_nodes = Vec::new();
-        
+
         // Collect nodes to query first to avoid borrow conflicts
-        let nodes_to_query: Vec<DhtNode> = self.routing_table
+        let nodes_to_query: Vec<DhtNode> = self
+            .routing_table
             .find_closest(target, self.config.max_concurrent_queries)
             .into_iter()
             .cloned()
             .collect();
-        
+
         for node in nodes_to_query {
             let tx_id = rand::random::<u32>();
             let msg = DhtMessageBuilder::find_node(tx_id, &self.config.self_id, target);
             let encoded = msg.encode()?;
-            
+
             socket.send_to(node.addr, &encoded).await?;
-            
+
             let mut buf = [0u8; 4096];
-            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await
+            if let Ok((len, _)) = socket
+                .recv_with_timeout(&mut buf, self.config.query_timeout)
+                .await
                 && len > 0
                 && let Ok(response) = DhtMessage::decode(&buf[..len])
             {
@@ -265,7 +271,7 @@ impl DhtClient {
                 }
             }
         }
-        
+
         Ok(all_nodes)
     }
 
@@ -274,23 +280,26 @@ impl DhtClient {
         let socket = self.get_socket().await?;
         let mut all_peers = Vec::new();
         let mut all_nodes = Vec::new();
-        
+
         // Collect nodes to query first to avoid borrow conflicts
-        let nodes_to_query: Vec<DhtNode> = self.routing_table
+        let nodes_to_query: Vec<DhtNode> = self
+            .routing_table
             .find_closest(info_hash, self.config.max_concurrent_queries)
             .into_iter()
             .cloned()
             .collect();
-        
+
         for node in nodes_to_query {
             let tx_id = rand::random::<u32>();
             let msg = DhtMessageBuilder::get_peers(tx_id, &self.config.self_id, info_hash);
             let encoded = msg.encode()?;
-            
+
             socket.send_to(node.addr, &encoded).await?;
-            
+
             let mut buf = [0u8; 4096];
-            if let Ok((len, _)) = socket.recv_with_timeout(&mut buf, self.config.query_timeout).await
+            if let Ok((len, _)) = socket
+                .recv_with_timeout(&mut buf, self.config.query_timeout)
+                .await
                 && len > 0
                 && let Ok(response) = DhtMessage::decode(&buf[..len])
             {
@@ -305,7 +314,7 @@ impl DhtClient {
                 }
             }
         }
-        
+
         if !all_peers.is_empty() {
             Ok(GetPeersResult::Peers(all_peers))
         } else {
@@ -314,26 +323,37 @@ impl DhtClient {
     }
 
     /// Send an announce_peer query to announce ourselves to the DHT network
-    pub async fn send_announce_peer(&mut self, info_hash: &[u8; 20], port: u16) -> Result<(), String> {
+    pub async fn send_announce_peer(
+        &mut self,
+        info_hash: &[u8; 20],
+        port: u16,
+    ) -> Result<(), String> {
         let socket = self.get_socket().await?;
-        
+
         // Collect nodes to query first to avoid borrow conflicts
-        let nodes_to_query: Vec<DhtNode> = self.routing_table
+        let nodes_to_query: Vec<DhtNode> = self
+            .routing_table
             .find_closest(info_hash, 8)
             .into_iter()
             .cloned()
             .collect();
-        
+
         for node in nodes_to_query {
             // Generate a token for announce (in real implementation, this should come from previous get_peers response)
             let token = format!("token_{}", rand::random::<u32>());
             let tx_id = rand::random::<u32>();
-            let msg = DhtMessageBuilder::announce_peer(tx_id, &self.config.self_id, info_hash, port, &token);
+            let msg = DhtMessageBuilder::announce_peer(
+                tx_id,
+                &self.config.self_id,
+                info_hash,
+                port,
+                &token,
+            );
             let encoded = msg.encode()?;
-            
+
             socket.send_to(node.addr, &encoded).await?;
         }
-        
+
         Ok(())
     }
 

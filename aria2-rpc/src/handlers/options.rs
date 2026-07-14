@@ -11,26 +11,52 @@ use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 /// Valid option keys accepted by `aria2.changeOption`.
 const VALID_OPTION_KEYS: &[&str] = &[
-    "split", "max-connection-per-server", "max-download-limit",
-    "max-upload-limit", "dir", "out", "seed-time", "seed-ratio",
+    "split",
+    "max-connection-per-server",
+    "max-download-limit",
+    "max-upload-limit",
+    "dir",
+    "out",
+    "seed-time",
+    "seed-ratio",
     // File allocation
-    "file-allocation", "mmap-threshold", "secure-falloc",
+    "file-allocation",
+    "mmap-threshold",
+    "secure-falloc",
     // Checksum & cookies
-    "checksum", "cookie-file", "cookies",
+    "checksum",
+    "cookie-file",
+    "cookies",
     // BitTorrent
-    "bt-force-encrypt", "bt-require-crypto", "enable-dht",
-    "dht-listen-port", "dht-entry-point", "enable-public-trackers",
-    "bt-piece-selection-strategy", "bt-endgame-threshold",
-    "bt-max-upload-slots", "bt-optimistic-unchoke-interval", "bt-snubbed-timeout",
-    "bt-prioritize-piece", "enable-utp", "utp-listen-port",
+    "bt-force-encrypt",
+    "bt-require-crypto",
+    "enable-dht",
+    "dht-listen-port",
+    "dht-entry-point",
+    "enable-public-trackers",
+    "bt-piece-selection-strategy",
+    "bt-endgame-threshold",
+    "bt-max-upload-slots",
+    "bt-optimistic-unchoke-interval",
+    "bt-snubbed-timeout",
+    "bt-prioritize-piece",
+    "enable-utp",
+    "utp-listen-port",
     // Retry
-    "max-retries", "retry-wait",
+    "max-retries",
+    "retry-wait",
     // DHT
     "dht-file-path",
     // Proxy
-    "http-proxy", "all-proxy", "https-proxy", "ftp-proxy", "no-proxy",
+    "http-proxy",
+    "all-proxy",
+    "https-proxy",
+    "ftp-proxy",
+    "no-proxy",
     // HTTP headers
-    "header", "user-agent", "referer",
+    "header",
+    "user-agent",
+    "referer",
 ];
 
 impl RpcEngine {
@@ -129,7 +155,10 @@ impl RpcEngine {
         // Step 1: reject unknown option keys entirely.
         for key in changes.keys() {
             if !VALID_OPTION_KEYS.contains(&key.as_str()) {
-                return Err(JsonRpcError::InvalidParams(format!("Unknown option: {}", key)));
+                return Err(JsonRpcError::InvalidParams(format!(
+                    "Unknown option: {}",
+                    key
+                )));
             }
         }
 
