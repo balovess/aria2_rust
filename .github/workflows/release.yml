@@ -87,14 +87,14 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          strip aria2${{ matrix.ext }} || true
-          tar czf ../../../../${{ matrix.artifact }}.tar.gz aria2${{ matrix.ext }}
+          strip aria2c${{ matrix.ext }} || true
+          tar czf ../../../../${{ matrix.artifact }}.tar.gz aria2c${{ matrix.ext }}
           cd -
       - name: Prepare artifacts (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.artifact }}.zip aria2${{ matrix.ext }}
+          7z a ../../../${{ matrix.artifact }}.zip aria2c${{ matrix.ext }}
           cd -
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

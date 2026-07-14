@@ -9,7 +9,8 @@
 # ============================================
 # Stage 1: Build
 # ============================================
-FROM rust:1.75-alpine AS builder
+# Rust 1.85+ is required for edition = "2024" (stabilized in 1.85).
+FROM rust:1.85-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
