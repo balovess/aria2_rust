@@ -289,7 +289,10 @@ mod tests {
         let mut cipher2 = Arc4Cipher::new(key);
         cipher2.decrypt(&mut data2);
 
-        assert_eq!(data1, data2, "encrypt and decrypt should produce same result");
+        assert_eq!(
+            data1, data2,
+            "encrypt and decrypt should produce same result"
+        );
     }
 
     #[test]
@@ -304,7 +307,10 @@ mod tests {
         cipher1.encrypt(&mut enc1);
         cipher2.encrypt(&mut enc2);
 
-        assert_ne!(enc1, enc2, "different keys should produce different ciphertext");
+        assert_ne!(
+            enc1, enc2,
+            "different keys should produce different ciphertext"
+        );
     }
 
     #[test]

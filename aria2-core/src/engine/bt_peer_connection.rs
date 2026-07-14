@@ -46,23 +46,20 @@ impl UtpPeerConnection {
     }
 
     /// Connect to a remote peer via uTP
-    pub async fn connect(
-        addr: std::net::SocketAddr,
-        info_hash: &[u8; 20],
-    ) -> Result<Self> {
+    pub async fn connect(addr: std::net::SocketAddr, info_hash: &[u8; 20]) -> Result<Self> {
         // Create a new uTP socket for this connection
         let socket = aria2_protocol::bittorrent::utp::UtpSocket::bind_any()
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
-        
+
         let socket = Arc::new(Mutex::new(socket));
-        
+
         // Initiate uTP connection
         let conn_id = {
             let mut sock = socket.lock().await;
             sock.connect(addr)
                 .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?
         };
-        
+
         Ok(Self {
             socket,
             conn_id,
@@ -87,40 +84,50 @@ impl UtpPeerConnection {
     pub async fn perform_handshake(&mut self) -> Result<()> {
         use aria2_protocol::bittorrent::message::handshake::Handshake;
         use aria2_protocol::bittorrent::peer::id::generate_peer_id;
-        
+
         // Generate proper peer_id following BEP 20 format (-AR0001- prefix)
         let peer_id = generate_peer_id();
         let handshake = Handshake::new(&self.info_hash, &peer_id);
         let handshake_bytes = handshake.to_bytes();
-        
+
         // Send handshake
         {
             let mut socket = self.socket.lock().await;
-            socket.send(self.conn_id, &handshake_bytes)
-                .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?;
+            socket.send(self.conn_id, &handshake_bytes).map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: e.to_string(),
+                })
+            })?;
         }
-        
+
         // Receive handshake response
         let mut response_buf = vec![0u8; 68]; // Handshake is 68 bytes
         let len = {
             let mut socket = self.socket.lock().await;
-            socket.recv(self.conn_id, &mut response_buf)
-                .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?
+            socket.recv(self.conn_id, &mut response_buf).map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: e.to_string(),
+                })
+            })?
         };
-        
+
         if len < 68 {
-            return Err(Aria2Error::Fatal(FatalError::Config("Handshake response too short".to_string())));
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Handshake response too short".to_string(),
+            )));
         }
-        
+
         // Parse handshake
         let response = Handshake::parse(&response_buf[..len])
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))?;
-        
+
         // Verify info hash
         if response.info_hash != self.info_hash {
-            return Err(Aria2Error::Fatal(FatalError::Config("Info hash mismatch".to_string())));
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Info hash mismatch".to_string(),
+            )));
         }
-        
+
         self.handshake_complete = true;
         Ok(())
     }
@@ -128,8 +135,11 @@ impl UtpPeerConnection {
     /// Send a BitTorrent message
     pub async fn send_message(&mut self, message: &[u8]) -> Result<()> {
         let mut socket = self.socket.lock().await;
-        socket.send(self.conn_id, message)
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?;
+        socket.send(self.conn_id, message).map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: e.to_string(),
+            })
+        })?;
         Ok(())
     }
 
@@ -142,13 +152,19 @@ impl UtpPeerConnection {
             match socket.recv(self.conn_id, &mut buf) {
                 Ok(0) => return Ok(None), // No data available
                 Ok(len) => len,
-                Err(e) => return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() })),
+                Err(e) => {
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: e.to_string(),
+                        },
+                    ));
+                }
             }
         };
-        
+
         // Append to receive buffer
         self.recv_buffer.extend_from_slice(&buf[..len]);
-        
+
         // Try to parse a complete message
         if self.recv_buffer.len() >= 4 {
             // Read message length (4 bytes, big-endian)
@@ -158,7 +174,7 @@ impl UtpPeerConnection {
                 self.recv_buffer[2],
                 self.recv_buffer[3],
             ]) as usize;
-            
+
             // Check if we have the complete message
             if self.recv_buffer.len() >= 4 + msg_len {
                 // Extract message
@@ -167,22 +183,26 @@ impl UtpPeerConnection {
                 return Ok(Some(message));
             }
         }
-        
+
         Ok(None)
     }
 
     /// Close the connection
     pub async fn close(&mut self) -> Result<()> {
         let mut socket = self.socket.lock().await;
-        socket.close_connection(self.conn_id)
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e.to_string() }))?;
+        socket.close_connection(self.conn_id).map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: e.to_string(),
+            })
+        })?;
         Ok(())
     }
 
     /// Get connection statistics
     pub async fn stats(&self) -> Result<aria2_protocol::bittorrent::utp::ConnectionStats> {
         let socket = self.socket.lock().await;
-        socket.connection_stats(self.conn_id)
+        socket
+            .connection_stats(self.conn_id)
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))
     }
 }
@@ -251,12 +271,9 @@ impl BtPeerConn {
     /// - LEDBAT congestion control (low priority, background traffic)
     /// - Better performance on congested networks
     /// - NAT traversal benefits
-    pub async fn connect_utp(
-        addr: std::net::SocketAddr,
-        info_hash: &[u8; 20],
-    ) -> Result<Self> {
+    pub async fn connect_utp(addr: std::net::SocketAddr, info_hash: &[u8; 20]) -> Result<Self> {
         let utp_conn = UtpPeerConnection::connect(addr, info_hash).await?;
-        
+
         Ok(Self {
             inner: InnerConnection::Utp(utp_conn),
             allowed_fast: HashSet::new(),
@@ -273,7 +290,7 @@ impl BtPeerConn {
         info_hash: &[u8; 20],
     ) -> Self {
         let utp_conn = UtpPeerConnection::new(socket, conn_id, *info_hash);
-        
+
         Self {
             inner: InnerConnection::Utp(utp_conn),
             allowed_fast: HashSet::new(),
@@ -479,8 +496,7 @@ impl BtPeerConn {
                 if let Some(bytes) = msg_bytes {
                     // Parse into BtMessage
                     use aria2_protocol::bittorrent::message::factory::parse_message;
-                    parse_message(&bytes)
-                        .map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
+                    parse_message(&bytes).map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
                 } else {
                     Ok(None)
                 }

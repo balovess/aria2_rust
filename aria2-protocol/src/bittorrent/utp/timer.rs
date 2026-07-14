@@ -181,10 +181,10 @@ impl TimerManager {
 
         // Insert or replace timer
         self.timers.insert(key, entry);
-        
+
         // Update queue - remove old entry if exists
         self.timer_queue.retain(|k| *k != key);
-        
+
         // Add to queue
         self.timer_queue.push_back(key);
     }
@@ -238,7 +238,7 @@ impl TimerManager {
         // Process expired timers
         for key in expired_keys {
             expired.push(key);
-            
+
             if let Some(entry) = self.timers.get(&key) {
                 // For retransmit timers, check if we should reset or remove
                 if matches!(entry.timer_type, TimerType::Retransmit(_)) {
@@ -280,13 +280,17 @@ impl TimerManager {
 
     /// Get remaining time for a timer
     pub fn remaining_time(&self, conn_id: u16, timer_type: TimerType) -> Option<Duration> {
-        self.timers.get(&(conn_id, timer_type)).map(|e| e.remaining())
+        self.timers
+            .get(&(conn_id, timer_type))
+            .map(|e| e.remaining())
     }
 
     /// Get the next timer to expire
     pub fn next_timer(&self) -> Option<(u16, TimerType, Duration)> {
         self.timer_queue.front().and_then(|key| {
-            self.timers.get(key).map(|entry| (key.0, key.1, entry.remaining()))
+            self.timers
+                .get(key)
+                .map(|entry| (key.0, key.1, entry.remaining()))
         })
     }
 
@@ -570,7 +574,9 @@ impl KeepaliveManager {
         let now = Instant::now();
 
         // Calculate time since last activity
-        let idle_time = self.last_activity.map_or(Duration::ZERO, |t| now.duration_since(t));
+        let idle_time = self
+            .last_activity
+            .map_or(Duration::ZERO, |t| now.duration_since(t));
 
         // Calculate remaining time until keepalive
         if idle_time >= self.interval {
@@ -710,9 +716,9 @@ mod tests {
     #[test]
     fn test_timer_manager_set_timer() {
         let mut manager = TimerManager::new();
-        
+
         manager.set_timer(1, TimerType::ConnectTimeout, Duration::from_secs(5));
-        
+
         assert_eq!(manager.timer_count(), 1);
         assert!(manager.has_timer(1, TimerType::ConnectTimeout));
     }
@@ -720,10 +726,10 @@ mod tests {
     #[test]
     fn test_timer_manager_cancel_timer() {
         let mut manager = TimerManager::new();
-        
+
         manager.set_timer(1, TimerType::ConnectTimeout, Duration::from_secs(5));
         assert_eq!(manager.timer_count(), 1);
-        
+
         manager.cancel_timer(1, TimerType::ConnectTimeout);
         assert_eq!(manager.timer_count(), 0);
         assert!(!manager.has_timer(1, TimerType::ConnectTimeout));
@@ -732,14 +738,14 @@ mod tests {
     #[test]
     fn test_timer_manager_cancel_all_timers() {
         let mut manager = TimerManager::new();
-        
+
         manager.set_timer(1, TimerType::ConnectTimeout, Duration::from_secs(5));
         manager.set_timer(1, TimerType::Keepalive, Duration::from_secs(10));
         manager.set_timer(2, TimerType::IdleTimeout, Duration::from_secs(30));
-        
+
         assert_eq!(manager.timer_count(), 3);
         assert_eq!(manager.connection_timer_count(1), 2);
-        
+
         manager.cancel_all_timers(1);
         assert_eq!(manager.timer_count(), 1);
         assert_eq!(manager.connection_timer_count(1), 0);
@@ -749,13 +755,13 @@ mod tests {
     #[test]
     fn test_timer_manager_get_expired_timers() {
         let mut manager = TimerManager::new();
-        
+
         // Set a very short timer
         manager.set_timer(1, TimerType::ConnectTimeout, Duration::from_millis(1));
-        
+
         // Wait for it to expire
         std::thread::sleep(Duration::from_millis(10));
-        
+
         let expired = manager.get_expired_timers();
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0], (1, TimerType::ConnectTimeout));
@@ -765,9 +771,9 @@ mod tests {
     #[test]
     fn test_timer_manager_remaining_time() {
         let mut manager = TimerManager::new();
-        
+
         manager.set_timer(1, TimerType::Keepalive, Duration::from_secs(10));
-        
+
         let remaining = manager.remaining_time(1, TimerType::Keepalive);
         assert!(remaining.is_some());
         let rem = remaining.unwrap();
@@ -778,10 +784,10 @@ mod tests {
     #[test]
     fn test_timer_manager_clear() {
         let mut manager = TimerManager::new();
-        
+
         manager.set_timer(1, TimerType::ConnectTimeout, Duration::from_secs(5));
         manager.set_timer(2, TimerType::Keepalive, Duration::from_secs(10));
-        
+
         manager.clear();
         assert_eq!(manager.timer_count(), 0);
     }
@@ -791,7 +797,10 @@ mod tests {
         let manager = TimerManager::new();
         assert_eq!(manager.default_connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
         assert_eq!(manager.default_idle_timeout(), DEFAULT_IDLE_TIMEOUT);
-        assert_eq!(manager.default_keepalive_interval(), DEFAULT_KEEPALIVE_INTERVAL);
+        assert_eq!(
+            manager.default_keepalive_interval(),
+            DEFAULT_KEEPALIVE_INTERVAL
+        );
     }
 
     #[test]
@@ -805,9 +814,9 @@ mod tests {
     #[test]
     fn test_retransmit_scheduler_timeout() {
         let mut scheduler = RetransmitScheduler::new();
-        
+
         let initial_rto = scheduler.rto();
-        
+
         scheduler.on_timeout();
         assert_eq!(scheduler.timeout_count(), 1);
         assert!(scheduler.rto() > initial_rto);
@@ -816,11 +825,11 @@ mod tests {
     #[test]
     fn test_retransmit_scheduler_ack_received() {
         let mut scheduler = RetransmitScheduler::new();
-        
+
         scheduler.on_timeout();
         scheduler.on_timeout();
         assert_eq!(scheduler.timeout_count(), 2);
-        
+
         scheduler.on_ack_received();
         assert_eq!(scheduler.timeout_count(), 0);
         assert_eq!(scheduler.rto(), scheduler.base_rto());
@@ -836,10 +845,10 @@ mod tests {
     #[test]
     fn test_keepalive_manager_should_send() {
         let mut manager = KeepaliveManager::new();
-        
+
         // Initially should send (no activity)
         assert!(manager.should_send_keepalive());
-        
+
         // Record activity
         manager.record_activity();
         assert!(!manager.should_send_keepalive());
@@ -855,10 +864,10 @@ mod tests {
     #[test]
     fn test_idle_timeout_detector_is_timeout() {
         let mut detector = IdleTimeoutDetector::with_timeout(Duration::from_millis(100));
-        
+
         detector.record_activity();
         assert!(!detector.is_timeout());
-        
+
         std::thread::sleep(Duration::from_millis(150));
         assert!(detector.is_timeout());
     }

@@ -60,8 +60,8 @@ impl MockLpdServer {
     pub fn new() -> Result<Self, String> {
         // Bind to ephemeral port on localhost for testing
         // (Real LPD would use the multicast address)
-        let socket = UdpSocket::bind("127.0.0.1:0")
-            .map_err(|e| format!("Failed to bind socket: {}", e))?;
+        let socket =
+            UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("Failed to bind socket: {}", e))?;
 
         socket
             .set_broadcast(true)
@@ -195,7 +195,10 @@ impl MockLpdServer {
         target: SocketAddr,
     ) -> Result<(), String> {
         let token: u32 = rand::random();
-        let msg = format!("Hash: {}\nPort: {}\nToken: {:08x}\n", info_hash, port, token);
+        let msg = format!(
+            "Hash: {}\nPort: {}\nToken: {:08x}\n",
+            info_hash, port, token
+        );
 
         self.socket
             .send_to(msg.as_bytes(), target)
@@ -213,7 +216,10 @@ impl MockLpdServer {
         token: u32,
         target: SocketAddr,
     ) -> Result<(), String> {
-        let msg = format!("Hash: {}\nPort: {}\nToken: {:08x}\n", info_hash, port, token);
+        let msg = format!(
+            "Hash: {}\nPort: {}\nToken: {:08x}\n",
+            info_hash, port, token
+        );
 
         self.socket
             .send_to(msg.as_bytes(), target)
@@ -397,7 +403,8 @@ mod tests {
     #[test]
     fn test_parse_valid_announcement() {
         let data = b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: deadbeef\n";
-        let result = MockLpdServer::parse_announcement(data, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let result =
+            MockLpdServer::parse_announcement(data, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
         assert!(result.is_some());
         let ann = result.unwrap();

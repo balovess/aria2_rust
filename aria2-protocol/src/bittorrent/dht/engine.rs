@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -187,7 +187,10 @@ impl DhtEngine {
                     }
                 }
                 Err(e) => {
-                    debug!("DHT: Failed to load routing table file {} (using bootstrap): {}", path, e);
+                    debug!(
+                        "DHT: Failed to load routing table file {} (using bootstrap): {}",
+                        path, e
+                    );
                 }
             }
         }
@@ -261,14 +264,14 @@ impl DhtEngine {
     /// Add custom bootstrap nodes to the routing table
     pub async fn add_bootstrap_nodes(&self, nodes: &[std::net::SocketAddr]) {
         debug!("DHT: Adding {} custom bootstrap nodes", nodes.len());
-        
+
         for addr in nodes {
             let mut id = [0u8; 20];
             getrandom::getrandom(&mut id).ok();
             let node = DhtNode::new(id, *addr);
             self.routing_table.write().await.insert(node);
         }
-        
+
         // Send pings to discover their real node IDs
         let nodes_to_ping: Vec<DhtNode> = nodes
             .iter()
@@ -278,25 +281,25 @@ impl DhtEngine {
                 DhtNode::new(id, addr)
             })
             .collect();
-        
+
         self.send_ping_to_all(&nodes_to_ping).await;
     }
 
     /// Bootstrap the DHT with a list of known nodes
     pub async fn bootstrap_with_nodes(&self, nodes: &[(std::net::SocketAddr, [u8; 20])]) {
         debug!("DHT: Bootstrapping with {} known nodes", nodes.len());
-        
+
         for (addr, id) in nodes {
             let node = DhtNode::new(*id, *addr);
             self.routing_table.write().await.insert(node);
         }
-        
+
         // Send pings to verify connectivity
         let nodes_to_ping: Vec<DhtNode> = nodes
             .iter()
             .map(|(addr, id)| DhtNode::new(*id, *addr))
             .collect();
-        
+
         self.send_ping_to_all(&nodes_to_ping).await;
     }
 
@@ -447,8 +450,7 @@ impl DhtEngine {
         for target in targets {
             let tx_id = self.next_tx_id();
             let tx_id_bytes = tx_id.to_be_bytes().to_vec();
-            let msg =
-                DhtMessageBuilder::get_peers(tx_id, &self.config.self_id, info_hash);
+            let msg = DhtMessageBuilder::get_peers(tx_id, &self.config.self_id, info_hash);
             let data = match msg.encode() {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -633,10 +635,7 @@ impl DhtEngine {
     ///
     /// The `tx_id_bytes` key supports arbitrary-length transaction IDs per
     /// BEP 0005 (typically 2 or 4 bytes).
-    fn register_pending_query(
-        &self,
-        tx_id_bytes: Vec<u8>,
-    ) -> oneshot::Receiver<DhtMessage> {
+    fn register_pending_query(&self, tx_id_bytes: Vec<u8>) -> oneshot::Receiver<DhtMessage> {
         let (tx, rx) = oneshot::channel();
         let mut map = self
             .pending_queries
@@ -828,8 +827,7 @@ impl DhtEngine {
             match port {
                 Some(p) => SocketAddr::new(sender.ip(), p),
                 None => {
-                    let response =
-                        DhtMessageBuilder::error_response(&msg.t, 203, "Missing port");
+                    let response = DhtMessageBuilder::error_response(&msg.t, 203, "Missing port");
                     if let Ok(data) = response.encode() {
                         let _ = self.socket.send_to(sender, &data).await;
                     }
@@ -843,8 +841,7 @@ impl DhtEngine {
             .validate_token(&token, &info_hash, &sender)
         {
             self.peer_storage.add_peer(info_hash, announce_addr);
-            let response =
-                DhtMessageBuilder::announce_peer_response(&msg.t, &self.config.self_id);
+            let response = DhtMessageBuilder::announce_peer_response(&msg.t, &self.config.self_id);
             if let Ok(data) = response.encode() {
                 let _ = self.socket.send_to(sender, &data).await;
             }
@@ -853,8 +850,7 @@ impl DhtEngine {
                 announce_addr
             );
         } else {
-            let response =
-                DhtMessageBuilder::error_response(&msg.t, 203, "Invalid token");
+            let response = DhtMessageBuilder::error_response(&msg.t, 203, "Invalid token");
             if let Ok(data) = response.encode() {
                 let _ = self.socket.send_to(sender, &data).await;
             }
@@ -876,9 +872,7 @@ impl DhtEngine {
                 // The tx_id is a small Vec<u8> (typically 2-4 bytes).
                 let tx_id = msg.t.clone();
                 if !self.complete_pending_query(&tx_id, msg) {
-                    debug!(
-                        "DHT: received response for unknown tx_id (late or unsolicited)"
-                    );
+                    debug!("DHT: received response for unknown tx_id (late or unsolicited)");
                 }
             }
             DhtMessageType::Query => {
@@ -1241,13 +1235,10 @@ mod tests {
     /// Helper: receive a single DHT message from a UDP socket within a timeout.
     async fn recv_dht_message(socket: &tokio::net::UdpSocket) -> DhtMessage {
         let mut buf = [0u8; 4096];
-        let (n, _) = tokio::time::timeout(
-            Duration::from_secs(2),
-            socket.recv_from(&mut buf),
-        )
-        .await
-        .expect("should receive response within 2s timeout")
-        .expect("recv_from should succeed");
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf))
+            .await
+            .expect("should receive response within 2s timeout")
+            .expect("recv_from should succeed");
         DhtMessage::decode(&buf[..n]).expect("should decode DHT message")
     }
 
@@ -1256,7 +1247,10 @@ mod tests {
     /// for sending to in tests. On Windows, sending to `0.0.0.0` fails with
     /// `WSAEADDRNOTAVAIL` (os error 10049).
     fn localhost_addr(addr: SocketAddr) -> SocketAddr {
-        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
+        SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        )
     }
 
     // ---- Pending query registry tests (Task 3) ----
@@ -1409,7 +1403,10 @@ mod tests {
         dict.insert(b"token".to_vec(), BencodeValue::Bytes(b"abc123".to_vec()));
         let args = BencodeValue::Dict(dict);
 
-        assert_eq!(extract_token_from_args(&Some(args)), Some("abc123".to_string()));
+        assert_eq!(
+            extract_token_from_args(&Some(args)),
+            Some("abc123".to_string())
+        );
     }
 
     // ---- Direct handler tests (Task 5) ----
@@ -1428,8 +1425,15 @@ mod tests {
         assert!(response.is_response(), "should be a response message");
 
         let r = response.r.as_ref().expect("response must have r field");
-        let id_bytes = r.dict_get(b"id").and_then(|v| v.as_bytes()).expect("missing r.id");
-        assert_eq!(id_bytes, &engine.config.self_id[..], "r.id should be engine's self_id");
+        let id_bytes = r
+            .dict_get(b"id")
+            .and_then(|v| v.as_bytes())
+            .expect("missing r.id");
+        assert_eq!(
+            id_bytes,
+            &engine.config.self_id[..],
+            "r.id should be engine's self_id"
+        );
 
         engine.shutdown();
     }
@@ -1455,7 +1459,10 @@ mod tests {
 
         let r = response.r.as_ref().expect("response must have r field");
         let nodes_bytes = r.dict_get(b"nodes").and_then(|v| v.as_bytes());
-        assert!(nodes_bytes.is_some(), "find_node response should have nodes field");
+        assert!(
+            nodes_bytes.is_some(),
+            "find_node response should have nodes field"
+        );
 
         // The known node is IPv4, so it should be in the compact nodes (26 bytes)
         if let Some(nodes) = nodes_bytes
@@ -1521,17 +1528,10 @@ mod tests {
         let announce_port = 51413u16;
 
         // Generate a valid token for the test address
-        let token = engine
-            .token_tracker
-            .generate_token(&info_hash, &test_addr);
+        let token = engine.token_tracker.generate_token(&info_hash, &test_addr);
 
-        let query = DhtMessageBuilder::announce_peer(
-            777,
-            &[0xFF; 20],
-            &info_hash,
-            announce_port,
-            &token,
-        );
+        let query =
+            DhtMessageBuilder::announce_peer(777, &[0xFF; 20], &info_hash, announce_port, &token);
         engine.handle_announce_peer_query(test_addr, &query).await;
 
         let response = recv_dht_message(&test_socket).await;
@@ -1560,17 +1560,14 @@ mod tests {
         let info_hash = [0x11u8; 20];
         let bad_token = "this_is_not_a_valid_token";
 
-        let query = DhtMessageBuilder::announce_peer(
-            888,
-            &[0x22; 20],
-            &info_hash,
-            6881,
-            bad_token,
-        );
+        let query = DhtMessageBuilder::announce_peer(888, &[0x22; 20], &info_hash, 6881, bad_token);
         engine.handle_announce_peer_query(test_addr, &query).await;
 
         let response = recv_dht_message(&test_socket).await;
-        assert!(response.is_error(), "invalid token should get an error response");
+        assert!(
+            response.is_error(),
+            "invalid token should get an error response"
+        );
 
         // Verify no peer was stored
         let stored_peers = engine.peer_storage.get_peers(&info_hash);
@@ -1592,9 +1589,7 @@ mod tests {
         let info_hash = [0x33u8; 20];
 
         // Generate a valid token
-        let token = engine
-            .token_tracker
-            .generate_token(&info_hash, &test_addr);
+        let token = engine.token_tracker.generate_token(&info_hash, &test_addr);
 
         // Build announce_peer with implied_port=1 and a DIFFERENT port
         let mut args_dict = std::collections::BTreeMap::new();
@@ -1610,23 +1605,21 @@ mod tests {
             BencodeValue::Bytes(token.as_bytes().to_vec()),
         );
 
-        let query = DhtMessage::new_query(
-            555,
-            "announce_peer",
-            BencodeValue::Dict(args_dict),
-        );
+        let query = DhtMessage::new_query(555, "announce_peer", BencodeValue::Dict(args_dict));
         engine.handle_announce_peer_query(test_addr, &query).await;
 
         let response = recv_dht_message(&test_socket).await;
-        assert!(response.is_response(), "implied_port announce should succeed");
+        assert!(
+            response.is_response(),
+            "implied_port announce should succeed"
+        );
 
         // With implied_port=1, the stored peer should use the SENDER's port,
         // not the explicit port field (9999).
         let stored_peers = engine.peer_storage.get_peers(&info_hash);
         assert_eq!(stored_peers.len(), 1, "exactly one peer should be stored");
         assert_eq!(
-            stored_peers[0],
-            test_addr,
+            stored_peers[0], test_addr,
             "implied_port should use sender's address, not the port field"
         );
 
@@ -1643,23 +1636,20 @@ mod tests {
         let info_hash = [0x99u8; 20];
 
         // Step 1: Announce a peer
-        let token = engine
-            .token_tracker
-            .generate_token(&info_hash, &test_addr);
-        let announce_query = DhtMessageBuilder::announce_peer(
-            111,
-            &[0xAA; 20],
-            &info_hash,
-            51413,
-            &token,
-        );
-        engine.handle_announce_peer_query(test_addr, &announce_query).await;
+        let token = engine.token_tracker.generate_token(&info_hash, &test_addr);
+        let announce_query =
+            DhtMessageBuilder::announce_peer(111, &[0xAA; 20], &info_hash, 51413, &token);
+        engine
+            .handle_announce_peer_query(test_addr, &announce_query)
+            .await;
         // Consume the announce response
         let _ = recv_dht_message(&test_socket).await;
 
         // Step 2: get_peers should now return the announced peer
         let get_peers_query = DhtMessageBuilder::get_peers(222, &[0xBB; 20], &info_hash);
-        engine.handle_get_peers_query(test_addr, &get_peers_query).await;
+        engine
+            .handle_get_peers_query(test_addr, &get_peers_query)
+            .await;
 
         let response = recv_dht_message(&test_socket).await;
         assert!(response.is_response());
@@ -1669,11 +1659,7 @@ mod tests {
         // Should have values (peers), not nodes
         let values = r.dict_get(b"values").and_then(|v| v.as_list());
         assert!(values.is_some(), "should have values field with peers");
-        assert_eq!(
-            values.unwrap().len(),
-            1,
-            "should have exactly 1 peer"
-        );
+        assert_eq!(values.unwrap().len(), 1, "should have exactly 1 peer");
 
         // Should still have a token
         let token = r.dict_get(b"token").and_then(|v| v.as_bytes());
@@ -1692,11 +1678,7 @@ mod tests {
         // Build a query with only id, missing info_hash and token
         let mut args_dict = std::collections::BTreeMap::new();
         args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(vec![0x55; 20]));
-        let query = DhtMessage::new_query(
-            333,
-            "announce_peer",
-            BencodeValue::Dict(args_dict),
-        );
+        let query = DhtMessage::new_query(333, "announce_peer", BencodeValue::Dict(args_dict));
         engine.handle_announce_peer_query(test_addr, &query).await;
 
         let response = recv_dht_message(&test_socket).await;
@@ -1736,7 +1718,10 @@ mod tests {
         assert!(response.is_response(), "should be a response");
 
         let r = response.r.as_ref().expect("response must have r field");
-        let id_bytes = r.dict_get(b"id").and_then(|v| v.as_bytes()).expect("missing r.id");
+        let id_bytes = r
+            .dict_get(b"id")
+            .and_then(|v| v.as_bytes())
+            .expect("missing r.id");
         assert_eq!(
             id_bytes,
             &engine_b.config.self_id[..],
@@ -1879,11 +1864,10 @@ mod tests {
         );
 
         // Shutdown should complete without hanging
-        let shutdown_result =
-            tokio::time::timeout(Duration::from_secs(2), async {
-                engine.shutdown_async().await;
-            })
-            .await;
+        let shutdown_result = tokio::time::timeout(Duration::from_secs(2), async {
+            engine.shutdown_async().await;
+        })
+        .await;
 
         assert!(
             shutdown_result.is_ok(),

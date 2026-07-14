@@ -333,14 +333,39 @@ impl OptionDef {
 /// Error type for option validation failures.
 #[derive(Debug, Clone)]
 pub enum OptionError {
-    TypeMismatch { expected: String, got: String },
-    OutOfRange { value: String, min: String, max: String },
-    InvalidChoice { value: String, allowed: Vec<String> },
-    InvalidUrl { url: String, reason: String },
-    InvalidPath { path: String, reason: String },
-    PatternMismatch { value: String, pattern: String },
-    DependencyConflict { option: String, conflicts_with: String },
-    MissingDependency { option: String, requires: String },
+    TypeMismatch {
+        expected: String,
+        got: String,
+    },
+    OutOfRange {
+        value: String,
+        min: String,
+        max: String,
+    },
+    InvalidChoice {
+        value: String,
+        allowed: Vec<String>,
+    },
+    InvalidUrl {
+        url: String,
+        reason: String,
+    },
+    InvalidPath {
+        path: String,
+        reason: String,
+    },
+    PatternMismatch {
+        value: String,
+        pattern: String,
+    },
+    DependencyConflict {
+        option: String,
+        conflicts_with: String,
+    },
+    MissingDependency {
+        option: String,
+        requires: String,
+    },
 }
 
 impl fmt::Display for OptionError {
@@ -1083,7 +1108,11 @@ mod tests {
         assert!(float_validator.validate("ratio", &Value::from(0.5)).is_ok());
 
         let u64_validator = RangeValidator::<u64>::new(1024, 1024 * 1024);
-        assert!(u64_validator.validate("size", &Value::from(4096u64)).is_ok());
+        assert!(
+            u64_validator
+                .validate("size", &Value::from(4096u64))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1109,22 +1138,49 @@ mod tests {
             "warn".to_string(),
             "error".to_string(),
         ]);
-        assert!(validator.validate("log-level", &Value::String("debug".into())).is_ok());
-        assert!(validator.validate("log-level", &Value::String("verbose".into())).is_err());
+        assert!(
+            validator
+                .validate("log-level", &Value::String("debug".into()))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("log-level", &Value::String("verbose".into()))
+                .is_err()
+        );
     }
 
     #[test]
     fn test_url_validator_malformed() {
         let validator = UrlValidator::new();
-        assert!(validator.validate("tracker", &Value::String("http://example.com:6969/announce".into())).is_ok());
-        assert!(validator.validate("url", &Value::String("not-a-url".into())).is_err());
+        assert!(
+            validator
+                .validate(
+                    "tracker",
+                    &Value::String("http://example.com:6969/announce".into())
+                )
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("url", &Value::String("not-a-url".into()))
+                .is_err()
+        );
     }
 
     #[test]
     fn test_regex_validator_pattern_match() {
         let validator = RegexValidator::new(r"^[a-zA-Z0-9.-]+:\d+$");
-        assert!(validator.validate("proxy", &Value::String("proxy.example.com:8080".into())).is_ok());
-        assert!(validator.validate("proxy", &Value::String("not-valid".into())).is_err());
+        assert!(
+            validator
+                .validate("proxy", &Value::String("proxy.example.com:8080".into()))
+                .is_ok()
+        );
+        assert!(
+            validator
+                .validate("proxy", &Value::String("not-valid".into()))
+                .is_err()
+        );
     }
 
     #[test]

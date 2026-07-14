@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::debug;
 
 use crate::constants;
@@ -20,7 +20,7 @@ pub struct Segment {
     pub offset: u64,
     pub length: u64,
     pub status: SegmentStatus,
-    pub data: Option<bytes::Bytes>,  // Zero-copy storage
+    pub data: Option<bytes::Bytes>, // Zero-copy storage
     pub assigned_mirror: Option<usize>,
     pub retry_count: u32,
 }
@@ -571,7 +571,11 @@ impl ConcurrentSegmentManager {
             // Select mirror using UriSelector
             if let Some(mirror_idx) = selector.select(&self.mirror_urls, &used_hosts) {
                 // Check if mirror can accept more
-                if self.mirrors.get(mirror_idx).is_some_and(|m| m.can_accept_more()) {
+                if self
+                    .mirrors
+                    .get(mirror_idx)
+                    .is_some_and(|m| m.can_accept_more())
+                {
                     // Assign segment to this mirror
                     if let Some(seg) = self.segments.get_mut(seg_index as usize) {
                         seg.status = SegmentStatus::Downloading;
@@ -947,13 +951,8 @@ mod tests {
             urls.clone(),
         ));
 
-        let mut mgr = ConcurrentSegmentManager::new_with_selector(
-            300,
-            urls,
-            Some(100),
-            stat_man,
-            selector,
-        );
+        let mut mgr =
+            ConcurrentSegmentManager::new_with_selector(300, urls, Some(100), stat_man, selector);
 
         let result = mgr.select_mirror_for_next_segment();
         assert!(result.is_some());
@@ -986,7 +985,8 @@ mod tests {
         mgr.allocate_segments();
 
         // Report completion with 1 MB/s speed
-        let success = mgr.report_segment_complete(0, bytes::Bytes::from(vec![0xAB; 100]), 1_000_000, false);
+        let success =
+            mgr.report_segment_complete(0, bytes::Bytes::from(vec![0xAB; 100]), 1_000_000, false);
         assert!(success);
 
         // Check that stats were updated
@@ -1058,11 +1058,8 @@ mod tests {
 
     #[test]
     fn test_mirror_active_segments() {
-        let mut mgr = ConcurrentSegmentManager::new(
-            300,
-            vec!["http://a.com/f".to_string()],
-            Some(100),
-        );
+        let mut mgr =
+            ConcurrentSegmentManager::new(300, vec!["http://a.com/f".to_string()], Some(100));
 
         assert_eq!(mgr.mirror_active_segments(0), 0);
         assert_eq!(mgr.num_segments(), 3);
@@ -1077,11 +1074,7 @@ mod tests {
 
     #[test]
     fn test_no_intelligent_selection_by_default() {
-        let mgr = ConcurrentSegmentManager::new(
-            100,
-            vec!["http://a.com/f".to_string()],
-            Some(100),
-        );
+        let mgr = ConcurrentSegmentManager::new(100, vec!["http://a.com/f".to_string()], Some(100));
 
         assert!(!mgr.has_intelligent_selection());
     }
@@ -1141,7 +1134,11 @@ mod tests {
 
         // Verify no duplicates.
         let set: HashSet<u32> = indices.iter().copied().collect();
-        assert_eq!(set.len(), 16000, "all indices must be unique (no duplicates)");
+        assert_eq!(
+            set.len(),
+            16000,
+            "all indices must be unique (no duplicates)"
+        );
 
         // Verify all indices 0..16000 are present.
         for i in 0..16000u32 {
@@ -1158,11 +1155,8 @@ mod tests {
     /// to 0 by `reset_allocation_index`.
     #[test]
     fn test_allocation_hint_advances_and_resets() {
-        let mut mgr = ConcurrentSegmentManager::new(
-            500,
-            vec!["http://a.com/f".to_string()],
-            Some(100),
-        );
+        let mut mgr =
+            ConcurrentSegmentManager::new(500, vec!["http://a.com/f".to_string()], Some(100));
         // 5 segments; let the single mirror accept all of them.
         mgr.set_max_connections_per_mirror(10);
         assert_eq!(mgr.num_segments(), 5);

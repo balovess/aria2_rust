@@ -918,7 +918,9 @@ impl super::OptionRegistry {
             name: "mmap-threshold".into(),
             opt_type: OptionType::Size,
             default_value: OptionValue::Int(256 * 1024 * 1024), // 256 MiB
-            description: "File size threshold for mmap writes when file-allocation=mmap (default 256 MiB)".into(),
+            description:
+                "File size threshold for mmap writes when file-allocation=mmap (default 256 MiB)"
+                    .into(),
             category: OptionCategory::Advanced,
             ..Default::default()
         });

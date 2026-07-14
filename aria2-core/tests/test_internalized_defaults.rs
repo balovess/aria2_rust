@@ -68,11 +68,7 @@ async fn test_default_download_uses_falloc_allocation() {
     );
 
     let data = std::fs::read(&output_path).expect("failed to read downloaded file");
-    assert_eq!(
-        data.len(),
-        1024 * 1024,
-        "output file size must be 1 MiB"
-    );
+    assert_eq!(data.len(), 1024 * 1024, "output file size must be 1 MiB");
     assert!(
         data.iter().all(|&b| b == medium_pattern()),
         "output file content must be all 0xAB"
@@ -120,12 +116,7 @@ async fn test_default_download_uses_progress_channel() {
     // The aggregator applies channel updates to the group's atomic
     // completed_length mirror. After execute() returns (which drains the
     // aggregator), completed_length must reflect the downloaded bytes.
-    let completed = {
-        group_for_assertion
-            .read()
-            .await
-            .get_completed_length()
-    };
+    let completed = { group_for_assertion.read().await.get_completed_length() };
     assert_eq!(
         completed,
         1024 * 1024,

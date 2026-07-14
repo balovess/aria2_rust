@@ -3,7 +3,7 @@
 //! These tests verify that all CLI options are parsed correctly and
 //! behave as expected, maintaining compatibility with original aria2.
 
-use aria2_core::config::{ConfigParser, OptionRegistry, OptionValue, OptionType, OptionCategory};
+use aria2_core::config::{ConfigParser, OptionCategory, OptionRegistry, OptionType, OptionValue};
 
 // =========================================================================
 // Short Option Parsing Tests
@@ -152,7 +152,10 @@ fn regression_short_option_header() {
 fn regression_short_option_all_proxy() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["-p", "http://proxy.example.com:8080"]);
-    assert_eq!(parser.get_str("all-proxy").unwrap(), "http://proxy.example.com:8080");
+    assert_eq!(
+        parser.get_str("all-proxy").unwrap(),
+        "http://proxy.example.com:8080"
+    );
 }
 
 /// Test: -g maps to "seed-ratio" option.
@@ -420,7 +423,10 @@ fn regression_long_option_input_file() {
 fn regression_long_option_save_session() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["--save-session=/path/to/session.txt"]);
-    assert_eq!(parser.get_str("save-session").unwrap(), "/path/to/session.txt");
+    assert_eq!(
+        parser.get_str("save-session").unwrap(),
+        "/path/to/session.txt"
+    );
 }
 
 /// Test: --load-cookies with path value.
@@ -428,7 +434,10 @@ fn regression_long_option_save_session() {
 fn regression_long_option_load_cookies() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["--load-cookies=/path/to/cookies.txt"]);
-    assert_eq!(parser.get_str("load-cookies").unwrap(), "/path/to/cookies.txt");
+    assert_eq!(
+        parser.get_str("load-cookies").unwrap(),
+        "/path/to/cookies.txt"
+    );
 }
 
 /// Test: --save-cookies with path value.
@@ -436,7 +445,10 @@ fn regression_long_option_load_cookies() {
 fn regression_long_option_save_cookies() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["--save-cookies=/path/to/cookies.txt"]);
-    assert_eq!(parser.get_str("save-cookies").unwrap(), "/path/to/cookies.txt");
+    assert_eq!(
+        parser.get_str("save-cookies").unwrap(),
+        "/path/to/cookies.txt"
+    );
 }
 
 /// Test: --ca-certificate with path value.
@@ -444,7 +456,10 @@ fn regression_long_option_save_cookies() {
 fn regression_long_option_ca_certificate() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["--ca-certificate=/path/to/cert.pem"]);
-    assert_eq!(parser.get_str("ca-certificate").unwrap(), "/path/to/cert.pem");
+    assert_eq!(
+        parser.get_str("ca-certificate").unwrap(),
+        "/path/to/cert.pem"
+    );
 }
 
 /// Test: --referer with URL value.
@@ -560,16 +575,16 @@ fn regression_long_option_auto_save_interval() {
 #[test]
 fn regression_split_range_validation() {
     let mut parser = ConfigParser::new();
-    
+
     // Valid values
     parser.parse_cli_args(&["--split=5"]);
     assert_eq!(parser.get_i64("split").unwrap(), 5);
-    
+
     // Edge values
     let mut parser2 = ConfigParser::new();
     parser2.parse_cli_args(&["--split=1"]);
     assert_eq!(parser2.get_i64("split").unwrap(), 1);
-    
+
     let mut parser3 = ConfigParser::new();
     parser3.parse_cli_args(&["--split=16"]);
     assert_eq!(parser3.get_i64("split").unwrap(), 16);
@@ -623,7 +638,7 @@ fn regression_zero_split_value() {
 #[test]
 fn regression_registry_contains_core_options() {
     let registry = OptionRegistry::new();
-    
+
     // Core options should be present (verify a subset)
     assert!(registry.contains("dir"));
     assert!(registry.contains("out"));
@@ -670,87 +685,195 @@ fn regression_registry_contains_core_options() {
 #[test]
 fn regression_registry_option_types() {
     let registry = OptionRegistry::new();
-    
+
     // String options
     assert_eq!(registry.get("dir").unwrap().opt_type(), OptionType::Path);
     assert_eq!(registry.get("out").unwrap().opt_type(), OptionType::String);
-    assert_eq!(registry.get("user-agent").unwrap().opt_type(), OptionType::String);
-    
+    assert_eq!(
+        registry.get("user-agent").unwrap().opt_type(),
+        OptionType::String
+    );
+
     // Integer options
-    assert_eq!(registry.get("split").unwrap().opt_type(), OptionType::Integer);
-    assert_eq!(registry.get("timeout").unwrap().opt_type(), OptionType::Integer);
-    assert_eq!(registry.get("max-tries").unwrap().opt_type(), OptionType::Integer);
-    
+    assert_eq!(
+        registry.get("split").unwrap().opt_type(),
+        OptionType::Integer
+    );
+    assert_eq!(
+        registry.get("timeout").unwrap().opt_type(),
+        OptionType::Integer
+    );
+    assert_eq!(
+        registry.get("max-tries").unwrap().opt_type(),
+        OptionType::Integer
+    );
+
     // Boolean options
-    assert_eq!(registry.get("quiet").unwrap().opt_type(), OptionType::Boolean);
-    assert_eq!(registry.get("daemon").unwrap().opt_type(), OptionType::Boolean);
-    assert_eq!(registry.get("check-certificate").unwrap().opt_type(), OptionType::Boolean);
-    
+    assert_eq!(
+        registry.get("quiet").unwrap().opt_type(),
+        OptionType::Boolean
+    );
+    assert_eq!(
+        registry.get("daemon").unwrap().opt_type(),
+        OptionType::Boolean
+    );
+    assert_eq!(
+        registry.get("check-certificate").unwrap().opt_type(),
+        OptionType::Boolean
+    );
+
     // List options
     assert_eq!(registry.get("header").unwrap().opt_type(), OptionType::List);
-    
+
     // Size options
-    assert_eq!(registry.get("disk-cache").unwrap().opt_type(), OptionType::Size);
-    assert_eq!(registry.get("min-split-size").unwrap().opt_type(), OptionType::Size);
-    
+    assert_eq!(
+        registry.get("disk-cache").unwrap().opt_type(),
+        OptionType::Size
+    );
+    assert_eq!(
+        registry.get("min-split-size").unwrap().opt_type(),
+        OptionType::Size
+    );
+
     // Float options
-    assert_eq!(registry.get("seed-ratio").unwrap().opt_type(), OptionType::Float);
+    assert_eq!(
+        registry.get("seed-ratio").unwrap().opt_type(),
+        OptionType::Float
+    );
 }
 
 /// Test: OptionRegistry has correct option categories.
 #[test]
 fn regression_registry_option_categories() {
     let registry = OptionRegistry::new();
-    
+
     // General options
-    assert_eq!(registry.get("dir").unwrap().get_category(), OptionCategory::General);
-    assert_eq!(registry.get("out").unwrap().get_category(), OptionCategory::General);
-    assert_eq!(registry.get("quiet").unwrap().get_category(), OptionCategory::General);
-    assert_eq!(registry.get("daemon").unwrap().get_category(), OptionCategory::General);
-    
+    assert_eq!(
+        registry.get("dir").unwrap().get_category(),
+        OptionCategory::General
+    );
+    assert_eq!(
+        registry.get("out").unwrap().get_category(),
+        OptionCategory::General
+    );
+    assert_eq!(
+        registry.get("quiet").unwrap().get_category(),
+        OptionCategory::General
+    );
+    assert_eq!(
+        registry.get("daemon").unwrap().get_category(),
+        OptionCategory::General
+    );
+
     // HTTP/FTP options
-    assert_eq!(registry.get("split").unwrap().get_category(), OptionCategory::HttpFtp);
-    assert_eq!(registry.get("timeout").unwrap().get_category(), OptionCategory::HttpFtp);
-    assert_eq!(registry.get("user-agent").unwrap().get_category(), OptionCategory::HttpFtp);
-    assert_eq!(registry.get("header").unwrap().get_category(), OptionCategory::HttpFtp);
-    
+    assert_eq!(
+        registry.get("split").unwrap().get_category(),
+        OptionCategory::HttpFtp
+    );
+    assert_eq!(
+        registry.get("timeout").unwrap().get_category(),
+        OptionCategory::HttpFtp
+    );
+    assert_eq!(
+        registry.get("user-agent").unwrap().get_category(),
+        OptionCategory::HttpFtp
+    );
+    assert_eq!(
+        registry.get("header").unwrap().get_category(),
+        OptionCategory::HttpFtp
+    );
+
     // BitTorrent options
-    assert_eq!(registry.get("seed-ratio").unwrap().get_category(), OptionCategory::BitTorrent);
-    assert_eq!(registry.get("seed-time").unwrap().get_category(), OptionCategory::BitTorrent);
-    assert_eq!(registry.get("bt-max-peers").unwrap().get_category(), OptionCategory::BitTorrent);
-    assert_eq!(registry.get("enable-dht").unwrap().get_category(), OptionCategory::BitTorrent);
-    
+    assert_eq!(
+        registry.get("seed-ratio").unwrap().get_category(),
+        OptionCategory::BitTorrent
+    );
+    assert_eq!(
+        registry.get("seed-time").unwrap().get_category(),
+        OptionCategory::BitTorrent
+    );
+    assert_eq!(
+        registry.get("bt-max-peers").unwrap().get_category(),
+        OptionCategory::BitTorrent
+    );
+    assert_eq!(
+        registry.get("enable-dht").unwrap().get_category(),
+        OptionCategory::BitTorrent
+    );
+
     // RPC options
-    assert_eq!(registry.get("enable-rpc").unwrap().get_category(), OptionCategory::Rpc);
-    assert_eq!(registry.get("rpc-listen-port").unwrap().get_category(), OptionCategory::Rpc);
-    assert_eq!(registry.get("rpc-secret").unwrap().get_category(), OptionCategory::Rpc);
-    
+    assert_eq!(
+        registry.get("enable-rpc").unwrap().get_category(),
+        OptionCategory::Rpc
+    );
+    assert_eq!(
+        registry.get("rpc-listen-port").unwrap().get_category(),
+        OptionCategory::Rpc
+    );
+    assert_eq!(
+        registry.get("rpc-secret").unwrap().get_category(),
+        OptionCategory::Rpc
+    );
+
     // Advanced options
-    assert_eq!(registry.get("max-concurrent-downloads").unwrap().get_category(), OptionCategory::Advanced);
-    assert_eq!(registry.get("file-allocation").unwrap().get_category(), OptionCategory::Advanced);
-    assert_eq!(registry.get("disk-cache").unwrap().get_category(), OptionCategory::Advanced);
+    assert_eq!(
+        registry
+            .get("max-concurrent-downloads")
+            .unwrap()
+            .get_category(),
+        OptionCategory::Advanced
+    );
+    assert_eq!(
+        registry.get("file-allocation").unwrap().get_category(),
+        OptionCategory::Advanced
+    );
+    assert_eq!(
+        registry.get("disk-cache").unwrap().get_category(),
+        OptionCategory::Advanced
+    );
 }
 
 /// Test: OptionRegistry default values.
 #[test]
 fn regression_registry_default_values() {
     let registry = OptionRegistry::new();
-    
+
     // Check default values
-    assert_eq!(registry.get("dir").unwrap().default_value(), &OptionValue::Str(".".to_string()));
-    assert_eq!(registry.get("split").unwrap().default_value(), &OptionValue::Int(5));
-    assert_eq!(registry.get("timeout").unwrap().default_value(), &OptionValue::Int(60));
-    assert_eq!(registry.get("check-certificate").unwrap().default_value(), &OptionValue::Bool(true));
-    assert_eq!(registry.get("quiet").unwrap().default_value(), &OptionValue::Bool(false));
-    assert_eq!(registry.get("enable-rpc").unwrap().default_value(), &OptionValue::Bool(false));
-    assert_eq!(registry.get("rpc-listen-port").unwrap().default_value(), &OptionValue::Int(6800));
+    assert_eq!(
+        registry.get("dir").unwrap().default_value(),
+        &OptionValue::Str(".".to_string())
+    );
+    assert_eq!(
+        registry.get("split").unwrap().default_value(),
+        &OptionValue::Int(5)
+    );
+    assert_eq!(
+        registry.get("timeout").unwrap().default_value(),
+        &OptionValue::Int(60)
+    );
+    assert_eq!(
+        registry.get("check-certificate").unwrap().default_value(),
+        &OptionValue::Bool(true)
+    );
+    assert_eq!(
+        registry.get("quiet").unwrap().default_value(),
+        &OptionValue::Bool(false)
+    );
+    assert_eq!(
+        registry.get("enable-rpc").unwrap().default_value(),
+        &OptionValue::Bool(false)
+    );
+    assert_eq!(
+        registry.get("rpc-listen-port").unwrap().default_value(),
+        &OptionValue::Int(6800)
+    );
 }
 
 /// Test: OptionRegistry short name mappings.
 #[test]
 fn regression_registry_short_names() {
     let registry = OptionRegistry::new();
-    
+
     // Check short names
     assert_eq!(registry.get("dir").unwrap().short_name(), Some('d'));
     assert_eq!(registry.get("out").unwrap().short_name(), Some('o'));
@@ -759,8 +882,17 @@ fn regression_registry_short_names() {
     assert_eq!(registry.get("quiet").unwrap().short_name(), Some('q'));
     assert_eq!(registry.get("daemon").unwrap().short_name(), Some('D'));
     assert_eq!(registry.get("enable-rpc").unwrap().short_name(), Some('e'));
-    assert_eq!(registry.get("rpc-listen-port").unwrap().short_name(), Some('r'));
-    assert_eq!(registry.get("max-concurrent-downloads").unwrap().short_name(), Some('j'));
+    assert_eq!(
+        registry.get("rpc-listen-port").unwrap().short_name(),
+        Some('r')
+    );
+    assert_eq!(
+        registry
+            .get("max-concurrent-downloads")
+            .unwrap()
+            .short_name(),
+        Some('j')
+    );
 }
 
 /// Test: OptionRegistry count.
@@ -787,7 +919,7 @@ fn regression_multiple_options_parsed() {
         "--enable-rpc",
         "--rpc-listen-port=6801",
     ]);
-    
+
     assert_eq!(parser.get_str("dir").unwrap(), "/downloads");
     assert_eq!(parser.get_i64("split").unwrap(), 8);
     assert_eq!(parser.get_i64("timeout").unwrap(), 120);
@@ -801,13 +933,15 @@ fn regression_multiple_options_parsed() {
 fn regression_mixed_short_long_options() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&[
-        "-d", "/downloads",
+        "-d",
+        "/downloads",
         "--split=8",
         "-q",
         "--enable-rpc",
-        "-r", "6801",
+        "-r",
+        "6801",
     ]);
-    
+
     assert_eq!(parser.get_str("dir").unwrap(), "/downloads");
     assert_eq!(parser.get_i64("split").unwrap(), 8);
     assert!(parser.get_bool("quiet").unwrap());
@@ -819,12 +953,8 @@ fn regression_mixed_short_long_options() {
 #[test]
 fn regression_options_with_negation() {
     let mut parser = ConfigParser::new();
-    parser.parse_cli_args(&[
-        "--no-check-certificate",
-        "--no-continue",
-        "--no-enable-dht",
-    ]);
-    
+    parser.parse_cli_args(&["--no-check-certificate", "--no-continue", "--no-enable-dht"]);
+
     assert!(!parser.get_bool("check-certificate").unwrap());
     assert!(!parser.get_bool("continue").unwrap());
     assert!(!parser.get_bool("enable-dht").unwrap());
@@ -839,7 +969,7 @@ fn regression_options_with_negation() {
 fn regression_defaults_applied() {
     let mut parser = ConfigParser::new();
     parser.apply_defaults();
-    
+
     assert_eq!(parser.get_str("dir").unwrap(), ".");
     assert_eq!(parser.get_i64("split").unwrap(), 5);
     assert_eq!(parser.get_i64("timeout").unwrap(), 60);
@@ -855,11 +985,11 @@ fn regression_cli_overrides_defaults() {
     let mut parser = ConfigParser::new();
     parser.apply_defaults();
     parser.parse_cli_args(&["--split=10", "--quiet"]);
-    
+
     // CLI values should override defaults
     assert_eq!(parser.get_i64("split").unwrap(), 10);
     assert!(parser.get_bool("quiet").unwrap());
-    
+
     // Other defaults should remain
     assert_eq!(parser.get_str("dir").unwrap(), ".");
 }
@@ -964,7 +1094,10 @@ fn regression_option_empty_value() {
 fn regression_option_special_characters() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["--dir=/path with spaces/and=equals"]);
-    assert_eq!(parser.get_str("dir").unwrap(), "/path with spaces/and=equals");
+    assert_eq!(
+        parser.get_str("dir").unwrap(),
+        "/path with spaces/and=equals"
+    );
 }
 
 /// Test: Option value with unicode characters.

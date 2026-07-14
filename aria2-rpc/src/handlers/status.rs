@@ -141,7 +141,8 @@ impl RpcEngine {
                 (dl, ul, active_n, waiting_n, stopped_n)
             } else {
                 let tasks = self.tasks.read().await;
-                let (a, w): (Vec<_>, Vec<_>) = tasks.values().partition(|s| s.status.status.is_active());
+                let (a, w): (Vec<_>, Vec<_>) =
+                    tasks.values().partition(|s| s.status.status.is_active());
                 (0, 0, a.len(), w.len(), 0)
             };
         let stat = GlobalStat {

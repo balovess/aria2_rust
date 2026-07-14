@@ -113,7 +113,10 @@ impl FtpDownloadCommand {
         };
 
         let (username, password) = if auth.is_empty() {
-            (constants::FTP_DEFAULT_USER.to_string(), constants::FTP_DEFAULT_PASSWORD.to_string())
+            (
+                constants::FTP_DEFAULT_USER.to_string(),
+                constants::FTP_DEFAULT_PASSWORD.to_string(),
+            )
         } else if let Some(colon_pos) = auth.find(':') {
             (
                 auth[..colon_pos].to_string(),
@@ -126,7 +129,9 @@ impl FtpDownloadCommand {
         let (host, port) = match host_port.rfind(':') {
             Some(idx) => (
                 host_port[..idx].to_string(),
-                host_port[idx + 1..].parse::<u16>().unwrap_or(constants::FTP_DEFAULT_PORT),
+                host_port[idx + 1..]
+                    .parse::<u16>()
+                    .unwrap_or(constants::FTP_DEFAULT_PORT),
             ),
             None => (host_port.to_string(), constants::FTP_DEFAULT_PORT),
         };
@@ -284,7 +289,9 @@ impl RawFtpControl {
             reader: BufReader::new(stream),
             host: host.to_string(),
         };
-        let welcome = ctrl.read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS)).await?;
+        let welcome = ctrl
+            .read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS))
+            .await?;
 
         if !(200..300).contains(&welcome.0) && !(100..200).contains(&welcome.0) {
             return Err(Aria2Error::Fatal(FatalError::Config(format!(
@@ -389,7 +396,8 @@ impl RawFtpControl {
     /// Send command and read response in one operation
     async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
         self.send_command(cmd).await?;
-        self.read_response(Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS)).await
+        self.read_response(Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS))
+            .await
     }
 
     /// Authenticate with USER/PASS commands
@@ -524,7 +532,12 @@ impl RawFtpControl {
 
     /// Read final transfer completion response
     async fn read_transfer_complete(&mut self) -> Result<()> {
-        match self.read_response(Duration::from_secs(constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS)).await {
+        match self
+            .read_response(Duration::from_secs(
+                constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS,
+            ))
+            .await
+        {
             Ok((226, msg)) => {
                 debug!("Transfer complete: {}", msg);
                 Ok(())
@@ -621,7 +634,8 @@ impl Command for FtpDownloadCommand {
 
                     if should_retry {
                         self.current_retry += 1;
-                        let wait_ms = constants::FTP_BASE_RETRY_WAIT_MS * (1 << (self.current_retry - 1));
+                        let wait_ms =
+                            constants::FTP_BASE_RETRY_WAIT_MS * (1 << (self.current_retry - 1));
                         warn!(
                             "FTP download failed (attempt {}/{}), retrying in {}ms: {}",
                             self.current_retry, self.max_retries, wait_ms, e
@@ -654,7 +668,9 @@ impl Command for FtpDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(constants::FTP_DEFAULT_COMMAND_TIMEOUT_SECS))
+        Some(Duration::from_secs(
+            constants::FTP_DEFAULT_COMMAND_TIMEOUT_SECS,
+        ))
     }
 }
 

@@ -55,10 +55,18 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             max_connections: crate::constants::HTTP_CONFIG_DEFAULT_MAX_CONNECTIONS,
-            connect_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_CONNECT_TIMEOUT_SECS),
-            read_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_READ_TIMEOUT_SECS),
-            write_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_WRITE_TIMEOUT_SECS),
-            idle_timeout: Duration::from_secs(crate::constants::HTTP_CONFIG_DEFAULT_IDLE_TIMEOUT_SECS),
+            connect_timeout: Duration::from_secs(
+                crate::constants::HTTP_CONFIG_DEFAULT_CONNECT_TIMEOUT_SECS,
+            ),
+            read_timeout: Duration::from_secs(
+                crate::constants::HTTP_CONFIG_DEFAULT_READ_TIMEOUT_SECS,
+            ),
+            write_timeout: Duration::from_secs(
+                crate::constants::HTTP_CONFIG_DEFAULT_WRITE_TIMEOUT_SECS,
+            ),
+            idle_timeout: Duration::from_secs(
+                crate::constants::HTTP_CONFIG_DEFAULT_IDLE_TIMEOUT_SECS,
+            ),
         }
     }
 }
@@ -815,8 +823,15 @@ impl HttpConnectionManager {
     /// 从 URL 中提取主机标识（host:port）
     fn extract_host(url: &Url) -> String {
         match url.port_or_known_default() {
-            Some(port) => format!("{}:{}", url.host_str().unwrap_or(crate::constants::DEFAULT_HOST), port),
-            None => url.host_str().unwrap_or(crate::constants::DEFAULT_HOST).to_string(),
+            Some(port) => format!(
+                "{}:{}",
+                url.host_str().unwrap_or(crate::constants::DEFAULT_HOST),
+                port
+            ),
+            None => url
+                .host_str()
+                .unwrap_or(crate::constants::DEFAULT_HOST)
+                .to_string(),
         }
     }
 

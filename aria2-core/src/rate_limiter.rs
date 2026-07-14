@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
@@ -102,7 +102,10 @@ impl fmt::Debug for TokenBucket {
         f.debug_struct("TokenBucket")
             .field("tokens_milli", &self.tokens_milli.load(Ordering::Relaxed))
             .field("capacity_milli", &self.capacity_milli)
-            .field("rate_milli_per_sec", &self.rate_milli_per_sec.load(Ordering::Relaxed))
+            .field(
+                "rate_milli_per_sec",
+                &self.rate_milli_per_sec.load(Ordering::Relaxed),
+            )
             .field("unlimited", &self.unlimited.load(Ordering::Relaxed))
             .finish()
     }
@@ -218,9 +221,7 @@ impl TokenBucket {
                 // Won the claim — add tokens, capping at capacity.
                 loop {
                     let current = self.tokens_milli.load(Ordering::Relaxed);
-                    let new = current
-                        .saturating_add(added_milli)
-                        .min(self.capacity_milli);
+                    let new = current.saturating_add(added_milli).min(self.capacity_milli);
                     match self.tokens_milli.compare_exchange_weak(
                         current,
                         new,
@@ -279,8 +280,8 @@ impl TokenBucket {
             }
             // wait_ns = deficit_milli * NS_PER_SEC / rate_milli_per_sec
             // (u128 to avoid overflow).
-            let wait_ns = ((deficit_milli as u128) * NS_PER_SEC as u128
-                / rate_milli as u128) as u64;
+            let wait_ns =
+                ((deficit_milli as u128) * NS_PER_SEC as u128 / rate_milli as u128) as u64;
             let wait = Duration::from_nanos(wait_ns);
 
             if wait < MIN_SLEEP {
@@ -673,8 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter_with_limits() {
-        let cfg =
-            RateLimiterConfig::new(Some(5000), Some(1000)).with_burst(Some(1000), Some(500));
+        let cfg = RateLimiterConfig::new(Some(5000), Some(1000)).with_burst(Some(1000), Some(500));
         let rl = RateLimiter::new(&cfg);
         assert!(rl.is_download_limited());
         assert!(rl.is_upload_limited());
@@ -869,8 +869,7 @@ mod tests {
     /// confirming the lock-free path has negligible overhead.
     #[tokio::test]
     async fn test_rate_limiter_high_rate_low_latency() {
-        let cfg =
-            RateLimiterConfig::new(Some(100_000_000), None).with_burst(Some(1_000_000), None);
+        let cfg = RateLimiterConfig::new(Some(100_000_000), None).with_burst(Some(1_000_000), None);
         let rl = RateLimiter::new(&cfg);
 
         let start = Instant::now();

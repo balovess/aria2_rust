@@ -19,7 +19,7 @@ const EVICTION_TARGET_RATIO: f64 = 0.5;
 #[derive(Clone)]
 pub struct CacheEntry {
     offset: u64,
-    data: bytes::Bytes,  // Zero-copy immutable buffer
+    data: bytes::Bytes, // Zero-copy immutable buffer
     dirty: bool,
     /// Monotonic insertion sequence number used for LRU eviction ordering.
     /// Lower `seq` = older insertion = evicted first.
@@ -167,7 +167,15 @@ impl WrDiskCache {
         // is replaced — the new write supersedes the old one. Subtract the old
         // entry's size so total_cached_bytes stays accurate.
         let old_size = entries
-            .insert(offset, CacheEntry { offset, data, dirty: true, seq })
+            .insert(
+                offset,
+                CacheEntry {
+                    offset,
+                    data,
+                    dirty: true,
+                    seq,
+                },
+            )
             .map(|old| old.size_bytes());
         if let Some(old) = old_size {
             self.total_cached_bytes.fetch_sub(old, Ordering::Relaxed);
@@ -278,7 +286,12 @@ impl WrDiskCache {
 
     /// Returns the number of dirty (unflushed) entries.
     pub async fn dirty_count(&self) -> usize {
-        self.entries.lock().await.values().filter(|e| e.dirty).count()
+        self.entries
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.dirty)
+            .count()
     }
 
     // -----------------------------------------------------------------------
@@ -314,7 +327,11 @@ impl WrDiskCache {
     /// Each iteration is O(n) (a full scan to find the min-`seq` clean entry),
     /// but eviction is infrequent (only when over the memory limit), so this is
     /// acceptable. The common `read`/`write` paths remain O(log n).
-    fn evict_clean_entries_locked(&self, entries: &mut BTreeMap<u64, CacheEntry>, needed_size: usize) {
+    fn evict_clean_entries_locked(
+        &self,
+        entries: &mut BTreeMap<u64, CacheEntry>,
+        needed_size: usize,
+    ) {
         let target = ((self.max_size_bytes as f64) * EVICTION_TARGET_RATIO) as usize;
         let mut evicted_count = 0usize;
         let mut evicted_bytes = 0usize;
@@ -446,7 +463,10 @@ mod tests {
     async fn test_clear_resets_cache() {
         let cache = make_small_cache(4096);
 
-        cache.write(0, bytes::Bytes::from(vec![0x42; 100])).await.unwrap();
+        cache
+            .write(0, bytes::Bytes::from(vec![0x42; 100]))
+            .await
+            .unwrap();
         assert_eq!(cache.size().await, 100);
 
         cache.clear().await.unwrap();
@@ -466,9 +486,18 @@ mod tests {
         let cache = make_small_cache(500);
 
         // Phase 1: Write 3 dirty entries (300 bytes) — under limit
-        cache.write(0, bytes::Bytes::from(vec![0u8; 100])).await.unwrap(); // entry A: offset=0
-        cache.write(100, bytes::Bytes::from(vec![1u8; 100])).await.unwrap(); // entry B: offset=100
-        cache.write(200, bytes::Bytes::from(vec![2u8; 100])).await.unwrap(); // entry C: offset=200
+        cache
+            .write(0, bytes::Bytes::from(vec![0u8; 100]))
+            .await
+            .unwrap(); // entry A: offset=0
+        cache
+            .write(100, bytes::Bytes::from(vec![1u8; 100]))
+            .await
+            .unwrap(); // entry B: offset=100
+        cache
+            .write(200, bytes::Bytes::from(vec![2u8; 100]))
+            .await
+            .unwrap(); // entry C: offset=200
         assert_eq!(cache.count().await, 3);
         assert_eq!(cache.size().await, 300);
 
@@ -479,11 +508,20 @@ mod tests {
 
         // Phase 2: Write more entries that will trigger eviction
         // Writing 300 more bytes would exceed 500 limit → should evict old clean ones
-        cache.write(300, bytes::Bytes::from(vec![3u8; 100])).await.unwrap(); // entry D: dirty
-        cache.write(400, bytes::Bytes::from(vec![4u8; 100])).await.unwrap(); // entry E: dirty
+        cache
+            .write(300, bytes::Bytes::from(vec![3u8; 100]))
+            .await
+            .unwrap(); // entry D: dirty
+        cache
+            .write(400, bytes::Bytes::from(vec![4u8; 100]))
+            .await
+            .unwrap(); // entry E: dirty
 
         // At this point we have 5 entries (500 bytes). Adding one more triggers eviction.
-        cache.write(500, bytes::Bytes::from(vec![5u8; 100])).await.unwrap(); // entry F: dirty
+        cache
+            .write(500, bytes::Bytes::from(vec![5u8; 100]))
+            .await
+            .unwrap(); // entry F: dirty
 
         // The oldest CLEAN entries (A, B, C) should have been evicted to make room.
         // Only D, E, F should remain (or possibly some of A/B/C if not all were evicted).
@@ -523,10 +561,22 @@ mod tests {
         let cache = make_small_cache(400);
 
         // Write 4 dirty entries (400 bytes = exactly at limit)
-        cache.write(0, bytes::Bytes::from(vec![0xAA; 100])).await.unwrap(); // dirty A
-        cache.write(100, bytes::Bytes::from(vec![0xBB; 100])).await.unwrap(); // dirty B
-        cache.write(200, bytes::Bytes::from(vec![0xCC; 100])).await.unwrap(); // dirty C
-        cache.write(300, bytes::Bytes::from(vec![0xDD; 100])).await.unwrap(); // dirty D
+        cache
+            .write(0, bytes::Bytes::from(vec![0xAA; 100]))
+            .await
+            .unwrap(); // dirty A
+        cache
+            .write(100, bytes::Bytes::from(vec![0xBB; 100]))
+            .await
+            .unwrap(); // dirty B
+        cache
+            .write(200, bytes::Bytes::from(vec![0xCC; 100]))
+            .await
+            .unwrap(); // dirty C
+        cache
+            .write(300, bytes::Bytes::from(vec![0xDD; 100]))
+            .await
+            .unwrap(); // dirty D
 
         assert_eq!(cache.dirty_count().await, 4);
         assert_eq!(cache.count().await, 4);
@@ -534,7 +584,10 @@ mod tests {
         // Now try to write another entry that would exceed the limit.
         // All existing entries are dirty, so NONE can be evicted.
         // The write must still succeed (cache may temporarily overshoot).
-        cache.write(400, bytes::Bytes::from(vec![0xEE; 100])).await.unwrap(); // dirty E
+        cache
+            .write(400, bytes::Bytes::from(vec![0xEE; 100]))
+            .await
+            .unwrap(); // dirty E
 
         // ALL 5 dirty entries must still be present — zero data loss allowed
         assert_eq!(
@@ -583,18 +636,36 @@ mod tests {
         let cache = make_small_cache(500);
 
         // Write and flush (make clean) some older entries
-        cache.write(0, bytes::Bytes::from(vec![1u8; 100])).await.unwrap(); // will become clean
-        cache.write(100, bytes::Bytes::from(vec![2u8; 100])).await.unwrap(); // will become clean
+        cache
+            .write(0, bytes::Bytes::from(vec![1u8; 100]))
+            .await
+            .unwrap(); // will become clean
+        cache
+            .write(100, bytes::Bytes::from(vec![2u8; 100]))
+            .await
+            .unwrap(); // will become clean
         cache.flush().await.unwrap(); // Mark A, B as clean
 
         // Write new dirty entries
-        cache.write(200, bytes::Bytes::from(vec![3u8; 100])).await.unwrap(); // dirty C
-        cache.write(300, bytes::Bytes::from(vec![4u8; 100])).await.unwrap(); // dirty D
+        cache
+            .write(200, bytes::Bytes::from(vec![3u8; 100]))
+            .await
+            .unwrap(); // dirty C
+        cache
+            .write(300, bytes::Bytes::from(vec![4u8; 100]))
+            .await
+            .unwrap(); // dirty D
 
         // Now: A(clean), B(clean), C(dirty), D(dirty) = 400 bytes
         // Write more to trigger eviction
-        cache.write(400, bytes::Bytes::from(vec![5u8; 100])).await.unwrap(); // dirty E — now 500 bytes
-        cache.write(500, bytes::Bytes::from(vec![6u8; 100])).await.unwrap(); // dirty F — exceeds 500, triggers eviction
+        cache
+            .write(400, bytes::Bytes::from(vec![5u8; 100]))
+            .await
+            .unwrap(); // dirty E — now 500 bytes
+        cache
+            .write(500, bytes::Bytes::from(vec![6u8; 100]))
+            .await
+            .unwrap(); // dirty F — exceeds 500, triggers eviction
 
         // Clean entries A and/or B should be evicted; C,D,E,F (dirty) must remain
         let dirty_cnt = cache.dirty_count().await;
@@ -634,17 +705,26 @@ mod tests {
         let cache = make_small_cache(300);
 
         // Fill with dirty entries, then flush them
-        cache.write(0, bytes::Bytes::from(vec![0u8; 150])).await.unwrap();
+        cache
+            .write(0, bytes::Bytes::from(vec![0u8; 150]))
+            .await
+            .unwrap();
         cache.flush().await.unwrap(); // Now clean
         assert_eq!(cache.dirty_count().await, 0);
 
         // Write new dirty entry — should trigger eviction of the clean one
-        cache.write(200, bytes::Bytes::from(vec![1u8; 150])).await.unwrap();
+        cache
+            .write(200, bytes::Bytes::from(vec![1u8; 150]))
+            .await
+            .unwrap();
 
         // The first entry (now clean) may or may not have been evicted depending on
         // whether 300 + 150 > 300 triggered it. With our logic, 150 + 150 = 300 which
         // is NOT > 300, so no eviction yet. One more write should trigger it.
-        cache.write(400, bytes::Bytes::from(vec![2u8; 150])).await.unwrap(); // 450 > 300 → evict!
+        cache
+            .write(400, bytes::Bytes::from(vec![2u8; 150]))
+            .await
+            .unwrap(); // 450 > 300 → evict!
 
         // Old clean entry at offset 0 should be evicted; new dirty entries remain
         let _old_entry = cache.read(0, 150).await.unwrap();
@@ -670,7 +750,10 @@ mod tests {
         cache.flush().await.unwrap(); // All clean now
 
         // Write one more entry to push over limit and trigger eviction
-        cache.write(2000, bytes::Bytes::from(vec![0xFF; 50])).await.unwrap(); // 1050 > 1000 → evict
+        cache
+            .write(2000, bytes::Bytes::from(vec![0xFF; 50]))
+            .await
+            .unwrap(); // 1050 > 1000 → evict
 
         // Should have evicted down to target (~500 bytes / 50 per entry ≈ 10 entries)
         let size = cache.size().await;
@@ -694,8 +777,14 @@ mod tests {
         // Verify current_size_bytes() works without holding the async lock
         let cache = make_small_cache(4096);
 
-        cache.write(0, bytes::Bytes::from(vec![0u8; 256])).await.unwrap();
-        cache.write(256, bytes::Bytes::from(vec![1u8; 256])).await.unwrap();
+        cache
+            .write(0, bytes::Bytes::from(vec![0u8; 256]))
+            .await
+            .unwrap();
+        cache
+            .write(256, bytes::Bytes::from(vec![1u8; 256]))
+            .await
+            .unwrap();
 
         // Lock-free read should match locked read
         let lock_free_size = cache.current_size_bytes();
@@ -723,7 +812,10 @@ mod tests {
         let cache = make_small_cache(4096);
 
         // Write an entry covering offsets 0-99
-        cache.write(0, bytes::Bytes::from(vec![42u8; 100])).await.unwrap();
+        cache
+            .write(0, bytes::Bytes::from(vec![42u8; 100]))
+            .await
+            .unwrap();
 
         // Read a sub-range within the entry
         let result = cache.read(10, 30).await.unwrap();
@@ -784,7 +876,10 @@ mod tests {
         let cache = make_small_cache(100); // Tiny 100-byte cache
 
         // Write a single entry larger than max
-        cache.write(0, bytes::Bytes::from(vec![0u8; 200])).await.unwrap();
+        cache
+            .write(0, bytes::Bytes::from(vec![0u8; 200]))
+            .await
+            .unwrap();
 
         // Must succeed without losing data (no clean entries to evict anyway)
         assert_eq!(cache.count().await, 1);

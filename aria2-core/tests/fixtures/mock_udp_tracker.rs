@@ -17,8 +17,8 @@ pub struct MockUdpTracker {
 impl MockUdpTracker {
     /// Create a new mock UDP tracker on a random port
     pub fn new() -> Result<Self, String> {
-        let socket = UdpSocket::bind("127.0.0.1:0")
-            .map_err(|e| format!("Failed to bind socket: {}", e))?;
+        let socket =
+            UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("Failed to bind socket: {}", e))?;
 
         let port = socket
             .local_addr()

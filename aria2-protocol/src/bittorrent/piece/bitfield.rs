@@ -68,18 +68,15 @@ impl Bitfield {
     pub fn all_set(num_bits: usize) -> Self {
         let num_bytes = num_bits.div_ceil(8);
         let mut bits = vec![0xFFu8; num_bytes];
-        
+
         // Clear unused bits in the last byte
         let remaining_bits = num_bits % 8;
         if remaining_bits > 0 && num_bytes > 0 {
             let mask = ((1u8 << remaining_bits) - 1) << (8 - remaining_bits);
             bits[num_bytes - 1] = mask;
         }
-        
-        Bitfield {
-            bits,
-            num_bits,
-        }
+
+        Bitfield { bits, num_bits }
     }
 
     /// Create a bitfield from raw bytes (e.g., from a peer's bitfield message).
@@ -102,23 +99,20 @@ impl Bitfield {
     pub fn from_bytes(data: &[u8], num_bits: usize) -> Self {
         let num_bytes = num_bits.div_ceil(8);
         let mut bits = vec![0u8; num_bytes];
-        
+
         let copy_len = std::cmp::min(data.len(), num_bytes);
         if copy_len > 0 {
             bits[..copy_len].copy_from_slice(&data[..copy_len]);
         }
-        
+
         // Clear unused bits in the last byte
         let remaining_bits = num_bits % 8;
         if remaining_bits > 0 && num_bytes > 0 {
             let mask = ((1u8 << remaining_bits) - 1) << (8 - remaining_bits);
             bits[num_bytes - 1] &= mask;
         }
-        
-        Bitfield {
-            bits,
-            num_bits,
-        }
+
+        Bitfield { bits, num_bits }
     }
 
     /// Get the raw byte representation.
@@ -157,7 +151,7 @@ impl Bitfield {
         if index >= self.num_bits {
             return None;
         }
-        
+
         let byte_index = index / 8;
         let bit_offset = index % 8;
         self.bits[byte_index] |= 1 << (7 - bit_offset);
@@ -173,7 +167,7 @@ impl Bitfield {
         if index >= self.num_bits {
             return None;
         }
-        
+
         let byte_index = index / 8;
         let bit_offset = index % 8;
         self.bits[byte_index] &= !(1 << (7 - bit_offset));
@@ -199,7 +193,7 @@ impl Bitfield {
         if index >= self.num_bits {
             return false;
         }
-        
+
         let byte_index = index / 8;
         let bit_offset = index % 8;
         (self.bits[byte_index] & (1 << (7 - bit_offset))) != 0
@@ -212,13 +206,13 @@ impl Bitfield {
     /// Uses `count_ones()` intrinsic for fast bit counting.
     pub fn count_set(&self) -> usize {
         let mut count = 0;
-        
+
         // Count full bytes
         let full_bytes = self.num_bits / 8;
         for i in 0..full_bytes {
             count += self.bits[i].count_ones() as usize;
         }
-        
+
         // Count remaining bits in the last partial byte
         let remaining_bits = self.num_bits % 8;
         if remaining_bits > 0 && full_bytes < self.bits.len() {
@@ -229,7 +223,7 @@ impl Bitfield {
                 }
             }
         }
-        
+
         count
     }
 
@@ -273,7 +267,7 @@ impl Bitfield {
             // Check if this byte has any clear bits (considering num_bits)
             let start_bit = byte_index * 8;
             let end_bit = std::cmp::min(start_bit + 8, self.num_bits);
-            
+
             for bit_offset in 0..(end_bit - start_bit) {
                 let index = start_bit + bit_offset;
                 if (byte & (1 << (7 - bit_offset))) == 0 {
@@ -292,10 +286,10 @@ impl Bitfield {
         if start >= self.num_bits {
             return None;
         }
-        
+
         let byte_index = start / 8;
         let bit_offset = start % 8;
-        
+
         // Check remaining bits in the current byte
         let byte = self.bits[byte_index];
         for bit in bit_offset..8 {
@@ -304,7 +298,7 @@ impl Bitfield {
                 return Some(index);
             }
         }
-        
+
         // Check subsequent bytes
         for (bi, &b) in self.bits.iter().enumerate().skip(byte_index + 1) {
             if b != 0 {
@@ -316,7 +310,7 @@ impl Bitfield {
                 }
             }
         }
-        
+
         None
     }
 
@@ -493,13 +487,13 @@ mod tests {
     #[test]
     fn test_set_and_test() {
         let mut bf = Bitfield::new(10);
-        
+
         assert!(!bf.test(5));
         bf.set(5).unwrap();
         assert!(bf.test(5));
         assert!(!bf.test(4));
         assert!(!bf.test(6));
-        
+
         // Test out of bounds
         assert!(bf.set(100).is_none());
         assert!(!bf.test(100));
@@ -510,10 +504,10 @@ mod tests {
         let mut bf = Bitfield::new(10);
         bf.set(3).unwrap();
         assert!(bf.test(3));
-        
+
         bf.clear(3).unwrap();
         assert!(!bf.test(3));
-        
+
         // Test out of bounds
         assert!(bf.clear(100).is_none());
     }
@@ -521,12 +515,12 @@ mod tests {
     #[test]
     fn test_count_bits() {
         let mut bf = Bitfield::new(100);
-        
+
         bf.set(0).unwrap();
         bf.set(10).unwrap();
         bf.set(50).unwrap();
         bf.set(99).unwrap();
-        
+
         assert_eq!(bf.count_set(), 4);
         assert_eq!(bf.count_clear(), 96);
     }
@@ -539,7 +533,7 @@ mod tests {
         assert!(!bf.test(1));
         assert!(!bf.test(6));
         assert!(bf.test(7));
-        
+
         // Test with multiple bytes
         let bf2 = Bitfield::from_bytes(&[0xFF, 0x00], 16);
         assert!(bf2.test(0));
@@ -554,7 +548,7 @@ mod tests {
         bf.set(0).unwrap();
         bf.set(7).unwrap();
         bf.set(15).unwrap();
-        
+
         let bytes = bf.as_bytes();
         assert_eq!(bytes.len(), 2);
         assert_eq!(bytes[0], 0x81); // 0b10000001
@@ -565,10 +559,10 @@ mod tests {
     fn test_find_first_set() {
         let mut bf = Bitfield::new(100);
         assert!(bf.find_first_set().is_none());
-        
+
         bf.set(42).unwrap();
         assert_eq!(bf.find_first_set(), Some(42));
-        
+
         bf.set(10).unwrap();
         assert_eq!(bf.find_first_set(), Some(10));
     }
@@ -577,7 +571,7 @@ mod tests {
     fn test_find_first_clear() {
         let bf = Bitfield::new(100);
         assert_eq!(bf.find_first_clear(), Some(0));
-        
+
         let bf2 = Bitfield::all_set(50);
         assert!(bf2.find_first_clear().is_none());
     }
@@ -588,7 +582,7 @@ mod tests {
         bf.set(5).unwrap();
         bf.set(10).unwrap();
         bf.set(20).unwrap();
-        
+
         assert_eq!(bf.find_next_set(0), Some(5));
         assert_eq!(bf.find_next_set(5), Some(10));
         assert_eq!(bf.find_next_set(10), Some(20));
@@ -601,7 +595,7 @@ mod tests {
         bf.set(1).unwrap();
         bf.set(5).unwrap();
         bf.set(10).unwrap();
-        
+
         let set_bits: Vec<usize> = bf.iter_set().collect();
         assert_eq!(set_bits, vec![1, 5, 10]);
     }
@@ -611,7 +605,7 @@ mod tests {
         let mut bf = Bitfield::new(5);
         bf.set(1).unwrap();
         bf.set(3).unwrap();
-        
+
         let clear_bits: Vec<usize> = bf.iter_clear().collect();
         assert_eq!(clear_bits, vec![0, 2, 4]);
     }
@@ -621,30 +615,33 @@ mod tests {
         let bf = Bitfield::new(100);
         assert_eq!(bf.memory_usage(), 13); // ceil(100/8) = 13 bytes
         assert_eq!(bf.vec_bool_memory_usage(), 100); // 100 bytes for Vec<bool>
-        
+
         let ratio = bf.memory_savings_ratio();
-        assert!(ratio > 7.5 && ratio < 8.0, "Memory savings ratio should be close to 8x");
+        assert!(
+            ratio > 7.5 && ratio < 8.0,
+            "Memory savings ratio should be close to 8x"
+        );
     }
 
     #[test]
     fn test_large_bitfield() {
         // Test with a large number of bits (typical for large torrents)
         let mut bf = Bitfield::new(10_000);
-        
+
         // Set every 100th bit
         for i in (0..10_000).step_by(100) {
             bf.set(i).unwrap();
         }
-        
+
         assert_eq!(bf.count_set(), 100);
         assert_eq!(bf.count_clear(), 9900);
-        
+
         // Memory usage should be 10,000 / 8 = 1250 bytes
         assert_eq!(bf.memory_usage(), 1250);
-        
+
         // Vec<bool> would use 10,000 bytes
         assert_eq!(bf.vec_bool_memory_usage(), 10_000);
-        
+
         // Verify 8x memory savings
         let ratio = bf.memory_savings_ratio();
         assert!(ratio > 7.9, "Should achieve close to 8x memory savings");
@@ -656,12 +653,12 @@ mod tests {
         bf1.set(0).unwrap();
         bf1.set(1).unwrap();
         bf1.set(2).unwrap();
-        
+
         let mut bf2 = Bitfield::new(16);
         bf2.set(1).unwrap();
         bf2.set(2).unwrap();
         bf2.set(3).unwrap();
-        
+
         // Test AND
         let mut result = bf1.clone();
         result.bitand_assign(&bf2);
@@ -669,7 +666,7 @@ mod tests {
         assert!(result.test(2));
         assert!(!result.test(0));
         assert!(!result.test(3));
-        
+
         // Test OR
         let mut result = bf1.clone();
         result.bitor_assign(&bf2);
@@ -677,7 +674,7 @@ mod tests {
         assert!(result.test(1));
         assert!(result.test(2));
         assert!(result.test(3));
-        
+
         // Test XOR
         let mut result = bf1.clone();
         result.bitxor_assign(&bf2);
@@ -690,11 +687,11 @@ mod tests {
     #[test]
     fn test_set_all_and_clear_all() {
         let mut bf = Bitfield::new(100);
-        
+
         bf.set_all();
         assert!(bf.is_all_set());
         assert_eq!(bf.count_set(), 100);
-        
+
         bf.clear_all();
         assert!(bf.is_all_clear());
         assert_eq!(bf.count_set(), 0);
@@ -706,20 +703,20 @@ mod tests {
         let bf = Bitfield::new(0);
         assert!(bf.is_empty());
         assert_eq!(bf.count_set(), 0);
-        
+
         // Test with 1 bit
         let mut bf = Bitfield::new(1);
         assert!(!bf.test(0));
         bf.set(0).unwrap();
         assert!(bf.test(0));
         assert!(bf.is_all_set());
-        
+
         // Test with 7 bits (less than one byte)
         let mut bf = Bitfield::new(7);
         bf.set(6).unwrap();
         assert!(bf.test(6));
         assert!(!bf.test(7)); // Out of bounds
-        
+
         // Test with 8 bits (exactly one byte)
         let mut bf = Bitfield::new(8);
         bf.set(7).unwrap();
@@ -733,10 +730,10 @@ mod tests {
         bf1.set(0).unwrap();
         bf1.set(50).unwrap();
         bf1.set(99).unwrap();
-        
+
         let bytes = bf1.as_bytes().to_vec();
         let bf2 = Bitfield::from_bytes(&bytes, 100);
-        
+
         assert_eq!(bf1, bf2);
     }
 
@@ -746,14 +743,14 @@ mod tests {
         let mut bf = Bitfield::new(10);
         bf.set(8).unwrap();
         bf.set(9).unwrap();
-        
+
         assert!(bf.test(8));
         assert!(bf.test(9));
         assert_eq!(bf.count_set(), 2);
-        
+
         // Ensure bits 10+ are not accessible
         assert!(!bf.test(10));
-        
+
         // Test from_bytes with partial byte
         let bf2 = Bitfield::from_bytes(&[0x00, 0xC0], 10); // 0xC0 = 0b11000000
         assert!(!bf2.test(7));

@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use dashmap::DashMap;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -422,7 +422,10 @@ mod tests {
         // With DashMap, concurrent reads should be very fast
         // This is a sanity check - the actual improvement depends on hardware
         println!("Concurrent read operations took: {:?}", duration);
-        assert!(duration.as_millis() < 1000, "Concurrent operations should be fast");
+        assert!(
+            duration.as_millis() < 1000,
+            "Concurrent operations should be fast"
+        );
     }
 
     /// Test that list_groups works correctly with concurrent modifications
@@ -482,10 +485,7 @@ mod tests {
         }
 
         let results: Vec<_> = futures::future::join_all(handles).await;
-        let gids: Vec<_> = results
-            .into_iter()
-            .map(|r| r.unwrap().unwrap())
-            .collect();
+        let gids: Vec<_> = results.into_iter().map(|r| r.unwrap().unwrap()).collect();
 
         // Verify all GIDs are unique
         let mut gid_values: Vec<_> = gids.iter().map(|g| g.value()).collect();

@@ -192,7 +192,10 @@ async fn test_force_pause() {
 
     let status_json = status_resp.result.unwrap();
     let status_str = status_json.get("status").unwrap().as_str().unwrap();
-    assert_eq!(status_str, "paused", "Task status should be 'paused' after forcePause");
+    assert_eq!(
+        status_str, "paused",
+        "Task status should be 'paused' after forcePause"
+    );
 }
 
 #[tokio::test]
@@ -207,8 +210,15 @@ async fn test_force_pause_nonexistent_gid() {
         id: Some(serde_json::Value::String("forcePause".into())),
     };
     let force_pause_resp = engine.handle_request(&force_pause_req).await;
-    assert!(force_pause_resp.is_error(), "forcePause should fail for non-existent GID");
-    assert_eq!(force_pause_resp.error.unwrap().code, -32601, "Error code should be MethodNotFound");
+    assert!(
+        force_pause_resp.is_error(),
+        "forcePause should fail for non-existent GID"
+    );
+    assert_eq!(
+        force_pause_resp.error.unwrap().code,
+        -32601,
+        "Error code should be MethodNotFound"
+    );
 }
 
 #[tokio::test]
@@ -234,7 +244,8 @@ async fn test_force_pause_all() {
         id: Some(serde_json::Value::String("active".into())),
     };
     let active_resp = engine.handle_request(&tell_active_req).await;
-    let active_tasks: Vec<serde_json::Value> = serde_json::from_value(active_resp.result.unwrap()).unwrap();
+    let active_tasks: Vec<serde_json::Value> =
+        serde_json::from_value(active_resp.result.unwrap()).unwrap();
     assert_eq!(active_tasks.len(), 3, "Should have 3 active tasks");
 
     // Force pause all
@@ -245,7 +256,10 @@ async fn test_force_pause_all() {
         id: Some(serde_json::Value::String("forcePauseAll".into())),
     };
     let force_pause_all_resp = engine.handle_request(&force_pause_all_req).await;
-    assert!(force_pause_all_resp.is_success(), "forcePauseAll should succeed");
+    assert!(
+        force_pause_all_resp.is_success(),
+        "forcePauseAll should succeed"
+    );
 
     // Verify result is "OK"
     let result: String = serde_json::from_value(force_pause_all_resp.result.unwrap()).unwrap();
@@ -253,8 +267,13 @@ async fn test_force_pause_all() {
 
     // Verify no active tasks remain
     let active_resp2 = engine.handle_request(&tell_active_req).await;
-    let active_tasks2: Vec<serde_json::Value> = serde_json::from_value(active_resp2.result.unwrap()).unwrap();
-    assert_eq!(active_tasks2.len(), 0, "No tasks should be active after forcePauseAll");
+    let active_tasks2: Vec<serde_json::Value> =
+        serde_json::from_value(active_resp2.result.unwrap()).unwrap();
+    assert_eq!(
+        active_tasks2.len(),
+        0,
+        "No tasks should be active after forcePauseAll"
+    );
 }
 
 #[tokio::test]
@@ -269,7 +288,10 @@ async fn test_force_pause_all_empty_tasks() {
         id: Some(serde_json::Value::String("forcePauseAll".into())),
     };
     let force_pause_all_resp = engine.handle_request(&force_pause_all_req).await;
-    assert!(force_pause_all_resp.is_success(), "forcePauseAll should succeed even with no tasks");
+    assert!(
+        force_pause_all_resp.is_success(),
+        "forcePauseAll should succeed even with no tasks"
+    );
 
     let result: String = serde_json::from_value(force_pause_all_resp.result.unwrap()).unwrap();
     assert_eq!(result, "OK");

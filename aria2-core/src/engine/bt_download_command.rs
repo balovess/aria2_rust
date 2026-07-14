@@ -140,7 +140,7 @@ impl BtDownloadCommand {
             vec![format!("bt://{}", meta.info_hash.as_hex())],
             options.clone(),
         );
-        
+
         // Set BT metadata for session persistence (Task 3)
         group.set_bt_metadata(
             meta.num_pieces() as u32,
@@ -172,11 +172,16 @@ impl BtDownloadCommand {
             || options.bt_snubbed_timeout.is_some()
         {
             let config = ChokingConfig {
-                max_upload_slots: options.bt_max_upload_slots.unwrap_or(constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32) as usize,
+                max_upload_slots: options
+                    .bt_max_upload_slots
+                    .unwrap_or(constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32)
+                    as usize,
                 optimistic_unchoke_interval_secs: options
                     .bt_optimistic_unchoke_interval
                     .unwrap_or(constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS),
-                snubbed_timeout_secs: options.bt_snubbed_timeout.unwrap_or(constants::BT_SNUBBED_TIMEOUT_SECS),
+                snubbed_timeout_secs: options
+                    .bt_snubbed_timeout
+                    .unwrap_or(constants::BT_SNUBBED_TIMEOUT_SECS),
                 choke_rotation_interval_secs: constants::BT_CHOKE_ROTATION_INTERVAL_SECS,
             };
             Some(ChokingAlgorithm::new(config))
@@ -760,10 +765,8 @@ impl BtDownloadCommand {
         let seed_ratio = self.seed_ratio.unwrap_or(0.0);
         let seed_time = self.seed_time.map(|d| d.as_secs());
 
-        let exit_condition = SeedExitCondition::with_time_and_ratio(
-            seed_time.unwrap_or(0),
-            seed_ratio,
-        );
+        let exit_condition =
+            SeedExitCondition::with_time_and_ratio(seed_time.unwrap_or(0), seed_ratio);
 
         let config = BtSeedingConfig {
             max_upload_bytes_per_sec: None, // Will be set from options if needed

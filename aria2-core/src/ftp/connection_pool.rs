@@ -169,9 +169,15 @@ impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             max_connections: crate::constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS,
-            max_idle_time: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_MAX_IDLE_TIME_SECS),
-            max_connection_age: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_MAX_CONNECTION_AGE_SECS),
-            connect_timeout: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_CONNECT_TIMEOUT_SECS),
+            max_idle_time: Duration::from_secs(
+                crate::constants::FTP_POOL_DEFAULT_MAX_IDLE_TIME_SECS,
+            ),
+            max_connection_age: Duration::from_secs(
+                crate::constants::FTP_POOL_DEFAULT_MAX_CONNECTION_AGE_SECS,
+            ),
+            connect_timeout: Duration::from_secs(
+                crate::constants::FTP_POOL_DEFAULT_CONNECT_TIMEOUT_SECS,
+            ),
             read_timeout: Duration::from_secs(crate::constants::FTP_POOL_DEFAULT_READ_TIMEOUT_SECS),
         }
     }
@@ -251,16 +257,16 @@ impl FtpConnectionPool {
                 if conn.is_healthy(self.config.max_idle_time) {
                     conn.mark_used();
                     self.update_lru_access(&key).await;
-                    
+
                     // Update stats
                     let mut stats = self.stats.lock().await;
                     stats.connections_reused += 1;
-                    
+
                     debug!(
                         "Reusing FTP connection to {}:{} (reuse #{})",
                         host, port, conn.reuse_count
                     );
-                    
+
                     // Return a clone for the caller to use
                     // Note: FtpClient doesn't implement Clone, so we need to remove it
                     // and return it. The caller will return it back to the pool.
@@ -271,7 +277,7 @@ impl FtpConnectionPool {
                     debug!("Removing stale FTP connection to {}:{}", host, port);
                     connections.remove(&key);
                     self.remove_from_lru(&key).await;
-                    
+
                     let mut stats = self.stats.lock().await;
                     stats.connections_evicted += 1;
                 }
@@ -285,24 +291,24 @@ impl FtpConnectionPool {
         // Create new connection
         debug!("Creating new FTP connection to {}:{}", host, port);
         let client = FtpClient::connect(host, port, mode).await?;
-        
+
         // Authenticate
         {
             let mut client = client;
             client.login(username, password).await?;
-            
+
             // Set binary mode for file transfers
             client.set_binary_mode(true).await?;
-            
+
             let pooled = PooledConnection::new(client, key.clone(), mode);
-            
+
             // Add to pool
             let mut connections = self.connections.lock().await;
             connections.insert(key.clone(), pooled);
-            
+
             // Update LRU
             self.add_to_lru(key.clone()).await;
-            
+
             // Update stats
             let mut stats = self.stats.lock().await;
             stats.connections_created += 1;
@@ -310,9 +316,12 @@ impl FtpConnectionPool {
             if connections.len() > stats.peak_size {
                 stats.peak_size = connections.len();
             }
-            
-            info!("FTP connection pool: created new connection to {}:{}", host, port);
-            
+
+            info!(
+                "FTP connection pool: created new connection to {}:{}",
+                host, port
+            );
+
             // Return the connection (remove from pool temporarily)
             Ok(connections.remove(&key).unwrap())
         }
@@ -335,7 +344,9 @@ impl FtpConnectionPool {
         if conn.age() > self.config.max_connection_age {
             debug!(
                 "Not returning expired connection to {}:{} (age: {:?})",
-                conn.key.host, conn.key.port, conn.age()
+                conn.key.host,
+                conn.key.port,
+                conn.age()
             );
             let mut stats = self.stats.lock().await;
             stats.connections_evicted += 1;
@@ -347,23 +358,23 @@ impl FtpConnectionPool {
         let mut connections = self.connections.lock().await;
         let key = conn.key.clone();
         connections.insert(key.clone(), conn);
-        
+
         self.update_lru_access(&key).await;
-        
+
         let mut stats = self.stats.lock().await;
         stats.current_size = connections.len();
-        
+
         debug!("Returned FTP connection to pool: {}:{}", key.host, key.port);
     }
 
     /// Evict connections if pool is full
     async fn evict_if_needed(&self) -> Result<()> {
         let mut connections = self.connections.lock().await;
-        
+
         while connections.len() >= self.config.max_connections {
             // Find the least recently used connection
             let lru_key = self.find_lru_key().await;
-            
+
             if let Some(key) = lru_key {
                 debug!(
                     "Evicting LRU connection to {}:{} (pool full)",
@@ -371,14 +382,14 @@ impl FtpConnectionPool {
                 );
                 connections.remove(&key);
                 self.remove_from_lru(&key).await;
-                
+
                 let mut stats = self.stats.lock().await;
                 stats.connections_evicted += 1;
             } else {
                 break;
             }
         }
-        
+
         Ok(())
     }
 
@@ -417,25 +428,30 @@ impl FtpConnectionPool {
     pub async fn cleanup_stale(&self) {
         let mut connections = self.connections.lock().await;
         let mut to_remove = Vec::new();
-        
+
         for (key, conn) in connections.iter() {
-            if !conn.is_healthy(self.config.max_idle_time) || conn.age() > self.config.max_connection_age {
+            if !conn.is_healthy(self.config.max_idle_time)
+                || conn.age() > self.config.max_connection_age
+            {
                 to_remove.push(key.clone());
             }
         }
-        
+
         for key in to_remove {
             connections.remove(&key);
             self.remove_from_lru(&key).await;
-            
+
             let mut stats = self.stats.lock().await;
             stats.connections_evicted += 1;
         }
-        
+
         let mut stats = self.stats.lock().await;
         stats.current_size = connections.len();
-        
-        debug!("FTP connection pool cleanup: {} connections remaining", connections.len());
+
+        debug!(
+            "FTP connection pool cleanup: {} connections remaining",
+            connections.len()
+        );
     }
 
     /// Get pool statistics
@@ -453,23 +469,23 @@ impl FtpConnectionPool {
         let mut connections = self.connections.lock().await;
         let count = connections.len();
         connections.clear();
-        
+
         let mut lru = self.lru_order.lock().await;
         lru.clear();
-        
+
         let mut stats = self.stats.lock().await;
         stats.connections_evicted += count as u64;
         stats.current_size = 0;
-        
+
         info!("FTP connection pool cleared: {} connections removed", count);
     }
 
     /// Check if the pool has a connection for the given key
     pub async fn has_connection(&self, host: &str, port: u16, username: &str) -> bool {
         let connections = self.connections.lock().await;
-        connections.keys().any(|k| {
-            k.host == host && k.port == port && k.username == username
-        })
+        connections
+            .keys()
+            .any(|k| k.host == host && k.port == port && k.username == username)
     }
 }
 
@@ -495,7 +511,7 @@ mod tests {
         let key1 = ConnectionKey::new("example.com", 21, "user", "pass");
         let key2 = ConnectionKey::new("example.com", 21, "user", "pass");
         let key3 = ConnectionKey::new("example.com", 21, "user2", "pass");
-        
+
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
     }
@@ -536,13 +552,13 @@ mod tests {
         // Create a mock pooled connection (without actual FTP client)
         // We can't easily create a real FtpClient in tests, so we test the logic
         let max_idle_time = Duration::from_secs(300);
-        
+
         // A connection that was just used should be healthy
         // (We can't create a real PooledConnection without FtpClient,
         // but the is_healthy logic is simple: check if idle_time < max_idle_time)
         let idle_time = Duration::from_secs(10);
         assert!(idle_time < max_idle_time);
-        
+
         // A connection idle for too long should be unhealthy
         let idle_time_long = Duration::from_secs(400);
         assert!(idle_time_long >= max_idle_time);
@@ -555,7 +571,7 @@ mod tests {
             key: key.clone(),
             last_access: Instant::now(),
         };
-        
+
         assert_eq!(entry.key, key);
         assert!(entry.last_access.elapsed() < Duration::from_secs(1));
     }
@@ -592,12 +608,12 @@ mod tests {
     #[test]
     fn test_connection_key_hash() {
         use std::collections::HashSet;
-        
+
         let mut set = HashSet::new();
         let key1 = ConnectionKey::new("example.com", 21, "user", "pass");
         let key2 = ConnectionKey::new("example.com", 21, "user", "pass");
         let key3 = ConnectionKey::new("other.com", 21, "user", "pass");
-        
+
         set.insert(key1.clone());
         assert!(set.contains(&key2)); // Same key
         assert!(!set.contains(&key3)); // Different key

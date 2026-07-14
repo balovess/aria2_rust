@@ -47,13 +47,7 @@ fn test_whitespace_only_protocol_detection() {
 fn test_empty_uri_download_command_creation() {
     // DownloadCommand::new does not validate URI at creation time
     // It validates during execute()
-    let result = DownloadCommand::new(
-        GroupId::new(1),
-        "",
-        &DownloadOptions::default(),
-        None,
-        None,
-    );
+    let result = DownloadCommand::new(GroupId::new(1), "", &DownloadOptions::default(), None, None);
     // Creation succeeds, validation happens during execute()
     assert!(
         result.is_ok(),
@@ -80,14 +74,9 @@ fn test_whitespace_uri_download_command_creation() {
 
 #[tokio::test]
 async fn test_empty_uri_download_command_execute_returns_error() {
-    let mut cmd = DownloadCommand::new(
-        GroupId::new(3),
-        "",
-        &DownloadOptions::default(),
-        None,
-        None,
-    )
-    .expect("DownloadCommand::new should succeed");
+    let mut cmd =
+        DownloadCommand::new(GroupId::new(3), "", &DownloadOptions::default(), None, None)
+            .expect("DownloadCommand::new should succeed");
 
     let result = cmd.execute().await;
     assert!(
@@ -350,7 +339,7 @@ fn test_empty_torrent_variants_no_panic() {
     let empty_variants: Vec<Vec<u8>> = vec![
         vec![],
         vec![0],
-        vec![b'd'], // Just dict start
+        vec![b'd'],       // Just dict start
         vec![b'd', b'e'], // Empty dict
     ];
 

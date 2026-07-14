@@ -22,7 +22,9 @@ async fn test_web_seed_client_basic() {
     let data: Vec<u8> = (0..total_size as usize).map(|i| (i % 256) as u8).collect();
 
     // Start mock server with Range support
-    let server = MockHttpServer::start().await.expect("Failed to start mock server");
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
     server.register_range_response("/file.bin", &data);
 
     let base_url = server.base_url();
@@ -55,7 +57,9 @@ async fn test_web_seed_manager_fallback() {
     let data: Vec<u8> = (0..total_size as usize).map(|i| (i % 256) as u8).collect();
 
     // Start mock server
-    let server = MockHttpServer::start().await.expect("Failed to start mock server");
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
     server.register_range_response("/file.bin", &data);
 
     let base_url = server.base_url();
@@ -76,7 +80,10 @@ async fn test_web_seed_manager_fallback() {
     let expected_offset = 2 * piece_length as u64;
     let expected_end = expected_offset + piece_length as u64;
     assert_eq!(piece_data.len(), piece_length as usize);
-    assert_eq!(piece_data, &data[expected_offset as usize..expected_end as usize]);
+    assert_eq!(
+        piece_data,
+        &data[expected_offset as usize..expected_end as usize]
+    );
 }
 
 // ===========================================================================
@@ -93,7 +100,9 @@ async fn test_web_seed_last_piece() {
     let data: Vec<u8> = (0..total_size as usize).map(|i| (i % 256) as u8).collect();
 
     // Start mock server
-    let server = MockHttpServer::start().await.expect("Failed to start mock server");
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
     server.register_range_response("/file.bin", &data);
 
     let base_url = server.base_url();
@@ -128,10 +137,14 @@ async fn test_web_seed_stats() {
 
     // Create test data
     let piece_length = 16384u64;
-    let data: Vec<u8> = (0..piece_length as usize).map(|i| (i % 256) as u8).collect();
+    let data: Vec<u8> = (0..piece_length as usize)
+        .map(|i| (i % 256) as u8)
+        .collect();
 
     // Start mock server
-    let server = MockHttpServer::start().await.expect("Failed to start mock server");
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
     server.register_range_response("/file.bin", &data);
 
     let base_url = server.base_url();
@@ -166,8 +179,12 @@ async fn test_web_seed_manager_multiple_urls() {
     let data: Vec<u8> = (0..total_size as usize).map(|i| (i % 256) as u8).collect();
 
     // Start two mock servers
-    let server1 = MockHttpServer::start().await.expect("Failed to start server 1");
-    let server2 = MockHttpServer::start().await.expect("Failed to start server 2");
+    let server1 = MockHttpServer::start()
+        .await
+        .expect("Failed to start server 1");
+    let server2 = MockHttpServer::start()
+        .await
+        .expect("Failed to start server 2");
     server1.register_range_response("/file.bin", &data);
     server2.register_range_response("/file.bin", &data);
 
@@ -182,8 +199,14 @@ async fn test_web_seed_manager_multiple_urls() {
     );
 
     // Request both pieces
-    let piece0 = manager.request_piece(0).await.expect("Failed to download piece 0");
-    let piece1 = manager.request_piece(1).await.expect("Failed to download piece 1");
+    let piece0 = manager
+        .request_piece(0)
+        .await
+        .expect("Failed to download piece 0");
+    let piece1 = manager
+        .request_piece(1)
+        .await
+        .expect("Failed to download piece 1");
 
     assert_eq!(piece0.len(), piece_length as usize);
     assert_eq!(piece1.len(), piece_length as usize);

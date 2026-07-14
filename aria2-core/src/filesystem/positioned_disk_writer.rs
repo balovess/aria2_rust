@@ -137,9 +137,7 @@ impl PositionedDiskWriter {
     #[cfg(unix)]
     pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
         let guard = self.file.lock().ok()?;
-        guard
-            .as_ref()
-            .map(std::os::unix::io::AsRawFd::as_raw_fd)
+        guard.as_ref().map(std::os::unix::io::AsRawFd::as_raw_fd)
     }
 }
 
@@ -725,10 +723,9 @@ mod io_uring_backend {
             // io_uring file, truncate via `std::fs::File::set_len`, then reopen
             // via tokio_uring to get a fresh file handle.
             if let Some(file) = self.file.take() {
-                let _ = file
-                    .close()
-                    .await
-                    .map_err(|e| Aria2Error::Io(format!("io_uring close during truncate failed: {e}")))?;
+                let _ = file.close().await.map_err(|e| {
+                    Aria2Error::Io(format!("io_uring close during truncate failed: {e}"))
+                })?;
             }
             std::fs::OpenOptions::new()
                 .write(true)
@@ -740,7 +737,9 @@ mod io_uring_backend {
                 .read(true)
                 .open(&self.path)
                 .await
-                .map_err(|e| Aria2Error::Io(format!("io_uring reopen after truncate failed: {e}")))?;
+                .map_err(|e| {
+                    Aria2Error::Io(format!("io_uring reopen after truncate failed: {e}"))
+                })?;
             self.file = Some(file);
             Ok(())
         }

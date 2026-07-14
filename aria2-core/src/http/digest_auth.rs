@@ -73,9 +73,9 @@ impl DigestAuthChallenge {
     /// ```
     pub fn parse(header_value: &str) -> Result<Self, Aria2Error> {
         // Extract after "Digest " prefix
-        let digest_part = header_value
-            .strip_prefix("Digest ")
-            .ok_or_else(|| Aria2Error::Parse("Not a Digest challenge: missing 'Digest ' prefix".to_string()))?;
+        let digest_part = header_value.strip_prefix("Digest ").ok_or_else(|| {
+            Aria2Error::Parse("Not a Digest challenge: missing 'Digest ' prefix".to_string())
+        })?;
 
         // Split by comma to get key=value pairs, then parse each pair
         let mut params = HashMap::new();
@@ -93,10 +93,9 @@ impl DigestAuthChallenge {
         }
 
         // Validate required fields
-        let nonce = params
-            .get("nonce")
-            .cloned()
-            .ok_or_else(|| Aria2Error::Parse("Missing required 'nonce' parameter in Digest challenge".to_string()))?;
+        let nonce = params.get("nonce").cloned().ok_or_else(|| {
+            Aria2Error::Parse("Missing required 'nonce' parameter in Digest challenge".to_string())
+        })?;
 
         Ok(DigestAuthChallenge {
             realm: params.get("realm").cloned().unwrap_or_default(),

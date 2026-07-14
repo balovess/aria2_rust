@@ -147,7 +147,10 @@ impl TorrentMeta {
             .ok_or("Missing pieces field")?;
 
         if pieces_raw.len() % 20 != 0 {
-            return Err(format!("pieces length ({}) is not a multiple of 20", pieces_raw.len()));
+            return Err(format!(
+                "pieces length ({}) is not a multiple of 20",
+                pieces_raw.len()
+            ));
         }
 
         let pieces = (0..pieces_raw.len() / 20)

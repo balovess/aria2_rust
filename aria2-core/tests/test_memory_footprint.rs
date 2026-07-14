@@ -99,7 +99,9 @@ async fn test_memory_footprint_10mb_write() {
     sample_rss(&mut sys, pid, &mut peak_rss);
 
     // Verify data integrity so the test is not just a memory measurement.
-    let content = tokio::fs::read(&path).await.expect("failed to read back file");
+    let content = tokio::fs::read(&path)
+        .await
+        .expect("failed to read back file");
     assert_eq!(content.len(), total_size, "file size mismatch");
     for i in 0..num_chunks {
         let chunk_start = i * chunk_size;

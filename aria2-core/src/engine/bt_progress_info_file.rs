@@ -195,21 +195,26 @@ impl BtProgressManager {
                 "{:x}.tmp.{}",
                 timestamp,
                 // Format thread ID as a simple hash
-                format!("{:?}", thread_id).chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>()
+                format!("{:?}", thread_id)
+                    .chars()
+                    .filter(|c| c.is_ascii_hexdigit())
+                    .collect::<String>()
             );
             file_path.with_extension(unique_suffix)
         };
 
         let content = self.serialize_progress(progress);
         {
-            let mut file = fs::File::create(&tmp_path)
-                .map_err(|e| Aria2Error::Io(format!("Failed to create temporary progress file: {}", e)))?;
+            let mut file = fs::File::create(&tmp_path).map_err(|e| {
+                Aria2Error::Io(format!("Failed to create temporary progress file: {}", e))
+            })?;
 
             file.write_all(content.as_bytes())
                 .map_err(|e| Aria2Error::Io(format!("Failed to write progress data: {}", e)))?;
 
-            file.flush()
-                .map_err(|e| Aria2Error::Io(format!("Failed to flush progress file buffer: {}", e)))?;
+            file.flush().map_err(|e| {
+                Aria2Error::Io(format!("Failed to flush progress file buffer: {}", e))
+            })?;
         }
 
         // Atomic rename
@@ -301,7 +306,10 @@ impl BtProgressManager {
                 if e.kind() == std::io::ErrorKind::InvalidData {
                     return self.load_binary_format(info_hash, &file_path);
                 }
-                return Err(Aria2Error::Io(format!("Failed to read progress file: {}", e)));
+                return Err(Aria2Error::Io(format!(
+                    "Failed to read progress file: {}",
+                    e
+                )));
             }
         };
 

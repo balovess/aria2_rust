@@ -83,27 +83,39 @@ pub async fn try_splice_download(
         ));
     }
 
-    let host = parsed.host_str().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "URL has no host")
-    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "URL has no host"))?;
     let port = parsed.port_or_known_default().unwrap_or(80);
-    let path = if parsed.path().is_empty() { "/" } else { parsed.path() };
+    let path = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
     let query = parsed.query().map(|q| format!("?{q}")).unwrap_or_default();
     let path_query = format!("{path}{query}");
 
     // 2. DNS resolution via tokio's async resolver.
     let addr = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::AddrNotAvailable, format!("DNS resolution failed: {e}")))?
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!("DNS resolution failed: {e}"),
+            )
+        })?
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "no addresses resolved"))?;
 
     debug!(host, port, %addr, "splice_download: connecting");
 
     // 3. TCP connect.
-    let mut stream = tokio::net::TcpStream::connect(addr)
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, format!("TCP connect failed: {e}")))?;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("TCP connect failed: {e}"),
+        )
+    })?;
     // Disable Nagle's algorithm — we send the full request at once and want
     // the response without delay.
     let _ = stream.set_nodelay(true);
@@ -153,8 +165,9 @@ pub async fn try_splice_download(
     // 6. Parse status code — must be 206 (Partial Content).
     //    Any other status (200, 416, 4xx, 5xx) → fall back to reqwest.
     let header_bytes = &header_buf[..header_end_pos];
-    let header_str = std::str::from_utf8(header_bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("non-UTF8 headers: {e}")))?;
+    let header_str = std::str::from_utf8(header_bytes).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("non-UTF8 headers: {e}"))
+    })?;
     let status = parse_status_code(header_str)?;
     if status != 206 {
         return Err(io::Error::other(format!(
@@ -175,9 +188,7 @@ pub async fn try_splice_download(
     if content_length > length {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "Content-Length ({content_length}) exceeds requested length ({length})"
-            ),
+            format!("Content-Length ({content_length}) exceeds requested length ({length})"),
         ));
     }
 
@@ -220,7 +231,13 @@ pub async fn try_splice_download(
             // we no longer perform async I/O on this socket — the header read
             // is done, and the socket will be dropped after splice completes.
             set_blocking(socket_fd);
-            splice_transfer(socket_fd, None, file_fd, Some(splice_file_offset), splice_len)
+            splice_transfer(
+                socket_fd,
+                None,
+                file_fd,
+                Some(splice_file_offset),
+                splice_len,
+            )
         })
         .await
         .map_err(|e| io::Error::other(format!("blocking task failed: {e}")))?
@@ -285,8 +302,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
     }
     // Search from the end of the previously-unsearched region. A simple
     // sliding window is sufficient — headers are small (< 8 KB).
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 /// Parse the HTTP status code from the first line of the response.
@@ -300,12 +316,12 @@ fn parse_status_code(header_str: &str) -> io::Result<u16> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty response"))?;
 
     let mut parts = first_line.split_whitespace();
-    let _version = parts.next().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing HTTP version")
-    })?;
-    let code_str = parts.next().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing status code")
-    })?;
+    let _version = parts
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing HTTP version"))?;
+    let code_str = parts
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing status code"))?;
 
     code_str.parse::<u16>().map_err(|_| {
         io::Error::new(
@@ -401,7 +417,6 @@ fn set_blocking(fd: std::os::unix::io::RawFd) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::os::unix::io::AsRawFd;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Spawn a mock HTTP server that responds to a Range request with 206
@@ -451,13 +466,13 @@ mod tests {
         for line in req.lines() {
             if let Some(rest) = line.strip_prefix("Range:") {
                 let rest = rest.trim();
-                if let Some(range) = rest.strip_prefix("bytes=") {
-                    if let Some((start_s, end_s)) = range.split_once('-') {
-                        let start: usize = start_s.parse().unwrap_or(0);
-                        let end: usize = end_s.parse().unwrap_or(total - 1);
-                        let length = end.saturating_sub(start) + 1;
-                        return (start, length);
-                    }
+                if let Some(range) = rest.strip_prefix("bytes=")
+                    && let Some((start_s, end_s)) = range.split_once('-')
+                {
+                    let start: usize = start_s.parse().unwrap_or(0);
+                    let end: usize = end_s.parse().unwrap_or(total - 1);
+                    let length = end.saturating_sub(start) + 1;
+                    return (start, length);
                 }
             }
         }
@@ -521,7 +536,10 @@ mod tests {
         drop(file);
         let content = std::fs::read(&out_path).unwrap();
         assert_eq!(content.len(), length as usize);
-        assert_eq!(content, &payload[offset as usize..(offset + length) as usize]);
+        assert_eq!(
+            content,
+            &payload[offset as usize..(offset + length) as usize]
+        );
     }
 
     #[tokio::test]
@@ -600,9 +618,11 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 4096];
             let _ = sock.read(&mut buf).await.unwrap();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
-                .await
-                .unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -655,15 +675,15 @@ mod tests {
             find_header_end(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"),
             Some(34)
         );
-        assert_eq!(
-            find_header_end(b"HTTP/1.1 200 OK\r\n\r\nbody"),
-            Some(15)
-        );
+        assert_eq!(find_header_end(b"HTTP/1.1 200 OK\r\n\r\nbody"), Some(15));
     }
 
     #[test]
     fn test_parse_status_code() {
-        assert_eq!(parse_status_code("HTTP/1.1 206 Partial Content\r\n").unwrap(), 206);
+        assert_eq!(
+            parse_status_code("HTTP/1.1 206 Partial Content\r\n").unwrap(),
+            206
+        );
         assert_eq!(parse_status_code("HTTP/1.1 200 OK\r\n").unwrap(), 200);
         assert!(parse_status_code("garbage").is_err());
         assert!(parse_status_code("").is_err());
@@ -671,9 +691,15 @@ mod tests {
 
     #[test]
     fn test_is_chunked() {
-        assert!(is_chunked("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"));
-        assert!(is_chunked("HTTP/1.1 200 OK\r\ntransfer-encoding: CHUNKED\r\n\r\n"));
-        assert!(!is_chunked("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"));
+        assert!(is_chunked(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        ));
+        assert!(is_chunked(
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: CHUNKED\r\n\r\n"
+        ));
+        assert!(!is_chunked(
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
+        ));
     }
 
     #[test]
@@ -686,10 +712,7 @@ mod tests {
             parse_content_length("HTTP/1.1 206\r\ncontent-length: 0\r\n\r\n").unwrap(),
             Some(0)
         );
-        assert_eq!(
-            parse_content_length("HTTP/1.1 206\r\n\r\n").unwrap(),
-            None
-        );
+        assert_eq!(parse_content_length("HTTP/1.1 206\r\n\r\n").unwrap(), None);
     }
 
     #[test]

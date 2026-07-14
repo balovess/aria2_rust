@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use crate::constants;
+use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
-use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 
 /// Configuration for mirror coordination.
 #[derive(Debug, Clone)]
@@ -109,7 +109,8 @@ impl MirrorCoordinator {
 
         // Create a new selector for the coordinator (since the previous one was moved)
         // Note: In practice, you'd want to share the selector or use Arc
-        let coordinator_selector = Box::new(crate::selector::uri_selector::InorderUriSelector::new());
+        let coordinator_selector =
+            Box::new(crate::selector::uri_selector::InorderUriSelector::new());
 
         Self {
             stat_man,
@@ -178,12 +179,9 @@ impl MirrorCoordinator {
     ) -> bool {
         let is_multi = self.segment_manager.mirror_active_segments(mirror_idx) > 1;
 
-        let success = self.segment_manager.report_segment_complete(
-            seg_idx,
-            data,
-            bytes_per_sec,
-            is_multi,
-        );
+        let success =
+            self.segment_manager
+                .report_segment_complete(seg_idx, data, bytes_per_sec, is_multi);
 
         if success {
             // Check if we should rebalance connections
@@ -214,7 +212,8 @@ impl MirrorCoordinator {
         seg_idx: u32,
         error_code: u16,
     ) -> Option<usize> {
-        self.segment_manager.report_segment_failed(seg_idx, error_code)
+        self.segment_manager
+            .report_segment_failed(seg_idx, error_code)
     }
 
     /// Get the maximum download speed across all mirrors.
@@ -229,7 +228,9 @@ impl MirrorCoordinator {
             .iter()
             .filter_map(|url| {
                 let host = extract_host(url);
-                self.stat_man.find_stat(&host).map(|stat| stat.get_avg_speed())
+                self.stat_man
+                    .find_stat(&host)
+                    .map(|stat| stat.get_avg_speed())
             })
             .max()
             .unwrap_or(1)
@@ -296,7 +297,8 @@ impl MirrorCoordinator {
             let optimal = self.calculate_optimal_connections(idx);
 
             // Update the segment manager's mirror state
-            self.segment_manager.set_mirror_max_connections(idx, optimal);
+            self.segment_manager
+                .set_mirror_max_connections(idx, optimal);
         }
     }
 
@@ -450,7 +452,12 @@ mod tests {
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
 
         // Report completion
-        let success = coord.on_segment_complete(mirror_idx, seg_idx, bytes::Bytes::from(vec![0xAB; 500_000]), 1_000_000);
+        let success = coord.on_segment_complete(
+            mirror_idx,
+            seg_idx,
+            bytes::Bytes::from(vec![0xAB; 500_000]),
+            1_000_000,
+        );
         assert!(success);
 
         // Check progress
@@ -494,12 +501,22 @@ mod tests {
 
         // Complete first segment
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(mirror_idx, seg_idx, bytes::Bytes::from(vec![0xAB; 500_000]), 1_000_000);
+        coord.on_segment_complete(
+            mirror_idx,
+            seg_idx,
+            bytes::Bytes::from(vec![0xAB; 500_000]),
+            1_000_000,
+        );
         assert!((coord.progress() - 50.0).abs() < 0.01);
 
         // Complete second segment
         let (mirror_idx2, _, (seg_idx2, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(mirror_idx2, seg_idx2, bytes::Bytes::from(vec![0xCD; 500_000]), 1_000_000);
+        coord.on_segment_complete(
+            mirror_idx2,
+            seg_idx2,
+            bytes::Bytes::from(vec![0xCD; 500_000]),
+            1_000_000,
+        );
         assert!((coord.progress() - 100.0).abs() < 0.01);
         assert!(coord.is_complete());
     }
@@ -622,7 +639,10 @@ mod tests {
         // After rebalance: fast mirror should have more connections
         let conn0 = coord.segment_manager.get_mirror_max_connections(0).unwrap();
         let conn1 = coord.segment_manager.get_mirror_max_connections(1).unwrap();
-        assert!(conn0 >= conn1, "Fast mirror should have >= connections than slow mirror");
+        assert!(
+            conn0 >= conn1,
+            "Fast mirror should have >= connections than slow mirror"
+        );
     }
 
     #[test]
@@ -661,13 +681,21 @@ mod tests {
 
         // Select and complete segment from fast mirror
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
-        let success = coord.on_segment_complete(mirror_idx, seg_idx, bytes::Bytes::from(vec![0xAB; 500_000]), 2_000_000);
+        let success = coord.on_segment_complete(
+            mirror_idx,
+            seg_idx,
+            bytes::Bytes::from(vec![0xAB; 500_000]),
+            2_000_000,
+        );
         assert!(success);
 
         // After completion, the coordinator should have updated stats
         // The fast mirror should now have higher optimal connections
         let optimal = coord.calculate_optimal_connections(mirror_idx);
-        assert!(optimal >= 2, "Optimal connections should be at least base value");
+        assert!(
+            optimal >= 2,
+            "Optimal connections should be at least base value"
+        );
     }
 
     #[test]
@@ -716,7 +744,15 @@ mod tests {
         // Max speed should be close to 2MB/s (mirror2)
         // Due to EMA, it won't be exactly 2MB/s but should be the highest
         let max_speed = coord.get_max_mirror_speed();
-        assert!(max_speed > 1_500_000, "Max speed should be > 1.5MB/s, got {}", max_speed);
-        assert!(max_speed < 2_100_000, "Max speed should be < 2.1MB/s, got {}", max_speed);
+        assert!(
+            max_speed > 1_500_000,
+            "Max speed should be > 1.5MB/s, got {}",
+            max_speed
+        );
+        assert!(
+            max_speed < 2_100_000,
+            "Max speed should be < 2.1MB/s, got {}",
+            max_speed
+        );
     }
 }

@@ -125,10 +125,10 @@ fn test_tls_error_messages() {
     let err = TlsError::NoPrivateKey;
     assert!(err.to_string().contains("No private key"));
 
-    let err = TlsError::CertificateRead("test.pem".to_string(), std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "not found"
-    ));
+    let err = TlsError::CertificateRead(
+        "test.pem".to_string(),
+        std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+    );
     assert!(err.to_string().contains("test.pem"));
 }
 
@@ -148,9 +148,7 @@ fn test_rpc_server_http_creation() {
 
 #[test]
 fn test_rpc_server_from_config() {
-    let config = ServerConfig::default()
-        .with_host("0.0.0.0")
-        .with_port(8080);
+    let config = ServerConfig::default().with_host("0.0.0.0").with_port(8080);
 
     let server = RpcServer::new(config).expect("Failed to create server");
     assert_eq!(server.addr(), "0.0.0.0:8080");
@@ -161,9 +159,7 @@ fn test_rpc_server_from_config() {
 #[test]
 fn test_rpc_server_config_with_auth() {
     let auth = AuthConfig::default().with_token("my-secret-token");
-    let config = ServerConfig::default()
-        .with_port(9000)
-        .with_auth(auth);
+    let config = ServerConfig::default().with_port(9000).with_auth(auth);
 
     let server = RpcServer::new(config).expect("Failed to create server");
     assert_eq!(server.port(), 9000);
@@ -173,13 +169,21 @@ fn test_rpc_server_config_with_auth() {
 #[test]
 fn test_rpc_server_config_with_cors() {
     let cors = CorsConfig::from_option_value("http://localhost:3000,https://example.com");
-    let config = ServerConfig::default()
-        .with_port(6800)
-        .with_cors(cors);
+    let config = ServerConfig::default().with_port(6800).with_cors(cors);
 
     let server = RpcServer::new(config).expect("Failed to create server");
-    assert!(server.config().cors.allows_origin(Some("http://localhost:3000")));
-    assert!(server.config().cors.allows_origin(Some("https://example.com")));
+    assert!(
+        server
+            .config()
+            .cors
+            .allows_origin(Some("http://localhost:3000"))
+    );
+    assert!(
+        server
+            .config()
+            .cors
+            .allows_origin(Some("https://example.com"))
+    );
     assert!(!server.config().cors.allows_origin(Some("http://evil.com")));
 }
 
@@ -225,9 +229,7 @@ fn test_server_config_with_tls() {
         key_file.path().to_str().unwrap(),
     );
 
-    let config = ServerConfig::default()
-        .with_port(8443)
-        .with_tls(tls);
+    let config = ServerConfig::default().with_port(8443).with_tls(tls);
 
     assert!(config.is_secure());
     assert_eq!(config.scheme(), "https");
@@ -502,10 +504,7 @@ impl MockRpcHandler {
                 if self.auth.is_auth_enabled() {
                     // In real impl, token would be extracted differently
                     // For now, we skip auth validation in mock
-                    let _token = rpc_req
-                        .params
-                        .get(0)
-                        .and_then(|v| v.as_str());
+                    let _token = rpc_req.params.get(0).and_then(|v| v.as_str());
                 }
 
                 // Handle RPC request

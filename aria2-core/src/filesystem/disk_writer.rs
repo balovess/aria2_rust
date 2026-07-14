@@ -246,7 +246,9 @@ impl SeekableDiskWriter for CachedDiskWriter {
             // Small writes go to the write-back cache.
             // copy_from_slice is unavoidable here: we only have a &[u8],
             // and the cache stores Bytes (Arc-backed).
-            cache.write(offset, bytes::Bytes::copy_from_slice(data)).await?;
+            cache
+                .write(offset, bytes::Bytes::copy_from_slice(data))
+                .await?;
         } else {
             // No cache configured — write directly.
             self.writer.write_at(offset, data).await?;
@@ -627,8 +629,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_writes_serialized() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_same_offset.bin");

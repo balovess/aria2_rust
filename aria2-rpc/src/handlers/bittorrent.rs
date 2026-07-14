@@ -33,8 +33,9 @@ impl RpcEngine {
         match tasks.get(&gid) {
             Some(state) => Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
-                serde_json::to_value(&state.peers)
-                    .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+                serde_json::to_value(&state.peers).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                })?,
             )),
             None => Err(JsonRpcError::MethodNotFound(format!(
                 "GID {} not found",
@@ -57,7 +58,10 @@ impl RpcEngine {
                 count += 1;
             }
         }
-        JsonRpcResponse::success(serde_json::Value::Null, format!("OK. {} tasks paused.", count))
+        JsonRpcResponse::success(
+            serde_json::Value::Null,
+            format!("OK. {} tasks paused.", count),
+        )
     }
 
     /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
@@ -73,10 +77,7 @@ impl RpcEngine {
             }
         }
 
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            serde_json::json!("OK"),
-        )
+        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
     }
 
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.
@@ -89,7 +90,10 @@ impl RpcEngine {
                 count += 1;
             }
         }
-        JsonRpcResponse::success(serde_json::Value::Null, format!("OK. {} tasks resumed.", count))
+        JsonRpcResponse::success(
+            serde_json::Value::Null,
+            format!("OK. {} tasks resumed.", count),
+        )
     }
 
     /// Handle `aria2.getUris` - Get URI list for a download with status.
@@ -115,8 +119,9 @@ impl RpcEngine {
                     .collect();
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(uris)
-                        .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+                    serde_json::to_value(uris).map_err(|e| {
+                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                    })?,
                 ))
             }
             None => Err(JsonRpcError::MethodNotFound(format!(
@@ -136,32 +141,41 @@ impl RpcEngine {
         match tasks.get(&gid) {
             Some(state) => {
                 let files = match &state.status.files {
-                    Some(files_vec) if !files_vec.is_empty() => {
-                        files_vec
-                            .iter()
-                            .enumerate()
-                            .map(|(i, f)| FileInfo {
-                                index: i,
-                                path: f.path.clone(),
-                                length: if f.length == 0 { state.total_length } else { f.length },
-                                completed_length: if f.completed_length == 0 { state.completed_length } else { f.completed_length },
-                                selected: f.selected,
-                                uris: f.uris.clone(),
-                            })
-                            .collect()
-                    }
+                    Some(files_vec) if !files_vec.is_empty() => files_vec
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| FileInfo {
+                            index: i,
+                            path: f.path.clone(),
+                            length: if f.length == 0 {
+                                state.total_length
+                            } else {
+                                f.length
+                            },
+                            completed_length: if f.completed_length == 0 {
+                                state.completed_length
+                            } else {
+                                f.completed_length
+                            },
+                            selected: f.selected,
+                            uris: f.uris.clone(),
+                        })
+                        .collect(),
                     _ => {
-                        vec![FileInfo::new(
-                            state.uris.first().map(|s| s.as_str()).unwrap_or(""),
-                            state.total_length,
-                        )
-                        .with_completed(state.completed_length)]
+                        vec![
+                            FileInfo::new(
+                                state.uris.first().map(|s| s.as_str()).unwrap_or(""),
+                                state.total_length,
+                            )
+                            .with_completed(state.completed_length),
+                        ]
                     }
                 };
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(files)
-                        .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+                    serde_json::to_value(files).map_err(|e| {
+                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                    })?,
                 ))
             }
             None => Err(JsonRpcError::MethodNotFound(format!(
@@ -183,18 +197,16 @@ impl RpcEngine {
                 let servers: Vec<ServerInfo> = state
                     .uris
                     .iter()
-                    .map(|u| {
-                        ServerInfo::new(u.as_str())
-                            .with_download_speed(state.download_speed)
-                    })
+                    .map(|u| ServerInfo::new(u.as_str()).with_download_speed(state.download_speed))
                     .collect();
 
                 let result = vec![ServerInfoIndex { index: 0, servers }];
 
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(result)
-                        .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+                    serde_json::to_value(result).map_err(|e| {
+                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                    })?,
                 ))
             }
             None => Err(JsonRpcError::MethodNotFound(format!(
@@ -301,22 +313,52 @@ impl RpcEngine {
 
             let id = sub_request.id.clone().unwrap_or_default();
             let sub_response = match sub_request.method.as_str() {
-                "aria2.addUri" => self.handle_add_uri(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.addUri" => self
+                    .handle_add_uri(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.tellActive" => self.handle_tell_active(&sub_request).await?,
                 "aria2.getGlobalStat" => self.handle_global_stat().await,
-                "aria2.getUris" => self.handle_get_uris(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getFiles" => self.handle_get_files(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getServers" => self.handle_get_servers(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getUris" => self
+                    .handle_get_uris(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getFiles" => self
+                    .handle_get_files(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getServers" => self
+                    .handle_get_servers(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.getVersion" => self.handle_version(&sub_request),
                 "aria2.getSessionInfo" => self.handle_session_info(&sub_request),
-                "aria2.purgeDownloadResult" => self.handle_purge_download_result(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.saveSession" => self.handle_save_session(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.changePosition" => self.handle_change_position(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.forceRemove" => self.handle_force_remove(&sub_request).await.unwrap_or_else(|e| e.into_response(Some(id))),
-                "system.multicall" => {
-                    JsonRpcResponse::error(Some(id), -32600, "Nested system.multicall is not supported".to_string())
-                }
-                _ => JsonRpcResponse::error(Some(id), -32601, format!("Method not found: {}", sub_request.method)),
+                "aria2.purgeDownloadResult" => self
+                    .handle_purge_download_result(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.saveSession" => self
+                    .handle_save_session(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.changePosition" => self
+                    .handle_change_position(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.forceRemove" => self
+                    .handle_force_remove(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "system.multicall" => JsonRpcResponse::error(
+                    Some(id),
+                    -32600,
+                    "Nested system.multicall is not supported".to_string(),
+                ),
+                _ => JsonRpcResponse::error(
+                    Some(id),
+                    -32601,
+                    format!("Method not found: {}", sub_request.method),
+                ),
             };
 
             match sub_response.result {

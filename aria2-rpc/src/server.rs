@@ -212,7 +212,11 @@ impl CorsConfig {
     /// - No origin header is provided (browser navigation / non-CORS request)
     pub fn allows_origin(&self, origin: Option<&str>) -> bool {
         // Wildcard allows everything
-        if self.allowed_origins.iter().any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN) {
+        if self
+            .allowed_origins
+            .iter()
+            .any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN)
+        {
             return true;
         }
 
@@ -231,7 +235,11 @@ impl CorsConfig {
             Some(o) if self.allows_origin(Some(o)) => o.to_string(),
             None if self.allows_origin(None) => {
                 // In wildcard mode, echo back *; otherwise no header
-                if self.allowed_origins.iter().any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN) {
+                if self
+                    .allowed_origins
+                    .iter()
+                    .any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN)
+                {
                     crate::constants::CORS_DEFAULT_ORIGIN.to_string()
                 } else {
                     return Some(vec![]); // Allow but don't set specific origin
@@ -244,7 +252,10 @@ impl CorsConfig {
             ("Access-Control-Allow-Origin", origin_str),
             ("Access-Control-Allow-Methods", self.allow_methods.clone()),
             ("Access-Control-Allow-Headers", self.allow_headers.clone()),
-            ("Access-Control-Max-Age", aria2_core::constants::CORS_MAX_AGE.to_string()),
+            (
+                "Access-Control-Max-Age",
+                aria2_core::constants::CORS_MAX_AGE.to_string(),
+            ),
         ])
     }
 
@@ -254,7 +265,10 @@ impl CorsConfig {
             ("Access-Control-Allow-Origin", &self.allow_origin),
             ("Access-Control-Allow-Methods", &self.allow_methods),
             ("Access-Control-Allow-Headers", &self.allow_headers),
-            ("Access-Control-Max-Age", aria2_core::constants::CORS_MAX_AGE),
+            (
+                "Access-Control-Max-Age",
+                aria2_core::constants::CORS_MAX_AGE,
+            ),
         ]
     }
 
@@ -305,9 +319,9 @@ impl TlsConfig {
         let cert_file = std::fs::File::open(&self.cert_path)
             .map_err(|e| TlsError::CertificateRead(self.cert_path.clone(), e))?;
         let mut cert_reader = BufReader::new(cert_file);
-        let cert_chain: Vec<rustls::pki_types::CertificateDer> =
-            certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()
-                .map_err(TlsError::CertificateParse)?;
+        let cert_chain: Vec<rustls::pki_types::CertificateDer> = certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TlsError::CertificateParse)?;
 
         if cert_chain.is_empty() {
             return Err(TlsError::NoCertificates);
@@ -469,9 +483,7 @@ impl RpcServer {
     /// Create a new HTTP RPC server (no TLS).
     pub fn new_http(host: impl Into<String>, port: u16) -> Self {
         Self {
-            config: ServerConfig::default()
-                .with_host(host)
-                .with_port(port),
+            config: ServerConfig::default().with_host(host).with_port(port),
             tls_acceptor: None,
             engine: Arc::new(RpcEngine::new()),
         }
@@ -524,7 +536,12 @@ impl RpcServer {
 
     /// Get the full URL for the RPC endpoint.
     pub fn rpc_url(&self) -> String {
-        format!("{}://{}{}", self.scheme(), self.addr(), crate::constants::RPC_ENDPOINT_PATH)
+        format!(
+            "{}://{}{}",
+            self.scheme(),
+            self.addr(),
+            crate::constants::RPC_ENDPOINT_PATH
+        )
     }
 
     /// Get a reference to the server configuration.
@@ -562,9 +579,9 @@ impl RpcServer {
     /// ```
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::{
-            http::{header, Method},
-            routing::{get, post},
             Router,
+            http::{Method, header},
+            routing::{get, post},
         };
         use std::net::SocketAddr;
         use tokio::net::TcpListener;
@@ -630,13 +647,16 @@ async fn root_handler() -> impl axum::response::IntoResponse {
     use axum::response::Json;
     use serde_json::json;
 
-    (StatusCode::OK, Json(json!({
-        "name": crate::constants::RPC_SERVER_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
-        "endpoints": {
-            "jsonrpc": crate::constants::RPC_ENDPOINT_PATH
-        }
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "name": crate::constants::RPC_SERVER_NAME,
+            "version": env!("CARGO_PKG_VERSION"),
+            "endpoints": {
+                "jsonrpc": crate::constants::RPC_ENDPOINT_PATH
+            }
+        })),
+    )
 }
 
 /// Handle JSON-RPC POST requests
@@ -659,9 +679,12 @@ async fn handle_jsonrpc_get() -> impl axum::response::IntoResponse {
     use axum::response::Json;
     use serde_json::json;
 
-    (StatusCode::OK, Json(json!({
-        "error": "GET method not supported. Use POST for JSON-RPC requests."
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "error": "GET method not supported. Use POST for JSON-RPC requests."
+        })),
+    )
 }
 
 impl std::fmt::Debug for RpcServer {
@@ -1001,9 +1024,7 @@ mod tests {
     #[test]
     fn test_server_config_with_tls() {
         let tls = TlsConfig::new("/cert.pem", "/key.pem");
-        let config = ServerConfig::default()
-            .with_port(8443)
-            .with_tls(tls);
+        let config = ServerConfig::default().with_port(8443).with_tls(tls);
 
         assert!(config.is_secure());
         assert_eq!(config.scheme(), "https");
@@ -1034,9 +1055,7 @@ mod tests {
 
     #[test]
     fn test_rpc_server_from_config() {
-        let config = ServerConfig::default()
-            .with_host("0.0.0.0")
-            .with_port(8080);
+        let config = ServerConfig::default().with_host("0.0.0.0").with_port(8080);
 
         let server = RpcServer::new(config).expect("Failed to create server");
         assert_eq!(server.addr(), "0.0.0.0:8080");

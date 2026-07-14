@@ -199,7 +199,9 @@ fn do_splice(
 ) -> io::Result<isize> {
     // `ptr::from_mut` yields a `*mut i64` that stays valid for the borrow's
     // lifetime (the entire call). `None` becomes a NULL pointer.
-    let in_ptr = off_in.map(std::ptr::from_mut).unwrap_or(std::ptr::null_mut());
+    let in_ptr = off_in
+        .map(std::ptr::from_mut)
+        .unwrap_or(std::ptr::null_mut());
     let out_ptr = off_out
         .map(std::ptr::from_mut)
         .unwrap_or(std::ptr::null_mut());
@@ -265,10 +267,7 @@ mod tests {
         // The fallback must refuse gracefully and never panic.
         let result = splice_transfer(0, None, 1, None, 1024);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().kind(),
-            std::io::ErrorKind::Unsupported
-        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
     }
 
     #[cfg(target_os = "linux")]

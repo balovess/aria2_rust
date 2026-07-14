@@ -447,7 +447,10 @@ async fn bt_hook_exec_env_vars() {
     );
 
     // Test other statuses display correctly
-    assert_eq!(format!("{}", DownloadStatus::Error("test".to_string())), "error");
+    assert_eq!(
+        format!("{}", DownloadStatus::Error("test".to_string())),
+        "error"
+    );
     assert_eq!(format!("{}", DownloadStatus::Removed), "removed");
     assert_eq!(format!("{}", DownloadStatus::Paused), "paused");
 
@@ -874,10 +877,8 @@ async fn bt_mse_encrypted_handshake_plus_piece() {
     ];
 
     // Create two MSE managers simulating both sides of the handshake
-    let mut client_mgr =
-        MseHandshakeManager::new(info_hash).expect("Client MSE init failed");
-    let mut server_mgr =
-        MseHandshakeManager::new(info_hash).expect("Server MSE init failed");
+    let mut client_mgr = MseHandshakeManager::new(info_hash).expect("Client MSE init failed");
+    let mut server_mgr = MseHandshakeManager::new(info_hash).expect("Server MSE init failed");
 
     // ---- Phase 1: Method Selection ----
     let client_method_sel = client_mgr.build_method_selection();

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use crate::constants;
 use super::peer_stats::PeerStats;
+use crate::constants;
 
 /// Action to take for a peer during choke rotation
 #[derive(Debug, Clone, PartialEq)]
@@ -326,7 +326,10 @@ impl ChokingAlgorithm {
         }
 
         // Anti-churn: prefer keeping current unchoked peers stable
-        if !peer.am_choking && peer.time_since_last_unchoke().as_secs() < constants::CHOKING_ANTI_CHURN_THRESHOLD_SECS {
+        if !peer.am_choking
+            && peer.time_since_last_unchoke().as_secs()
+                < constants::CHOKING_ANTI_CHURN_THRESHOLD_SECS
+        {
             score += constants::CHOKING_ANTI_CHURN_BONUS;
         }
 

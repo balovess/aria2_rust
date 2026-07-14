@@ -252,7 +252,10 @@ impl StatusPanel {
         println!("{}", "Download summary:".yellow());
         println!("  Total files:   {}", total_files.to_string().white());
         println!("  Total size:     {}", format_size(total_size).white());
-        println!("  Total time:     {}", format_duration(elapsed_secs).white());
+        println!(
+            "  Total time:     {}",
+            format_duration(elapsed_secs).white()
+        );
         println!(
             "  Average speed:   {}/s",
             format_size((total_size as f64 / elapsed_secs.max(1.0)) as u64).white()

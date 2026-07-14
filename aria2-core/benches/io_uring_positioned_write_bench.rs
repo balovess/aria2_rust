@@ -39,9 +39,7 @@ mod bench_impl {
     use tempfile::TempDir;
 
     use aria2_core::filesystem::disk_writer::SeekableDiskWriter;
-    use aria2_core::filesystem::positioned_disk_writer::{
-        IoUringDiskWriter, PositionedDiskWriter,
-    };
+    use aria2_core::filesystem::positioned_disk_writer::{IoUringDiskWriter, PositionedDiskWriter};
 
     /// Chunk size per write: 4 KiB.
     const CHUNK_SIZE: usize = 4 * 1024;
@@ -64,8 +62,7 @@ mod bench_impl {
                     .write(true)
                     .open(path)
                     .expect("failed to pre-create bench file");
-                f.set_len(total)
-                    .expect("failed to pre-allocate bench file");
+                f.set_len(total).expect("failed to pre-allocate bench file");
             }
         }
 

@@ -10,9 +10,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Validation: tests, clippy, formatting ──────────────────
-  validate:
-    name: Validate & Test
+  # ── Lint & format (fast, single platform) ─────────────────
+  lint:
+    name: Lint & Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,16 +20,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
-        run: cargo test --workspace --all-targets
       - name: Clippy check
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format check
         run: cargo fmt --all -- --check
 
-  # ── Compilation check across platforms ────────────────────
-  check-compile:
-    name: Check compile (${{ matrix.target }})
+  # ── Full test suite across all platforms ──────────────────
+  test:
+    name: Test (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -49,5 +47,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Check compilation
-        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+      - name: Run tests
+        run: cargo test --workspace --all-targets --target ${{ matrix.target }}

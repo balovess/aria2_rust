@@ -22,9 +22,11 @@ async fn test_shutdown_with_active_downloads() {
     let engine = RpcEngine::new();
 
     // Add a download task
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://example.com/file.zip"]))
-            .with_id(1);
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!(["http://example.com/file.zip"]),
+    )
+    .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     assert!(add_resp.is_success());
 
@@ -87,9 +89,11 @@ async fn test_shutdown_vs_force_shutdown_difference() {
     let engine = RpcEngine::new();
 
     // Add a task
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://example.com/test.zip"]))
-            .with_id(1);
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!(["http://example.com/test.zip"]),
+    )
+    .with_id(1);
     engine.handle_request(&add_req).await;
 
     // shutdown should keep tasks (graceful)

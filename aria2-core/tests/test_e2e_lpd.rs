@@ -16,8 +16,8 @@ use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::Duration;
 
 use aria2_core::engine::lpd_manager::{
-    LpdManager, LpdPeer, parse_lpd_announcement,
-    LPD_MULTICAST_ADDR, LPD_PORT, DEFAULT_ANNOUNCE_INTERVAL_SECS,
+    DEFAULT_ANNOUNCE_INTERVAL_SECS, LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer,
+    parse_lpd_announcement,
 };
 
 // =========================================================================
@@ -58,16 +58,28 @@ fn test_lpd_announcement_format_spec_compliance() {
 
     // Verify format compliance
     // 1. Hash field must be present with 40-char hex value
-    assert!(msg.starts_with("Hash:"), "Announcement must start with Hash field");
-    let hash_val = msg.lines()
+    assert!(
+        msg.starts_with("Hash:"),
+        "Announcement must start with Hash field"
+    );
+    let hash_val = msg
+        .lines()
         .find(|l| l.starts_with("Hash:"))
         .map(|l| l[5..].trim())
         .unwrap();
-    assert_eq!(hash_val.len(), 40, "Info hash must be exactly 40 characters");
-    assert!(hash_val.chars().all(|c| c.is_ascii_hexdigit()), "Info hash must be all hex digits");
+    assert_eq!(
+        hash_val.len(),
+        40,
+        "Info hash must be exactly 40 characters"
+    );
+    assert!(
+        hash_val.chars().all(|c| c.is_ascii_hexdigit()),
+        "Info hash must be all hex digits"
+    );
 
     // 2. Port field must be present with valid port number
-    let port_val = msg.lines()
+    let port_val = msg
+        .lines()
         .find(|l| l.starts_with("Port:"))
         .map(|l| l[5..].trim())
         .unwrap();
@@ -75,16 +87,24 @@ fn test_lpd_announcement_format_spec_compliance() {
     assert!(parsed_port > 0, "Port must be valid");
 
     // 3. Token field must be present with 8-char hex value
-    let token_val = msg.lines()
+    let token_val = msg
+        .lines()
         .find(|l| l.starts_with("Token:"))
         .map(|l| l[6..].trim())
         .unwrap();
     assert_eq!(token_val.len(), 8, "Token must be exactly 8 characters");
-    assert!(token_val.chars().all(|c| c.is_ascii_hexdigit()), "Token must be all hex digits");
+    assert!(
+        token_val.chars().all(|c| c.is_ascii_hexdigit()),
+        "Token must be all hex digits"
+    );
 
     // 4. Each field ends with newline
     assert!(msg.ends_with('\n'), "Announcement must end with newline");
-    assert_eq!(msg.lines().count(), 3, "Announcement must have exactly 3 lines");
+    assert_eq!(
+        msg.lines().count(),
+        3,
+        "Announcement must have exactly 3 lines"
+    );
 }
 
 /// Test announcement format with uppercase hash (should be normalized)
@@ -140,7 +160,10 @@ fn test_lpd_announcement_format_unknown_fields_ignored() {
     let msg = "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: abcdef01\nUnknownField: value\nVersion: 1.0\n";
 
     let result = parse_lpd_announcement(msg.as_bytes(), test_ip());
-    assert!(result.is_some(), "Unknown fields should not prevent parsing");
+    assert!(
+        result.is_some(),
+        "Unknown fields should not prevent parsing"
+    );
 
     let peer = result.unwrap();
     assert_eq!(peer.port, 6881);
@@ -155,25 +178,67 @@ fn test_lpd_announcement_format_invalid_rejected() {
     assert!(parse_lpd_announcement(b"Port: 6881\nToken: abcdef01\n", sender_ip).is_none());
 
     // Missing Port
-    assert!(parse_lpd_announcement(b"Hash: 0123456789abcdef0123456789abcdef01234567\nToken: abcdef01\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(
+            b"Hash: 0123456789abcdef0123456789abcdef01234567\nToken: abcdef01\n",
+            sender_ip
+        )
+        .is_none()
+    );
 
     // Missing Token
-    assert!(parse_lpd_announcement(b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(
+            b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n",
+            sender_ip
+        )
+        .is_none()
+    );
 
     // Invalid hash length (39 chars)
-    assert!(parse_lpd_announcement(b"Hash: 0123456789abcdef0123456789abcdef0123456\nPort: 6881\nToken: abcdef01\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(
+            b"Hash: 0123456789abcdef0123456789abcdef0123456\nPort: 6881\nToken: abcdef01\n",
+            sender_ip
+        )
+        .is_none()
+    );
 
     // Invalid hash length (41 chars)
-    assert!(parse_lpd_announcement(b"Hash: 0123456789abcdef0123456789abcdef012345678\nPort: 6881\nToken: abcdef01\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(
+            b"Hash: 0123456789abcdef0123456789abcdef012345678\nPort: 6881\nToken: abcdef01\n",
+            sender_ip
+        )
+        .is_none()
+    );
 
     // Non-hex characters in hash
-    assert!(parse_lpd_announcement(b"Hash: ghijklmnopqrstuvwxyzabcdefghijklmnopqrstu\nPort: 6881\nToken: abcdef01\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(
+            b"Hash: ghijklmnopqrstuvwxyzabcdefghijklmnopqrstu\nPort: 6881\nToken: abcdef01\n",
+            sender_ip
+        )
+        .is_none()
+    );
 
     // Port 0 (invalid)
-    assert!(parse_lpd_announcement(b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 0\nToken: abcdef01\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(
+            b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 0\nToken: abcdef01\n",
+            sender_ip
+        )
+        .is_none()
+    );
 
     // Non-numeric port
-    assert!(parse_lpd_announcement(b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: abc\nToken: abcdef01\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(
+            b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: abc\nToken: abcdef01\n",
+            sender_ip
+        )
+        .is_none()
+    );
 
     // Empty announcement
     assert!(parse_lpd_announcement(b"", sender_ip).is_none());
@@ -236,18 +301,26 @@ fn test_lpd_send_announcement_between_peers() {
     let socket1 = UdpSocket::bind("127.0.0.1:0").expect("Failed to bind socket1");
     let socket2 = UdpSocket::bind("127.0.0.1:0").expect("Failed to bind socket2");
 
-    socket1.set_broadcast(true).expect("Failed to enable broadcast");
-    socket2.set_broadcast(true).expect("Failed to enable broadcast");
+    socket1
+        .set_broadcast(true)
+        .expect("Failed to enable broadcast");
+    socket2
+        .set_broadcast(true)
+        .expect("Failed to enable broadcast");
 
     let _addr1 = socket1.local_addr().expect("Failed to get addr1");
     let addr2 = socket2.local_addr().expect("Failed to get addr2");
 
     // Peer1 sends announcement to Peer2
     let peer1 = MockLpdPeer::new(test_info_hash(), 6881, Ipv4Addr::new(127, 0, 0, 1));
-    let _token = peer1.announce_to(&socket1, addr2).expect("Failed to announce");
+    let _token = peer1
+        .announce_to(&socket1, addr2)
+        .expect("Failed to announce");
 
     // Peer2 receives announcement
-    socket2.set_read_timeout(Some(Duration::from_millis(500))).expect("Failed to set timeout");
+    socket2
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("Failed to set timeout");
     let mut buf = [0u8; 1024];
 
     match socket2.recv_from(&mut buf) {
@@ -277,18 +350,24 @@ fn test_lpd_peer_discovery_simulation() {
 
     // Create client socket
     let client_socket = UdpSocket::bind("127.0.0.1:0").expect("Failed to bind client socket");
-    client_socket.set_broadcast(true).expect("Failed to enable broadcast");
+    client_socket
+        .set_broadcast(true)
+        .expect("Failed to enable broadcast");
 
     // Send announcement to server
     let peer = MockLpdPeer::new(test_info_hash(), 6881, Ipv4Addr::new(127, 0, 0, 1));
-    peer.announce_to(&client_socket, server.addr()).expect("Failed to send announcement");
+    peer.announce_to(&client_socket, server.addr())
+        .expect("Failed to send announcement");
 
     // Wait for processing
     std::thread::sleep(Duration::from_millis(200));
 
     // Check server received announcement
     let received = server.get_received();
-    assert!(!received.is_empty(), "Server should have received announcement");
+    assert!(
+        !received.is_empty(),
+        "Server should have received announcement"
+    );
 
     let first_ann = &received[0];
     assert_eq!(first_ann.info_hash, test_info_hash());
@@ -319,16 +398,25 @@ fn test_lpd_multiple_peer_discovery() {
     let peer2 = MockLpdPeer::new(test_info_hash(), 6882, Ipv4Addr::new(127, 0, 0, 2));
     let peer3 = MockLpdPeer::new(test_info_hash_2(), 6883, Ipv4Addr::new(127, 0, 0, 3));
 
-    peer1.announce_to(&socket1, server.addr()).expect("Failed to announce peer1");
-    peer2.announce_to(&socket2, server.addr()).expect("Failed to announce peer2");
-    peer3.announce_to(&socket3, server.addr()).expect("Failed to announce peer3");
+    peer1
+        .announce_to(&socket1, server.addr())
+        .expect("Failed to announce peer1");
+    peer2
+        .announce_to(&socket2, server.addr())
+        .expect("Failed to announce peer2");
+    peer3
+        .announce_to(&socket3, server.addr())
+        .expect("Failed to announce peer3");
 
     // Wait for processing
     std::thread::sleep(Duration::from_millis(300));
 
     // Check server received all announcements
     let received = server.get_received();
-    assert!(received.len() >= 3, "Server should have received at least 3 announcements");
+    assert!(
+        received.len() >= 3,
+        "Server should have received at least 3 announcements"
+    );
 
     // Check unique hashes
     let unique_hashes = server.unique_hashes();
@@ -344,11 +432,17 @@ async fn test_lpd_peer_registration_and_discovery() {
     let manager = LpdManager::default();
 
     // Register a torrent
-    manager.register_torrent(test_info_hash()).await.expect("Failed to register torrent");
+    manager
+        .register_torrent(test_info_hash())
+        .await
+        .expect("Failed to register torrent");
 
     // Check active hashes
     let active = manager.active_hashes.read().await;
-    assert!(active.contains(test_info_hash()), "Torrent should be registered");
+    assert!(
+        active.contains(test_info_hash()),
+        "Torrent should be registered"
+    );
     drop(active);
 
     // Create mock peers
@@ -366,7 +460,9 @@ async fn test_lpd_peer_registration_and_discovery() {
     );
 
     // Update peers
-    manager.update_peers(test_info_hash(), vec![peer1.clone(), peer2.clone()]).await;
+    manager
+        .update_peers(test_info_hash(), vec![peer1.clone(), peer2.clone()])
+        .await;
 
     // Get peers for torrent
     let peers = manager.get_peers_for(test_info_hash()).await;
@@ -383,14 +479,20 @@ async fn test_lpd_peer_registration_and_discovery() {
     manager.unregister_torrent(test_info_hash()).await;
 
     let active = manager.active_hashes.read().await;
-    assert!(!active.contains(test_info_hash()), "Torrent should be unregistered");
+    assert!(
+        !active.contains(test_info_hash()),
+        "Torrent should be unregistered"
+    );
 }
 
 /// Test LPD peer deduplication
 #[tokio::test]
 async fn test_lpd_peer_deduplication() {
     let manager = LpdManager::default();
-    manager.register_torrent(test_info_hash()).await.expect("Failed to register");
+    manager
+        .register_torrent(test_info_hash())
+        .await
+        .expect("Failed to register");
 
     // Add same peer multiple times (same info_hash + IP)
     let peer = LpdPeer::with_token(
@@ -401,20 +503,33 @@ async fn test_lpd_peer_deduplication() {
     );
 
     // Add peer three times
-    manager.update_peers(test_info_hash(), vec![peer.clone()]).await;
-    manager.update_peers(test_info_hash(), vec![peer.clone()]).await;
-    manager.update_peers(test_info_hash(), vec![peer.clone()]).await;
+    manager
+        .update_peers(test_info_hash(), vec![peer.clone()])
+        .await;
+    manager
+        .update_peers(test_info_hash(), vec![peer.clone()])
+        .await;
+    manager
+        .update_peers(test_info_hash(), vec![peer.clone()])
+        .await;
 
     // Should only have one peer due to deduplication
     let peers = manager.get_peers_for(test_info_hash()).await;
-    assert_eq!(peers.len(), 1, "Should deduplicate peers by (info_hash, addr)");
+    assert_eq!(
+        peers.len(),
+        1,
+        "Should deduplicate peers by (info_hash, addr)"
+    );
 }
 
 /// Test LPD peer expiration cleanup
 #[tokio::test]
 async fn test_lpd_peer_expiration_cleanup() {
     let manager = LpdManager::default();
-    manager.register_torrent(test_info_hash()).await.expect("Failed to register");
+    manager
+        .register_torrent(test_info_hash())
+        .await
+        .expect("Failed to register");
 
     // Add a peer
     let peer = LpdPeer::new(test_info_hash(), 6881, test_ip());
@@ -437,7 +552,10 @@ async fn test_lpd_peer_expiration_cleanup() {
 #[test]
 fn test_lpd_manager_availability() {
     let manager = LpdManager::default();
-    assert!(manager.is_available(), "Default LPD manager should be available");
+    assert!(
+        manager.is_available(),
+        "Default LPD manager should be available"
+    );
 }
 
 // =========================================================================
@@ -450,8 +568,14 @@ async fn test_lpd_torrent_registration_announcement() {
     let manager = LpdManager::default();
 
     // Register multiple torrents
-    manager.register_torrent(test_info_hash()).await.expect("Failed to register hash1");
-    manager.register_torrent(test_info_hash_2()).await.expect("Failed to register hash2");
+    manager
+        .register_torrent(test_info_hash())
+        .await
+        .expect("Failed to register hash1");
+    manager
+        .register_torrent(test_info_hash_2())
+        .await
+        .expect("Failed to register hash2");
 
     // Check both are registered
     let active = manager.active_hashes.read().await;
@@ -464,7 +588,10 @@ async fn test_lpd_torrent_registration_announcement() {
 #[tokio::test]
 async fn test_lpd_peer_discovery_integration() {
     let manager = LpdManager::default();
-    manager.register_torrent(test_info_hash()).await.expect("Failed to register");
+    manager
+        .register_torrent(test_info_hash())
+        .await
+        .expect("Failed to register");
 
     // Simulate discovering peers via LPD
     let discovered_peers = vec![
@@ -489,7 +616,9 @@ async fn test_lpd_peer_discovery_integration() {
     ];
 
     // Update peers from discovery
-    manager.update_peers(test_info_hash(), discovered_peers).await;
+    manager
+        .update_peers(test_info_hash(), discovered_peers)
+        .await;
 
     // Verify peers are stored
     let stored_peers = manager.get_peers_for(test_info_hash()).await;
@@ -509,18 +638,44 @@ async fn test_lpd_multiple_torrents_independent_tracking() {
     let manager = LpdManager::default();
 
     // Register two torrents
-    manager.register_torrent(test_info_hash()).await.expect("Failed to register hash1");
-    manager.register_torrent(test_info_hash_2()).await.expect("Failed to register hash2");
+    manager
+        .register_torrent(test_info_hash())
+        .await
+        .expect("Failed to register hash1");
+    manager
+        .register_torrent(test_info_hash_2())
+        .await
+        .expect("Failed to register hash2");
 
     // Add peers to each torrent
     let peers1 = vec![
-        LpdPeer::with_token(test_info_hash(), 6881, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 0xA1),
-        LpdPeer::with_token(test_info_hash(), 6882, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 0xA2),
+        LpdPeer::with_token(
+            test_info_hash(),
+            6881,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            0xA1,
+        ),
+        LpdPeer::with_token(
+            test_info_hash(),
+            6882,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            0xA2,
+        ),
     ];
 
     let peers2 = vec![
-        LpdPeer::with_token(test_info_hash_2(), 6991, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 0xB1),
-        LpdPeer::with_token(test_info_hash_2(), 6992, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)), 0xB2),
+        LpdPeer::with_token(
+            test_info_hash_2(),
+            6991,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+            0xB1,
+        ),
+        LpdPeer::with_token(
+            test_info_hash_2(),
+            6992,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+            0xB2,
+        ),
     ];
 
     manager.update_peers(test_info_hash(), peers1).await;
@@ -553,7 +708,10 @@ fn test_lpd_peer_socket_addr() {
 
     let socket_addr = peer.socket_addr();
 
-    assert_eq!(socket_addr.ip(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
+    assert_eq!(
+        socket_addr.ip(),
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))
+    );
     assert_eq!(socket_addr.port(), 6881);
 }
 
@@ -572,7 +730,10 @@ fn test_lpd_announcement_message_building() {
 
     // Parse it back
     let result = parse_lpd_announcement(msg.as_bytes(), test_ip());
-    assert!(result.is_some(), "Built announcement should parse successfully");
+    assert!(
+        result.is_some(),
+        "Built announcement should parse successfully"
+    );
 
     let peer = result.unwrap();
     assert_eq!(peer.info_hash, info_hash);
@@ -631,7 +792,10 @@ async fn test_lpd_bittorrent_peer_simulation() {
 
     // Register torrent
     let info_hash = make_test_info_hash(0xAB);
-    manager.register_torrent(&info_hash).await.expect("Failed to register");
+    manager
+        .register_torrent(&info_hash)
+        .await
+        .expect("Failed to register");
 
     // Simulate LPD discovering a peer that has the torrent
     let discovered_peer = LpdPeer::with_token(
@@ -642,7 +806,9 @@ async fn test_lpd_bittorrent_peer_simulation() {
     );
 
     // Update peer registry
-    manager.update_peers(&info_hash, vec![discovered_peer.clone()]).await;
+    manager
+        .update_peers(&info_hash, vec![discovered_peer.clone()])
+        .await;
 
     // Verify peer is available for connection
     let peers = manager.get_peers_for(&info_hash).await;
@@ -652,7 +818,10 @@ async fn test_lpd_bittorrent_peer_simulation() {
     let peer_addr = peer.socket_addr();
 
     // Verify peer address is usable for BitTorrent connection
-    assert!(peer_addr.port() > 0, "Peer port should be valid for BT connection");
+    assert!(
+        peer_addr.port() > 0,
+        "Peer port should be valid for BT connection"
+    );
     assert!(peer_addr.ip().is_ipv4(), "Peer IP should be IPv4 for LPD");
 
     // Cleanup
@@ -665,7 +834,10 @@ async fn test_lpd_peer_max_limit() {
     use aria2_core::engine::lpd_manager::MAX_PEERS_PER_HASH;
 
     let manager = LpdManager::default();
-    manager.register_torrent(test_info_hash()).await.expect("Failed to register");
+    manager
+        .register_torrent(test_info_hash())
+        .await
+        .expect("Failed to register");
 
     // Add more peers than the max limit
     let mut many_peers = Vec::new();
@@ -720,10 +892,16 @@ fn test_lpd_peer_expiration_check() {
     let peer = LpdPeer::new(test_info_hash(), 6881, test_ip());
 
     // Fresh peer should not be expired
-    assert!(!peer.is_expired(Duration::from_secs(3600)), "Fresh peer should not be expired");
+    assert!(
+        !peer.is_expired(Duration::from_secs(3600)),
+        "Fresh peer should not be expired"
+    );
 
     // Peer should be expired with zero tolerance
-    assert!(peer.is_expired(Duration::ZERO), "Peer should be expired with zero tolerance");
+    assert!(
+        peer.is_expired(Duration::ZERO),
+        "Peer should be expired with zero tolerance"
+    );
 }
 
 /// Test LPD token generation uniqueness
@@ -735,7 +913,10 @@ fn test_lpd_token_uniqueness() {
     let tokens: Vec<u32> = (0..100).map(|_| random::<u32>()).collect();
 
     // Check for uniqueness (high probability)
-    let unique_count = tokens.iter().collect::<std::collections::HashSet<_>>().len();
+    let unique_count = tokens
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     assert!(unique_count > 90, "Most tokens should be unique");
 }
 
@@ -752,8 +933,14 @@ fn test_lpd_real_world_announcement_parsing() {
         info_hash, port, token
     );
 
-    let result = parse_lpd_announcement(announcement.as_bytes(), IpAddr::V4(Ipv4Addr::new(192, 168, 0, 100)));
-    assert!(result.is_some(), "Real-world-like announcement should parse");
+    let result = parse_lpd_announcement(
+        announcement.as_bytes(),
+        IpAddr::V4(Ipv4Addr::new(192, 168, 0, 100)),
+    );
+    assert!(
+        result.is_some(),
+        "Real-world-like announcement should parse"
+    );
 
     let peer = result.unwrap();
     assert_eq!(peer.info_hash, info_hash);

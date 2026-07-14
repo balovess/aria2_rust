@@ -766,5 +766,4 @@ mod tests {
         assert!(resp.header("CONTENT-TYPE").is_some());
         assert!(resp.header("Content-Length").is_some());
     }
-
 }

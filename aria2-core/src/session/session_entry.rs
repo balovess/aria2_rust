@@ -224,10 +224,7 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert("bt-max-upload-slots".to_string(), v.to_string());
     }
     if let Some(v) = opts.bt_optimistic_unchoke_interval {
-        map.insert(
-            "bt-optimistic-unchoke-interval".to_string(),
-            v.to_string(),
-        );
+        map.insert("bt-optimistic-unchoke-interval".to_string(), v.to_string());
     }
     if let Some(v) = opts.bt_snubbed_timeout {
         map.insert("bt-snubbed-timeout".to_string(), v.to_string());

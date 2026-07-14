@@ -78,7 +78,10 @@ pub struct ConnectionId {
 impl ConnectionId {
     /// Create a new connection identifier
     pub fn new(conn_id: u16, remote_addr: SocketAddr) -> Self {
-        Self { conn_id, remote_addr }
+        Self {
+            conn_id,
+            remote_addr,
+        }
     }
 }
 
@@ -114,7 +117,9 @@ impl UtpSocket {
     pub fn bind(addr: &str) -> Result<Self, UtpSocketError> {
         let socket = UdpSocket::bind(addr).map_err(UtpSocketError::BindFailed)?;
         let local_addr = socket.local_addr().map_err(UtpSocketError::BindFailed)?;
-        socket.set_nonblocking(true).map_err(UtpSocketError::BindFailed)?;
+        socket
+            .set_nonblocking(true)
+            .map_err(UtpSocketError::BindFailed)?;
 
         Ok(Self {
             socket,
@@ -189,7 +194,8 @@ impl UtpSocket {
         self.connections.insert(conn_id, conn);
         self.addr_to_conn.insert(remote_addr, conn_id);
 
-        self.timers.set_timer(conn_id, TimerType::ConnectTimeout, self.connect_timeout);
+        self.timers
+            .set_timer(conn_id, TimerType::ConnectTimeout, self.connect_timeout);
 
         Ok(conn_id)
     }
@@ -197,7 +203,9 @@ impl UtpSocket {
     /// Send a packet to a remote address
     fn send_packet(&self, packet: &UtpPacket, addr: SocketAddr) -> Result<(), UtpSocketError> {
         let data = packet.to_bytes();
-        self.socket.send_to(&data, addr).map_err(UtpSocketError::SendFailed)?;
+        self.socket
+            .send_to(&data, addr)
+            .map_err(UtpSocketError::SendFailed)?;
         Ok(())
     }
 
@@ -209,21 +217,28 @@ impl UtpSocket {
 
         // Get connection info first
         let (remote_addr, rto) = {
-            let conn = self.connections.get(&conn_id)
+            let conn = self
+                .connections
+                .get(&conn_id)
                 .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
 
             if !conn.is_established() {
-                return Err(UtpSocketError::ConnectionError(ConnectionError::NotConnected));
+                return Err(UtpSocketError::ConnectionError(
+                    ConnectionError::NotConnected,
+                ));
             }
 
-            let remote_addr = conn.remote_addr()
+            let remote_addr = conn
+                .remote_addr()
                 .ok_or(UtpSocketError::AddressNotFound(conn_id))?;
             (remote_addr, conn.rto())
         };
 
         // Get packets to send
         let packets = {
-            let conn = self.connections.get_mut(&conn_id)
+            let conn = self
+                .connections
+                .get_mut(&conn_id)
                 .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
             conn.send_data(data)?
         };
@@ -233,7 +248,8 @@ impl UtpSocket {
         for packet in &packets {
             bytes_sent += packet.payload.len();
             self.send_packet(packet, remote_addr)?;
-            self.timers.set_timer(conn_id, TimerType::Retransmit(packet.seq_nr), rto);
+            self.timers
+                .set_timer(conn_id, TimerType::Retransmit(packet.seq_nr), rto);
         }
 
         Ok(bytes_sent)
@@ -249,9 +265,11 @@ impl UtpSocket {
         self.process_incoming_packets()?;
 
         // Get data from connection
-        let conn = self.connections.get_mut(&conn_id)
+        let conn = self
+            .connections
+            .get_mut(&conn_id)
             .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
-        
+
         let data = conn.recv_data();
         let len = std::cmp::min(data.len(), buf.len());
         buf[..len].copy_from_slice(&data[..len]);
@@ -272,7 +290,11 @@ impl UtpSocket {
     }
 
     /// Handle an incoming packet
-    fn handle_packet(&mut self, packet: &UtpPacket, addr: SocketAddr) -> Result<(), UtpSocketError> {
+    fn handle_packet(
+        &mut self,
+        packet: &UtpPacket,
+        addr: SocketAddr,
+    ) -> Result<(), UtpSocketError> {
         let packet_type = packet.packet_type()?;
 
         match packet_type {
@@ -296,7 +318,8 @@ impl UtpSocket {
                     }
 
                     self.timers.cancel_timer(conn_id, TimerType::ConnectTimeout);
-                    self.timers.set_timer(conn_id, TimerType::Keepalive, keepalive_interval);
+                    self.timers
+                        .set_timer(conn_id, TimerType::Keepalive, keepalive_interval);
                 }
             }
             PacketType::StReset => {
@@ -326,13 +349,18 @@ impl UtpSocket {
         self.connections.insert(conn_id, conn);
         self.addr_to_conn.insert(addr, conn_id);
 
-        self.timers.set_timer(conn_id, TimerType::Keepalive, self.keepalive_interval);
+        self.timers
+            .set_timer(conn_id, TimerType::Keepalive, self.keepalive_interval);
 
         Ok(())
     }
 
     /// Find the connection ID for an incoming packet
-    fn find_connection_for_packet(&self, packet: &UtpPacket, addr: SocketAddr) -> Result<Option<u16>, UtpSocketError> {
+    fn find_connection_for_packet(
+        &self,
+        packet: &UtpPacket,
+        addr: SocketAddr,
+    ) -> Result<Option<u16>, UtpSocketError> {
         if let Some(conn_id) = self.addr_to_conn.get(&addr) {
             return Ok(Some(*conn_id));
         }
@@ -377,7 +405,7 @@ impl UtpSocket {
                     return Ok(());
                 }
             };
-            
+
             if let Some(addr) = remote_addr {
                 self.send_packet(&fin, addr)?;
             }
@@ -423,14 +451,18 @@ impl UtpSocket {
     }
 
     /// Handle an expired timer
-    fn handle_timer_expired(&mut self, conn_id: u16, timer_type: TimerType) -> Result<(), UtpSocketError> {
+    fn handle_timer_expired(
+        &mut self,
+        conn_id: u16,
+        timer_type: TimerType,
+    ) -> Result<(), UtpSocketError> {
         match timer_type {
             TimerType::ConnectTimeout => {
                 let should_close = {
                     let conn = self.connections.get(&conn_id);
                     conn.is_some_and(|c| c.state() == ConnectionState::SynSent)
                 };
-                
+
                 if should_close {
                     self.close_connection_internal(conn_id)?;
                 }
@@ -455,13 +487,25 @@ impl UtpSocket {
                     for packet in packets_to_send {
                         if let Some(addr) = remote_addr {
                             self.send_packet(&packet, addr)?;
-                            self.timers.set_timer(conn_id, TimerType::Retransmit(packet.seq_nr), rto);
+                            self.timers.set_timer(
+                                conn_id,
+                                TimerType::Retransmit(packet.seq_nr),
+                                rto,
+                            );
                         }
                     }
                 }
             }
             TimerType::Keepalive => {
-                let (is_established, remote_conn_id, ack_nr, seq_nr, recv_window, remote_addr, keepalive_interval) = {
+                let (
+                    is_established,
+                    remote_conn_id,
+                    ack_nr,
+                    seq_nr,
+                    recv_window,
+                    remote_addr,
+                    keepalive_interval,
+                ) = {
                     let conn = self.connections.get(&conn_id);
                     if let Some(conn) = conn {
                         let is_established = conn.is_established();
@@ -471,7 +515,15 @@ impl UtpSocket {
                         let recv_window = conn.receive_window();
                         let remote_addr = conn.remote_addr();
                         let keepalive_interval = self.keepalive_interval;
-                        (is_established, remote_conn_id, ack_nr, seq_nr, recv_window, remote_addr, keepalive_interval)
+                        (
+                            is_established,
+                            remote_conn_id,
+                            ack_nr,
+                            seq_nr,
+                            recv_window,
+                            remote_addr,
+                            keepalive_interval,
+                        )
                     } else {
                         return Ok(());
                     }
@@ -482,7 +534,8 @@ impl UtpSocket {
                     if let Some(addr) = remote_addr {
                         self.send_packet(&ack, addr)?;
                     }
-                    self.timers.set_timer(conn_id, TimerType::Keepalive, keepalive_interval);
+                    self.timers
+                        .set_timer(conn_id, TimerType::Keepalive, keepalive_interval);
                 }
             }
             TimerType::IdleTimeout => {
@@ -495,14 +548,18 @@ impl UtpSocket {
 
     /// Check connection state
     pub fn connection_state(&self, conn_id: u16) -> Result<ConnectionState, UtpSocketError> {
-        let conn = self.connections.get(&conn_id)
+        let conn = self
+            .connections
+            .get(&conn_id)
             .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
         Ok(conn.state())
     }
 
     /// Get connection statistics
     pub fn connection_stats(&self, conn_id: u16) -> Result<ConnectionStats, UtpSocketError> {
-        let conn = self.connections.get(&conn_id)
+        let conn = self
+            .connections
+            .get(&conn_id)
             .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
 
         Ok(ConnectionStats {
@@ -525,7 +582,7 @@ impl UtpSocket {
 
         let mut results = Vec::new();
         let conn_ids: Vec<u16> = self.connections.keys().copied().collect();
-        
+
         for conn_id in conn_ids {
             if let Some(conn) = self.connections.get_mut(&conn_id) {
                 let data = conn.recv_data();
@@ -584,7 +641,9 @@ impl AsyncUtpSocket {
     /// Create a new async uTP socket
     pub fn bind(addr: &str) -> Result<Self, UtpSocketError> {
         let socket = UtpSocket::bind(addr)?;
-        Ok(Self { inner: Arc::new(Mutex::new(socket)) })
+        Ok(Self {
+            inner: Arc::new(Mutex::new(socket)),
+        })
     }
 
     /// Bind to any available port
@@ -666,7 +725,7 @@ mod tests {
     fn test_socket_bind() {
         let socket = UtpSocket::bind_any();
         assert!(socket.is_ok());
-        
+
         let socket = socket.unwrap();
         assert!(socket.local_addr().port() > 0);
         assert!(!socket.is_closed());
@@ -677,7 +736,7 @@ mod tests {
     fn test_socket_close() {
         let mut socket = UtpSocket::bind_any().unwrap();
         assert!(!socket.is_closed());
-        
+
         socket.close();
         assert!(socket.is_closed());
     }
@@ -686,7 +745,7 @@ mod tests {
     fn test_socket_connect_closed() {
         let mut socket = UtpSocket::bind_any().unwrap();
         socket.close();
-        
+
         let result = socket.connect(test_addr());
         assert!(matches!(result, Err(UtpSocketError::SocketClosed)));
     }
@@ -694,13 +753,19 @@ mod tests {
     #[test]
     fn test_socket_connection_not_found() {
         let mut socket = UtpSocket::bind_any().unwrap();
-        
+
         let result = socket.send(60000, &[1, 2, 3]);
-        assert!(matches!(result, Err(UtpSocketError::ConnectionNotFound(60000))));
-        
+        assert!(matches!(
+            result,
+            Err(UtpSocketError::ConnectionNotFound(60000))
+        ));
+
         let mut buf = [0u8; 100];
         let result = socket.recv(60000, &mut buf);
-        assert!(matches!(result, Err(UtpSocketError::ConnectionNotFound(60000))));
+        assert!(matches!(
+            result,
+            Err(UtpSocketError::ConnectionNotFound(60000))
+        ));
     }
 
     #[test]

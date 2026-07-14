@@ -142,7 +142,12 @@ impl FtpConnection {
 
         let stream = timeout(options.connect_timeout, TcpStream::connect((host, port)))
             .await
-            .map_err(|_| format!("FTP connection timeout ({}s)", options.connect_timeout.as_secs()))?
+            .map_err(|_| {
+                format!(
+                    "FTP connection timeout ({}s)",
+                    options.connect_timeout.as_secs()
+                )
+            })?
             .map_err(|e| format!("FTP connection failed: {}", e))?;
 
         let mut conn = Self {
@@ -211,7 +216,10 @@ impl FtpConnection {
                 .parse::<u64>()
                 .map_err(|e| format!("Failed to parse file size: {} ({})", e, size_str))
         } else {
-            Err(format!("SIZE command failed: {} {}", resp.code, resp.message))
+            Err(format!(
+                "SIZE command failed: {} {}",
+                resp.code, resp.message
+            ))
         }
     }
 
@@ -222,7 +230,10 @@ impl FtpConnection {
         if resp.code == 213 {
             Ok(resp.message.trim().to_string())
         } else {
-            Err(format!("MDTM command failed: {} {}", resp.code, resp.message))
+            Err(format!(
+                "MDTM command failed: {} {}",
+                resp.code, resp.message
+            ))
         }
     }
 
@@ -282,7 +293,9 @@ impl FtpConnection {
         let octets = match ip {
             std::net::IpAddr::V4(v4) => v4.octets(),
             std::net::IpAddr::V6(_) => {
-                return Err("IPv6 address not supported for PORT command, use EPRT instead".to_string());
+                return Err(
+                    "IPv6 address not supported for PORT command, use EPRT instead".to_string(),
+                );
             }
         };
 

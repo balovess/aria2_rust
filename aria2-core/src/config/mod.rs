@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{
-    ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition,
-    OptionError, OptionRegistry, OptionType, OptionValue, OptionValidator, PathValidator,
-    RangeValidator, RegexValidator, UrlValidator,
+    ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition, OptionError,
+    OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, RangeValidator,
+    RegexValidator, UrlValidator,
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use uri_list::{UriListEntry, UriListError, UriListFile};

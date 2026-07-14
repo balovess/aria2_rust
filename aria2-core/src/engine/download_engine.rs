@@ -8,9 +8,9 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use super::command::{Command, ProgressUpdate};
-use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
+use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::RequestGroup;
@@ -83,7 +83,9 @@ impl DownloadEngine {
             save_session_interval: None,
             request_group_man: None,
             auto_save: None,
-            ftp_pool: Arc::new(FtpConnectionPool::new(constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS)),
+            ftp_pool: Arc::new(FtpConnectionPool::new(
+                constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS,
+            )),
             dns_cache: Arc::new(Mutex::new(DnsCache::new())),
             keep_alive: false,
         };
@@ -367,7 +369,11 @@ impl DownloadEngine {
                     timeout,
                 },
             );
-            debug!("Dispatched command (task {}), running: {}", id, running.len());
+            debug!(
+                "Dispatched command (task {}), running: {}",
+                id,
+                running.len()
+            );
         }
         Ok(())
     }
@@ -488,8 +494,8 @@ mod tests {
     use super::*;
     use crate::engine::command::CommandStatus;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
     /// A command that sleeps far longer than its reported timeout, so the
@@ -596,8 +602,7 @@ mod tests {
         }
 
         let start = Instant::now();
-        let run_result =
-            tokio::time::timeout(Duration::from_millis(500), engine.run()).await;
+        let run_result = tokio::time::timeout(Duration::from_millis(500), engine.run()).await;
         let elapsed = start.elapsed();
 
         assert!(

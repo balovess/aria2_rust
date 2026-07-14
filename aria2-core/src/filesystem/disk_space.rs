@@ -4,6 +4,21 @@ use std::path::Path;
 
 const DEFAULT_MARGIN_MB: u64 = 100;
 
+/// Convert a Path to a null-terminated CString for libc functions on Unix.
+///
+/// `statvfs` and similar C APIs require null-terminated strings, but
+/// `OsStr::as_bytes()` does NOT include a null terminator. Passing
+/// `as_bytes().as_ptr()` directly causes `statvfs` to read past the path
+/// until it finds a `\0` byte in memory — undefined behavior that causes
+/// failures on macOS and intermittently on Linux.
+///
+/// Returns `None` if the path contains an embedded null byte.
+#[cfg(unix)]
+fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
+}
+
 // =========================================================================
 // K5.2 — DiskError Enum for Structured Error Handling
 // =========================================================================
@@ -133,8 +148,6 @@ fn format_bytes(bytes: u64) -> String {
 pub fn check_disk_space(path: &Path, required_bytes: u64) -> std::result::Result<(), String> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
-
         // Handle empty/invalid paths gracefully
         let check_path = if path.as_os_str().is_empty() {
             Path::new(".")
@@ -142,13 +155,19 @@ pub fn check_disk_space(path: &Path, required_bytes: u64) -> std::result::Result
             path
         };
 
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ret = unsafe {
-            libc::statvfs(
-                check_path.as_os_str().as_bytes().as_ptr() as *const i8,
-                &mut stat,
-            )
+        // statvfs requires a null-terminated C string; OsStr::as_bytes() is NOT
+        // null-terminated (undefined behavior if passed directly).
+        let Some(c_path) = path_to_cstring(check_path) else {
+            tracing::warn!(
+                path = %check_path.display(),
+                required = required_bytes,
+                "path contains embedded null byte, skipping disk space check"
+            );
+            return Ok(());
         };
+
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
 
         if ret != 0 {
             // Failed to get disk space info, log warning but don't block
@@ -278,21 +297,25 @@ pub fn check_disk_space_typed(
 ) -> std::result::Result<(), DiskError> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
-
         let check_path = if path.as_os_str().is_empty() {
             Path::new(".")
         } else {
             path
         };
 
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ret = unsafe {
-            libc::statvfs(
-                check_path.as_os_str().as_bytes().as_ptr() as *const i8,
-                &mut stat,
-            )
+        // statvfs requires a null-terminated C string; OsStr::as_bytes() is NOT
+        // null-terminated (undefined behavior if passed directly).
+        let Some(c_path) = path_to_cstring(check_path) else {
+            tracing::warn!(
+                path = %check_path.display(),
+                required = required_bytes,
+                "path contains embedded null byte, skipping disk space check"
+            );
+            return Ok(());
         };
+
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
 
         if ret != 0 {
             // Failed to get disk space info, log warning but don't block
@@ -332,9 +355,7 @@ pub fn check_disk_space_typed(
         // Get absolute path for GetDiskFreeSpaceEx
         let abs_path = match std::fs::canonicalize(check_path) {
             Ok(p) => p,
-            Err(_) => {
-                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-            }
+            Err(_) => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
         };
 
         // Convert path to wide string with null terminator
@@ -388,10 +409,16 @@ pub fn available_space(path: &Path) -> Result<u64> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
+        // statvfs requires a null-terminated C string; OsStr::as_bytes() is NOT
+        // null-terminated (undefined behavior if passed directly).
+        let c_path = path_to_cstring(path).ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "path contains embedded null byte: {}",
+                path.display()
+            )))
+        })?;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ret =
-            unsafe { libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat) };
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
         if ret != 0 {
             return Err(Aria2Error::Fatal(FatalError::Config(format!(
                 "statvfs failed: {}",
@@ -408,9 +435,7 @@ pub fn available_space(path: &Path) -> Result<u64> {
         // Get absolute path for GetDiskFreeSpaceEx
         let abs_path = match std::fs::canonicalize(path) {
             Ok(p) => p,
-            Err(_) => {
-                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-            }
+            Err(_) => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
         };
 
         // Convert path to wide string with null terminator
@@ -432,7 +457,7 @@ pub fn available_space(path: &Path) -> Result<u64> {
 
         if result == 0 {
             return Err(Aria2Error::Fatal(FatalError::Config(
-                "GetDiskFreeSpaceExW failed".to_string()
+                "GetDiskFreeSpaceExW failed".to_string(),
             )));
         }
 
@@ -485,10 +510,16 @@ pub fn total_space(path: &Path) -> Result<u64> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
+        // statvfs requires a null-terminated C string; OsStr::as_bytes() is NOT
+        // null-terminated (undefined behavior if passed directly).
+        let c_path = path_to_cstring(path).ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "path contains embedded null byte: {}",
+                path.display()
+            )))
+        })?;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ret =
-            unsafe { libc::statvfs(path.as_os_str().as_bytes().as_ptr() as *const i8, &mut stat) };
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
         if ret != 0 {
             return Err(Aria2Error::Fatal(FatalError::Config(format!(
                 "statvfs failed: {}",
@@ -505,9 +536,7 @@ pub fn total_space(path: &Path) -> Result<u64> {
         // Get absolute path for GetDiskFreeSpaceEx
         let abs_path = match std::fs::canonicalize(path) {
             Ok(p) => p,
-            Err(_) => {
-                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-            }
+            Err(_) => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
         };
 
         // Convert path to wide string with null terminator
@@ -529,7 +558,7 @@ pub fn total_space(path: &Path) -> Result<u64> {
 
         if result == 0 {
             return Err(Aria2Error::Fatal(FatalError::Config(
-                "GetDiskFreeSpaceExW failed".to_string()
+                "GetDiskFreeSpaceExW failed".to_string(),
             )));
         }
 

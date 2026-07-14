@@ -77,7 +77,9 @@ pub fn sort_by_score(stats: &mut [&ServerStat]) {
     stats.sort_by(|a, b| {
         let score_a = score_source(a);
         let score_b = score_source(b);
-        score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+        score_a
+            .partial_cmp(&score_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 }
 
@@ -110,7 +112,9 @@ impl AdaptiveUriSelector {
         Self {
             stat_man,
             uris: Vec::new(),
-            nb_server_toevaluate: AtomicI32::new(crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32),
+            nb_server_toevaluate: AtomicI32::new(
+                crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32,
+            ),
             nb_connections: AtomicI32::new(crate::constants::DEFAULT_NB_CONNECTIONS as i32),
         }
     }
@@ -144,7 +148,9 @@ impl AdaptiveUriSelector {
         Self {
             stat_man,
             uris,
-            nb_server_toevaluate: AtomicI32::new(crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32),
+            nb_server_toevaluate: AtomicI32::new(
+                crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32,
+            ),
             nb_connections: AtomicI32::new(crate::constants::DEFAULT_NB_CONNECTIONS as i32),
         }
     }

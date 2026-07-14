@@ -46,7 +46,9 @@ async fn test_preallocation_none() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_none.bin");
 
-    preallocate_file(&path, 1024 * 1024, "none", false).await.unwrap();
+    preallocate_file(&path, 1024 * 1024, "none", false)
+        .await
+        .unwrap();
     assert!(!path.exists());
 }
 

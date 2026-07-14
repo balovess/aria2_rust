@@ -14,7 +14,10 @@ use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
 impl RpcEngine {
     /// Handle `aria2.addUri` - Add a new download task from URI(s).
-    pub async fn handle_add_uri(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
+    pub async fn handle_add_uri(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let uris: Vec<String> = if let Ok(arr) = req.get_param::<Vec<String>>(0) {
             arr
         } else if let Ok(single) = req.get_param::<String>(0) {
@@ -38,7 +41,7 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let torrent_data: String = req.get_param(0)?;
-        let opts: HashMap<String,serde_json::Value> = req.get_param_or_default(1);
+        let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
         let _dir = opts
             .get("dir")
             .and_then(|v| v.as_str())
@@ -52,11 +55,8 @@ impl RpcEngine {
             )
             .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
         } else {
-            base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &torrent_data,
-            )
-            .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &torrent_data)
+                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
         };
 
         if decoded_bytes.len() < 3
@@ -102,11 +102,8 @@ impl RpcEngine {
             )
             .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
         } else {
-            base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &metalink_data,
-            )
-            .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &metalink_data)
+                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
         };
 
         let preview = String::from_utf8_lossy(&decoded_bytes[..decoded_bytes.len().min(200)]);
@@ -128,7 +125,10 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.remove` - Remove a download task.
-    pub async fn handle_remove(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
+    pub async fn handle_remove(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
         let mut tasks = self.tasks.write().await;
         match tasks.remove(&gid) {
@@ -144,7 +144,10 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.pause` / `aria2.forcePause` - Pause a download task.
-    pub async fn handle_pause(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
+    pub async fn handle_pause(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
         let mut tasks = self.tasks.write().await;
         match tasks.get_mut(&gid) {
@@ -163,7 +166,10 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.forcePause` - Force pause a download task.
-    pub async fn handle_force_pause(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
+    pub async fn handle_force_pause(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
         let mut tasks_map = self.tasks.write().await;
@@ -178,12 +184,18 @@ impl RpcEngine {
                     serde_json::json!("OK"),
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!("GID {} not found", gid))),
+            None => Err(JsonRpcError::MethodNotFound(format!(
+                "GID {} not found",
+                gid
+            ))),
         }
     }
 
     /// Handle `aria2.unpause` / `aria2.forceUnpause` - Resume a paused task.
-    pub async fn handle_unpause(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, JsonRpcError> {
+    pub async fn handle_unpause(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
         let mut tasks = self.tasks.write().await;
         match tasks.get_mut(&gid) {
@@ -210,8 +222,9 @@ impl RpcEngine {
         match self.get_status(&gid).await {
             Some(status) => Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
-                serde_json::to_value(status)
-                    .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+                serde_json::to_value(status).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                })?,
             )),
             None => Err(JsonRpcError::MethodNotFound(format!(
                 "GID {} not found",
@@ -257,9 +270,9 @@ impl RpcEngine {
             .and_then(|v| serde_json::from_value(v).ok());
 
         let mut tasks = self.tasks.write().await;
-        let state = tasks.get_mut(&gid).ok_or_else(|| {
-            JsonRpcError::MethodNotFound(format!("GID {} not found", gid))
-        })?;
+        let state = tasks
+            .get_mut(&gid)
+            .ok_or_else(|| JsonRpcError::MethodNotFound(format!("GID {} not found", gid)))?;
 
         if let Some(to_remove) = del_uris {
             state.uris.retain(|u| !to_remove.contains(u));
@@ -319,9 +332,9 @@ impl RpcEngine {
         }
 
         let mut tasks = self.tasks.write().await;
-        let state = tasks.get_mut(&gid).ok_or_else(|| {
-            JsonRpcError::MethodNotFound(format!("GID {} not found", gid))
-        })?;
+        let state = tasks
+            .get_mut(&gid)
+            .ok_or_else(|| JsonRpcError::MethodNotFound(format!("GID {} not found", gid)))?;
 
         match (del_pos, add_pos) {
             (Some(del), Some(add)) => {
@@ -345,8 +358,9 @@ impl RpcEngine {
             }
             (None, Some(add)) => {
                 if !state.uris.is_empty() && add <= state.uris.len() {
-                    let uri = state.uris.pop()
-                        .ok_or_else(|| JsonRpcError::InternalError("No URIs available".to_string()))?;
+                    let uri = state.uris.pop().ok_or_else(|| {
+                        JsonRpcError::InternalError("No URIs available".to_string())
+                    })?;
                     state.uris.insert(add, uri);
                     return Ok(JsonRpcResponse::success(
                         req.id.clone().unwrap_or_default(),
@@ -385,7 +399,10 @@ impl RpcEngine {
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::Value::String(format!("OK. {} active downloads will be saved.", active_count)),
+            serde_json::Value::String(format!(
+                "OK. {} active downloads will be saved.",
+                active_count
+            )),
         ))
     }
 
@@ -414,7 +431,10 @@ impl RpcEngine {
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::Value::String(format!("OK. {} downloads forcibly terminated.", cancelled_count)),
+            serde_json::Value::String(format!(
+                "OK. {} downloads forcibly terminated.",
+                cancelled_count
+            )),
         ))
     }
 
@@ -446,9 +466,9 @@ impl RpcEngine {
                 .await
                 .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
 
-            let group = man
-                .group_by_id(gid)
-                .ok_or_else(|| JsonRpcError::InternalError("Group not found after insert".into()))?;
+            let group = man.group_by_id(gid).ok_or_else(|| {
+                JsonRpcError::InternalError("Group not found after insert".into())
+            })?;
 
             let first_uri = uris.first().ok_or_else(|| {
                 JsonRpcError::InvalidParams("At least one URI is required".into())
@@ -463,9 +483,9 @@ impl RpcEngine {
             )
             .map_err(|e| JsonRpcError::InternalError(format!("DownloadCommand failed: {}", e)))?;
 
-            cmd_tx
-                .send(Box::new(cmd))
-                .map_err(|e| JsonRpcError::InternalError(format!("Failed to send command: {}", e)))?;
+            cmd_tx.send(Box::new(cmd)).map_err(|e| {
+                JsonRpcError::InternalError(format!("Failed to send command: {}", e))
+            })?;
         }
 
         // Track in RPC tasks map (for cancel_token, options metadata)
@@ -512,14 +532,16 @@ impl RpcEngine {
                 let uris: Vec<String> = g.uris().to_vec();
                 let first_uri = uris.first().cloned().unwrap_or_default();
                 let files = vec![FileInfo::new(first_uri, total).with_completed(completed)];
-                return Some(StatusInfo::new(gid)
-                    .with_status(status)
-                    .with_total_length(total)
-                    .with_completed_length(completed)
-                    .with_upload_length(uploaded)
-                    .with_download_speed(dl_speed)
-                    .with_dir(dir)
-                    .with_files(files));
+                return Some(
+                    StatusInfo::new(gid)
+                        .with_status(status)
+                        .with_total_length(total)
+                        .with_completed_length(completed)
+                        .with_upload_length(uploaded)
+                        .with_download_speed(dl_speed)
+                        .with_dir(dir)
+                        .with_files(files),
+                );
             }
         }
         // Fallback to tasks map (placeholder, for tests/no-engine mode)
@@ -591,10 +613,16 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         // BT
         bt_force_encrypt: get_bool("bt-force-encrypt"),
         bt_require_crypto: get_bool("bt-require-crypto"),
-        enable_dht: opts.get("enable-dht").and_then(|v| v.as_bool()).unwrap_or(true),
+        enable_dht: opts
+            .get("enable-dht")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         dht_listen_port: get_u16("dht-listen-port"),
         dht_entry_point,
-        enable_public_trackers: opts.get("enable-public-trackers").and_then(|v| v.as_bool()).unwrap_or(true),
+        enable_public_trackers: opts
+            .get("enable-public-trackers")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         bt_piece_selection_strategy: get_str("bt-piece-selection-strategy").unwrap_or_default(),
         bt_endgame_threshold: get_u32("bt-endgame-threshold").unwrap_or(0),
         bt_max_upload_slots: get_u32("bt-max-upload-slots"),

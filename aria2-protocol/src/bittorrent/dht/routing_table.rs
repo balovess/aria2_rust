@@ -93,8 +93,8 @@ impl RoutingTable {
 
     /// Get a random node from the routing table for bucket refresh
     pub fn get_random_node(&self) -> Option<&DhtNode> {
-        use rand::seq::SliceRandom;
         use rand::Rng;
+        use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
 
         // Collect all non-empty buckets
@@ -134,7 +134,10 @@ impl RoutingTable {
 
     /// Count questionable nodes in the routing table
     pub fn questionable_node_count(&self) -> usize {
-        self.buckets.iter().map(|b| b.get_questionable_count()).sum()
+        self.buckets
+            .iter()
+            .map(|b| b.get_questionable_count())
+            .sum()
     }
 
     /// Count bad nodes in the routing table
@@ -146,7 +149,7 @@ impl RoutingTable {
     /// Returns a list of target IDs to query for each bucket needing refresh
     pub fn refresh_buckets(&self) -> Vec<[u8; 20]> {
         let mut targets = Vec::new();
-        
+
         for (idx, bucket) in self.buckets.iter().enumerate() {
             if bucket.needs_refresh() {
                 // Generate a random ID in this bucket's range
@@ -154,14 +157,14 @@ impl RoutingTable {
                 targets.push(target);
             }
         }
-        
+
         targets
     }
 
     /// Get all questionable nodes (nodes not seen in 15 minutes)
     pub fn get_questionable_nodes(&self) -> Vec<&DhtNode> {
         let mut nodes = Vec::new();
-        
+
         for bucket in &self.buckets {
             for node in bucket.get_nodes() {
                 if node.is_questionable() {
@@ -169,7 +172,7 @@ impl RoutingTable {
                 }
             }
         }
-        
+
         nodes
     }
 
@@ -177,7 +180,7 @@ impl RoutingTable {
     /// Returns a list of target IDs to query
     pub fn fill_routing_table(&self) -> Vec<[u8; 20]> {
         let mut targets = Vec::new();
-        
+
         // Find buckets that are not full
         for (idx, bucket) in self.buckets.iter().enumerate() {
             if !bucket.is_full() {
@@ -186,7 +189,7 @@ impl RoutingTable {
                 targets.push(target);
             }
         }
-        
+
         targets
     }
 
@@ -194,24 +197,24 @@ impl RoutingTable {
     fn generate_random_id_in_bucket(&self, bucket_idx: usize) -> [u8; 20] {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        
+
         let mut id = self.self_id;
-        
+
         // Set the bits to place the ID in the target bucket
         // The bucket index determines which bit differs from our ID
         let byte_idx = bucket_idx / 8;
         let bit_idx = bucket_idx % 8;
-        
+
         if byte_idx < 20 {
             // Flip the bit at the bucket position
             id[byte_idx] ^= 1 << (7 - bit_idx);
-            
+
             // Randomize lower bits
             for byte in id.iter_mut().skip(byte_idx + 1) {
                 *byte = rng.r#gen();
             }
         }
-        
+
         id
     }
 
@@ -363,10 +366,10 @@ mod tests {
     #[test]
     fn test_get_questionable_nodes() {
         let mut table = RoutingTable::new([0u8; 20]);
-        
+
         // Add a node (it will be good initially)
         table.insert(DhtNode::new([1u8; 20], "127.0.0.1:6881".parse().unwrap()));
-        
+
         // Get questionable nodes (should be empty since node is fresh)
         let questionable = table.get_questionable_nodes();
         assert!(questionable.is_empty());
@@ -384,7 +387,7 @@ mod tests {
     #[test]
     fn test_generate_random_id_in_bucket() {
         let table = RoutingTable::new([0u8; 20]);
-        
+
         // Generate IDs for different buckets
         for bucket_idx in [0, 50, 100, 159] {
             let id = table.generate_random_id_in_bucket(bucket_idx);

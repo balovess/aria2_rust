@@ -39,7 +39,10 @@ fn test_serialization_performance() {
     let time = measure("session_serialize_small", 10000, || {
         let _ = entry_small.serialize();
     });
-    println!("  Small entry (1 URI): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Small entry (1 URI): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Medium entry
@@ -48,7 +51,9 @@ fn test_serialization_performance() {
         .collect();
     let mut entry_medium = aria2_core::session::session_entry::SessionEntry::new(2, uris_medium);
     for i in 0..20 {
-        entry_medium.options.insert(format!("opt{}", i), format!("val{}", i));
+        entry_medium
+            .options
+            .insert(format!("opt{}", i), format!("val{}", i));
     }
     entry_medium.total_length = 1024 * 1024 * 1024;
     entry_medium.completed_length = 512 * 1024 * 1024;
@@ -56,7 +61,10 @@ fn test_serialization_performance() {
     let time = measure("session_serialize_medium", 10000, || {
         let _ = entry_medium.serialize();
     });
-    println!("  Medium entry (5 URIs, 20 options): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Medium entry (5 URIs, 20 options): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Large entry with bitfield
@@ -65,7 +73,9 @@ fn test_serialization_performance() {
         .collect();
     let mut entry_large = aria2_core::session::session_entry::SessionEntry::new(3, uris_large);
     for i in 0..50 {
-        entry_large.options.insert(format!("opt{}", i), format!("val{}", i));
+        entry_large
+            .options
+            .insert(format!("opt{}", i), format!("val{}", i));
     }
     entry_large.bitfield = Some((0..10000).map(|i| (i % 256) as u8).collect());
     entry_large.num_pieces = Some(80000);
@@ -74,7 +84,10 @@ fn test_serialization_performance() {
     let time = measure("session_serialize_large", 1000, || {
         let _ = entry_large.serialize();
     });
-    println!("  Large entry (20 URIs, 50 options, 10KB bitfield): {} for 1,000 iterations", format_duration(time));
+    println!(
+        "  Large entry (20 URIs, 50 options, 10KB bitfield): {} for 1,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 1000);
 
     // Test deserialization
@@ -83,23 +96,35 @@ fn test_serialization_performance() {
 
     let serialized_small = entry_small.serialize();
     let time = measure("session_deserialize_small", 10000, || {
-        let _ = aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_small);
+        let _ =
+            aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_small);
     });
-    println!("  Small entry: {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Small entry: {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     let serialized_medium = entry_medium.serialize();
     let time = measure("session_deserialize_medium", 10000, || {
-        let _ = aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_medium);
+        let _ =
+            aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_medium);
     });
-    println!("  Medium entry: {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Medium entry: {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     let serialized_large = entry_large.serialize();
     let time = measure("session_deserialize_large", 1000, || {
-        let _ = aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_large);
+        let _ =
+            aria2_core::session::session_entry::SessionEntry::deserialize_line(&serialized_large);
     });
-    println!("  Large entry: {} for 1,000 iterations", format_duration(time));
+    println!(
+        "  Large entry: {} for 1,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 1000);
 
     // Test Bencode encoding
@@ -112,40 +137,58 @@ fn test_serialization_performance() {
     // Small dict
     let mut dict_small = BTreeMap::new();
     for i in 0..10 {
-        dict_small.insert(format!("key{}", i).into_bytes(), BencodeValue::Int(i as i64));
+        dict_small.insert(
+            format!("key{}", i).into_bytes(),
+            BencodeValue::Int(i as i64),
+        );
     }
     let bencode_small = BencodeValue::Dict(dict_small);
 
     let time = measure("bencode_encode_small", 10000, || {
         let _ = bencode_small.encode().len();
     });
-    println!("  Small dict (10 keys): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Small dict (10 keys): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Medium dict
     let mut dict_medium = BTreeMap::new();
     for i in 0..50 {
-        dict_medium.insert(format!("key{}", i).into_bytes(), BencodeValue::Int(i as i64));
+        dict_medium.insert(
+            format!("key{}", i).into_bytes(),
+            BencodeValue::Int(i as i64),
+        );
     }
     let bencode_medium = BencodeValue::Dict(dict_medium);
 
     let time = measure("bencode_encode_medium", 10000, || {
         let _ = bencode_medium.encode().len();
     });
-    println!("  Medium dict (50 keys): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Medium dict (50 keys): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Large dict
     let mut dict_large = BTreeMap::new();
     for i in 0..200 {
-        dict_large.insert(format!("key{}", i).into_bytes(), BencodeValue::Int(i as i64));
+        dict_large.insert(
+            format!("key{}", i).into_bytes(),
+            BencodeValue::Int(i as i64),
+        );
     }
     let bencode_large = BencodeValue::Dict(dict_large);
 
     let time = measure("bencode_encode_large", 1000, || {
         let _ = bencode_large.encode().len();
     });
-    println!("  Large dict (200 keys): {} for 1,000 iterations", format_duration(time));
+    println!(
+        "  Large dict (200 keys): {} for 1,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 1000);
 
     // Test Bencode decoding
@@ -156,21 +199,30 @@ fn test_serialization_performance() {
     let time = measure("bencode_decode_small", 10000, || {
         let _ = BencodeValue::decode(&encoded_small);
     });
-    println!("  Small dict: {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Small dict: {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     let encoded_medium = bencode_medium.encode();
     let time = measure("bencode_decode_medium", 10000, || {
         let _ = BencodeValue::decode(&encoded_medium);
     });
-    println!("  Medium dict: {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Medium dict: {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     let encoded_large = bencode_large.encode();
     let time = measure("bencode_decode_large", 1000, || {
         let _ = BencodeValue::decode(&encoded_large);
     });
-    println!("  Large dict: {} for 1,000 iterations", format_duration(time));
+    println!(
+        "  Large dict: {} for 1,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 1000);
 
     // Test Config parsing
@@ -194,7 +246,10 @@ fn test_serialization_performance() {
             }
         }
     });
-    println!("  Small config (20 options): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Small config (20 options): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Medium config
@@ -212,7 +267,10 @@ fn test_serialization_performance() {
             }
         }
     });
-    println!("  Medium config (100 options): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Medium config (100 options): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Large config
@@ -230,7 +288,10 @@ fn test_serialization_performance() {
             }
         }
     });
-    println!("  Large config (500 options): {} for 1,000 iterations", format_duration(time));
+    println!(
+        "  Large config (500 options): {} for 1,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 1000);
 
     // Test JSON serialization
@@ -247,7 +308,10 @@ fn test_serialization_performance() {
     let time = measure("json_serialize_small", 10000, || {
         let _ = serde_json::to_string(&json_small_val).unwrap().len();
     });
-    println!("  Small JSON (10 keys): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Small JSON (10 keys): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Medium JSON
@@ -260,20 +324,29 @@ fn test_serialization_performance() {
     let time = measure("json_serialize_medium", 10000, || {
         let _ = serde_json::to_string(&json_medium_val).unwrap().len();
     });
-    println!("  Medium JSON (50 keys): {} for 10,000 iterations", format_duration(time));
+    println!(
+        "  Medium JSON (50 keys): {} for 10,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 10000);
 
     // Large JSON
     let mut json_large = serde_json::Map::new();
     for i in 0..200 {
-        json_large.insert(format!("key{}", i), serde_json::json!({"nested": {"value": i}}));
+        json_large.insert(
+            format!("key{}", i),
+            serde_json::json!({"nested": {"value": i}}),
+        );
     }
     let json_large_val = serde_json::Value::Object(json_large);
 
     let time = measure("json_serialize_large", 1000, || {
         let _ = serde_json::to_string(&json_large_val).unwrap().len();
     });
-    println!("  Large JSON (200 keys): {} for 1,000 iterations", format_duration(time));
+    println!(
+        "  Large JSON (200 keys): {} for 1,000 iterations",
+        format_duration(time)
+    );
     println!("    Per operation: {:?}", time / 1000);
 
     println!("\n=== Performance Analysis Complete ===");

@@ -53,10 +53,7 @@ fn test_invalid_uri_dangerous_scheme_vbscript() {
 #[test]
 fn test_invalid_uri_unsupported_scheme_ssh() {
     let result = validate("ssh://user@host/path");
-    assert!(
-        result.is_err(),
-        "SSH URI should be rejected as unsupported"
-    );
+    assert!(result.is_err(), "SSH URI should be rejected as unsupported");
 }
 
 #[test]
@@ -71,10 +68,7 @@ fn test_invalid_uri_unsupported_scheme_rsync() {
 #[test]
 fn test_invalid_uri_unsupported_scheme_git() {
     let result = validate("git://github.com/repo.git");
-    assert!(
-        result.is_err(),
-        "git URI should be rejected as unsupported"
-    );
+    assert!(result.is_err(), "git URI should be rejected as unsupported");
 }
 
 #[test]
@@ -189,8 +183,7 @@ fn test_corrupted_torrent_missing_info() {
 #[test]
 fn test_corrupted_torrent_invalid_announce() {
     // Torrent with invalid announce URL
-    let corrupted: Vec<u8> =
-        b"d8:announce15:not-a-valid-urle4:infod6:lengthi1000eee".to_vec();
+    let corrupted: Vec<u8> = b"d8:announce15:not-a-valid-urle4:infod6:lengthi1000eee".to_vec();
     let result = BtDownloadCommand::new(
         GroupId::new(103),
         &corrupted,
@@ -204,7 +197,8 @@ fn test_corrupted_torrent_invalid_announce() {
 #[test]
 fn test_corrupted_torrent_negative_length() {
     // Torrent with negative file length (invalid)
-    let corrupted: Vec<u8> = b"d8:announce30:http://tracker.example.com/announce4:infod6:lengthi-1000eee".to_vec();
+    let corrupted: Vec<u8> =
+        b"d8:announce30:http://tracker.example.com/announce4:infod6:lengthi-1000eee".to_vec();
     let result = BtDownloadCommand::new(
         GroupId::new(104),
         &corrupted,
@@ -242,10 +236,7 @@ fn test_corrupted_torrent_truncated() {
         &DownloadOptions::default(),
         None,
     );
-    assert!(
-        result.is_err(),
-        "Truncated torrent should return error"
-    );
+    assert!(result.is_err(), "Truncated torrent should return error");
 }
 
 #[test]
@@ -300,7 +291,8 @@ fn test_corrupted_metalink_random_bytes() {
 #[test]
 fn test_corrupted_metalink_malformed_xml() {
     // Malformed XML - unclosed tags
-    let corrupted: Vec<u8> = b"<?xml version=\"1.0\"?><metalink><files><file name=\"test.bin\">".to_vec();
+    let corrupted: Vec<u8> =
+        b"<?xml version=\"1.0\"?><metalink><files><file name=\"test.bin\">".to_vec();
     let result = MetalinkDownloadCommand::new(
         GroupId::new(201),
         &corrupted,
@@ -316,7 +308,9 @@ fn test_corrupted_metalink_malformed_xml() {
 #[test]
 fn test_corrupted_metalink_missing_files() {
     // Metalink without files element
-    let corrupted: Vec<u8> = b"<?xml version=\"1.0\"?><metalink xmlns=\"urn:ietf:params:xml:ns:metalink\"></metalink>".to_vec();
+    let corrupted: Vec<u8> =
+        b"<?xml version=\"1.0\"?><metalink xmlns=\"urn:ietf:params:xml:ns:metalink\"></metalink>"
+            .to_vec();
     let result = MetalinkDownloadCommand::new(
         GroupId::new(202),
         &corrupted,
@@ -382,10 +376,7 @@ fn test_corrupted_metalink_truncated() {
         &DownloadOptions::default(),
         None,
     );
-    assert!(
-        result.is_err(),
-        "Truncated metalink should return error"
-    );
+    assert!(result.is_err(), "Truncated metalink should return error");
 }
 
 #[test]
@@ -426,10 +417,7 @@ fn test_corrupted_meta4_file() {
     std::fs::write(&fake_meta4_path, &corrupted).unwrap();
 
     let result = detect(fake_meta4_path.to_str().unwrap());
-    assert!(
-        result.is_err(),
-        "Corrupted .meta4 file should return error"
-    );
+    assert!(result.is_err(), "Corrupted .meta4 file should return error");
 }
 
 // =============================================================================
@@ -483,10 +471,7 @@ fn test_invalid_magnet_wrong_urn() {
 #[test]
 fn test_detection_nonexistent_file() {
     let result = detect("/nonexistent/path/to/file.torrent");
-    assert!(
-        result.is_err(),
-        "Non-existent file should return error"
-    );
+    assert!(result.is_err(), "Non-existent file should return error");
 }
 
 #[test]
@@ -652,7 +637,9 @@ fn test_very_long_torrent_info() {
     torrent.extend_from_slice(long_announce.len().to_string().as_bytes());
     torrent.push(b':');
     torrent.extend_from_slice(long_announce.as_bytes());
-    torrent.extend_from_slice(b"4:infod6:lengthi1000e12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee");
+    torrent.extend_from_slice(
+        b"4:infod6:lengthi1000e12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee",
+    );
 
     let result = BtDownloadCommand::new(
         GroupId::new(500),

@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::sync::{Arc, OnceLock};
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Global flag indicating shutdown was requested via signal.
 #[cfg(unix)]
@@ -197,7 +197,10 @@ impl Daemonizer {
         }
         if pid > 0 {
             // Session leader exits
-            info!("Second fork successful, session leader exiting (grandchild PID: {})", pid);
+            info!(
+                "Second fork successful, session leader exiting (grandchild PID: {})",
+                pid
+            );
             std::process::exit(0);
         }
 
@@ -237,7 +240,7 @@ impl Daemonizer {
         let devnull = OpenOptions::new()
             .read(true)
             .open("/dev/null")
-            .map_err(|e| DaemonError::IoRedirect(format!("Failed to open /dev/null: {}", e)))?;
+            .inspect_err(|e| error!("Failed to open /dev/null: {e}"))?;
 
         unsafe {
             libc::dup2(devnull.as_raw_fd(), libc::STDIN_FILENO);
@@ -249,12 +252,12 @@ impl Daemonizer {
                 .create(true)
                 .append(true)
                 .open(path)
-                .map_err(|e| DaemonError::IoRedirect(format!("Failed to open stdout file: {}", e)))?
+                .inspect_err(|e| error!("Failed to open stdout file: {e}"))?
         } else {
             OpenOptions::new()
                 .write(true)
                 .open("/dev/null")
-                .map_err(|e| DaemonError::IoRedirect(format!("Failed to open /dev/null: {}", e)))?
+                .inspect_err(|e| error!("Failed to open /dev/null for stdout: {e}"))?
         };
 
         unsafe {
@@ -267,12 +270,12 @@ impl Daemonizer {
                 .create(true)
                 .append(true)
                 .open(path)
-                .map_err(|e| DaemonError::IoRedirect(format!("Failed to open stderr file: {}", e)))?
+                .inspect_err(|e| error!("Failed to open stderr file: {e}"))?
         } else {
             OpenOptions::new()
                 .write(true)
                 .open("/dev/null")
-                .map_err(|e| DaemonError::IoRedirect(format!("Failed to open /dev/null: {}", e)))?
+                .inspect_err(|e| error!("Failed to open /dev/null for stderr: {e}"))?
         };
 
         unsafe {
@@ -302,19 +305,19 @@ impl Daemonizer {
     /// Set up signal handlers for graceful shutdown on Unix.
     #[cfg(unix)]
     fn setup_signal_handlers_unix(&self) -> DaemonResult<()> {
-        use signal_hook::flag;
         use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+        use signal_hook::flag;
 
         // Initialize the shutdown flag once
         let shutdown_flag = SHUTDOWN_REQUESTED.get_or_init(|| Arc::new(AtomicBool::new(false)));
 
         // Register signal handlers
         flag::register(SIGTERM, shutdown_flag.clone())
-            .map_err(|e| DaemonError::SignalSetup(format!("SIGTERM handler: {}", e)))?;
+            .inspect_err(|e| error!("SIGTERM handler: {e}"))?;
         flag::register(SIGINT, shutdown_flag.clone())
-            .map_err(|e| DaemonError::SignalSetup(format!("SIGINT handler: {}", e)))?;
+            .inspect_err(|e| error!("SIGINT handler: {e}"))?;
         flag::register(SIGHUP, shutdown_flag.clone())
-            .map_err(|e| DaemonError::SignalSetup(format!("SIGHUP handler: {}", e)))?;
+            .inspect_err(|e| error!("SIGHUP handler: {e}"))?;
 
         debug!("Signal handlers registered for SIGTERM, SIGINT, SIGHUP");
         Ok(())
@@ -330,8 +333,8 @@ impl Daemonizer {
         // to create a completely detached background process.
 
         // Get current executable path
-        let exe_path = std::env::current_exe()
-            .map_err(|e| DaemonError::DetachFailed(format!("Failed to get exe path: {}", e)))?;
+        let exe_path =
+            std::env::current_exe().inspect_err(|e| error!("Failed to get exe path: {e}"))?;
 
         // Get current arguments (excluding the program name)
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -354,7 +357,7 @@ impl Daemonizer {
                 .create(true)
                 .append(true)
                 .open(path)
-                .map_err(|e| DaemonError::IoRedirect(format!("Failed to open stdout file: {}", e)))?;
+                .inspect_err(|e| error!("Failed to open stdout file: {e}"))?;
             cmd.stdout(file);
         }
 
@@ -363,14 +366,14 @@ impl Daemonizer {
                 .create(true)
                 .append(true)
                 .open(path)
-                .map_err(|e| DaemonError::IoRedirect(format!("Failed to open stderr file: {}", e)))?;
+                .inspect_err(|e| error!("Failed to open stderr file: {e}"))?;
             cmd.stderr(file);
         }
 
         // Spawn the detached process
         let child = cmd
             .spawn()
-            .map_err(|e| DaemonError::DetachFailed(format!("Failed to spawn detached process: {}", e)))?;
+            .inspect_err(|e| error!("Failed to spawn detached process: {e}"))?;
 
         let child_pid = child.id();
         info!("Spawned detached process with PID: {}", child_pid);
@@ -378,13 +381,15 @@ impl Daemonizer {
         // Write PID file for the child process
         if let Some(ref path) = self.config.pid_file {
             let pid_str = format!("{}", child_pid);
-            fs::write(path, &pid_str)
-                .map_err(|e| DaemonError::PidFileWrite(format!("Failed to write PID file: {}", e)))?;
+            fs::write(path, &pid_str).inspect_err(|e| error!("Failed to write PID file: {e}"))?;
             info!("Wrote PID {} to {:?}", child_pid, path);
         }
 
         // Parent exits
-        info!("Parent process exiting, daemon running with PID: {}", child_pid);
+        info!(
+            "Parent process exiting, daemon running with PID: {}",
+            child_pid
+        );
         std::process::exit(0);
     }
 
@@ -400,7 +405,7 @@ impl Daemonizer {
                 && !parent.exists()
             {
                 fs::create_dir_all(parent)
-                    .map_err(|e| DaemonError::PidFileCreate(format!("Failed to create directory: {}", e)))?;
+                    .inspect_err(|e| error!("Failed to create directory: {e}"))?;
             }
 
             // Write PID file
@@ -409,10 +414,10 @@ impl Daemonizer {
                 .write(true)
                 .truncate(true)
                 .open(path)
-                .map_err(|e| DaemonError::PidFileCreate(format!("Failed to create PID file: {}", e)))?;
+                .inspect_err(|e| error!("Failed to create PID file: {e}"))?;
 
             file.write_all(pid_str.as_bytes())
-                .map_err(|e| DaemonError::PidFileWrite(format!("Failed to write PID: {}", e)))?;
+                .inspect_err(|e| error!("Failed to write PID: {e}"))?;
 
             info!("Wrote PID {} to {:?}", pid, path);
         }
@@ -503,7 +508,7 @@ impl PidFileManager {
     #[allow(dead_code)]
     pub fn send_signal(&self, signal: i32) -> DaemonResult<()> {
         let content = fs::read_to_string(&self.path)
-            .map_err(|e| DaemonError::PidFileRead(format!("Failed to read PID file: {}", e)))?;
+            .inspect_err(|e| error!("Failed to read PID file: {e}"))?;
         let pid: i32 = content
             .trim()
             .parse()
@@ -528,7 +533,7 @@ impl PidFileManager {
     #[allow(dead_code)]
     pub fn stop(&self) -> DaemonResult<()> {
         let content = fs::read_to_string(&self.path)
-            .map_err(|e| DaemonError::PidFileRead(format!("Failed to read PID file: {}", e)))?;
+            .inspect_err(|e| error!("Failed to read PID file: {e}"))?;
         let pid: u32 = content
             .trim()
             .parse()
@@ -537,7 +542,7 @@ impl PidFileManager {
         let output = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .output()
-            .map_err(DaemonError::Io)?;
+            .inspect_err(|e| error!("Failed to execute taskkill: {e}"))?;
 
         if !output.status.success() {
             Err(DaemonError::DetachFailed(

@@ -25,13 +25,18 @@ pub enum DownloadStatus {
 // browser plugins expect. The `Error(String)` payload (error message) is not
 // emitted here; callers surface it via `StatusInfo.error_message` instead.
 impl Serialize for DownloadStatus {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
     }
 }
 
 impl<'de> Deserialize<'de> for DownloadStatus {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
             "waiting" => Ok(DownloadStatus::Waiting),
@@ -42,7 +47,9 @@ impl<'de> Deserialize<'de> for DownloadStatus {
             "removed" => Ok(DownloadStatus::Removed),
             _ => Err(serde::de::Error::unknown_variant(
                 "DownloadStatus",
-                &["waiting", "active", "paused", "error", "complete", "removed"],
+                &[
+                    "waiting", "active", "paused", "error", "complete", "removed",
+                ],
             )),
         }
     }
@@ -352,7 +359,7 @@ pub struct RequestGroup {
     pub uploaded_length: AtomicU64,
     pub download_speed_cached: AtomicU64,
     pub bt_bitfield: RwLock<Option<Vec<u8>>>,
-    
+
     // BT metadata fields (for session persistence enhancement)
     /// Number of pieces in the torrent (0 for non-BT downloads)
     pub bt_num_pieces: AtomicU32,
@@ -392,7 +399,7 @@ impl RequestGroup {
             uploaded_length: AtomicU64::new(0),
             download_speed_cached: AtomicU64::new(0),
             bt_bitfield: RwLock::new(None),
-            
+
             // Initialize BT metadata fields (default to 0/None for non-BT downloads)
             bt_num_pieces: AtomicU32::new(0),
             bt_piece_length: AtomicU32::new(0),
@@ -752,9 +759,9 @@ impl RequestGroup {
         self.completed_length_atomic
             .store(offset, Ordering::Relaxed);
     }
-    
+
     // BT metadata methods (for session persistence enhancement)
-    
+
     /// Set BT metadata fields (num_pieces, piece_length, info_hash_hex)
     /// Called by BtDownloadCommand after parsing TorrentMeta
     pub fn set_bt_metadata(&self, num_pieces: u32, piece_length: u32, info_hash_hex: String) {
@@ -763,23 +770,23 @@ impl RequestGroup {
         // Use std::sync::RwLock for non-async access
         *self.bt_info_hash_hex.write().unwrap() = Some(info_hash_hex);
     }
-    
+
     /// Get number of pieces (lock-free atomic read)
     pub fn get_bt_num_pieces(&self) -> u32 {
         self.bt_num_pieces.load(Ordering::Relaxed)
     }
-    
+
     /// Get piece length (lock-free atomic read)
     pub fn get_bt_piece_length(&self) -> u32 {
         self.bt_piece_length.load(Ordering::Relaxed)
     }
-    
+
     /// Get info hash hex string (async-compatible wrapper)
     pub async fn get_bt_info_hash_hex_async(&self) -> Option<String> {
         // std::sync::RwLock can be used in async context for short reads
         self.bt_info_hash_hex.read().unwrap().clone()
     }
-    
+
     /// Get info hash hex string (blocking read for non-async contexts)
     pub fn get_bt_info_hash_hex(&self) -> Option<String> {
         self.bt_info_hash_hex.read().unwrap().clone()
@@ -1073,9 +1080,9 @@ mod tests {
         assert_eq!(cloned.bt_optimistic_unchoke_interval, Some(20));
         assert_eq!(cloned.bt_snubbed_timeout, Some(90));
     }
-    
+
     // ==================== BT Metadata Tests ====================
-    
+
     #[test]
     fn test_bt_metadata_defaults() {
         let group = RequestGroup::new(
@@ -1083,13 +1090,25 @@ mod tests {
             vec!["http://example.com/file.zip".to_string()],
             DownloadOptions::default(),
         );
-        
+
         // Non-BT downloads should have 0/None defaults
-        assert_eq!(group.get_bt_num_pieces(), 0, "bt_num_pieces should default to 0");
-        assert_eq!(group.get_bt_piece_length(), 0, "bt_piece_length should default to 0");
-        assert_eq!(group.get_bt_info_hash_hex(), None, "bt_info_hash_hex should default to None");
+        assert_eq!(
+            group.get_bt_num_pieces(),
+            0,
+            "bt_num_pieces should default to 0"
+        );
+        assert_eq!(
+            group.get_bt_piece_length(),
+            0,
+            "bt_piece_length should default to 0"
+        );
+        assert_eq!(
+            group.get_bt_info_hash_hex(),
+            None,
+            "bt_info_hash_hex should default to None"
+        );
     }
-    
+
     #[test]
     fn test_set_bt_metadata() {
         let group = RequestGroup::new(
@@ -1097,10 +1116,14 @@ mod tests {
             vec!["magnet:?xt=urn:btih:abc123def456".to_string()],
             DownloadOptions::default(),
         );
-        
+
         // Set BT metadata
-        group.set_bt_metadata(100, 262144, "abc123def456789012345678901234567890abcd".to_string());
-        
+        group.set_bt_metadata(
+            100,
+            262144,
+            "abc123def456789012345678901234567890abcd".to_string(),
+        );
+
         // Verify values
         assert_eq!(group.get_bt_num_pieces(), 100);
         assert_eq!(group.get_bt_piece_length(), 262144); // 256KB
@@ -1109,7 +1132,7 @@ mod tests {
             Some("abc123def456789012345678901234567890abcd".to_string())
         );
     }
-    
+
     #[test]
     fn test_bt_metadata_update() {
         let group = RequestGroup::new(
@@ -1117,18 +1140,21 @@ mod tests {
             vec!["bt://test.torrent".to_string()],
             DownloadOptions::default(),
         );
-        
+
         // Initial set
         group.set_bt_metadata(50, 16384, "first_hash".to_string());
         assert_eq!(group.get_bt_num_pieces(), 50);
-        
+
         // Update with new values
         group.set_bt_metadata(200, 524288, "updated_hash".to_string());
         assert_eq!(group.get_bt_num_pieces(), 200);
         assert_eq!(group.get_bt_piece_length(), 524288);
-        assert_eq!(group.get_bt_info_hash_hex(), Some("updated_hash".to_string()));
+        assert_eq!(
+            group.get_bt_info_hash_hex(),
+            Some("updated_hash".to_string())
+        );
     }
-    
+
     #[tokio::test]
     async fn test_bt_info_hash_hex_async() {
         let group = RequestGroup::new(
@@ -1152,34 +1178,66 @@ mod tests {
         let mut group = RequestGroup::new(gid, uris, DownloadOptions::default());
 
         // max-connection-per-server
-        assert!(group.update_option("max-connection-per-server", serde_json::json!(4)).await);
+        assert!(
+            group
+                .update_option("max-connection-per-server", serde_json::json!(4))
+                .await
+        );
         assert_eq!(group.options().max_connection_per_server, Some(4));
 
         // bt-max-upload-slots
-        assert!(group.update_option("bt-max-upload-slots", serde_json::json!(8)).await);
+        assert!(
+            group
+                .update_option("bt-max-upload-slots", serde_json::json!(8))
+                .await
+        );
         assert_eq!(group.options().bt_max_upload_slots, Some(8));
 
         // bt-snubbed-timeout
-        assert!(group.update_option("bt-snubbed-timeout", serde_json::json!(120)).await);
+        assert!(
+            group
+                .update_option("bt-snubbed-timeout", serde_json::json!(120))
+                .await
+        );
         assert_eq!(group.options().bt_snubbed_timeout, Some(120));
 
         // bt-optimistic-unchoke-interval
-        assert!(group.update_option("bt-optimistic-unchoke-interval", serde_json::json!(45)).await);
+        assert!(
+            group
+                .update_option("bt-optimistic-unchoke-interval", serde_json::json!(45))
+                .await
+        );
         assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
 
         // bt-endgame-threshold
-        assert!(group.update_option("bt-endgame-threshold", serde_json::json!(50)).await);
+        assert!(
+            group
+                .update_option("bt-endgame-threshold", serde_json::json!(50))
+                .await
+        );
         assert_eq!(group.options().bt_endgame_threshold, 50);
 
         // seed-time
-        assert!(group.update_option("seed-time", serde_json::json!(3600)).await);
+        assert!(
+            group
+                .update_option("seed-time", serde_json::json!(3600))
+                .await
+        );
         assert_eq!(group.options().seed_time, Some(3600));
 
         // seed-ratio
-        assert!(group.update_option("seed-ratio", serde_json::json!(2.0)).await);
+        assert!(
+            group
+                .update_option("seed-ratio", serde_json::json!(2.0))
+                .await
+        );
         assert_eq!(group.options().seed_ratio, Some(2.0));
 
         // Unknown option returns false
-        assert!(!group.update_option("unknown-option", serde_json::json!(1)).await);
+        assert!(
+            !group
+                .update_option("unknown-option", serde_json::json!(1))
+                .await
+        );
     }
 }

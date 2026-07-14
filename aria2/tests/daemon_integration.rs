@@ -16,30 +16,33 @@ use std::time::Duration;
 #[test]
 fn test_pid_file_manager_no_file() {
     use aria2::PidFileManager;
-    
+
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let pid_file = temp_dir.path().join("nonexistent.pid");
-    
+
     let mgr = PidFileManager::new(pid_file);
     let result = mgr.check_existing();
-    
-    assert!(result.is_none(), "Should return None for non-existent PID file");
+
+    assert!(
+        result.is_none(),
+        "Should return None for non-existent PID file"
+    );
 }
 
 /// Test: PID file manager can detect stale PID file.
 #[test]
 fn test_pid_file_manager_stale_pid() {
     use aria2::PidFileManager;
-    
+
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let pid_file = temp_dir.path().join("stale.pid");
-    
+
     // Write a PID that definitely doesn't exist (9999999)
     fs::write(&pid_file, "9999999").expect("Failed to write PID file");
-    
+
     let mgr = PidFileManager::new(pid_file.clone());
     let result = mgr.check_existing();
-    
+
     assert!(result.is_none(), "Should return None for stale PID");
     assert!(!pid_file.exists(), "Stale PID file should be removed");
 }
@@ -48,7 +51,7 @@ fn test_pid_file_manager_stale_pid() {
 #[test]
 fn test_daemon_config_defaults() {
     use aria2::DaemonConfig;
-    
+
     let config = DaemonConfig::default();
     assert!(config.pid_file.is_none());
     assert!(config.stdout_file.is_none());
@@ -63,15 +66,15 @@ fn test_daemon_mode_detection() {
     // Test --daemon
     let args = vec!["--daemon".to_string()];
     assert!(is_daemon_in_args(&args));
-    
+
     // Test -D
     let args = vec!["-D".to_string()];
     assert!(is_daemon_in_args(&args));
-    
+
     // Test --daemon=true
     let args = vec!["--daemon=true".to_string()];
     assert!(is_daemon_in_args(&args));
-    
+
     // Test no daemon flag
     let args = vec!["--help".to_string()];
     assert!(!is_daemon_in_args(&args));
@@ -98,12 +101,12 @@ fn test_pid_file_path_extraction() {
     let args = vec!["--pid-file=/var/run/test.pid".to_string()];
     let path = extract_pid_file(&args);
     assert_eq!(path, Some("/var/run/test.pid"));
-    
+
     // Test --pid-file path
     let args = vec!["--pid-file".to_string(), "/tmp/test.pid".to_string()];
     let path = extract_pid_file(&args);
     assert_eq!(path, Some("/tmp/test.pid"));
-    
+
     // Test no pid-file
     let args = vec!["--daemon".to_string()];
     let path = extract_pid_file(&args);
@@ -133,38 +136,40 @@ fn test_daemon_start_with_pid_file() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let pid_file = temp_dir.path().join("aria2c.pid");
     let log_file = temp_dir.path().join("aria2c.log");
-    
+
     // Start daemon with RPC enabled
     let status = Command::new(&binary)
         .args([
             "--daemon",
-            "--pid-file", pid_file.to_str().unwrap(),
-            "--log", log_file.to_str().unwrap(),
+            "--pid-file",
+            pid_file.to_str().unwrap(),
+            "--log",
+            log_file.to_str().unwrap(),
             "--enable-rpc",
-            "--rpc-listen-port=6999",  // Use non-standard port to avoid conflicts
+            "--rpc-listen-port=6999", // Use non-standard port to avoid conflicts
         ])
         .status()
         .expect("Failed to start daemon");
-    
+
     // Parent process should exit successfully
     assert!(status.success(), "Daemon start should succeed");
-    
+
     // Wait for PID file to be created
     let found = wait_for_file(&pid_file, Duration::from_secs(5));
     assert!(found, "PID file should be created within 5 seconds");
-    
+
     // Read PID from file
     let pid_str = fs::read_to_string(&pid_file).expect("Failed to read PID file");
     let pid: u32 = pid_str.trim().parse().expect("Failed to parse PID");
-    
+
     println!("Daemon started with PID: {}", pid);
-    
+
     // Verify process is running
     assert!(is_process_running(pid), "Daemon process should be running");
-    
+
     // Clean up: stop the daemon
     stop_process(pid);
-    
+
     // Wait for process to stop
     thread::sleep(Duration::from_secs(1));
 }
@@ -179,43 +184,45 @@ fn test_daemon_prevent_duplicate() {
     let binary = get_binary_path();
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let pid_file = temp_dir.path().join("aria2c.pid");
-    
+
     // Start first daemon
     let status = Command::new(&binary)
         .args([
             "--daemon",
-            "--pid-file", pid_file.to_str().unwrap(),
+            "--pid-file",
+            pid_file.to_str().unwrap(),
             "--enable-rpc",
             "--rpc-listen-port=7000",
         ])
         .status()
         .expect("Failed to start first daemon");
-    
+
     assert!(status.success());
-    
+
     // Wait for PID file
     let found = wait_for_file(&pid_file, Duration::from_secs(5));
     assert!(found, "First daemon should create PID file");
-    
+
     // Try to start second daemon with same PID file
     // This should fail or exit early because daemon is already running
     let status = Command::new(&binary)
         .args([
             "--daemon",
-            "--pid-file", pid_file.to_str().unwrap(),
+            "--pid-file",
+            pid_file.to_str().unwrap(),
             "--enable-rpc",
-            "--rpc-listen-port=7001",  // Different port
+            "--rpc-listen-port=7001", // Different port
         ])
         .status()
         .expect("Failed to execute second daemon check");
-    
+
     // Second instance should exit without error (it detects existing daemon)
     assert!(status.success(), "Second instance should exit cleanly");
-    
+
     // Read PID and clean up
     let pid_str = fs::read_to_string(&pid_file).expect("Failed to read PID file");
     let pid: u32 = pid_str.trim().parse().expect("Failed to parse PID");
-    
+
     stop_process(pid);
 }
 
@@ -227,30 +234,32 @@ fn test_daemon_with_log_file() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let pid_file = temp_dir.path().join("test.pid");
     let log_file = temp_dir.path().join("test.log");
-    
+
     // Start daemon with log file
     let status = Command::new(&binary)
         .args([
             "--daemon",
-            "--pid-file", pid_file.to_str().unwrap(),
-            "--log", log_file.to_str().unwrap(),
+            "--pid-file",
+            pid_file.to_str().unwrap(),
+            "--log",
+            log_file.to_str().unwrap(),
             "--enable-rpc",
             "--rpc-listen-port=7002",
         ])
         .status()
         .expect("Failed to start daemon");
-    
+
     assert!(status.success());
-    
+
     // Wait for log file to be created
     let found = wait_for_file(&log_file, Duration::from_secs(5));
     assert!(found, "Log file should be created");
-    
+
     // Verify log file has content
     thread::sleep(Duration::from_millis(500));
     let log_content = fs::read_to_string(&log_file).unwrap_or_default();
     assert!(!log_content.is_empty(), "Log file should contain output");
-    
+
     // Clean up
     if pid_file.exists() {
         let pid_str = fs::read_to_string(&pid_file).unwrap_or_default();

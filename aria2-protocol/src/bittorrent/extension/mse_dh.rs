@@ -33,12 +33,12 @@ impl MseDhKeyExchange {
     pub fn generate_public_key(&self) -> [u8; 96] {
         let mut result = [0u8; 96];
         let pub_bytes = &self.keypair.public;
-        
+
         // Take the last 96 bytes (most significant) or pad with zeros at the beginning
         let offset = pub_bytes.len().saturating_sub(96);
         let len = pub_bytes.len().saturating_sub(offset);
         result[..len].copy_from_slice(&pub_bytes[offset..]);
-        
+
         result
     }
 
@@ -50,25 +50,25 @@ impl MseDhKeyExchange {
 
     /// Compute the shared secret using the other party's public key.
     /// Returns a 96-byte array containing the shared secret.
-    /// 
+    ///
     /// Note: This method expects the full public key from the other party,
-    /// not the truncated 96-byte version. Use `compute_shared_secret_full()` 
+    /// not the truncated 96-byte version. Use `compute_shared_secret_full()`
     /// if you have the full public key.
     pub fn compute_shared_secret(&self, other_public: &[u8; 96]) -> [u8; 96] {
         // Pad the other public key to full size (prepend zeros if needed)
         // This assumes the other public key was also truncated to 96 bytes
         let mut other_pub_full = vec![0u8; 128 - 96];
         other_pub_full.extend_from_slice(other_public);
-        
+
         // Compute shared secret using the full-size implementation
         let shared = self.keypair.compute_shared_secret(&other_pub_full);
-        
+
         // Pad or truncate to 96 bytes
         let mut result = [0u8; 96];
         let offset = shared.len().saturating_sub(96);
         let len = shared.len().saturating_sub(offset);
         result[..len].copy_from_slice(&shared[offset..]);
-        
+
         result
     }
 
@@ -77,13 +77,13 @@ impl MseDhKeyExchange {
     pub fn compute_shared_secret_full(&self, other_public_full: &[u8]) -> [u8; 96] {
         // Compute shared secret using the full-size implementation
         let shared = self.keypair.compute_shared_secret(other_public_full);
-        
+
         // Pad or truncate to 96 bytes
         let mut result = [0u8; 96];
         let offset = shared.len().saturating_sub(96);
         let len = shared.len().saturating_sub(offset);
         result[..len].copy_from_slice(&shared[offset..]);
-        
+
         result
     }
 }
@@ -177,7 +177,10 @@ mod tests {
         let s_ba = bob.compute_shared_secret_full(alice_pub_full);
 
         assert_eq!(s_ab, s_ba, "Shared secrets should be equal");
-        assert!(!s_ab.iter().all(|&b| b == 0), "Shared secret should not be all zeros");
+        assert!(
+            !s_ab.iter().all(|&b| b == 0),
+            "Shared secret should not be all zeros"
+        );
     }
 
     #[test]

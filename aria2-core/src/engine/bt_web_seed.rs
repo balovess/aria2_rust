@@ -12,8 +12,8 @@
 //! - [`parse_url_list()`] - Extracts `url-list` from torrent metadata
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -46,7 +46,8 @@ impl WebSeedStats {
     /// Record bytes downloaded from a web seed.
     pub fn record_bytes(&self, bytes: u64) {
         self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.current_second_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.current_second_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Get total bytes downloaded from web seeds.
@@ -58,7 +59,11 @@ impl WebSeedStats {
     pub fn average_speed(&self) -> u64 {
         if let Some(start) = self.start_time {
             let elapsed = start.elapsed().as_secs();
-            return self.total_bytes.load(Ordering::Relaxed).checked_div(elapsed).unwrap_or(0);
+            return self
+                .total_bytes
+                .load(Ordering::Relaxed)
+                .checked_div(elapsed)
+                .unwrap_or(0);
         }
         0
     }
@@ -154,25 +159,37 @@ impl WebSeedClient {
 
     /// Check if a piece can be requested (not already active).
     pub fn can_request(&self, piece_index: u32) -> bool {
-        let active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
+        let active = self
+            .active_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         !active.contains(&piece_index)
     }
 
     /// Mark a piece as being requested.
     pub fn mark_requesting(&self, piece_index: u32) {
-        let mut active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
+        let mut active = self
+            .active_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         active.insert(piece_index);
     }
 
     /// Mark a piece as no longer being requested.
     pub fn clear_request(&self, piece_index: u32) {
-        let mut active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
+        let mut active = self
+            .active_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         active.remove(&piece_index);
     }
 
     /// Get the number of active requests.
     pub fn active_request_count(&self) -> usize {
-        let active = self.active_requests.lock().unwrap_or_else(|e| e.into_inner());
+        let active = self
+            .active_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         active.len()
     }
 
@@ -292,7 +309,12 @@ impl WebSeedClient {
 
         // Download
         let result = self
-            .download_piece(piece_index, piece_length as u64, piece_offset, actual_length)
+            .download_piece(
+                piece_index,
+                piece_length as u64,
+                piece_offset,
+                actual_length,
+            )
             .await;
 
         // Clear active flag
@@ -547,7 +569,9 @@ impl WebSeedManager {
 ///     let manager = WebSeedManager::new(urls, piece_length, total_length);
 /// }
 /// ```
-pub fn parse_url_list(meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta) -> Vec<String> {
+pub fn parse_url_list(
+    meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+) -> Vec<String> {
     meta.web_seeds.clone()
 }
 

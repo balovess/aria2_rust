@@ -99,14 +99,9 @@ async fn test_e2e_rpc_change_option_increases_download_rate() {
         .expect("group should be registered");
 
     // Create DownloadCommand with the shared group Arc and spawn it.
-    let mut cmd = DownloadCommand::new_with_group(
-        group.clone(),
-        &url,
-        &options,
-        dir.path().to_str(),
-        None,
-    )
-    .expect("Failed to create DownloadCommand");
+    let mut cmd =
+        DownloadCommand::new_with_group(group.clone(), &url, &options, dir.path().to_str(), None)
+            .expect("Failed to create DownloadCommand");
 
     let download_task = tokio::spawn(async move {
         let _ = cmd.execute().await;
@@ -196,14 +191,9 @@ async fn test_e2e_rpc_change_option_to_unlimited() {
         .group_by_hex(&gid_hex)
         .expect("group should be registered");
 
-    let mut cmd = DownloadCommand::new_with_group(
-        group.clone(),
-        &url,
-        &options,
-        dir.path().to_str(),
-        None,
-    )
-    .expect("Failed to create DownloadCommand");
+    let mut cmd =
+        DownloadCommand::new_with_group(group.clone(), &url, &options, dir.path().to_str(), None)
+            .expect("Failed to create DownloadCommand");
 
     let download_task = tokio::spawn(async move {
         let _ = cmd.execute().await;

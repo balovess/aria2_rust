@@ -35,7 +35,10 @@ impl App {
 
         let session_path = PathBuf::from(&input_file);
         if !session_path.exists() {
-            info!("Session file does not exist, skipping restore: {}", input_file);
+            info!(
+                "Session file does not exist, skipping restore: {}",
+                input_file
+            );
             return Ok(0);
         }
 
@@ -70,7 +73,10 @@ impl App {
 
             // Skip entries without progress info
             if entry.completed_length == 0 && entry.total_length == 0 {
-                debug!("Skipping entry with no progress: GID={:x}, URIs={:?}", entry.gid, entry.uris);
+                debug!(
+                    "Skipping entry with no progress: GID={:x}, URIs={:?}",
+                    entry.gid, entry.uris
+                );
                 continue;
             }
 
@@ -216,7 +222,12 @@ impl App {
                 if v.is_empty() {
                     None
                 } else {
-                    Some(v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                    Some(
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
                 }
             }),
             enable_public_trackers: options
@@ -270,12 +281,19 @@ impl App {
             // HTTP headers
             header: options
                 .get("header")
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),
             file_allocation: options.get("file-allocation").cloned(),
-            mmap_threshold: options.get("mmap-threshold").and_then(|v| v.parse::<u64>().ok()),
+            mmap_threshold: options
+                .get("mmap-threshold")
+                .and_then(|v| v.parse::<u64>().ok()),
             secure_falloc: options
                 .get("secure-falloc")
                 .map(|v| v == "true")

@@ -166,7 +166,13 @@ impl SftpDownloadCommand {
             None => {
                 // No username in URI; try environment variable
                 let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-                return Ok((user.to_string(), constants::SFTP_DEFAULT_PORT, user, None, "/".to_string()));
+                return Ok((
+                    user.to_string(),
+                    constants::SFTP_DEFAULT_PORT,
+                    user,
+                    None,
+                    "/".to_string(),
+                ));
             }
         };
 
@@ -178,7 +184,9 @@ impl SftpDownloadCommand {
         let (host, port) = match rest.rfind(':') {
             Some(idx) => (
                 rest[..idx].to_string(),
-                rest[idx + 1..].parse::<u16>().unwrap_or(constants::SFTP_DEFAULT_PORT),
+                rest[idx + 1..]
+                    .parse::<u16>()
+                    .unwrap_or(constants::SFTP_DEFAULT_PORT),
             ),
             None => (rest.to_string(), constants::SFTP_DEFAULT_PORT),
         };
