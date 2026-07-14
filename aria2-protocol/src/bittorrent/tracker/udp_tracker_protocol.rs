@@ -830,9 +830,15 @@ mod tests {
 
     #[test]
     fn test_random_txn_id_produces_values() {
-        let id1 = random_txn_id();
-        let id2 = random_txn_id();
-        assert_ne!(id1, id2, "连续两次调用应产生不同 ID");
+        // Generate multiple IDs and verify they are not all the same.
+        // A truly broken RNG would produce all-zero or all-identical values;
+        // a healthy one will produce at least one differing value among 5 draws
+        // with probability ≈ 1 - (1/2^32)^4 ≈ 1.
+        let ids: Vec<u32> = (0..5).map(|_| random_txn_id()).collect();
+        assert!(
+            ids.iter().skip(1).any(|&v| v != ids[0]),
+            "repeated random_txn_id() calls should eventually produce differing values, got: {ids:?}"
+        );
     }
 
     #[test]

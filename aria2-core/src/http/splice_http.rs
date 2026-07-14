@@ -401,7 +401,6 @@ fn set_blocking(fd: std::os::unix::io::RawFd) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::os::unix::io::AsRawFd;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Spawn a mock HTTP server that responds to a Range request with 206
@@ -451,13 +450,13 @@ mod tests {
         for line in req.lines() {
             if let Some(rest) = line.strip_prefix("Range:") {
                 let rest = rest.trim();
-                if let Some(range) = rest.strip_prefix("bytes=") {
-                    if let Some((start_s, end_s)) = range.split_once('-') {
-                        let start: usize = start_s.parse().unwrap_or(0);
-                        let end: usize = end_s.parse().unwrap_or(total - 1);
-                        let length = end.saturating_sub(start) + 1;
-                        return (start, length);
-                    }
+                if let Some(range) = rest.strip_prefix("bytes=")
+                    && let Some((start_s, end_s)) = range.split_once('-')
+                {
+                    let start: usize = start_s.parse().unwrap_or(0);
+                    let end: usize = end_s.parse().unwrap_or(total - 1);
+                    let length = end.saturating_sub(start) + 1;
+                    return (start, length);
                 }
             }
         }
