@@ -110,11 +110,19 @@ async fn test_positioned_write_throughput_10mb_16segments() {
         );
     }
 
-    // Throughput assertion. 50 MiB/s is conservative — positioned writes on a
-    // pre-allocated file should be much faster even with per-segment fsync.
-    // Windows CI runners have notoriously slow disk I/O, so we use a relaxed
-    // threshold there.
-    let min_throughput_mib_s: f64 = if cfg!(windows) { 3.0 } else { 50.0 };
+    // Throughput assertion.
+    //
+    // The test's purpose is to catch regressions that re-introduce global-lock
+    // serialization (which would collapse throughput to ~1 MiB/s), not to
+    // benchmark peak hardware speed. 5 MiB/s is a conservative floor that:
+    //   - is comfortably above what a serialized implementation would achieve,
+    //   - tolerates GitHub Actions runners with shared/cloud-attached storage,
+    //   - works uniformly across Linux, Windows, and macOS CI runners.
+    //
+    // The previous Linux-only threshold of 50 MiB/s was too aggressive for
+    // shared CI infrastructure (real-world CI throughput varies between
+    // 5 and 50 MiB/s depending on runner load).
+    let min_throughput_mib_s: f64 = 5.0;
     let min_throughput = min_throughput_mib_s * 1024.0 * 1024.0;
     let throughput_mib_s = throughput / (1024.0 * 1024.0);
     assert!(
