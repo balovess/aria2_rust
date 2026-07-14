@@ -19,7 +19,6 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::cli_options::{extract_uris, parse_args, validate_options};
 use crate::progress_display::{format_bytes, format_duration, format_speed};
 use aria2_core::{
     config::option::{DownloadOptions, OptionCategory},

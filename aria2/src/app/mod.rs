@@ -10,18 +10,20 @@
 //! # Example
 //!
 //! ```rust,no_run
+//! use aria2::app::cli::CliArgs;
 //! use aria2::app::App;
+//! use clap::Parser;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let exit_code = App::new()
-//!         .run(&["--dir=/downloads", "http://example.com/file.zip".into()])
-//!         .await;
+//!     let cli = CliArgs::parse();
+//!     let exit_code = App::new().run(cli).await;
 //!     std::process::exit(exit_code);
 //! }
 //! ```
 
 use colored::Colorize;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -32,13 +34,12 @@ use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::validation::protocol_detector::DetectedInput;
 use tracing::{Level, info, warn};
 
-// Daemon support
-#[path = "../daemon.rs"]
-mod daemon;
-use daemon::{DaemonConfig, Daemonizer, PidFileManager};
+// Daemon support (module declared in lib.rs as `pub mod daemon;`)
+use crate::daemon::{DaemonConfig, Daemonizer, PidFileManager};
 
 // Sub-modules
-mod cli;
+pub mod cli;
+use cli::CliArgs;
 mod config;
 mod engine;
 mod rpc;
@@ -71,7 +72,7 @@ impl App {
     /// Run the complete application lifecycle.
     ///
     /// This is the main entry point that:
-    /// 1. Handles `--help` / `--version` flags
+    /// 1. Applies `--no-color` / TTY detection (color control)
     /// 2. Loads config from env → file → CLI args (4-source merge)
     /// 3. **Handles daemon mode if `--daemon` is specified**
     /// 4. Initializes the download engine
@@ -80,19 +81,34 @@ impl App {
     /// 7. Runs the engine event loop
     /// 8. **Saves session on shutdown (if configured)**
     ///
+    /// `--help` / `--version` are handled by clap before `run` is called.
+    ///
     /// Returns exit code: `0` = success, `1` = error.
-    pub async fn run(&mut self, args: &[String]) -> i32 {
-        if self.print_help_or_version(args) {
-            return 0;
+    pub async fn run(&mut self, cli: CliArgs) -> i32 {
+        // Apply --no-color flag + TTY detection: disable colored output when
+        // the user requests it OR when stdout is not a terminal (e.g. piped).
+        if cli.no_color || !std::io::stdout().is_terminal() {
+            colored::control::set_override(false);
         }
+
+        // Extract verbose before cli is consumed by load_cli_args
+        let verbose = cli.verbose;
+
+        // Use --conf-path from CLI if provided, else fall back to default
+        let conf_path = cli
+            .general
+            .conf_path
+            .as_ref()
+            .and_then(|p| p.to_str())
+            .map(|s| s.to_string());
 
         self.load_env().await;
 
-        if let Err(e) = self.load_config_file(None).await {
+        if let Err(e) = self.load_config_file(conf_path.as_deref()).await {
             tracing::error!("Failed to load config file: {}", e);
         }
 
-        if let Err(e) = self.load_args(args).await {
+        if let Err(e) = self.load_cli_args(cli).await {
             eprintln!("{}", format!("Argument parsing error: {}", e).red());
             return 1;
         }
@@ -133,22 +149,14 @@ impl App {
 
             // After daemonization, we are in the child process
             // Re-initialize logging for the daemon process
-            let log_level = if self.get_opt_bool("verbose").await.unwrap_or(false) {
-                Level::DEBUG
-            } else {
-                Level::INFO
-            };
+            let log_level = if verbose { Level::DEBUG } else { Level::INFO };
             let log_path = self.get_opt_str("log").await;
             init_logging(log_level, log_path.as_deref());
 
             info!("Daemon started successfully");
         }
 
-        let log_level = if self.get_opt_bool("verbose").await.unwrap_or(false) {
-            Level::DEBUG
-        } else {
-            Level::INFO
-        };
+        let log_level = if verbose { Level::DEBUG } else { Level::INFO };
         let log_path = self.get_opt_str("log").await;
         init_logging(log_level, log_path.as_deref());
 
