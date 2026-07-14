@@ -88,10 +88,11 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           strip aria2c${{ matrix.ext }} || true
-          tar czf ../../../../${{ matrix.artifact }}.tar.gz aria2c${{ matrix.ext }}
+          tar czf ../../../${{ matrix.artifact }}.tar.gz aria2c${{ matrix.ext }}
           cd -
       - name: Prepare artifacts (Windows)
         if: runner.os == 'Windows'
+        shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.artifact }}.zip aria2c${{ matrix.ext }}
@@ -100,7 +101,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.*.*
+          path: ${{ matrix.artifact }}.*
+          if-no-files-found: error
 
   # Job 3: Generate changelog and create GitHub Release
   github-release:
