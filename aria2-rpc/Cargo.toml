@@ -9,7 +9,7 @@ description = "Remote control server for aria2-rust: JSON-RPC 2.0, XML-RPC, and 
 documentation = "https://docs.rs/aria2-rpc"
 homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
-keywords = ["rpc", "json-rpc", "xml-rpc", "websocket", "aria2", "download-manager", "remote-control"]
+keywords = ["rpc", "json-rpc", "xml-rpc", "websocket", "download-manager"]
 categories = ["network-programming", "web-programming::http-server"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 

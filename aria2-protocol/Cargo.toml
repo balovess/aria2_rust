@@ -9,7 +9,7 @@ description = "Multi-protocol networking stack for aria2-rust: HTTP/HTTPS client
 documentation = "https://docs.rs/aria2-protocol"
 homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
-keywords = ["http", "ftp", "bittorrent", "metalink", "protocol", "dht", "bencode", "peer-to-peer", "torrent", "networking"]
+keywords = ["http", "ftp", "bittorrent", "metalink", "dht"]
 categories = ["network-programming", "web-programming::http-client"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 
