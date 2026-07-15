@@ -193,9 +193,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Set up QEMU for multi-platform builds
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
@@ -224,4 +221,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          # arm64 dropped: QEMU emulation takes 60+ minutes for Rust compilation
+          # with C/assembly deps (ring, aws-lc-rs). Use cross-compilation if
+          # arm64 Docker support is needed in the future.
+          platforms: linux/amd64
