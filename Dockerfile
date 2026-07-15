@@ -9,8 +9,9 @@
 # ============================================
 # Stage 1: Build
 # ============================================
-# Rust 1.85+ is required for edition = "2024" (stabilized in 1.85).
-FROM rust:1.85-alpine AS builder
+# Rust 1.88+ is required because time@0.3.47 needs rustc 1.88.
+# edition = "2024" was stabilized in 1.85, but transitive deps now demand newer.
+FROM rust:1.88-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
