@@ -9,4 +9,3 @@ bindings/python/tests/integration/__pycache__/
 bindings/python/tests/__pycache__/
 *.txt
 *.md
-Cargo.lock
