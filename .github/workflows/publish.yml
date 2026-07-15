@@ -55,11 +55,19 @@ jobs:
         run: |
           set -e
           for crate in aria2-protocol aria2-core aria2-rpc; do
-            version=$(curl -sSf "https://crates.io/api/v1/crates/$crate" | grep -o '"max_version":"[^"]*"' | cut -d'"' -f4)
+            # Retry up to 3 times — crates.io may need a few seconds to index
+            version=""
+            for attempt in 1 2 3; do
+              version=$(curl -sSf -A "aria2-rust-release-pipeline" "https://crates.io/api/v1/crates/$crate" | grep -o '"max_version":"[^"]*"' | cut -d'"' -f4)
+              if [ -n "$version" ]; then break; fi
+              echo "Attempt $attempt: $crate not yet indexed, retrying in 10s..."
+              sleep 10
+            done
             echo "$crate max_version: $version"
             if [ "$version" != "0.2.1" ]; then
               echo "ERROR: $crate is not at version 0.2.1"
               exit 1
             fi
+            sleep 2
           done
           echo "All crates verified at version 0.2.1"
