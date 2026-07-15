@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,18 +21,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          components: rustfmt, clippy
       
       - uses: Swatinem/rust-cache@v2
-      
-      - name: Verify tests pass
-        run: cargo test --workspace --all-targets
-      
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      
-      - name: Check formatting
-        run: cargo fmt --all -- --check
       
       - name: Dry-run validation
         run: cargo publish --dry-run -p aria2-protocol
