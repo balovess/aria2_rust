@@ -14,10 +14,13 @@
 FROM rust:1.88-alpine AS builder
 
 # Install build dependencies
+# openssl-libs-static is required because Rust's musl target links statically
+# by default and needs the .a files (openssl-dev only provides headers + .so).
 RUN apk add --no-cache \
     musl-dev \
     pkgconfig \
     openssl-dev \
+    openssl-libs-static \
     git
 
 WORKDIR /build
