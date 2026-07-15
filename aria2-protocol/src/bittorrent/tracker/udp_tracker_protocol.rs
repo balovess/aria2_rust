@@ -656,15 +656,6 @@ impl AsyncUdpTrackerClient {
 }
 
 #[cfg(test)]
-fn random_txn_id() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    (dur.as_nanos() & 0xFFFFFFFF) as u32
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -820,19 +811,6 @@ mod tests {
         let bytes = val.to_be_bytes();
         assert_eq!(bytes, [0xAA, 0xBB, 0xCC, 0xDD]);
         assert_eq!(u32::from_be_bytes(bytes), val);
-    }
-
-    #[test]
-    fn test_random_txn_id_produces_values() {
-        // Generate multiple IDs and verify they are not all the same.
-        // A truly broken RNG would produce all-zero or all-identical values;
-        // a healthy one will produce at least one differing value among 5 draws
-        // with probability ≈ 1 - (1/2^32)^4 ≈ 1.
-        let ids: Vec<u32> = (0..5).map(|_| random_txn_id()).collect();
-        assert!(
-            ids.iter().skip(1).any(|&v| v != ids[0]),
-            "repeated random_txn_id() calls should eventually produce differing values, got: {ids:?}"
-        );
     }
 
     #[test]

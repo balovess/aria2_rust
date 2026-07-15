@@ -14,7 +14,7 @@ authors = ["aria2-rust contributors"]
 license = "GPL-2.0-or-later"
 repository = "https://github.com/balovess/aria2_rust/"
 readme = "README.md"
-keywords = ["download", "bittorrent", "http", "ftp", "rpc", "aria2", "cli", "concurrent-download", "rate-limiting"]
+keywords = ["download", "bittorrent", "http", "ftp", "rpc"]
 categories = ["command-line-utilities", "network-programming", "web-programming::http-client"]
 
 [workspace.dependencies]

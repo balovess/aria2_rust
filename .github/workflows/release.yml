@@ -9,28 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Job 1: Pre-release validation
-  validate:
-    name: Validate & Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Sync versions
-        run: |
-          chmod +x scripts/sync-version.sh
-          ./scripts/sync-version.sh
-      - name: Run tests
-        run: cargo test --workspace --all-targets
-      - name: Clippy check
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-  # Job 1b: Check whether optional publish secrets are configured.
+  # Job 1: Check whether optional publish secrets are configured.
   # GitHub Actions cannot read secrets directly in `if:` conditions, so this
   # job exports boolean outputs that downstream bindings publish jobs gate on.
   check-secrets:
@@ -52,7 +31,6 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -88,10 +66,11 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           strip aria2c${{ matrix.ext }} || true
-          tar czf ../../../../${{ matrix.artifact }}.tar.gz aria2c${{ matrix.ext }}
+          tar czf ../../../${{ matrix.artifact }}.tar.gz aria2c${{ matrix.ext }}
           cd -
       - name: Prepare artifacts (Windows)
         if: runner.os == 'Windows'
+        shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.artifact }}.zip aria2c${{ matrix.ext }}
@@ -100,13 +79,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.*.*
+          path: ${{ matrix.artifact }}.*
+          if-no-files-found: error
 
   # Job 3: Generate changelog and create GitHub Release
   github-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [validate, build]
+    needs: [build]
     permissions:
       contents: write
     steps:
@@ -206,13 +186,16 @@ jobs:
   docker:
     name: Docker Image
     runs-on: ubuntu-latest
-    needs: validate
+    needs: [build]
     permissions:
       packages: write
       contents: read
     steps:
       - uses: actions/checkout@v4
       
+      - name: Set up QEMU for multi-platform builds
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       

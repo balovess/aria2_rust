@@ -9,7 +9,7 @@ description = "High-performance download engine core: multi-protocol segmented d
 documentation = "https://docs.rs/aria2-core"
 homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
-keywords = ["download", "http", "ftp", "bittorrent", "aria2", "concurrent-download", "rate-limiting", "segmented-download", "resume"]
+keywords = ["download", "bittorrent", "concurrent-download", "rate-limiting", "resume"]
 categories = ["network-programming", "web-programming::http-client"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 
