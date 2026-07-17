@@ -33,8 +33,12 @@ pub fn init_logging(
     if enable_file_logging {
         let path = log_file.unwrap();
         let p = std::path::Path::new(path);
-        let dir = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
-        let stem = p.file_name()
+        let dir = p
+            .parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let stem = p
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "aria2.log".to_string());
 
@@ -45,9 +49,7 @@ pub fn init_logging(
             .filename_prefix(&stem)
             .max_log_files(log_backup_count)
             .build(&dir)
-            .unwrap_or_else(|_| {
-                tracing_appender::rolling::daily(&dir, &stem)
-            });
+            .unwrap_or_else(|_| tracing_appender::rolling::daily(&dir, &stem));
         let (non_blocking, guard) = non_blocking(file_appender);
         let _ = LOG_GUARD.set(vec![guard]);
 
@@ -84,9 +86,11 @@ pub fn init_logging(
 
         let _ = tracing_subscriber::registry()
             .with(env_filter)
-            .with(fmt::layer()
-                .with_span_events(FmtSpan::CLOSE)
-                .with_target(false))
+            .with(
+                fmt::layer()
+                    .with_span_events(FmtSpan::CLOSE)
+                    .with_target(false),
+            )
             .try_init();
     }
 

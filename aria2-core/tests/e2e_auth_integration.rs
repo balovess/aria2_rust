@@ -8,9 +8,9 @@ mod e2e_helpers;
 mod tests {
     use crate::e2e_helpers::mock_http_server::MockHttpServer;
     use crate::e2e_helpers::mock_http_server::RequestLog;
+    use crate::e2e_helpers::mock_http_server::{Body, Incoming, Request, Response, full_body};
     use aria2_core::auth::digest_auth::DigestAlgorithm;
     use aria2_core::auth::*;
-    use crate::e2e_helpers::mock_http_server::{Body, Incoming, Request, Response, full_body};
 
     #[tokio::test]
     async fn test_basic_auth_401_then_200() {

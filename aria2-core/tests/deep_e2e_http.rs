@@ -12,8 +12,10 @@ mod e2e_helpers;
 
 use crate::e2e_helpers::mock_http_server::MockHttpServer;
 use crate::e2e_helpers::mock_http_server::RequestLog;
+use crate::e2e_helpers::mock_http_server::{
+    Body, Incoming, Request, Response, StatusCode, empty_body, full_body,
+};
 use base64::Engine;
-use crate::e2e_helpers::mock_http_server::{Body, Incoming, Request, Response, StatusCode, empty_body, full_body};
 
 // ---------------------------------------------------------------------------
 // Inline helpers (from test_harness -- not importable as crate module in integration tests)
@@ -295,23 +297,29 @@ async fn test_http_redirect_301_302_with_cookies() {
 
     // Step 0: initial path returns 301 -> hop_a
     let hop_a = format!("{}/hop_a", base);
-    server.on_get("/start", move |_req: &Request<Incoming>| -> Response<Body> {
-        Response::builder()
-            .status(301)
-            .header("Location", hop_a.as_str())
-            .body(empty_body())
-            .unwrap()
-    });
+    server.on_get(
+        "/start",
+        move |_req: &Request<Incoming>| -> Response<Body> {
+            Response::builder()
+                .status(301)
+                .header("Location", hop_a.as_str())
+                .body(empty_body())
+                .unwrap()
+        },
+    );
 
     // Step 1: hop_a returns 302 -> hop_b (final destination)
     let hop_b = format!("{}/hop_b", base);
-    server.on_get("/hop_a", move |_req: &Request<Incoming>| -> Response<Body> {
-        Response::builder()
-            .status(302)
-            .header("Location", hop_b.as_str())
-            .body(empty_body())
-            .unwrap()
-    });
+    server.on_get(
+        "/hop_a",
+        move |_req: &Request<Incoming>| -> Response<Body> {
+            Response::builder()
+                .status(302)
+                .header("Location", hop_b.as_str())
+                .body(empty_body())
+                .unwrap()
+        },
+    );
 
     // Final destination: returns actual content
     server.on_get("/hop_b", |_req: &Request<Incoming>| -> Response<Body> {
@@ -576,13 +584,16 @@ async fn test_http_range_not_supported_fallback() {
 
     // 2. Register a plain endpoint (NO range support)
     let plain_body = b"this_is_plain_content_no_ranges".as_slice();
-    server.on_get("/plain", move |_req: &Request<Incoming>| -> Response<Body> {
-        Response::builder()
-            .status(200)
-            .header("Content-Length", plain_body.len())
-            .body(full_body(plain_body.to_vec()))
-            .unwrap()
-    });
+    server.on_get(
+        "/plain",
+        move |_req: &Request<Incoming>| -> Response<Body> {
+            Response::builder()
+                .status(200)
+                .header("Content-Length", plain_body.len())
+                .body(full_body(plain_body.to_vec()))
+                .unwrap()
+        },
+    );
 
     // 3. Build client
     let client = reqwest::Client::new();
@@ -733,12 +744,15 @@ async fn test_http_timeout_then_retry_success() {
 
     // 2. Register both slow and fast endpoints
     server.register_slow_response("/slow-endpoint", 5000, b"slow_payload");
-    server.on_get("/fast-endpoint", |_req: &Request<Incoming>| -> Response<Body> {
-        Response::builder()
-            .status(200)
-            .body(full_body("fast_payload"))
-            .unwrap()
-    });
+    server.on_get(
+        "/fast-endpoint",
+        |_req: &Request<Incoming>| -> Response<Body> {
+            Response::builder()
+                .status(200)
+                .body(full_body("fast_payload"))
+                .unwrap()
+        },
+    );
 
     // 3. Build client with short timeout
     let client = reqwest::Client::builder()

@@ -149,8 +149,14 @@ impl App {
 
             // After daemonization, we are in the child process
             // Re-initialize logging for the daemon process
-            let log_level = self.get_opt_str("log-level").await.unwrap_or_else(|| "info".to_string());
-            let console_log_level = self.get_opt_str("console-log-level").await.unwrap_or_else(|| "notice".to_string());
+            let log_level = self
+                .get_opt_str("log-level")
+                .await
+                .unwrap_or_else(|| "info".to_string());
+            let console_log_level = self
+                .get_opt_str("console-log-level")
+                .await
+                .unwrap_or_else(|| "notice".to_string());
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
             init_logging(
@@ -165,8 +171,14 @@ impl App {
 
         // In daemon mode, logging was already re-initialized after daemonization above.
         if !daemon_mode {
-            let log_level = self.get_opt_str("log-level").await.unwrap_or_else(|| "info".to_string());
-            let console_log_level = self.get_opt_str("console-log-level").await.unwrap_or_else(|| "notice".to_string());
+            let log_level = self
+                .get_opt_str("log-level")
+                .await
+                .unwrap_or_else(|| "info".to_string());
+            let console_log_level = self
+                .get_opt_str("console-log-level")
+                .await
+                .unwrap_or_else(|| "notice".to_string());
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
             init_logging(

@@ -8,8 +8,8 @@ mod e2e_helpers;
 mod tests {
     use crate::e2e_helpers::mock_http_server::MockHttpServer;
     use crate::e2e_helpers::mock_http_server::RequestLog;
-    use aria2_core::http::stream_filter::*;
     use crate::e2e_helpers::mock_http_server::{Body, Incoming, Request, Response, full_body};
+    use aria2_core::http::stream_filter::*;
 
     #[tokio::test]
     async fn test_gzip_download_full_roundtrip() {
@@ -154,13 +154,16 @@ mod tests {
         let data_vec: Vec<u8> = original_data.to_vec();
 
         // Register plain response (no Content-Encoding)
-        server.on_get("/plain", move |_req: &Request<Incoming>| -> Response<Body> {
-            Response::builder()
-                .status(200)
-                .header("Content-Type", "text/plain")
-                .body(full_body(data_vec.clone()))
-                .unwrap()
-        });
+        server.on_get(
+            "/plain",
+            move |_req: &Request<Incoming>| -> Response<Body> {
+                Response::builder()
+                    .status(200)
+                    .header("Content-Type", "text/plain")
+                    .body(full_body(data_vec.clone()))
+                    .unwrap()
+            },
+        );
 
         // Fetch the data
         let client = reqwest::Client::new();

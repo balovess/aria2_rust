@@ -220,9 +220,7 @@ impl HyperDirectClient {
         let stream = response
             .into_body()
             .into_data_stream()
-            .map(|res| {
-                res.map_err(|e| std::io::Error::other(format!("hyper stream error: {e}")))
-            });
+            .map(|res| res.map_err(|e| std::io::Error::other(format!("hyper stream error: {e}"))));
         Ok(Box::pin(stream))
     }
 }

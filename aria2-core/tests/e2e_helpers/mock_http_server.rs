@@ -222,16 +222,19 @@ impl MockHttpServer {
     pub fn register_auth_challenge(&self, realm: &str, auth_type: &str) {
         let realm = realm.to_string();
         let auth_type = auth_type.to_string();
-        self.on_get("/secret", move |_req: &Request<Incoming>| -> Response<Body> {
-            Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(
-                    "WWW-Authenticate",
-                    format!("{} realm=\"{}\"", auth_type, realm),
-                )
-                .body(full_body("Unauthorized"))
-                .unwrap()
-        });
+        self.on_get(
+            "/secret",
+            move |_req: &Request<Incoming>| -> Response<Body> {
+                Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .header(
+                        "WWW-Authenticate",
+                        format!("{} realm=\"{}\"", auth_type, realm),
+                    )
+                    .body(full_body("Unauthorized"))
+                    .unwrap()
+            },
+        );
     }
 
     /// Quick method: return gzip compressed response

@@ -164,9 +164,7 @@ async fn test_concurrent_download_small_file_sequential() {
     )
     .expect("Failed to create DownloadCommand");
 
-    cmd.execute()
-        .await
-        .expect("Download should succeed");
+    cmd.execute().await.expect("Download should succeed");
 
     // Verify file
     let metadata = std::fs::metadata(&out_path).expect("Output file should exist");

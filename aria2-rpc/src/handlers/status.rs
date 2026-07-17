@@ -34,7 +34,12 @@ impl RpcEngine {
                             .with_download_speed(g.get_download_speed_cached())
                             .with_upload_length(g.get_uploaded_length())
                             .with_upload_speed(0)
-                            .with_connections(g.options().split.unwrap_or(aria2_core::constants::DEFAULT_SPLIT) as u16),
+                            .with_connections(
+                                g.options()
+                                    .split
+                                    .unwrap_or(aria2_core::constants::DEFAULT_SPLIT)
+                                    as u16,
+                            ),
                     );
                 }
             }
@@ -77,7 +82,12 @@ impl RpcEngine {
                             .with_completed_length(completed)
                             .with_download_speed(0)
                             .with_upload_speed(0)
-                            .with_connections(g.options().split.unwrap_or(aria2_core::constants::DEFAULT_SPLIT) as u16),
+                            .with_connections(
+                                g.options()
+                                    .split
+                                    .unwrap_or(aria2_core::constants::DEFAULT_SPLIT)
+                                    as u16,
+                            ),
                     );
                 }
             }

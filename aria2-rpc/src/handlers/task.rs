@@ -541,7 +541,9 @@ impl RpcEngine {
                         .with_upload_length(uploaded)
                         .with_download_speed(dl_speed)
                         .with_upload_speed(0)
-                        .with_connections(g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16)
+                        .with_connections(
+                            g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16,
+                        )
                         .with_dir(dir)
                         .with_files(files),
                 );
