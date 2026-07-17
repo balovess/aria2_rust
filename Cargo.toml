@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["aria2-rust contributors"]
 license = "GPL-2.0-or-later"
@@ -30,8 +30,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1.5"
 async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-aria2-protocol = { path = "aria2-protocol", version = "0.2.1" }
-aria2-core = { path = "aria2-core", version = "0.2.1" }
+aria2-protocol = { path = "aria2-protocol", version = "0.2.2" }
+aria2-core = { path = "aria2-core", version = "0.2.2" }
 
 [workspace.metadata.release]
 # Release workflow settings
@@ -50,6 +50,7 @@ commit-message = "chore: release v{{version}}"
 # Allow release from main branch only
 allow-branch = ["main", "master"]
 
-# Consistent versioning across workspace
-consolidate-commits = true
-shared-version = true
+# Independent versioning per crate (libraries are published to crates.io
+# individually; the binary has its own program-level version).
+consolidate-commits = false
+shared-version = false

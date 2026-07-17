@@ -16,7 +16,9 @@ use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
 use aria2_core::http::connection::{HttpConfig, HttpConnectionManager};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::retry::{RetryExecutor, RetryPolicy, RetryStats};
-use e2e_helpers::mock_http_server::MockHttpServer;
+use e2e_helpers::mock_http_server::{
+    MockHttpServer, Response, StatusCode, full_body, partial_body,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
@@ -80,12 +82,16 @@ async fn test_connection_reset_error_handling() {
         .await
         .expect("Failed to start mock server");
 
-    // Register a handler that immediately closes after sending headers
+    // Register a handler that sends headers claiming 1MB but only delivers
+    // 100 bytes, then closes the stream. This simulates a connection reset
+    // mid-transfer. Using `partial_body` (StreamBody with Unknown size_hint)
+    // ensures hyper 1.x respects the manually-set Content-Length header, so
+    // the client detects the premature EOF.
     server.on_get("/reset.bin", |_req| {
-        hyper::Response::builder()
-            .status(hyper::StatusCode::OK)
-            .header("Content-Length", "1000000") // Claim 1MB but don't send body
-            .body(hyper::Body::empty())
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Length", "1000000") // Claim 1MB
+            .body(partial_body(vec![0u8; 100])) // But only send 100 bytes
             .unwrap()
     });
 
@@ -351,9 +357,9 @@ async fn test_http_500_server_error() {
         .expect("Failed to start mock server");
 
     server.on_get("/error500", |_req| {
-        hyper::Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(hyper::Body::from("Internal Server Error"))
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(full_body("Internal Server Error"))
             .unwrap()
     });
 
@@ -415,9 +421,9 @@ async fn test_http_404_no_retry() {
         .expect("Failed to start mock server");
 
     server.on_get("/notfound", |_req| {
-        hyper::Response::builder()
-            .status(hyper::StatusCode::NOT_FOUND)
-            .body(hyper::Body::from("Not Found"))
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(full_body("Not Found"))
             .unwrap()
     });
 

@@ -19,7 +19,7 @@ use aria2_core::rate_limiter::RateLimiterConfig;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
 // Re-export helpers from test harness module
-use e2e_helpers::mock_http_server::MockHttpServer;
+use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
 
 // Import test harness utilities (need to check what's available)
 // Note: These may need adjustment based on actual module structure
@@ -587,9 +587,9 @@ async fn engine_error_cleanup_on_failure() {
 
     // Register route that always returns 404 Not Found
     server.on_get("/nonexistent.bin", |_req| {
-        hyper::Response::builder()
-            .status(hyper::StatusCode::NOT_FOUND)
-            .body(hyper::Body::from("Not Found"))
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(full_body("Not Found"))
             .unwrap()
     });
 
@@ -626,9 +626,9 @@ async fn engine_error_cleanup_on_failure() {
 
     // Also test 500 error case
     server.on_get("/server_error.bin", |_req| {
-        hyper::Response::builder()
-            .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-            .body(hyper::Body::from("Internal Server Error"))
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(full_body("Internal Server Error"))
             .unwrap()
     });
 

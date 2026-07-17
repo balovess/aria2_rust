@@ -29,6 +29,7 @@ pub type TaskOptions = Arc<RwLock<HashMap<String, HashMap<String, serde_json::Va
 /// and `aria2.tellStopped`. Contains both static metadata (GID, directory)
 /// and dynamic progress fields (speeds, lengths, connections).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StatusInfo {
     pub gid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,6 +151,7 @@ impl StatusInfo {
 /// Returned by `aria2.getFiles`. Contains file path, size, progress,
 /// selection state, and associated URIs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileInfo {
     pub index: usize,
     pub path: String,
@@ -195,6 +197,7 @@ impl FileInfo {
 ///
 /// Used in `FileInfo.uris` and returned by `aria2.getUris`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UriEntry {
     pub uri: String,
     pub status: UriStatus,
@@ -238,6 +241,7 @@ pub type UriInfo = UriEntry;
 ///
 /// Returned by `aria2.getServers`, grouped by file index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfoIndex {
     /// File index (0-based)
     pub index: usize,
@@ -249,6 +253,7 @@ pub struct ServerInfoIndex {
 ///
 /// Contains URI, current active URI (after redirects), and download speed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     /// Original server URI
     pub uri: String,
@@ -287,6 +292,7 @@ impl ServerInfo {
 /// Returned by `aria2.getPeers`. Contains peer connection state and
 /// transfer speeds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PeerInfo {
     pub peer_id: String,
     pub ip: String,
@@ -373,6 +379,7 @@ impl VersionInfo {
 ///
 /// Contains session identifier and startup timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     /// Unique session identifier
     pub session_id: String,
@@ -550,10 +557,10 @@ mod tests {
 
         let serialized = serde_json::to_value(&info).unwrap();
         assert!(
-            serialized.get("torrent_files").is_some(),
-            "torrent_files should appear in JSON output"
+            serialized.get("torrentFiles").is_some(),
+            "torrentFiles should appear in JSON output"
         );
-        let tf_arr = serialized.get("torrent_files").unwrap().as_array().unwrap();
+        let tf_arr = serialized.get("torrentFiles").unwrap().as_array().unwrap();
         assert_eq!(tf_arr.len(), 2);
     }
 
@@ -569,13 +576,13 @@ mod tests {
             upload_speed: 512000,
         };
         let json = serde_json::to_value(&peer).unwrap();
-        assert_eq!(json["peer_id"], "peer-abc123");
+        assert_eq!(json["peerId"], "peer-abc123");
         assert_eq!(json["ip"], "192.168.1.100");
         assert_eq!(json["port"], 6881);
-        assert_eq!(json["am_choking"], false);
-        assert_eq!(json["peer_choking"], true);
-        assert_eq!(json["download_speed"], 1048576);
-        assert_eq!(json["upload_speed"], 512000);
+        assert_eq!(json["amChoking"], false);
+        assert_eq!(json["peerChoking"], true);
+        assert_eq!(json["downloadSpeed"], 1048576);
+        assert_eq!(json["uploadSpeed"], 512000);
 
         let roundtrip: PeerInfo = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip.port, 6881);

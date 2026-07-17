@@ -10,7 +10,7 @@ mod tests {
     use crate::e2e_helpers::mock_http_server::RequestLog;
     use aria2_core::auth::digest_auth::DigestAlgorithm;
     use aria2_core::auth::*;
-    use hyper::{Body, Request, Response};
+    use crate::e2e_helpers::mock_http_server::{Body, Incoming, Request, Response, full_body};
 
     #[tokio::test]
     async fn test_basic_auth_401_then_200() {
@@ -21,18 +21,18 @@ mod tests {
 
         // 2. Register GET /secret -> 401 (no auth) / 200 (with auth)
         // Single handler that handles both cases
-        server.on_get("/secret", |req: &Request<Body>| -> Response<Body> {
+        server.on_get("/secret", |req: &Request<Incoming>| -> Response<Body> {
             // Check for Authorization header (simplified check)
             if req.headers().get("Authorization").is_some() {
                 Response::builder()
                     .status(200)
-                    .body(Body::from("Secret Content"))
+                    .body(full_body("Secret Content"))
                     .unwrap()
             } else {
                 Response::builder()
                     .status(401)
                     .header("WWW-Authenticate", "Basic realm=\"test\"")
-                    .body(Body::from("Unauthorized"))
+                    .body(full_body("Unauthorized"))
                     .unwrap()
             }
         });
@@ -89,14 +89,14 @@ mod tests {
             .expect("Failed to start server");
 
         // Register Digest auth challenge
-        server.on_get("/protected", |_req: &Request<Body>| -> Response<Body> {
+        server.on_get("/protected", |_req: &Request<Incoming>| -> Response<Body> {
             Response::builder()
                 .status(401)
                 .header(
                     "WWW-Authenticate",
                     r#"Digest realm="test", nonce="abc123", qop="auth", algorithm=MD5"#,
                 )
-                .body(Body::from("Unauthorized"))
+                .body(full_body("Unauthorized"))
                 .unwrap()
         });
 

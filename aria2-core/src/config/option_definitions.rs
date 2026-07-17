@@ -159,7 +159,7 @@ impl super::OptionRegistry {
             name: "log".into(),
             opt_type: OptionType::Path,
             short_name: Some('l'),
-            default_value: OptionValue::Str("-".into()),
+            default_value: OptionValue::None,
             description: "Log file path".into(),
             category: OptionCategory::General,
             ..Default::default()
@@ -178,6 +178,15 @@ impl super::OptionRegistry {
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("notice".into()),
             description: "Console log level".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "log-backup-count".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(5),
+            min: Some(1),
+            description: "Number of backup log files to keep".into(),
             category: OptionCategory::General,
             ..Default::default()
         });

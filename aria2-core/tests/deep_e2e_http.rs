@@ -13,7 +13,7 @@ mod e2e_helpers;
 use crate::e2e_helpers::mock_http_server::MockHttpServer;
 use crate::e2e_helpers::mock_http_server::RequestLog;
 use base64::Engine;
-use hyper::{Body, Request, Response};
+use crate::e2e_helpers::mock_http_server::{Body, Incoming, Request, Response, StatusCode, empty_body, full_body};
 
 // ---------------------------------------------------------------------------
 // Inline helpers (from test_harness -- not importable as crate module in integration tests)
@@ -295,30 +295,30 @@ async fn test_http_redirect_301_302_with_cookies() {
 
     // Step 0: initial path returns 301 -> hop_a
     let hop_a = format!("{}/hop_a", base);
-    server.on_get("/start", move |_req: &Request<Body>| -> Response<Body> {
+    server.on_get("/start", move |_req: &Request<Incoming>| -> Response<Body> {
         Response::builder()
             .status(301)
             .header("Location", hop_a.as_str())
-            .body(Body::empty())
+            .body(empty_body())
             .unwrap()
     });
 
     // Step 1: hop_a returns 302 -> hop_b (final destination)
     let hop_b = format!("{}/hop_b", base);
-    server.on_get("/hop_a", move |_req: &Request<Body>| -> Response<Body> {
+    server.on_get("/hop_a", move |_req: &Request<Incoming>| -> Response<Body> {
         Response::builder()
             .status(302)
             .header("Location", hop_b.as_str())
-            .body(Body::empty())
+            .body(empty_body())
             .unwrap()
     });
 
     // Final destination: returns actual content
-    server.on_get("/hop_b", |_req: &Request<Body>| -> Response<Body> {
+    server.on_get("/hop_b", |_req: &Request<Incoming>| -> Response<Body> {
         Response::builder()
             .status(200)
             .header("Content-Length", 13)
-            .body(Body::from(b"final_content".as_slice()))
+            .body(full_body(b"final_content".as_slice()))
             .unwrap()
     });
 
@@ -399,11 +399,11 @@ async fn test_http_redirect_post_to_get() {
     server.on(
         "POST",
         "/submit-form",
-        move |_req: &Request<Body>| -> Response<Body> {
+        move |_req: &Request<Incoming>| -> Response<Body> {
             Response::builder()
-                .status(hyper::StatusCode::MOVED_PERMANENTLY)
+                .status(StatusCode::MOVED_PERMANENTLY)
                 .header("Location", target_clone.as_str())
-                .body(Body::empty())
+                .body(empty_body())
                 .unwrap()
         },
     );
@@ -411,10 +411,10 @@ async fn test_http_redirect_post_to_get() {
     // Register the redirect destination
     server.on_get(
         "/post-destination",
-        |_req: &Request<Body>| -> Response<Body> {
+        |_req: &Request<Incoming>| -> Response<Body> {
             Response::builder()
                 .status(200)
-                .body(Body::from("post_redirect_ok"))
+                .body(full_body("post_redirect_ok"))
                 .unwrap()
         },
     );
@@ -576,11 +576,11 @@ async fn test_http_range_not_supported_fallback() {
 
     // 2. Register a plain endpoint (NO range support)
     let plain_body = b"this_is_plain_content_no_ranges".as_slice();
-    server.on_get("/plain", move |_req: &Request<Body>| -> Response<Body> {
+    server.on_get("/plain", move |_req: &Request<Incoming>| -> Response<Body> {
         Response::builder()
             .status(200)
             .header("Content-Length", plain_body.len())
-            .body(Body::from(plain_body.to_vec()))
+            .body(full_body(plain_body.to_vec()))
             .unwrap()
     });
 
@@ -651,7 +651,7 @@ async fn test_http_slow_server_timeout() {
     let result = client.get(&url).send().await;
     let elapsed_ms = start.elapsed().as_millis();
 
-    // 5. Request behavior depends on Body::wrap_stream():
+    // 5. Request behavior depends on StreamBody (hyper 1.x equivalent of Body::wrap_stream):
     //    - Response headers (200 OK) are sent immediately
     //    - Body data is delayed by 5000ms in the async stream
     //    - reqwest .send() may return Ok(resp) quickly (headers received)
@@ -673,10 +673,14 @@ async fn test_http_slow_server_timeout() {
                     assert_eq!(body_text, "slow_data");
                 }
                 Err(e) => {
-                    // Expected path: timeout while reading the streamed body
+                    // Expected path: timeout while reading the streamed body.
+                    // reqwest 0.13 wraps the timeout in a "decoding response
+                    // body" error, so use `is_timeout()` (which checks the
+                    // full error chain) rather than fragile string matching.
                     let err_str = e.to_string().to_lowercase();
                     assert!(
-                        err_str.contains("timeout")
+                        e.is_timeout()
+                            || err_str.contains("timeout")
                             || err_str.contains("timed out")
                             || err_str.contains("deadline"),
                         "Body read error should be timeout-related, got: {}",
@@ -729,10 +733,10 @@ async fn test_http_timeout_then_retry_success() {
 
     // 2. Register both slow and fast endpoints
     server.register_slow_response("/slow-endpoint", 5000, b"slow_payload");
-    server.on_get("/fast-endpoint", |_req: &Request<Body>| -> Response<Body> {
+    server.on_get("/fast-endpoint", |_req: &Request<Incoming>| -> Response<Body> {
         Response::builder()
             .status(200)
-            .body(Body::from("fast_payload"))
+            .body(full_body("fast_payload"))
             .unwrap()
     });
 
@@ -745,7 +749,7 @@ async fn test_http_timeout_then_retry_success() {
     let base = server.base_url();
 
     // 4. First call: to slow endpoint -> body read should timeout
-    // With Body::wrap_stream(), headers arrive immediately but body is delayed 5000ms
+    // With StreamBody, headers arrive immediately but body is delayed 5000ms
     let slow_url = make_url(&base, "/slow-endpoint");
     let first_result = client.get(&slow_url).send().await;
 

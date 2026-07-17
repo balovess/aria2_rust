@@ -557,7 +557,7 @@ impl DownloadCommand {
         self.no_proxy_matcher.as_ref()
     }
 
-    fn should_use_concurrent(&self, total_length: u64, supports_range: bool) -> bool {
+    fn should_use_concurrent(&self, total_length: u64, supports_range: bool, split: u16) -> bool {
         if !supports_range {
             return false;
         }
@@ -565,7 +565,6 @@ impl DownloadCommand {
             return false;
         }
 
-        let split = { self.group.blocking_read().options().split.unwrap_or(1) };
         split > 1
     }
 
@@ -884,8 +883,22 @@ impl DownloadCommand {
         Ok(())
     }
 
-    #[allow(dead_code)] // Reserved for future concurrent download execution strategy
-    async fn execute_concurrent_download(&mut self, uri: &str, total_length: u64) -> Result<()> {
+    async fn execute_concurrent_download(
+        &mut self,
+        uri: &str,
+        total_length: u64,
+        resume_state: &ResumeState,
+        max_retries_per_segment: u32,
+    ) -> Result<()> {
+        // Set total_length on the group immediately so external queries
+        // (RPC status, session persistence) see the correct value from the
+        // start of the concurrent download.
+        {
+            let mut g = self.group.write().await;
+            g.set_total_length(total_length).await;
+            g.set_total_length_atomic(total_length);
+        }
+
         let options = self.group.read().await.options().clone();
         let split = options.split.unwrap_or(1) as usize;
         let max_conn = options
@@ -894,6 +907,8 @@ impl DownloadCommand {
             as usize;
         let seg_size = total_length / split as u64;
         let mut last_progress_update = 0u64; // Track last progress update for batch updates
+        let mut last_speed_update = Instant::now();
+        let mut last_completed = 0u64;
 
         info!(
             "Concurrent download started: split={}, max_conn={}, segment_size={} bytes, total={}",
@@ -903,6 +918,16 @@ impl DownloadCommand {
         let mut manager =
             ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(seg_size));
         manager.set_max_connections_per_mirror(max_conn.min(split));
+        manager.set_max_retries(max_retries_per_segment);
+
+        if resume_state.should_resume {
+            manager.mark_completed_up_to(resume_state.start_offset, resume_state.existing_length);
+            self.completed_bytes = resume_state.start_offset;
+            debug!(
+                "Resume: marked {} bytes as completed, continuing from offset {}",
+                resume_state.existing_length, resume_state.start_offset
+            );
+        }
 
         let url_parsed = reqwest::Url::parse(uri).ok();
         let cookie_hdr = if let Some(ref url) = url_parsed {
@@ -1015,11 +1040,25 @@ impl DownloadCommand {
                         if self.completed_bytes - last_progress_update
                             >= constants::PROGRESS_UPDATE_BYTES as u64
                         {
+                            // Compute speed sample lock-free (refreshed every HTTP_SPEED_UPDATE_INTERVAL_MS).
+                            let elapsed = last_speed_update.elapsed();
+                            let speed = if elapsed.as_millis()
+                                >= constants::HTTP_SPEED_UPDATE_INTERVAL_MS as u128
+                            {
+                                let delta = self.completed_bytes - last_completed;
+                                let s = (delta as f64 / elapsed.as_secs_f64()) as u64;
+                                last_speed_update = Instant::now();
+                                last_completed = self.completed_bytes;
+                                s
+                            } else {
+                                0
+                            };
+
                             if let Some(ref sender) = self.progress_sender {
                                 // Lock-free: send via channel, engine aggregator applies to RequestGroup.
                                 let _ = sender.send(ProgressUpdate {
                                     completed_bytes: self.completed_bytes,
-                                    download_speed: 0,
+                                    download_speed: speed,
                                     upload_speed: 0,
                                 });
                             } else {
@@ -1028,6 +1067,22 @@ impl DownloadCommand {
                                 g.update_progress(self.completed_bytes).await;
                                 // Export to atomic fields for session persistence
                                 g.set_completed_length(self.completed_bytes);
+                                if speed > 0 {
+                                    g.update_speed(speed, 0).await;
+                                    // Update cached download speed for session persistence
+                                    g.set_download_speed_cached(speed);
+                                }
+                            }
+
+                            // Record performance metrics (minimal overhead, lock-free).
+                            if speed > 0 {
+                                self.atomic_metrics.record_throughput(speed);
+                                if let Some(ref monitor) = self.perf_monitor {
+                                    let metrics =
+                                        Metrics::new(speed, elapsed.as_millis() as u64, 0, 0)
+                                            .with_label("download_speed");
+                                    monitor.record_metric("download_speed", metrics);
+                                }
                             }
                             last_progress_update = self.completed_bytes;
                         }
@@ -1157,8 +1212,8 @@ impl DownloadCommand {
             )
             .await
         } else {
-            // Fallback to single-URI concurrent download
-            self.execute_concurrent_download_single_uri(
+            // Single URI: use FuturesUnordered-based concurrent download
+            self.execute_concurrent_download(
                 uri,
                 total_length,
                 resume_state,
@@ -1435,118 +1490,6 @@ impl DownloadCommand {
         Ok(())
     }
 
-    /// Execute concurrent download for a single URI (fallback method).
-    async fn execute_concurrent_download_single_uri(
-        &mut self,
-        uri: &str,
-        total_length: u64,
-        resume_state: &ResumeState,
-        max_retries_per_segment: u32,
-    ) -> Result<()> {
-        let split = self.group.read().await.options().split.unwrap_or(1) as u64;
-        let segment_size = total_length.div_ceil(split);
-        let mut manager =
-            ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(segment_size));
-        manager.set_max_retries(max_retries_per_segment);
-
-        if resume_state.should_resume {
-            manager.mark_completed_up_to(resume_state.start_offset, resume_state.existing_length);
-        }
-
-        let mut writer = self.create_writer(total_length);
-
-        while manager.has_pending_segments() || !manager.is_complete() {
-            while let Some((seg_idx, offset, length)) = manager.next_pending_segment() {
-                let seg_idx_u32 = seg_idx;
-                info!(
-                    "Starting segment {} download: offset={}, size={}",
-                    seg_idx, offset, length
-                );
-                let downloader = HttpSegmentDownloader::new(&self.client, self.use_hyper);
-                let seg_start = Instant::now();
-                let result = downloader
-                    .download_range(uri, offset, length, None, &self.headers)
-                    .await;
-
-                match result {
-                    Ok(data) => {
-                        let elapsed = seg_start.elapsed();
-                        let speed = if elapsed.as_secs_f64() > 0.0 {
-                            (data.len() as f64 / elapsed.as_secs_f64()) as u64
-                        } else {
-                            0
-                        };
-                        debug!(
-                            "Segment {} complete: {} bytes, speed={} B/s",
-                            seg_idx,
-                            data.len(),
-                            speed
-                        );
-
-                        // Zero-copy write: writer consumes the original Bytes;
-                        // manager gets a cheap Arc-refcount-bumped clone.
-                        let data_for_manager = data.clone();
-                        writer.write_bytes_at(offset, data).await.map_err(|e| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Write failed: {}",
-                                e
-                            )))
-                        })?;
-
-                        // Report completion with speed feedback
-                        manager.report_segment_complete(
-                            seg_idx_u32,
-                            data_for_manager,
-                            speed,
-                            false,
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Segment {} download failed: {}", seg_idx, e);
-                        manager
-                            .report_segment_failed(seg_idx_u32, constants::HTTP_DEFAULT_ERROR_CODE);
-                    }
-                }
-
-                self.completed_bytes = manager.completed_bytes();
-                let g = self.group.write().await;
-                g.update_progress(self.completed_bytes).await;
-                // Export to atomic fields for session persistence
-                g.set_completed_length(self.completed_bytes);
-            }
-
-            if manager.is_complete() {
-                break;
-            }
-
-            if manager.has_permanently_failed_segments() {
-                error!("Permanently failed download segments exist");
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: "Some download segments permanently failed".into(),
-                    },
-                ));
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        writer.flush().await.map_err(|e| {
-            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "Flush failed: {}",
-                e
-            )))
-        })?;
-        self.completed_bytes = manager.completed_bytes();
-        let mut g = self.group.write().await;
-        g.set_total_length(self.completed_bytes).await;
-        // Export to atomic fields for session persistence
-        g.set_total_length_atomic(self.completed_bytes);
-        g.set_completed_length(self.completed_bytes);
-        g.complete().await?;
-        Ok(())
-    }
-
     /// Save server statistics to the default location.
     async fn save_server_stats(&self) -> std::result::Result<usize, String> {
         // In a real implementation, this would save to a configured path
@@ -1639,7 +1582,16 @@ impl Command for DownloadCommand {
         }
         let head_resp = head_req.send().await.ok();
         let (total_length, supports_range) = if let Some(ref resp) = head_resp {
-            let tl = resp.content_length().unwrap_or(0);
+            // Use the Content-Length header directly instead of resp.content_length()
+            // because reqwest returns None for HEAD responses (it uses the actual body
+            // length, not the header value — documented behaviour in 0.11 through 0.13).
+            // Reading the header directly works correctly for both HEAD and GET responses.
+            let tl = resp
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
             let sr = resp
                 .headers()
                 .get("Accept-Ranges")
@@ -1694,8 +1646,9 @@ impl Command for DownloadCommand {
             }
 
             let options = self.group.read().await.options().clone();
+            let split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
 
-            if self.should_use_concurrent(total_length, supports_range) {
+            if self.should_use_concurrent(total_length, supports_range, split) {
                 if resume_state.should_resume {
                     info!(
                         "Concurrent mode + resume: existing {} bytes, continuing from offset {}",

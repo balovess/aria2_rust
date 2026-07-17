@@ -9,6 +9,7 @@ use crate::engine::TaskState;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, FileInfo, StatusInfo, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
+use aria2_core::constants as core_constants;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
@@ -539,6 +540,8 @@ impl RpcEngine {
                         .with_completed_length(completed)
                         .with_upload_length(uploaded)
                         .with_download_speed(dl_speed)
+                        .with_upload_speed(0)
+                        .with_connections(g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16)
                         .with_dir(dir)
                         .with_files(files),
                 );

@@ -337,7 +337,9 @@ impl Daemonizer {
             std::env::current_exe().inspect_err(|e| error!("Failed to get exe path: {e}"))?;
 
         // Get current arguments (excluding the program name)
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        let args: Vec<String> = std::env::args().skip(1)
+            .filter(|arg| arg != "--daemon" && arg != "-D")
+            .collect();
 
         // Build the command for the detached process
         let mut cmd = Command::new(&exe_path);
