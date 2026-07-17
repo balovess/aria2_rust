@@ -90,7 +90,7 @@ async fn test_concurrent_download_assembles_file_correctly() {
     let url = make_url(&server.base_url(), "/largefile");
     let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
     let out_name = format!("test_concurrent_asm_{}.bin", std::process::id());
-    let out_path = format!("{}/{}", tmp_dir, &out_name);
+    let out_path = format!("{}/{}", tmp_dir, out_name);
 
     // Clean up any leftover from previous runs
     let _ = std::fs::remove_file(&out_path);
@@ -152,7 +152,7 @@ async fn test_concurrent_download_small_file_sequential() {
     let url = make_url(&server.base_url(), "/smallfile");
     let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
     let out_name = format!("test_concurrent_small_{}.bin", std::process::id());
-    let out_path = format!("{}/{}", tmp_dir, &out_name);
+    let out_path = format!("{}/{}", tmp_dir, out_name);
     let _ = std::fs::remove_file(&out_path);
 
     let mut cmd = DownloadCommand::new(
@@ -179,14 +179,19 @@ async fn test_concurrent_download_small_file_sequential() {
     let output_data = std::fs::read(&out_path).expect("Should read output file");
     assert_eq!(output_data, data, "Output content should match source data");
 
-    // Verify: no Range requests (sequential path doesn't split into byte ranges)
+    // Verify: small file should NOT use concurrent split download.
+    // The sequential path never splits into multiple byte ranges. On Linux the
+    // splice optimization (`try_splice_download`) issues a single full-file
+    // Range request (`bytes=0-N`) for zero-copy transfer — this is still a
+    // single segment, not concurrent splitting, so at most one Range request
+    // is acceptable.
     let log = server.take_request_log();
-    for entry in &log {
-        assert!(
-            !has_range_header(entry),
-            "Small file should NOT use Range requests (sequential path)"
-        );
-    }
+    let range_count = log.iter().filter(|e| has_range_header(e)).count();
+    assert!(
+        range_count <= 1,
+        "Small file should NOT use concurrent split download (Range requests: {})",
+        range_count
+    );
 
     // Cleanup
     let _ = std::fs::remove_file(&out_path);
@@ -210,7 +215,7 @@ async fn test_concurrent_download_multiple_range_requests() {
     let url = make_url(&server.base_url(), "/range-test");
     let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
     let out_name = format!("test_concurrent_range_{}.bin", std::process::id());
-    let out_path = format!("{}/{}", tmp_dir, &out_name);
+    let out_path = format!("{}/{}", tmp_dir, out_name);
     let _ = std::fs::remove_file(&out_path);
 
     let mut cmd = DownloadCommand::new(
