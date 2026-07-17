@@ -171,9 +171,9 @@ async fn test_tell_status_returns_live_progress() {
     let status = resp.result.unwrap();
     assert_eq!(status["gid"], gid);
     assert_eq!(status["status"], "active");
-    assert_eq!(status["total_length"], 10_000_000);
-    assert_eq!(status["completed_length"], 4_200_000);
-    assert_eq!(status["download_speed"], 512_000);
+    assert_eq!(status["totalLength"], 10_000_000);
+    assert_eq!(status["completedLength"], 4_200_000);
+    assert_eq!(status["downloadSpeed"], 512_000);
 }
 
 // =========================================================================
@@ -292,8 +292,8 @@ async fn test_progress_changes_reflected_in_tell_status() {
     let tell1 = JsonRpcRequest::new("aria2.tellStatus", json!([gid.clone()])).with_id(2);
     let resp = engine.handle_request(&tell1).await;
     let s1 = resp.result.unwrap();
-    assert_eq!(s1["completed_length"], 100_000);
-    assert_eq!(s1["total_length"], 1_000_000);
+    assert_eq!(s1["completedLength"], 100_000);
+    assert_eq!(s1["totalLength"], 1_000_000);
 
     // Simulate more progress
     {
@@ -308,8 +308,8 @@ async fn test_progress_changes_reflected_in_tell_status() {
     let tell2 = JsonRpcRequest::new("aria2.tellStatus", json!([gid.clone()])).with_id(3);
     let resp = engine.handle_request(&tell2).await;
     let s2 = resp.result.unwrap();
-    assert_eq!(s2["completed_length"], 500_000, "progress should update");
-    assert_eq!(s2["download_speed"], 120_000, "speed should update");
+    assert_eq!(s2["completedLength"], 500_000, "progress should update");
+    assert_eq!(s2["downloadSpeed"], 120_000, "speed should update");
 }
 
 // =========================================================================

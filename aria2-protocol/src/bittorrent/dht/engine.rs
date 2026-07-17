@@ -565,6 +565,12 @@ impl DhtEngine {
         }
     }
 
+    /// Shutdown the DHT engine synchronously.
+    ///
+    /// **Do not call from `async` contexts.** This method uses
+    /// `tokio::sync::RwLock::blocking_read()`, which blocks the tokio worker
+    /// thread and can deadlock if another task holds the routing table's write
+    /// lock. Use [`shutdown_async`](Self::shutdown_async) instead from async code.
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::Relaxed);
 
@@ -960,7 +966,7 @@ mod tests {
             stats.total_nodes >= 4,
             "should have at least bootstrap nodes"
         );
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -979,7 +985,7 @@ mod tests {
             "should complete at least one round"
         );
         let _ = result.nodes_contacted;
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[test]
@@ -1000,7 +1006,7 @@ mod tests {
     async fn test_shutdown_sets_flag() {
         let engine = DhtEngine::start(DhtEngineConfig::default()).await.unwrap();
         assert!(engine.running.load(Ordering::Relaxed));
-        engine.shutdown();
+        engine.shutdown_async().await;
         assert!(!engine.running.load(Ordering::Relaxed));
     }
 
@@ -1009,7 +1015,7 @@ mod tests {
         let engine = DhtEngine::start(DhtEngineConfig::default()).await.unwrap();
         let addr = engine.local_addr();
         assert!(addr.port() > 0, "should have a valid port");
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1021,7 +1027,7 @@ mod tests {
             engine.running.load(Ordering::Relaxed),
             "maintenance should keep engine running"
         );
-        engine.shutdown();
+        engine.shutdown_async().await;
         sleep(Duration::from_millis(200)).await;
     }
 
@@ -1182,7 +1188,7 @@ mod tests {
             stats.total_nodes >= 4,
             "engine should still work after skipped save"
         );
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[test]
@@ -1227,7 +1233,7 @@ mod tests {
             HARDCODED_BOOTSTRAP_NODES.len()
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     // ==================== Task 8: DHT Query Handler Tests ====================
@@ -1269,7 +1275,7 @@ mod tests {
         let received = rx.await.expect("receiver should get the message");
         assert!(received.is_response());
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1280,7 +1286,7 @@ mod tests {
         let found = engine.complete_pending_query(&[0xFF, 0xFF], msg);
         assert!(!found, "complete for unknown tx_id should return false");
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1301,7 +1307,7 @@ mod tests {
         let found = engine.complete_pending_query(&tx_id, msg);
         assert!(!found, "complete after cancel should return false");
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     // ---- Compact node encoder test (Task 5 helper) ----
@@ -1435,7 +1441,7 @@ mod tests {
             "r.id should be engine's self_id"
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1475,7 +1481,7 @@ mod tests {
             );
         }
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1514,7 +1520,7 @@ mod tests {
             "should not have values field when no peers"
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1547,7 +1553,7 @@ mod tests {
             stored_peers
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1576,7 +1582,7 @@ mod tests {
             "no peer should be stored for invalid token"
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1623,7 +1629,7 @@ mod tests {
             "implied_port should use sender's address, not the port field"
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1665,7 +1671,7 @@ mod tests {
         let token = r.dict_get(b"token").and_then(|v| v.as_bytes());
         assert!(token.is_some(), "should still include a token");
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1687,7 +1693,7 @@ mod tests {
             "missing fields should result in error response"
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     // ---- Full roundtrip tests (Task 8: integration) ----
@@ -1728,8 +1734,8 @@ mod tests {
             "response r.id should be engine B's self_id"
         );
 
-        engine_a.shutdown();
-        engine_b.shutdown();
+        engine_a.shutdown_async().await;
+        engine_b.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1767,8 +1773,8 @@ mod tests {
         let token = r.dict_get(b"token").and_then(|v| v.as_bytes());
         assert!(token.is_some(), "get_peers response should include a token");
 
-        engine_a.shutdown();
-        engine_b.shutdown();
+        engine_a.shutdown_async().await;
+        engine_b.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1849,8 +1855,8 @@ mod tests {
             stored_peers
         );
 
-        engine_a.shutdown();
-        engine_b.shutdown();
+        engine_a.shutdown_async().await;
+        engine_b.shutdown_async().await;
     }
 
     // ---- Shutdown test (Task 8.7) ----
@@ -1917,7 +1923,7 @@ mod tests {
             "should complete 0 rounds (cache hit)"
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -1942,6 +1948,6 @@ mod tests {
             "no peers should be stored if none were found"
         );
 
-        engine.shutdown();
+        engine.shutdown_async().await;
     }
 }

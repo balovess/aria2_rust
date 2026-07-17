@@ -1,6 +1,6 @@
 [package]
 name = "aria2-core"
-version.workspace = true
+version = "0.2.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -47,17 +47,23 @@ sha2 = "0.10"
 adler32 = "1.2"
 digest = "0.10"
 aria2-protocol = { workspace = true, features = ["bittorrent", "metalink", "sftp"] }
-reqwest = { version = "0.11", features = ["stream", "rustls-tls"], default-features = false }
-# Direct hyper client for the hot HTTP download path. Bypasses reqwest overhead
-# for simple range GETs. The `server` feature is used by the in-crate tests
-# (local hyper server), so hyper is a normal dependency rather than a dev-dep.
-# Note: `hyper-util` / `http-body-util` (which target hyper 1.x) are intentionally
-# NOT added to avoid a dual-hyper-version dependency tree; the v1 client uses
-# hyper 0.14 APIs exclusively.
-hyper = { version = "0.14", features = ["client", "server", "http1", "http2", "stream"] }
+reqwest = { version = "0.13.4", features = ["stream", "rustls", "gzip", "http2"], default-features = false }
+# hyper 1.x is used directly for the hot HTTP download path (HyperDirectClient)
+# and by the in-crate test mock server. reqwest 0.13 also depends on hyper 1.x,
+# so a single hyper version is shared across the dependency tree.
+# `hyper-util` provides client/server connectors and `TokioIo` / `TokioExecutor`.
+# `http-body-util` provides `Full`/`Empty`/`StreamBody` body helpers.
+# `http` provides shared `Request`/`Response`/`StatusCode`/`HeaderMap` types.
+hyper = { version = "1", features = ["http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
+http-body-util = "0.1"
+http = "1"
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
+# Kept at 0.24: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`
+# feature is enabled (we don't use it). Upgrading to 0.26 would conflict with russh's
+# pinned `rand_core = 0.10.0-rc-3` via aria2-protocol's SFTP support.
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"], default-features = false }
 rand = "0.8"
 regex = "1"

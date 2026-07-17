@@ -3,16 +3,44 @@
 #![allow(dead_code)]
 //! Provides a lightweight HTTP server that can be configured with custom handlers,
 //! supporting auth challenges, gzip responses, chunked encoding, and range requests.
+//!
+//! # hyper 1.x architecture
+//! Uses `tokio::net::TcpListener` + `hyper::server::conn::http1::Builder` (the
+//! hyper 1.x replacement for the removed `hyper::server::Server`). Response
+//! bodies are type-erased via `http_body_util::combinators::BoxBody` so that
+//! handlers can return `Full<Bytes>`, `Empty<Bytes>`, or `StreamBody` uniformly.
 
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server, StatusCode};
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Empty, Full, StreamBody};
+use hyper::body::Frame;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use tokio::sync::oneshot;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
-/// Mock HTTP handler type
-type HandlerFn = Arc<dyn Fn(&Request<Body>) -> Response<Body> + Send + Sync>;
+// Re-export the types that test files need to construct mock-server handlers.
+// `pub use` also brings these names into scope for internal use, so no separate
+// `use` statements are needed for Request/Response/StatusCode/Incoming.
+// Test files can then write a single import line:
+//   use e2e_helpers::mock_http_server::{Body, Incoming, Request, Response, StatusCode, empty_body, full_body};
+pub use http::{Request, Response, StatusCode};
+pub use hyper::body::Incoming;
+
+/// Type-erased boxed body used for all mock server responses.
+///
+/// Uses `Infallible` as the error type because all body constructors in this
+/// module (`Full`, `Empty`, `StreamBody`) produce infallible bodies. This avoids
+/// `map_err` boilerplate while keeping type erasure via `BoxBody`.
+pub type Body = BoxBody<Bytes, Infallible>;
+
+/// Mock HTTP handler type. Takes a reference to the incoming request and
+/// returns a boxed response body.
+type HandlerFn = Arc<dyn Fn(&Request<Incoming>) -> Response<Body> + Send + Sync>;
 
 struct RouteEntry {
     method: Option<String>,
@@ -24,7 +52,7 @@ pub struct MockHttpServer {
     addr: SocketAddr,
     routes: Arc<RwLock<Vec<RouteEntry>>>,
     request_log: Arc<RwLock<Vec<RequestLog>>>,
-    shutdown_tx: Option<Arc<oneshot::Sender<()>>>,
+    server_handle: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,77 +62,130 @@ pub struct RequestLog {
     pub headers: Vec<(String, String)>,
 }
 
+/// Helper: create a boxed body from a byte slice.
+pub fn full_body(data: impl Into<Bytes>) -> Body {
+    Full::new(data.into()).boxed()
+}
+
+/// Helper: create an empty boxed body.
+pub fn empty_body() -> Body {
+    Empty::<Bytes>::new().boxed()
+}
+
+/// Helper: create a streaming body from a byte slice. Unlike `full_body`,
+/// this uses a `StreamBody` whose `size_hint` is `Unknown`, so hyper 1.x
+/// will **not** override a manually-set `Content-Length` header. Use this to
+/// simulate truncated/incomplete responses where the header claims more bytes
+/// than the body actually delivers (the client detects a premature EOF).
+pub fn partial_body(data: impl Into<Bytes>) -> Body {
+    let data = data.into();
+    let stream = futures::stream::once(async move { Ok::<_, Infallible>(Frame::data(data)) });
+    StreamBody::new(stream).boxed()
+}
+
 impl MockHttpServer {
     /// Start a new mock server (auto-binds to random port)
     pub async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let addr: SocketAddr = "127.0.0.1:0".parse()?;
         let routes: Arc<RwLock<Vec<RouteEntry>>> = Arc::new(RwLock::new(Vec::new()));
         let request_log: Arc<RwLock<Vec<RequestLog>>> = Arc::new(RwLock::new(Vec::new()));
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        let listener = TcpListener::bind(addr).await?;
+        let actual_addr = listener.local_addr()?;
 
         let routes_clone = Arc::clone(&routes);
         let log_clone = Arc::clone(&request_log);
 
-        let make_svc = make_service_fn(move |_conn| {
-            let routes = Arc::clone(&routes_clone);
-            let log = Arc::clone(&log_clone);
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
-                    let routes = Arc::clone(&routes);
-                    let log = Arc::clone(&log);
-                    async move {
-                        // Log the request
-                        let req_log = RequestLog {
-                            method: req.method().to_string(),
-                            path: req.uri().path().to_string(),
-                            headers: req
-                                .headers()
-                                .iter()
-                                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                                .collect(),
-                        };
-                        log.write().unwrap().push(req_log);
-
-                        // Find matching route
-                        let routes_guard = routes.read().unwrap();
-                        let method = req.method().to_string();
-                        let path = req.uri().path();
-
-                        for route in routes_guard.iter() {
-                            // Check method match
-                            if let Some(ref m) = route.method
-                                && m != &method
-                            {
-                                continue;
-                            }
-
-                            // Check path match (prefix or exact)
-                            if path.starts_with(&route.path_pattern) || route.path_pattern == path {
-                                let handler = &route.handler;
-                                return Ok::<Response<Body>, Infallible>(handler(&req));
-                            }
-                        }
-
-                        // No matching route found - return 404
-                        Ok(Response::builder()
-                            .status(StatusCode::NOT_FOUND)
-                            .body(Body::from("Not Found"))
-                            .unwrap())
+        let server_handle = tokio::spawn(async move {
+            loop {
+                // Accept connections until the listener is dropped (shutdown).
+                let (stream, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        eprintln!("Mock HTTP server accept error: {}", e);
+                        break;
                     }
-                }))
-            }
-        });
+                };
 
-        let server = Server::bind(&addr).serve(make_svc);
-        let actual_addr = server.local_addr();
-        let server_with_shutdown = server.with_graceful_shutdown(async {
-            let _ = shutdown_rx.await;
-        });
+                let routes = Arc::clone(&routes_clone);
+                let log = Arc::clone(&log_clone);
+                let io = TokioIo::new(stream);
 
-        // Spawn server in background
-        tokio::spawn(async move {
-            if let Err(e) = server_with_shutdown.await {
-                eprintln!("Mock HTTP server error: {}", e);
+                tokio::spawn(async move {
+                    let svc = service_fn(move |req: Request<Incoming>| {
+                        let routes = Arc::clone(&routes);
+                        let log = Arc::clone(&log);
+                        async move {
+                            // Log the request
+                            let req_log = RequestLog {
+                                method: req.method().to_string(),
+                                path: req.uri().path().to_string(),
+                                headers: req
+                                    .headers()
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        (k.to_string(), v.to_str().unwrap_or("").to_string())
+                                    })
+                                    .collect(),
+                            };
+                            log.write().unwrap().push(req_log);
+
+                            // Find matching route
+                            let routes_guard = routes.read().unwrap();
+                            let method = req.method().to_string();
+                            let path = req.uri().path();
+                            let is_head = method == "HEAD";
+
+                            // First pass: exact method match
+                            for route in routes_guard.iter() {
+                                if let Some(ref m) = route.method
+                                    && m != &method
+                                {
+                                    continue;
+                                }
+                                if path.starts_with(&route.path_pattern)
+                                    || route.path_pattern == path
+                                {
+                                    let handler = &route.handler;
+                                    return Ok::<Response<Body>, Infallible>(handler(&req));
+                                }
+                            }
+
+                            // Second pass (HEAD only): fall back to GET handler.
+                            // Construct a HEAD response: copy status and all headers
+                            // from the GET response, but with an empty body.
+                            if is_head {
+                                for route in routes_guard.iter() {
+                                    if let Some(ref m) = route.method
+                                        && m != "GET"
+                                    {
+                                        continue;
+                                    }
+                                    if path.starts_with(&route.path_pattern)
+                                        || route.path_pattern == path
+                                    {
+                                        let handler = &route.handler;
+                                        let resp = handler(&req);
+                                        let status = resp.status();
+                                        let headers = resp.headers().clone();
+                                        let mut head_resp = Response::new(empty_body());
+                                        *head_resp.status_mut() = status;
+                                        head_resp.headers_mut().extend(headers);
+                                        return Ok::<Response<Body>, Infallible>(head_resp);
+                                    }
+                                }
+                            }
+
+                            // No matching route found - return 404
+                            Ok(Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(full_body("Not Found"))
+                                .unwrap())
+                        }
+                    });
+
+                    let _ = http1::Builder::new().serve_connection(io, svc).await;
+                });
             }
         });
 
@@ -112,14 +193,14 @@ impl MockHttpServer {
             addr: actual_addr,
             routes,
             request_log,
-            shutdown_tx: Some(Arc::new(shutdown_tx)),
+            server_handle: Some(server_handle),
         })
     }
 
     /// Register GET route handler
     pub fn on_get<F>(&self, pattern: &str, handler: F)
     where
-        F: Fn(&Request<Body>) -> Response<Body> + Send + Sync + 'static,
+        F: Fn(&Request<Incoming>) -> Response<Body> + Send + Sync + 'static,
     {
         self.on("GET", pattern, handler)
     }
@@ -127,7 +208,7 @@ impl MockHttpServer {
     /// Register arbitrary method route
     pub fn on<F>(&self, method: &str, pattern: &str, handler: F)
     where
-        F: Fn(&Request<Body>) -> Response<Body> + Send + Sync + 'static,
+        F: Fn(&Request<Incoming>) -> Response<Body> + Send + Sync + 'static,
     {
         let entry = RouteEntry {
             method: Some(method.to_string()),
@@ -141,16 +222,19 @@ impl MockHttpServer {
     pub fn register_auth_challenge(&self, realm: &str, auth_type: &str) {
         let realm = realm.to_string();
         let auth_type = auth_type.to_string();
-        self.on_get("/secret", move |_req: &Request<Body>| -> Response<Body> {
-            Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(
-                    "WWW-Authenticate",
-                    format!("{} realm=\"{}\"", auth_type, realm),
-                )
-                .body(Body::from("Unauthorized"))
-                .unwrap()
-        });
+        self.on_get(
+            "/secret",
+            move |_req: &Request<Incoming>| -> Response<Body> {
+                Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .header(
+                        "WWW-Authenticate",
+                        format!("{} realm=\"{}\"", auth_type, realm),
+                    )
+                    .body(full_body("Unauthorized"))
+                    .unwrap()
+            },
+        );
     }
 
     /// Quick method: return gzip compressed response
@@ -166,12 +250,12 @@ impl MockHttpServer {
         let path = path.to_string();
         self.on_get(
             path.as_str(),
-            move |_req: &Request<Body>| -> Response<Body> {
+            move |_req: &Request<Incoming>| -> Response<Body> {
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Encoding", "gzip")
                     .header("Content-Type", "application/octet-stream")
-                    .body(Body::from(compressed.clone()))
+                    .body(full_body(compressed.clone()))
                     .unwrap()
             },
         );
@@ -182,7 +266,7 @@ impl MockHttpServer {
         let path = path.to_string();
         self.on_get(
             path.as_str(),
-            move |_req: &Request<Body>| -> Response<Body> {
+            move |_req: &Request<Incoming>| -> Response<Body> {
                 // Return plain data; hyper handles chunked encoding when
                 // Transfer-Encoding header is set
                 let body: Vec<u8> = chunks.iter().flatten().copied().collect();
@@ -190,7 +274,7 @@ impl MockHttpServer {
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("Transfer-Encoding", "chunked")
-                    .body(Body::from(body))
+                    .body(full_body(body))
                     .unwrap()
             },
         );
@@ -202,14 +286,14 @@ impl MockHttpServer {
         let path = path.to_string();
         self.on_get(
             path.as_str(),
-            move |req: &Request<Body>| -> Response<Body> {
+            move |req: &Request<Incoming>| -> Response<Body> {
                 // Handle empty body case
                 if body.is_empty() {
                     return Response::builder()
                         .status(StatusCode::OK)
                         .header("Accept-Ranges", "bytes")
                         .header("Content-Length", 0)
-                        .body(Body::empty())
+                        .body(empty_body())
                         .unwrap();
                 }
 
@@ -222,7 +306,6 @@ impl MockHttpServer {
                         && let Some((start_str, end_str)) = range_part.split_once('-')
                     {
                         let start: u64 = start_str.parse().unwrap_or(0);
-                        // Handle empty end_str (means "to end of file")
                         let end: u64 = if end_str.is_empty() {
                             body.len() as u64 - 1
                         } else {
@@ -235,7 +318,7 @@ impl MockHttpServer {
                             return Response::builder()
                                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                                 .header("Content-Range", format!("bytes=*/{}", body.len()))
-                                .body(Body::empty())
+                                .body(empty_body())
                                 .unwrap();
                         }
 
@@ -247,7 +330,7 @@ impl MockHttpServer {
                                 format!("bytes={}-{}/{}", start, end, body.len()),
                             )
                             .header("Accept-Ranges", "bytes")
-                            .body(Body::from(slice.to_vec()))
+                            .body(full_body(slice.to_vec()))
                             .unwrap();
                     }
                 }
@@ -257,7 +340,7 @@ impl MockHttpServer {
                     .status(StatusCode::OK)
                     .header("Accept-Ranges", "bytes")
                     .header("Content-Length", body.len())
-                    .body(Body::from(body.clone()))
+                    .body(full_body(body.clone()))
                     .unwrap()
             },
         );
@@ -274,19 +357,19 @@ impl MockHttpServer {
         let body = body.to_vec();
         self.on_get(
             path.as_str(),
-            move |_req: &Request<Body>| -> Response<Body> {
-                // Use async streaming Body to delay without blocking the tokio runtime.
-                // hyper::Body::wrap_stream() accepts any impl Stream<Item = Result<Bytes, E>>.
+            move |_req: &Request<Incoming>| -> Response<Body> {
+                // Use async streaming body to delay without blocking the tokio runtime.
+                // hyper 1.x `StreamBody` expects `Stream<Item = Result<Frame<D>, E>>`.
                 use futures::stream;
                 let body_clone = body.clone();
                 let stream = stream::once(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    Ok::<_, std::convert::Infallible>(bytes::Bytes::from(body_clone))
+                    Ok::<_, Infallible>(Frame::data(Bytes::from(body_clone)))
                 });
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Length", body.len())
-                    .body(Body::wrap_stream(stream))
+                    .body(StreamBody::new(stream).boxed())
                     .unwrap()
             },
         );
@@ -306,7 +389,7 @@ impl MockHttpServer {
             self.on_get(path, move |_| {
                 Response::builder()
                     .status(StatusCode::OK)
-                    .body(Body::from(final_body.clone()))
+                    .body(full_body(final_body.clone()))
                     .unwrap()
             });
             return;
@@ -342,7 +425,7 @@ impl MockHttpServer {
                     Response::builder()
                         .status(StatusCode::OK)
                         .header("Content-Length", fb.len())
-                        .body(Body::from(fb.clone()))
+                        .body(full_body(fb.clone()))
                         .unwrap()
                 });
             } else {
@@ -354,7 +437,7 @@ impl MockHttpServer {
                         .status(status)
                         .header("Location", loc.as_str())
                         .header("Content-Length", "0")
-                        .body(Body::empty())
+                        .body(empty_body())
                         .unwrap()
                 });
             }
@@ -376,7 +459,7 @@ impl MockHttpServer {
 
         self.on_get(
             path.as_str(),
-            move |req: &Request<Body>| -> Response<Body> {
+            move |req: &Request<Incoming>| -> Response<Body> {
                 // Validate Authorization header: must be present, non-empty,
                 // AND start with the expected scheme prefix (e.g., "Basic " or "Digest ")
                 let expected_prefix = format!("{} ", auth_type);
@@ -391,7 +474,7 @@ impl MockHttpServer {
                     Response::builder()
                         .status(StatusCode::OK)
                         .header("Content-Length", body.len())
-                        .body(Body::from(body.clone()))
+                        .body(full_body(body.clone()))
                         .unwrap()
                 } else {
                     Response::builder()
@@ -400,7 +483,7 @@ impl MockHttpServer {
                             "WWW-Authenticate",
                             format!("{} realm=\"{}\"", auth_type, realm),
                         )
-                        .body(Body::from("Unauthorized"))
+                        .body(full_body("Unauthorized"))
                         .unwrap()
                 }
             },
@@ -411,21 +494,21 @@ impl MockHttpServer {
     ///
     /// # Arguments
     /// * `path` - URL path
-    /// * `full_body` - Full intended body (used for Content-Length header)
+    /// * `full_body_bytes` - Full intended body (used for Content-Length header)
     /// * `serve_bytes` - Number of bytes to actually send before truncating
-    pub fn register_partial_serve(&self, path: &str, full_body: &[u8], serve_bytes: usize) {
-        let full_body = full_body.to_vec();
-        let partial = full_body[..serve_bytes.min(full_body.len())].to_vec();
+    pub fn register_partial_serve(&self, path: &str, full_body_bytes: &[u8], serve_bytes: usize) {
+        let full_body_bytes = full_body_bytes.to_vec();
+        let partial = full_body_bytes[..serve_bytes.min(full_body_bytes.len())].to_vec();
         let path = path.to_string();
 
         self.on_get(
             path.as_str(),
-            move |_req: &Request<Body>| -> Response<Body> {
+            move |_req: &Request<Incoming>| -> Response<Body> {
                 // Claim full size but deliver truncated data (simulates connection drop)
                 Response::builder()
                     .status(StatusCode::OK)
-                    .header("Content-Length", full_body.len())
-                    .body(Body::from(partial.clone()))
+                    .header("Content-Length", full_body_bytes.len())
+                    .body(full_body(partial.clone()))
                     .unwrap()
             },
         );
@@ -445,7 +528,7 @@ impl MockHttpServer {
 
         self.on_get(
             path.as_str(),
-            move |req: &Request<Body>| -> Response<Body> {
+            move |req: &Request<Incoming>| -> Response<Body> {
                 let count = request_count.fetch_add(1, Ordering::SeqCst);
 
                 if count == 0 {
@@ -453,7 +536,7 @@ impl MockHttpServer {
                     Response::builder()
                         .status(StatusCode::OK)
                         .header("Set-Cookie", "session=test_abc123; Path=/")
-                        .body(Body::from("cookie_set"))
+                        .body(full_body("cookie_set"))
                         .unwrap()
                 } else {
                     // Subsequent visits: verify cookie is echoed back
@@ -468,12 +551,12 @@ impl MockHttpServer {
                         seen_cookies.write().unwrap().insert(cookie_header);
                         Response::builder()
                             .status(StatusCode::OK)
-                            .body(Body::from("cookie_verified"))
+                            .body(full_body("cookie_verified"))
                             .unwrap()
                     } else {
                         Response::builder()
                             .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from("missing_cookie"))
+                            .body(full_body("missing_cookie"))
                             .unwrap()
                     }
                 }
@@ -496,13 +579,11 @@ impl MockHttpServer {
     }
 
     /// Shutdown server gracefully
-    pub async fn shutdown(self) {
-        if let Some(tx) = self.shutdown_tx
-            && let Ok(sender) = Arc::try_unwrap(tx)
-        {
-            let _ = sender.send(());
+    pub async fn shutdown(mut self) {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
         }
-        // Give time for graceful shutdown
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Give time for in-flight connections to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await
     }
 }

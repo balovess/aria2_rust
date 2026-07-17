@@ -32,7 +32,7 @@ use aria2_core::config::ConfigManager;
 use aria2_core::init_logging;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::validation::protocol_detector::DetectedInput;
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 
 // Daemon support (module declared in lib.rs as `pub mod daemon;`)
 use crate::daemon::{DaemonConfig, Daemonizer, PidFileManager};
@@ -91,8 +91,7 @@ impl App {
             colored::control::set_override(false);
         }
 
-        // Extract verbose before cli is consumed by load_cli_args
-        let verbose = cli.verbose;
+        // verbose is handled via log-level config option
 
         // Use --conf-path from CLI if provided, else fall back to default
         let conf_path = cli
@@ -131,12 +130,13 @@ impl App {
             }
 
             // Perform daemonization
-            let log_path = self.get_opt_str("log").await.map(PathBuf::from);
-
+            // Note: Do NOT pass log_path to stdout_file/stderr_file.
+            // File logging is handled by init_logging() below using rolling appender.
+            // Passing log_path here would create duplicate log files.
             let daemon_config = DaemonConfig {
                 pid_file: pid_file.clone(),
-                stdout_file: log_path.clone(),
-                stderr_file: log_path,
+                stdout_file: None,
+                stderr_file: None,
                 chdir_to_root: false,
                 close_fds: true,
             };
@@ -149,16 +149,45 @@ impl App {
 
             // After daemonization, we are in the child process
             // Re-initialize logging for the daemon process
-            let log_level = if verbose { Level::DEBUG } else { Level::INFO };
+            let log_level = self
+                .get_opt_str("log-level")
+                .await
+                .unwrap_or_else(|| "info".to_string());
+            let console_log_level = self
+                .get_opt_str("console-log-level")
+                .await
+                .unwrap_or_else(|| "notice".to_string());
             let log_path = self.get_opt_str("log").await;
-            init_logging(log_level, log_path.as_deref());
+            let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
+            init_logging(
+                &log_level,
+                &console_log_level,
+                log_path.as_deref(),
+                log_backup_count,
+            );
 
             info!("Daemon started successfully");
         }
 
-        let log_level = if verbose { Level::DEBUG } else { Level::INFO };
-        let log_path = self.get_opt_str("log").await;
-        init_logging(log_level, log_path.as_deref());
+        // In daemon mode, logging was already re-initialized after daemonization above.
+        if !daemon_mode {
+            let log_level = self
+                .get_opt_str("log-level")
+                .await
+                .unwrap_or_else(|| "info".to_string());
+            let console_log_level = self
+                .get_opt_str("console-log-level")
+                .await
+                .unwrap_or_else(|| "notice".to_string());
+            let log_path = self.get_opt_str("log").await;
+            let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
+            init_logging(
+                &log_level,
+                &console_log_level,
+                log_path.as_deref(),
+                log_backup_count,
+            );
+        }
 
         self.print_banner();
 

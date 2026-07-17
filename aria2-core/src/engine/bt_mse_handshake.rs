@@ -335,7 +335,10 @@ impl MseHandshakeManager {
 
     /// Parse remote key exchange payload, compute shared secret
     pub fn process_remote_key_exchange(&mut self, data: &[u8]) -> Result<()> {
-        if data.len() < 8 + 32 {
+        // Minimum payload = 6-byte header (PAD_D + PAD_LEN + Crypto_Pro) + 32-byte
+        // DH public key = 38 bytes. PAD data length is variable (0..=512) and is
+        // validated separately below against the embedded PAD_LEN field.
+        if data.len() < 6 + 32 {
             return Err(Aria2Error::Parse(
                 "Key exchange payload too short".to_string(),
             ));

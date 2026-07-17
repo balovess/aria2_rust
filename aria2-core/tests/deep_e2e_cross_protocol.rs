@@ -14,7 +14,7 @@ use aria2_core::filesystem::disk_writer::{ByteArrayDiskWriter, DefaultDiskWriter
 use aria2_core::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::session::session_entry::SessionEntry;
-use e2e_helpers::mock_http_server::MockHttpServer;
+use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
 use fixtures::mock_ftp_server::{MockFtpServer, small_content};
 use fixtures::test_metalink_builder::{build_metalink_v3, compute_sha256};
 use std::collections::HashMap;
@@ -160,9 +160,9 @@ async fn metalink_mirror_failover() {
     // Primary URL returns 503 Service Unavailable
     let primary_url = format!("{}/error/503-primary", server.base_url());
     server.on_get("/error/503-primary", |_req| {
-        hyper::Response::builder()
-            .status(hyper::StatusCode::SERVICE_UNAVAILABLE)
-            .body(hyper::Body::from("Service Unavailable"))
+        Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(full_body("Service Unavailable"))
             .unwrap()
     });
 

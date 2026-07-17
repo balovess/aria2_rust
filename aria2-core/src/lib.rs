@@ -108,12 +108,15 @@ pub use request::request_group::{DownloadStatus, RUNTIME_CHANGEABLE_OPTIONS};
 #[cfg(test)]
 mod integration_tests_j2_j5;
 
-use tracing::Level;
-
 /// Initialize the logging subsystem with optional file output.
 ///
 /// Sets up `tracing-subscriber` with console output (colorized) and optionally
 /// writes to a log file. The log level controls verbosity (DEBUG/INFO/WARN/ERROR).
-pub fn init_logging(level: Level, log_file: Option<&str>) {
-    log::init_logging(level, log_file);
+pub fn init_logging(
+    log_level: &str,
+    console_log_level: &str,
+    log_file: Option<&str>,
+    log_backup_count: usize,
+) {
+    log::init_logging(log_level, console_log_level, log_file, log_backup_count);
 }

@@ -257,7 +257,17 @@ impl MetalinkDownloadCommand {
             ))));
         }
 
-        let total_length = response.content_length().unwrap_or(0) as u64;
+        // Read Content-Length from the header directly instead of using
+        // response.content_length(), which returns the *body* size. For chunked
+        // transfer encoding or proxy-modified responses the body size may differ
+        // from the advertised header value. The header value is what the server
+        // advertised and is consistent with download_command.rs's approach.
+        let total_length = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
 
         {
             let mut g = self.group.write().await;
