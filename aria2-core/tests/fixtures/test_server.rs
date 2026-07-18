@@ -28,9 +28,18 @@ impl TestServer {
                         match result {
                             Ok((mut stream, _)) => {
                                 let request = Self::read_request(&mut stream).await;
-                                let response = Self::handle_request(&request);
-                                let _ = stream.write_all(&response).await;
-                                let _ = stream.flush().await;
+                                let request_str = String::from_utf8_lossy(&request);
+                                let first_line = request_str.lines().next().unwrap_or("");
+                                let mut parts = first_line.split(' ');
+                                parts.next();
+                                let path = parts.next().unwrap_or("");
+                                if path.starts_with("/files/timeout_") || path.starts_with("/files/disconnect_") {
+                                    let _ = Self::handle_async_request(&mut stream, &request).await;
+                                } else {
+                                    let response = Self::handle_request(&request);
+                                    let _ = stream.write_all(&response).await;
+                                    let _ = stream.flush().await;
+                                }
                             }
                             Err(_) => break,
                         }
@@ -56,6 +65,75 @@ impl TestServer {
         let n = stream.read(&mut buf).await.unwrap_or(0);
         buf.truncate(n);
         buf
+    }
+
+    async fn handle_async_request(
+        stream: &mut tokio::net::TcpStream,
+        request: &[u8],
+    ) -> std::io::Result<()> {
+        let request_str = String::from_utf8_lossy(request);
+        let first_line = request_str.lines().next().unwrap_or("");
+        let mut parts = first_line.split(' ');
+        let path = parts.nth(1).unwrap_or("");
+
+        match path {
+            "/files/timeout_test.bin" => {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let body: Vec<u8> = (0..=100u8).collect();
+                let response = http_response(200, "application/octet-stream", &body);
+                stream.write_all(&response).await?;
+                stream.flush().await
+            }
+            "/files/disconnect_test.bin" => {
+                let partial_response = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 1000\r\n\r\n";
+                stream.write_all(partial_response).await?;
+                stream.flush().await?;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Ok(())
+            }
+            "/files/disconnect_range_test.bin" => {
+                let range_header = if request_str.contains("Range:") {
+                    Some(
+                        request_str
+                            .split("Range: ")
+                            .nth(1)
+                            .and_then(|r| r.lines().next())
+                            .unwrap_or(""),
+                    )
+                } else {
+                    None
+                };
+
+                if let Some(range) = range_header
+                    && let Some((start_str, _)) = range
+                        .trim()
+                        .strip_prefix("bytes=")
+                        .and_then(|r| r.split_once('-'))
+                {
+                    let start: usize = start_str.parse().unwrap_or(0);
+                    if (100..200).contains(&start) {
+                        let partial_response = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes=100-149/250\r\nContent-Length: 50\r\n\r\n";
+                        stream.write_all(partial_response).await?;
+                        stream.flush().await?;
+                        let partial_body: Vec<u8> = (100..125).map(|i| i as u8).collect();
+                        stream.write_all(&partial_body).await?;
+                        stream.flush().await?;
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        return Ok(());
+                    }
+                }
+
+                let body: Vec<u8> = (0..=250u8).collect();
+                let response = http_response(200, "application/octet-stream", &body);
+                stream.write_all(&response).await?;
+                stream.flush().await
+            }
+            _ => {
+                let response = Self::handle_request(request);
+                stream.write_all(&response).await?;
+                stream.flush().await
+            }
+        }
     }
 
     fn handle_request(request: &[u8]) -> Vec<u8> {
@@ -121,6 +199,119 @@ impl TestServer {
                     String::from_utf8_lossy(body)
                 );
                 header.into_bytes()
+            }
+            "/files/retry_test.bin" => {
+                let range_header = if request_str.contains("Range:") {
+                    Some(request_str.split("Range: ").nth(1).and_then(|r| r.lines().next()).unwrap_or(""))
+                } else { None };
+
+                if let Some(range) = range_header {
+                    if let Some((start_str, end_str)) = range.trim().strip_prefix("bytes=").and_then(|r| r.split_once('-')) {
+                        let start: usize = start_str.parse().unwrap_or(0);
+                        let end: usize = end_str.parse().unwrap_or(99);
+                        let total = 200u8;
+
+                        if start >= 100 && request_str.contains("fail_on_second") {
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
+                        } else {
+                            let body: Vec<u8> = (start..=end.min(total as usize)).map(|i| i as u8).collect();
+                            format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes={}-{}/{}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                                start, end.min(total as usize), total, body.len()
+                            ).into_bytes()
+                            .into_iter().chain(body).collect()
+                        }
+                    } else { http_404() }
+                } else {
+                    let body: Vec<u8> = (0..=200u8).collect();
+                    http_response(200, "application/octet-stream", &body)
+                }
+            }
+            "/files/partial_fail_test.bin" => {
+                let range_header = if request_str.contains("Range:") {
+                    Some(request_str.split("Range: ").nth(1).and_then(|r| r.lines().next()).unwrap_or(""))
+                } else { None };
+
+                if let Some(range) = range_header {
+                    if let Some((start_str, end_str)) = range.trim().strip_prefix("bytes=").and_then(|r| r.split_once('-')) {
+                        let start: usize = start_str.parse().unwrap_or(0);
+                        let end: usize = end_str.parse().unwrap_or(99);
+                        let total = 250u8;
+
+                        if (100..200).contains(&start) {
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
+                        } else {
+                            let body: Vec<u8> = (start..=end.min(total as usize)).map(|i| i as u8).collect();
+                            format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes={}-{}/{}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                                start, end.min(total as usize), total, body.len()
+                            ).into_bytes()
+                            .into_iter().chain(body).collect()
+                        }
+                    } else { http_404() }
+                } else {
+                    let body: Vec<u8> = (0..=250u8).collect();
+                    http_response(200, "application/octet-stream", &body)
+                }
+            }
+            "/files/concurrent_416_test.bin" => {
+                let range_header = if request_str.contains("Range:") {
+                    Some(request_str.split("Range: ").nth(1).and_then(|r| r.lines().next()).unwrap_or(""))
+                } else { None };
+
+                if let Some(range) = range_header {
+                    if let Some((start_str, end_str)) = range.trim().strip_prefix("bytes=").and_then(|r| r.split_once('-')) {
+                        let start: usize = start_str.parse().unwrap_or(0);
+                        let end: usize = end_str.parse().unwrap_or(99);
+                        let total = 2000000u64;
+
+                        if (500000..1000000).contains(&start) {
+                            format!(
+                                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\n\r\n",
+                                total
+                            ).into_bytes()
+                        } else {
+                            let actual_end = std::cmp::min(end, (total - 1) as usize);
+                            let body: Vec<u8> = (start..=actual_end).map(|i| (i % 256) as u8).collect();
+                            format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes={}-{}/{}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                                start, actual_end, total, body.len()
+                            ).into_bytes()
+                            .into_iter().chain(body).collect()
+                        }
+                    } else { http_404() }
+                } else {
+                    let body: Vec<u8> = (0..2000000).map(|i| (i % 256) as u8).collect();
+                    http_response(200, "application/octet-stream", &body)
+                }
+            }
+            "/files/concurrent_server_error.bin" => {
+                let range_header = if request_str.contains("Range:") {
+                    Some(request_str.split("Range: ").nth(1).and_then(|r| r.lines().next()).unwrap_or(""))
+                } else { None };
+
+                if let Some(range) = range_header {
+                    if let Some((start_str, end_str)) = range.trim().strip_prefix("bytes=").and_then(|r| r.split_once('-')) {
+                        let start: usize = start_str.parse().unwrap_or(0);
+                        let end: usize = end_str.parse().unwrap_or(99);
+                        let total = 2000000u64;
+
+                        if (500000..1000000).contains(&start) {
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
+                        } else {
+                            let actual_end = std::cmp::min(end, (total - 1) as usize);
+                            let body: Vec<u8> = (start..=actual_end).map(|i| (i % 256) as u8).collect();
+                            format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes={}-{}/{}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                                start, actual_end, total, body.len()
+                            ).into_bytes()
+                            .into_iter().chain(body).collect()
+                        }
+                    } else { http_404() }
+                } else {
+                    let body: Vec<u8> = (0..2000000).map(|i| (i % 256) as u8).collect();
+                    http_response(200, "application/octet-stream", &body)
+                }
             }
             _ => http_404(),
         };

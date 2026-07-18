@@ -6,8 +6,6 @@ use tracing::{debug, warn};
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::http::hyper_client::HyperDirectClient;
-
 // Re-export score_source for convenience
 pub use crate::selector::adaptive_uri_selector::{
     score_source_raw as score_source, score_source_raw,
@@ -15,12 +13,6 @@ pub use crate::selector::adaptive_uri_selector::{
 
 pub struct HttpSegmentDownloader {
     client: reqwest::Client,
-    /// Direct hyper client for the non-proxy HTTP hot path. `None` when a
-    /// proxy is configured or the caller explicitly opts out (e.g. tests for
-    /// the reqwest-only path). HTTPS URLs always fall back to reqwest even
-    /// when this is `Some`, because `HyperDirectClient` only handles plain
-    /// HTTP in its current form.
-    hyper_client: Option<HyperDirectClient>,
 }
 
 /// Calculate optimal segment size based on download speed and remaining data.
@@ -189,29 +181,10 @@ impl ConnectionLimiter {
 
 impl HttpSegmentDownloader {
     /// Create a new `HttpSegmentDownloader`.
-    ///
-    /// When `use_hyper` is `true` and the request URL is plain HTTP, the
-    /// `download_range` hot path will try `HyperDirectClient` first and fall
-    /// back to reqwest on any error. Pass `false` for proxy paths (the
-    /// `HyperDirectClient` does not support proxies, HTTPS, or custom
-    /// headers/cookies).
-    pub fn new(client: &reqwest::Client, use_hyper: bool) -> Self {
+    pub fn new(client: &reqwest::Client) -> Self {
         Self {
             client: client.clone(),
-            hyper_client: if use_hyper {
-                Some(HyperDirectClient::new())
-            } else {
-                None
-            },
         }
-    }
-
-    /// Whether the hyper direct client is wired in for this downloader.
-    /// Exposed for tests so they can assert wiring without making the field
-    /// `pub`.
-    #[cfg(test)]
-    pub(crate) fn has_hyper_client(&self) -> bool {
-        self.hyper_client.is_some()
     }
 
     pub async fn supports_range(
@@ -220,10 +193,6 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
     ) -> Result<bool> {
-        // TODO: route HEAD probes through `HyperDirectClient` when available
-        // (it currently has no `supports_range` / HEAD API). Until then the
-        // reqwest path handles headers/cookies correctly, which is the
-        // behaviour we want for range-support negotiation.
         let mut req = self.client.head(url);
         if let Some(ch) = cookie_header {
             req = req.header("Cookie", ch);
@@ -263,35 +232,6 @@ impl HttpSegmentDownloader {
     ) -> Result<bytes::Bytes> {
         if length == 0 {
             return Ok(bytes::Bytes::new());
-        }
-
-        // Use the hyper direct client for the non-proxy plain-HTTP hot path.
-        // `HyperDirectClient` does not support HTTPS, proxies, custom headers,
-        // or cookies — those cases fall through to the reqwest path below.
-        // TODO: extend `HyperDirectClient` to forward custom headers/cookies so
-        // the reqwest fallback is only needed for HTTPS/proxy.
-        if let Some(ref hyper) = self.hyper_client
-            && !url.starts_with("https://")
-        {
-            match hyper.download_range(url, offset, Some(length)).await {
-                Ok(data) => {
-                    debug!(
-                        "HyperDirectClient served range {}-{} ({} bytes) from {}",
-                        offset,
-                        offset + length,
-                        data.len(),
-                        url
-                    );
-                    return Ok(data);
-                }
-                Err(e) => {
-                    warn!(
-                        "HyperDirectClient failed for {} (offset={}, len={}), falling back to reqwest: {}",
-                        url, offset, length, e
-                    );
-                    // Fall through to the reqwest path.
-                }
-            }
         }
 
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
@@ -394,9 +334,7 @@ mod tests {
             .connect_timeout(Duration::from_millis(100))
             .build()
             .unwrap();
-        // use_hyper=false keeps supports_range on the reqwest path it has
-        // always exercised.
-        let dl = HttpSegmentDownloader::new(&client, false);
+        let dl = HttpSegmentDownloader::new(&client);
         let result = dl
             .supports_range("http://127.0.0.1:1/nonexistent", None, &[])
             .await;
@@ -406,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_zero_length() {
         let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client, false);
+        let dl = HttpSegmentDownloader::new(&client);
         let result = dl
             .download_range("http://example.com", 0, 0, None, &[])
             .await;
@@ -417,8 +355,8 @@ mod tests {
     #[tokio::test]
     async fn test_downloader_creation() {
         let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client, false);
-        let _dl2 = HttpSegmentDownloader::new(&dl.client, false);
+        let dl = HttpSegmentDownloader::new(&client);
+        let _dl2 = HttpSegmentDownloader::new(&dl.client);
     }
 
     #[tokio::test]
@@ -444,10 +382,7 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        // use_hyper=false so the mock server (single accepted connection) is
-        // consumed by reqwest and the 416 status is handled by the reqwest
-        // path, preserving the test's original intent.
-        let dl = HttpSegmentDownloader::new(&client, false);
+        let dl = HttpSegmentDownloader::new(&client);
 
         let result = dl.download_range(&url, 99999, 100, None, &[]).await;
         assert!(result.is_err(), "416 should be an error");
@@ -462,7 +397,7 @@ mod tests {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .unwrap();
-        let dl = HttpSegmentDownloader::new(&client, false);
+        let dl = HttpSegmentDownloader::new(&client);
 
         match dl
             .supports_range(
@@ -487,38 +422,12 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_status_code_handling() {
         let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client, false);
+        let dl = HttpSegmentDownloader::new(&client);
 
         let result_404 = dl
             .download_range("http://httpbin.org/status/404", 0, 100, None, &[])
             .await;
         assert!(result_404.is_err(), "404 should be fatal error");
-    }
-
-    /// When constructed with `use_hyper=true` (the non-proxy hot path), the
-    /// `hyper_client` field must be wired so `download_range` can try hyper
-    /// first for plain HTTP URLs.
-    #[test]
-    fn test_http_segment_downloader_uses_hyper_by_default() {
-        let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client, true);
-        assert!(
-            dl.has_hyper_client(),
-            "use_hyper=true must wire the HyperDirectClient"
-        );
-    }
-
-    /// When constructed with `use_hyper=false` (the proxy path), the
-    /// `hyper_client` field must be `None` so `download_range` always uses
-    /// reqwest (the only client that supports proxies / custom auth).
-    #[test]
-    fn test_http_segment_downloader_no_hyper_with_proxy() {
-        let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client, false);
-        assert!(
-            !dl.has_hyper_client(),
-            "use_hyper=false must NOT wire the HyperDirectClient (proxy path)"
-        );
     }
 
     #[test]

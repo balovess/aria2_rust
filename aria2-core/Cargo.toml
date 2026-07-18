@@ -48,16 +48,6 @@ adler32 = "1.2"
 digest = "0.10"
 aria2-protocol = { workspace = true, features = ["bittorrent", "metalink", "sftp"] }
 reqwest = { version = "0.13.4", features = ["stream", "rustls", "gzip", "http2"], default-features = false }
-# hyper 1.x is used directly for the hot HTTP download path (HyperDirectClient)
-# and by the in-crate test mock server. reqwest 0.13 also depends on hyper 1.x,
-# so a single hyper version is shared across the dependency tree.
-# `hyper-util` provides client/server connectors and `TokioIo` / `TokioExecutor`.
-# `http-body-util` provides `Full`/`Empty`/`StreamBody` body helpers.
-# `http` provides shared `Request`/`Response`/`StatusCode`/`HeaderMap` types.
-hyper = { version = "1", features = ["http1", "http2"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
-http-body-util = "0.1"
-http = "1"
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
@@ -85,6 +75,13 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
+# hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
+# for serving test HTTP responses. reqwest 0.13 already depends on hyper 1.x
+# as a transitive dep, so no additional version conflicts are introduced.
+hyper = { version = "1", features = ["http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+http-body-util = "0.1"
+http = "1"
 tempfile = "3.8"
 tokio-test = "0.4"
 criterion.workspace = true

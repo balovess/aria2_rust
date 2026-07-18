@@ -56,6 +56,9 @@ pub enum RecoverableError {
     #[error("Server returned error: {code}")]
     ServerError { code: u16 },
 
+    #[error("Range not satisfiable: {range}")]
+    RangeNotSatisfiable { range: String },
+
     #[error("Temporary network failure: {message}")]
     TemporaryNetworkFailure { message: String },
 
