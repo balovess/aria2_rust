@@ -61,6 +61,7 @@ pub mod json_rpc;
 pub mod server;
 pub mod types;
 pub mod websocket;
+pub mod ws_handler;
 pub mod xml_rpc;
 
 pub use engine::RpcEngine;

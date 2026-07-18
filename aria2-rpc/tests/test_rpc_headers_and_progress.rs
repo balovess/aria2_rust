@@ -171,9 +171,10 @@ async fn test_tell_status_returns_live_progress() {
     let status = resp.result.unwrap();
     assert_eq!(status["gid"], gid);
     assert_eq!(status["status"], "active");
-    assert_eq!(status["totalLength"], 10_000_000);
-    assert_eq!(status["completedLength"], 4_200_000);
-    assert_eq!(status["downloadSpeed"], 512_000);
+    // Per original aria2 protocol, all numeric fields are JSON strings.
+    assert_eq!(status["totalLength"], "10000000");
+    assert_eq!(status["completedLength"], "4200000");
+    assert_eq!(status["downloadSpeed"], "512000");
 }
 
 // =========================================================================
@@ -189,8 +190,10 @@ async fn test_get_global_stat_aggregates_live_data() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
     let stat = resp.result.unwrap();
-    assert_eq!(stat["downloadSpeed"], 0);
-    assert_eq!(stat["numActive"], 0);
+    // Per original aria2 protocol, all GlobalStat fields are JSON strings
+    // (util::itos / util::uitos). See RpcMethodImpl.cc:1382-1394.
+    assert_eq!(stat["downloadSpeed"], "0");
+    assert_eq!(stat["numActive"], "0");
 
     // Add two downloads with different speeds
     let add1 = JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(2);
@@ -218,9 +221,10 @@ async fn test_get_global_stat_aggregates_live_data() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
     let stat = resp.result.unwrap();
-    assert_eq!(stat["downloadSpeed"], 500_000);
-    assert_eq!(stat["numActive"], 2);
-    assert_eq!(stat["numWaiting"], 0);
+    // All values are JSON strings (matches util::itos / util::uitos).
+    assert_eq!(stat["downloadSpeed"], "500000");
+    assert_eq!(stat["numActive"], "2");
+    assert_eq!(stat["numWaiting"], "0");
 }
 
 // =========================================================================
@@ -292,8 +296,9 @@ async fn test_progress_changes_reflected_in_tell_status() {
     let tell1 = JsonRpcRequest::new("aria2.tellStatus", json!([gid.clone()])).with_id(2);
     let resp = engine.handle_request(&tell1).await;
     let s1 = resp.result.unwrap();
-    assert_eq!(s1["completedLength"], 100_000);
-    assert_eq!(s1["totalLength"], 1_000_000);
+    // Per original aria2 protocol, numeric fields are JSON strings.
+    assert_eq!(s1["completedLength"], "100000");
+    assert_eq!(s1["totalLength"], "1000000");
 
     // Simulate more progress
     {
@@ -308,8 +313,8 @@ async fn test_progress_changes_reflected_in_tell_status() {
     let tell2 = JsonRpcRequest::new("aria2.tellStatus", json!([gid.clone()])).with_id(3);
     let resp = engine.handle_request(&tell2).await;
     let s2 = resp.result.unwrap();
-    assert_eq!(s2["completedLength"], 500_000, "progress should update");
-    assert_eq!(s2["downloadSpeed"], 120_000, "speed should update");
+    assert_eq!(s2["completedLength"], "500000", "progress should update");
+    assert_eq!(s2["downloadSpeed"], "120000", "speed should update");
 }
 
 // =========================================================================

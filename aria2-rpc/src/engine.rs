@@ -1,16 +1,23 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
-use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
+use super::types::{DownloadStatus, GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
 use super::websocket::EventPublisher;
 use aria2_core::TorrentFileEntry;
 use aria2_core::config::OptionRegistry;
 use aria2_core::engine::command::Command;
 use aria2_core::request::request_group_man::RequestGroupMan;
+
+/// Delay before a scheduled halt actually triggers the shutdown signal,
+/// mirroring the original aria2 `TimedHaltCommand` 3-second delay (see
+/// `RpcMethodImpl.cc::goingShutdown`). The delay gives the RPC client time
+/// to receive the `"OK"` response before the server begins shutting down.
+pub(crate) const HALT_DELAY: Duration = Duration::from_secs(3);
 
 /// Core RPC engine that manages download tasks and handles aria2 protocol requests.
 ///
@@ -42,6 +49,12 @@ pub struct RpcEngine {
     /// When set, `aria2.addUri` starts real downloads by sending a
     /// `DownloadCommand` through this channel.
     pub(crate) cmd_tx: Option<mpsc::UnboundedSender<Box<dyn Command>>>,
+    /// Cancellation token that signals graceful server shutdown.
+    ///
+    /// Triggered by [`RpcEngine::schedule_halt`] after a [`HALT_DELAY`]-second
+    /// delay (mirroring the original aria2 `TimedHaltCommand`). The HTTP
+    /// server's `with_graceful_shutdown` futures awaits this token.
+    pub(crate) shutdown_signal: CancellationToken,
 }
 
 /// Internal state for an active download task.
@@ -97,22 +110,18 @@ impl TaskState {
 
     /// Update the StatusInfo snapshot from current internal state.
     ///
-    /// Called before returning status to ensure all progress fields
-    /// are reflected in the response.
+    /// Refreshes progress fields (lengths, speeds, connections) from the
+    /// internal u64 counters while preserving all metadata fields (BT info,
+    /// files, dir, error info, etc.) that were set when the task was created
+    /// or updated by other handlers.
     pub(crate) fn update_status_info(&mut self) {
-        let mut status = StatusInfo::new(&self.status.gid)
-            .with_status(self.status.status.clone())
-            .with_total_length(self.total_length)
-            .with_completed_length(self.completed_length)
-            .with_upload_length(self.upload_length)
-            .with_download_speed(self.download_speed)
-            .with_upload_speed(self.upload_speed)
-            .with_connections(self.connections)
-            .with_dir(self.status.dir.clone().unwrap_or_default())
-            .with_files(self.status.files.clone().unwrap_or_default());
-        if let Some(ref tf) = self.torrent_files {
-            status = status.with_torrent_files(tf.clone());
-        }
+        let mut status = self.status.clone();
+        status.total_length = Some(self.total_length.to_string());
+        status.completed_length = Some(self.completed_length.to_string());
+        status.upload_length = Some(self.upload_length.to_string());
+        status.download_speed = Some(self.download_speed.to_string());
+        status.upload_speed = Some(self.upload_speed.to_string());
+        status.connections = Some(self.connections.to_string());
         self.status = status;
     }
 
@@ -169,6 +178,7 @@ impl RpcEngine {
             auth_middleware: RpcAuthMiddleware::default(),
             group_man: None,
             cmd_tx: None,
+            shutdown_signal: CancellationToken::new(),
         }
     }
 
@@ -237,6 +247,74 @@ impl RpcEngine {
         &self.event_publisher
     }
 
+    /// Returns a clone of the engine's shutdown signal token.
+    ///
+    /// Used by the HTTP server (`axum::serve::with_graceful_shutdown`) to wait
+    /// for shutdown triggers fired by [`Self::schedule_halt`].
+    ///
+    /// [`CancellationToken`] is internally `Arc`-based, so cloning is cheap
+    /// and shares the same underlying cancellation source.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown_signal.clone()
+    }
+
+    /// Schedule a delayed halt that triggers the engine's shutdown signal
+    /// after `delay`, mirroring the original aria2 `TimedHaltCommand`.
+    ///
+    /// When `force` is `true`, also forcibly cancels every active download
+    /// task (matching `forceHalt=true` in `DownloadEngine::forceHalt()`); the
+    /// task map is cleared and each task's [`CancellationToken`] is cancelled.
+    ///
+    /// When `force` is `false`, active downloads are left untouched — the
+    /// engine's graceful halt logic (in `DownloadEngine`) is responsible for
+    /// letting in-flight downloads finish before the process exits.
+    ///
+    /// # Why a delay?
+    ///
+    /// Per the original aria2 source comment:
+    /// > "Schedule shutdown after 3 seconds to give time to client to
+    /// > receive RPC response."
+    ///
+    /// Cancelling immediately could close the HTTP response stream before
+    /// the client receives the `"OK"` body, which would surface as a
+    /// connection-reset error in plugins like AriaNg.
+    ///
+    /// # Idempotency
+    ///
+    /// Safe to call multiple times: each call spawns an independent task,
+    /// but cancelling an already-cancelled token and clearing an empty map
+    /// are both no-ops.
+    pub(crate) fn schedule_halt(&self, delay: Duration, force: bool) {
+        let shutdown_token = self.shutdown_signal.clone();
+        let tasks = self.tasks.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+
+            if force {
+                // Force-cancel every active download (forceHalt=true).
+                // The order matters: cancel tokens first so any in-flight
+                // download futures stop promptly, then mark status as Removed
+                // so any subsequent tellStatus/tellActive call sees the right
+                // state, then drop the map entries entirely.
+                let mut tasks_guard = tasks.write().await;
+                for state in tasks_guard.values_mut() {
+                    if let Some(cancel_token) = &state.cancel_token {
+                        cancel_token.cancel();
+                    }
+                    state.status.status = DownloadStatus::Removed;
+                }
+                tasks_guard.clear();
+            }
+
+            shutdown_token.cancel();
+            tracing::info!(
+                force,
+                "RPC shutdown signal fired (scheduled halt fired after delay)"
+            );
+        });
+    }
+
     /// Get current number of active tasks.
     pub async fn task_count(&self) -> usize {
         self.tasks.read().await.len()
@@ -295,14 +373,28 @@ impl RpcEngine {
     ///
     /// Before dispatching, validates the request token against the
     /// configured `rpc-secret` (if any) via [`RpcAuthMiddleware`].
+    ///
+    /// **Authentication protocol** (matches original aria2):
+    /// - Positional params: `params[0]` must be a string `"token:<secret>"`
+    /// - Named params: `params.secret` must be the secret string
+    ///
+    /// The token is stripped from `params` before dispatching to handlers
+    /// so that handlers never see the token element.
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let id = req.id.clone().unwrap_or(serde_json::Value::Null);
 
-        // Authenticate: extract token from params and validate
-        let token = req.params.get("token").and_then(|v| v.as_str());
-        if let Err(auth_err) = self.auth_middleware.validate(token) {
+        // Authenticate: extract token via aria2 protocol and strip from params.
+        // The stripped request is passed to handlers so they see clean params.
+        let (token, stripped_params) = JsonRpcRequest::extract_token(&req.params);
+        let mut stripped_req = req.clone();
+        stripped_req.params = stripped_params;
+
+        if let Err(auth_err) = self.auth_middleware.validate(token.as_deref()) {
             return auth_err.into_response(req.id.clone());
         }
+
+        // Use `stripped_req` everywhere so handlers receive token-free params
+        let req = &stripped_req;
 
         match req.method.as_str() {
             "aria2.addUri" => self
@@ -349,7 +441,7 @@ impl RpcEngine {
                 .handle_tell_stopped(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getGlobalStat" => self.handle_global_stat().await,
+            "aria2.getGlobalStat" => self.handle_global_stat(req).await,
             "aria2.getUris" => self
                 .handle_get_uris(req)
                 .await
@@ -387,9 +479,9 @@ impl RpcEngine {
                 .handle_get_peers(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.pauseAll" => self.handle_pause_all().await,
-            "aria2.forcePauseAll" => self.handle_force_pause_all().await,
-            "aria2.unpauseAll" => self.handle_unpause_all().await,
+            "aria2.pauseAll" => self.handle_pause_all(req).await,
+            "aria2.forcePauseAll" => self.handle_force_pause_all(req).await,
+            "aria2.unpauseAll" => self.handle_unpause_all(req).await,
             "aria2.changeUri" => self
                 .handle_change_uri(req)
                 .await
@@ -593,26 +685,39 @@ mod tests {
     async fn test_engine_auth_valid_token_passes() {
         let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
 
-        // Request with correct token in params
+        // Request with correct token using aria2 standard positional protocol:
+        // params[0] = "token:<secret>"
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!(["token:my-secret"]))
+            .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(
+            resp.is_success(),
+            "Valid token:secret positional should be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_auth_valid_token_named_secret_passes() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
+
+        // Request with correct token using aria2 standard named-params protocol:
+        // params.secret = "<secret>" (without "token:" prefix)
         let req = JsonRpcRequest::new(
             "aria2.getVersion",
-            serde_json::json!({"token": "my-secret"}),
+            serde_json::json!({"secret": "my-secret"}),
         )
         .with_id(1);
         let resp = engine.handle_request(&req).await;
-        assert!(resp.is_success(), "Valid token should be accepted");
+        assert!(resp.is_success(), "Valid named secret should be accepted");
     }
 
     #[tokio::test]
     async fn test_engine_auth_wrong_token_rejected() {
         let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
 
-        // Request with wrong token
-        let req = JsonRpcRequest::new(
-            "aria2.getVersion",
-            serde_json::json!({"token": "wrong-token"}),
-        )
-        .with_id(1);
+        // Request with wrong token via positional protocol
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!(["token:wrong-token"]))
+            .with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_error(), "Wrong token should be rejected");
         assert_eq!(
@@ -641,13 +746,63 @@ mod tests {
         // Test that AuthConfig.token flows through correctly
         let engine = RpcEngine::new().with_auth(AuthConfig::default().with_token("config-secret"));
 
-        // Use object-style params where token is a named field
+        // Use aria2 standard positional protocol with config-provided secret
         let req = JsonRpcRequest::new(
             "aria2.getVersion",
-            serde_json::json!({"token": "config-secret"}),
+            serde_json::json!(["token:config-secret"]),
         )
         .with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_success(), "Token from AuthConfig should work");
+    }
+
+    #[tokio::test]
+    async fn test_engine_auth_token_stripped_from_params() {
+        // After auth succeeds, the token must be stripped from params so
+        // handlers never see "token:secret" as their first positional arg.
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
+
+        // addUri expects params[0] = uris array, params[1] = options dict.
+        // With token, the request is: ["token:my-secret", ["http://x.com/f"], {...}]
+        let req = JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!(["token:my-secret", ["http://x.com/f"]]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(
+            resp.is_success(),
+            "Token should be stripped and addUri should succeed. Got: {:?}",
+            resp.error
+        );
+        // Verify the result is a GID (16 hex chars), not an error about
+        // "token:my-secret" being treated as a URI list.
+        let result = resp.result.unwrap();
+        assert!(
+            result.is_string(),
+            "Result should be a GID string, got: {:?}",
+            result
+        );
+        let gid: String = serde_json::from_value(result).unwrap();
+        assert_eq!(gid.len(), 16, "GID should be 16 hex chars");
+    }
+
+    #[tokio::test]
+    async fn test_engine_auth_named_secret_stripped_from_params() {
+        // When using named params, the "secret" field must be removed
+        // before dispatching so handlers don't see it.
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("my-secret"));
+
+        // Use named "secret" + named "gid" — tellStatus reads gid by name.
+        let req = JsonRpcRequest::new(
+            "aria2.getVersion",
+            serde_json::json!({"secret": "my-secret"}),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&req).await;
+        assert!(
+            resp.is_success(),
+            "Named secret should be stripped and accepted"
+        );
     }
 }

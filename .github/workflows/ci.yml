@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [master]
   pull_request:
     branches: [master]
 
@@ -10,6 +8,59 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Detect changed crates ────────────────────────────────
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      pkgs: ${{ steps.pkgs.outputs.pkgs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            protocol:
+              - 'aria2-protocol/**'
+            core:
+              - 'aria2-core/**'
+            rpc:
+              - 'aria2-rpc/**'
+            cli:
+              - 'aria2/**'
+            workspace:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+      - name: Compute test packages
+        id: pkgs
+        shell: bash
+        run: |
+          # Dependency chain: aria2 → aria2-rpc → aria2-core → aria2-protocol
+          # Changes to a lower crate also need to test all upstream consumers.
+          if [ "${{ steps.filter.outputs.workspace }}" = "true" ] || \
+             [ "${{ steps.filter.outputs.protocol }}" = "true" ]; then
+            # workspace-level or protocol change → test everything
+            echo "pkgs=--workspace" >> "$GITHUB_OUTPUT"
+          else
+            pkgs=""
+            if [ "${{ steps.filter.outputs.core }}" = "true" ]; then
+              pkgs="$pkgs -p aria2-core -p aria2-rpc -p aria2"
+            fi
+            if [ "${{ steps.filter.outputs.rpc }}" = "true" ]; then
+              pkgs="$pkgs -p aria2-rpc -p aria2"
+            fi
+            if [ "${{ steps.filter.outputs.cli }}" = "true" ]; then
+              pkgs="$pkgs -p aria2"
+            fi
+            # deduplicate and strip leading/trailing whitespace
+            pkgs=$(echo "$pkgs" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+            if [ -z "$pkgs" ]; then
+              # no Rust source changed (e.g. docs, bindings, configs only)
+              echo "pkgs=--workspace" >> "$GITHUB_OUTPUT"
+            else
+              echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   # ── Lint & format (fast, single platform) ─────────────────
   lint:
     name: Lint & Format
@@ -25,20 +76,29 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-  # ── Full test suite across all platforms ──────────────────
+  # ── Test only affected crates across all platforms ────────
+  # Per-platform skip via PR labels: skip-linux / skip-windows / skip-macos
   test:
-    name: Test (${{ matrix.target }})
+    name: Test (${{ matrix.label }})
+    needs: [changes]
     runs-on: ${{ matrix.os }}
+    if: ${{ !contains(github.event.pull_request.labels.*.name, matrix.skip_label) }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            label: Linux
+            skip_label: skip-linux
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            label: Windows
+            skip_label: skip-windows
           - os: macos-latest
             target: aarch64-apple-darwin
+            label: macOS
+            skip_label: skip-macos
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -48,4 +108,4 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Run tests
-        run: cargo test --workspace --all-targets --target ${{ matrix.target }}
+        run: cargo test ${{ needs.changes.outputs.pkgs }} --all-targets --target ${{ matrix.target }}

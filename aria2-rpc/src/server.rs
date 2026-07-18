@@ -212,11 +212,7 @@ impl CorsConfig {
     /// - No origin header is provided (browser navigation / non-CORS request)
     pub fn allows_origin(&self, origin: Option<&str>) -> bool {
         // Wildcard allows everything
-        if self
-            .allowed_origins
-            .iter()
-            .any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN)
-        {
+        if self.is_wildcard() {
             return true;
         }
 
@@ -224,6 +220,25 @@ impl CorsConfig {
             Some(o) => self.allowed_origins.iter().any(|allowed| allowed == o),
             None => true, // No Origin header = allow (browser navigation)
         }
+    }
+
+    /// Returns true if wildcard mode is enabled (`"*"` is in allowed_origins).
+    ///
+    /// Mirrors the original aria2 `--rpc-allow-origin-all` behavior:
+    /// when enabled, `Access-Control-Allow-Origin: *` is sent on all
+    /// responses (HttpServerCommand.cc:76-78).
+    pub fn is_wildcard(&self) -> bool {
+        self.allowed_origins
+            .iter()
+            .any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN)
+    }
+
+    /// Returns the parsed list of allowed origins (read-only access).
+    ///
+    /// Used by the server to build the `tower_http::cors::CorsLayer` with
+    /// specific origins instead of always falling back to `Any`.
+    pub fn allowed_origins(&self) -> &[String] {
+        &self.allowed_origins
     }
 
     /// Generate CORS headers for a response
@@ -235,11 +250,7 @@ impl CorsConfig {
             Some(o) if self.allows_origin(Some(o)) => o.to_string(),
             None if self.allows_origin(None) => {
                 // In wildcard mode, echo back *; otherwise no header
-                if self
-                    .allowed_origins
-                    .iter()
-                    .any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN)
-                {
+                if self.is_wildcard() {
                     crate::constants::CORS_DEFAULT_ORIGIN.to_string()
                 } else {
                     return Some(vec![]); // Allow but don't set specific origin
@@ -444,6 +455,13 @@ pub struct RpcServer {
 impl RpcServer {
     /// Create a new RPC server with the given configuration.
     ///
+    /// The `ServerConfig.auth` token is applied to the engine's
+    /// `auth_middleware` so that `token:<secret>` (positional) and
+    /// `params.secret` (named) authentication is actually enforced on
+    /// every JSON-RPC request — matching the original aria2 `--rpc-secret`
+    /// behavior. Without this wiring, the auth config would be silently
+    /// ignored and all requests would be accepted unauthenticated.
+    ///
     /// # Errors
     ///
     /// Returns an error if TLS configuration is provided but fails to load.
@@ -455,10 +473,16 @@ impl RpcServer {
             None
         };
 
+        // Wire `ServerConfig.auth` into the engine's auth middleware.
+        // This must happen here (before the engine is shared via Arc) because
+        // `auth_middleware` is not behind a lock and cannot be mutated after
+        // the server starts serving requests.
+        let engine = Arc::new(RpcEngine::new().with_auth(config.auth.clone()));
+
         Ok(Self {
             config,
             tls_acceptor,
-            engine: Arc::new(RpcEngine::new()),
+            engine,
         })
     }
 
@@ -580,7 +604,7 @@ impl RpcServer {
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::{
             Router,
-            http::{Method, header},
+            http::{HeaderValue, Method, header},
             routing::{get, post},
         };
         use std::net::SocketAddr;
@@ -592,11 +616,41 @@ impl RpcServer {
             engine: self.engine.clone(),
         };
 
-        // Build CORS layer
-        let cors_layer = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+        // Build CORS layer from `ServerConfig.cors` (not hardcoded `Any`).
+        //
+        // Mirrors the original aria2 `--rpc-allow-origin-all` behavior
+        // (HttpServerCommand.cc:76-78): wildcard mode (`"*"`) sends
+        // `Access-Control-Allow-Origin: *`; specific origins echo the
+        // request's `Origin` header if it matches the allow-list.
+        //
+        // The previous implementation hardcoded `allow_origin(Any)`,
+        // which silently bypassed any user-supplied CORS restriction —
+        // a security regression that allowed arbitrary cross-origin
+        // access even when `ServerConfig::with_cors` configured a
+        // specific origin list.
+        let cors_layer = if self.config.cors.is_wildcard() {
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        } else {
+            // Parse each allowed origin into a `HeaderValue` for exact matching.
+            let origins: Vec<HeaderValue> = self
+                .config
+                .cors
+                .allowed_origins()
+                .iter()
+                .filter_map(|o| o.parse::<HeaderValue>().ok())
+                .collect();
+            tracing::info!(
+                origins = ?self.config.cors.allowed_origins(),
+                "CORS configured with specific origins (non-wildcard)"
+            );
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        };
 
         // Build router
         let app = Router::new()
@@ -613,23 +667,29 @@ impl RpcServer {
         // Bind TCP listener
         let listener = TcpListener::bind(addr).await?;
 
+        // Graceful shutdown signal: triggered by `aria2.shutdown` /
+        // `aria2.forceShutdown` after their 3-second `schedule_halt` delay
+        // (mirroring the original aria2 `TimedHaltCommand`). When the token
+        // fires, axum stops accepting new connections, drains in-flight
+        // requests, and `serve()` returns.
+        let shutdown_token = self.engine.shutdown_token();
+        let graceful = async move {
+            shutdown_token.cancelled().await;
+            tracing::info!("RPC graceful shutdown triggered by scheduled halt");
+        };
+
         // Serve with or without TLS
-        if let Some(ref _tls_acceptor) = self.tls_acceptor {
-            // HTTPS mode
+        if self.tls_acceptor.is_some() {
+            // HTTPS mode (TLS acceptor is wired separately when the upstream
+            // caller hands off the listener; we just log intent here).
             tracing::info!("TLS enabled, serving HTTPS");
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await?;
-        } else {
-            // HTTP mode
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await?;
         }
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(graceful)
+        .await?;
 
         Ok(())
     }
@@ -637,8 +697,8 @@ impl RpcServer {
 
 /// Shared state for RPC handlers
 #[derive(Clone)]
-struct RpcState {
-    engine: Arc<RpcEngine>,
+pub(crate) struct RpcState {
+    pub(crate) engine: Arc<RpcEngine>,
 }
 
 /// Root handler - returns server info
@@ -673,18 +733,31 @@ async fn handle_jsonrpc(
     (StatusCode::OK, Json(response))
 }
 
-/// Handle JSON-RPC GET requests (for debugging)
-async fn handle_jsonrpc_get() -> impl axum::response::IntoResponse {
-    use axum::http::StatusCode;
-    use axum::response::Json;
-    use serde_json::json;
+/// Handle JSON-RPC GET requests.
+///
+/// If the client sends an HTTP Upgrade request (`Upgrade: websocket`), this
+/// upgrades to a WebSocket connection that supports both inbound JSON-RPC
+/// requests and outbound download notifications (matching the original aria2
+/// `/jsonrpc` WebSocket semantics — see `WebSocketSessionMan::addNotification`).
+///
+/// Otherwise, returns a plain JSON informational message (the legacy behaviour
+/// used by HTTP clients that issue a plain GET against `/jsonrpc`).
+async fn handle_jsonrpc_get(
+    axum::extract::State(state): axum::extract::State<RpcState>,
+    ws_upgrade: Option<axum::extract::ws::WebSocketUpgrade>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "error": "GET method not supported. Use POST for JSON-RPC requests."
-        })),
-    )
+    match ws_upgrade {
+        Some(ws) => ws.on_upgrade(move |socket| crate::ws_handler::handle_ws_connection(socket, state)),
+        None => (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "error": "GET method not supported. Use POST for JSON-RPC requests, or upgrade to WebSocket."
+            })),
+        )
+            .into_response(),
+    }
 }
 
 impl std::fmt::Debug for RpcServer {

@@ -71,6 +71,17 @@ impl RpcEngine {
     ///
     /// Returns an array of notification event names that can be sent via WebSocket.
     /// These events are broadcast when download state changes occur.
+    ///
+    /// # Compatibility with original aria2
+    ///
+    /// Matches `RpcMethodFactory.cc::rpcNotificationsNames` exactly — 6 events
+    /// when BitTorrent is enabled (always-on for aria2-rust), 5 otherwise.
+    /// The original aria2 does NOT advertise `aria2.onBtDownloadError`;
+    /// BT download errors emit the generic `aria2.onDownloadError` instead.
+    /// Although `EventType::BtDownloadError` exists as a non-standard extension
+    /// for callers that want to emit it explicitly, it is intentionally
+    /// absent from this list to preserve plugin compatibility (e.g., AriaNg
+    /// validates the response against the documented 6-event set).
     pub async fn handle_list_notifications(
         &self,
         req: &JsonRpcRequest,
@@ -82,7 +93,6 @@ impl RpcEngine {
             "aria2.onDownloadComplete",
             "aria2.onDownloadError",
             "aria2.onBtDownloadComplete",
-            "aria2.onBtDownloadError",
         ];
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -120,9 +130,20 @@ mod tests {
         assert!(resp.is_success());
 
         let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-        assert_eq!(notifications.len(), 7);
+        // Exactly 6 events — matches original aria2 `rpcNotificationsNames`
+        // (BitTorrent enabled is always-on for aria2-rust).
+        assert_eq!(
+            notifications.len(),
+            6,
+            "Must match original aria2: 6 notifications (no onBtDownloadError)"
+        );
         assert!(notifications.contains(&"aria2.onDownloadStart".to_string()));
         assert!(notifications.contains(&"aria2.onDownloadComplete".to_string()));
         assert!(notifications.contains(&"aria2.onBtDownloadComplete".to_string()));
+        // Verify the non-standard event is NOT advertised.
+        assert!(
+            !notifications.contains(&"aria2.onBtDownloadError".to_string()),
+            "aria2.onBtDownloadError is a non-standard extension and must NOT be in listNotifications"
+        );
     }
 }

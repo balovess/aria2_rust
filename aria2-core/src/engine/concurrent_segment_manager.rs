@@ -395,6 +395,17 @@ impl ConcurrentSegmentManager {
             .any(|s| s.status == SegmentStatus::Pending)
     }
 
+    pub fn completed_ranges(&self) -> Vec<(u64, u64)> {
+        let mut ranges = Vec::new();
+        for seg in &self.segments {
+            if seg.status == SegmentStatus::Done {
+                ranges.push((seg.offset, seg.length));
+            }
+        }
+        ranges.sort_by_key(|r| r.0);
+        ranges
+    }
+
     pub fn assemble(&self) -> Option<Vec<u8>> {
         if !self.is_complete() || self.total_size == 0 {
             return None;

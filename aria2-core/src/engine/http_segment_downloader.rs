@@ -327,12 +327,8 @@ impl HttpSegmentDownloader {
             }
             416 => {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!(
-                            "Range not satisfiable: bytes={}-{}",
-                            offset,
-                            offset + length.saturating_sub(1)
-                        ),
+                    RecoverableError::RangeNotSatisfiable {
+                        range: format!("bytes={}-{}", offset, offset + length.saturating_sub(1)),
                     },
                 ));
             }

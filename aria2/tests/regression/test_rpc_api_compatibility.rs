@@ -111,9 +111,13 @@ async fn regression_add_metalink_validates_xml() {
     assert_success(&resp);
 }
 
-/// Test: aria2.remove returns array with removed GID.
+/// Test: aria2.remove returns the removed GID string.
+///
+/// Per original aria2 `RemoveRpcMethod::process` -> `removeDownload` ->
+/// `createGIDResponse(gid)` (RpcMethodImpl.cc:420), the result is the GID
+/// string itself, NOT an array.
 #[tokio::test]
-async fn regression_remove_returns_gid_array() {
+async fn regression_remove_returns_gid() {
     let engine = RpcEngine::new();
 
     // First add a task
@@ -129,9 +133,8 @@ async fn regression_remove_returns_gid_array() {
     let remove_resp = engine.handle_request(&remove_req).await;
 
     assert_success(&remove_resp);
-    let result: Vec<String> = serde_json::from_value(remove_resp.result.unwrap()).unwrap();
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0], gid);
+    let result: String = serde_json::from_value(remove_resp.result.unwrap()).unwrap();
+    assert_eq!(result, gid);
 }
 
 /// Test: aria2.remove with nonexistent GID returns error.
@@ -144,9 +147,13 @@ async fn regression_remove_nonexistent_returns_error() {
     assert_error_code(&resp, -32601); // MethodNotFound (GID not found)
 }
 
-/// Test: aria2.forceRemove returns "OK".
+/// Test: aria2.forceRemove returns the removed GID string.
+///
+/// Per original aria2 `ForceRemoveRpcMethod::process` -> `removeDownload` ->
+/// `createGIDResponse(gid)` (RpcMethodImpl.cc:420), the result is the GID
+/// string itself, NOT "OK".
 #[tokio::test]
-async fn regression_force_remove_returns_ok() {
+async fn regression_force_remove_returns_gid() {
     let engine = RpcEngine::new();
 
     // Add a task first
@@ -162,7 +169,7 @@ async fn regression_force_remove_returns_ok() {
 
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK");
+    assert_eq!(result, gid);
 }
 
 /// Test: aria2.pause changes status to Paused.
@@ -189,9 +196,13 @@ async fn regression_pause_changes_status() {
     assert_eq!(status.get("status").unwrap().as_str().unwrap(), "paused");
 }
 
-/// Test: aria2.forcePause returns "OK".
+/// Test: aria2.forcePause returns the paused GID string.
+///
+/// Per original aria2 `ForcePauseRpcMethod::process` -> `pauseDownload` ->
+/// `createGIDResponse(gid)` (RpcMethodImpl.cc:448), the result is the GID
+/// string itself, NOT "OK".
 #[tokio::test]
-async fn regression_force_pause_returns_ok() {
+async fn regression_force_pause_returns_gid() {
     let engine = RpcEngine::new();
 
     let add_req = make_request(
@@ -206,7 +217,7 @@ async fn regression_force_pause_returns_ok() {
 
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK");
+    assert_eq!(result, gid);
 }
 
 /// Test: aria2.unpause changes status back to Active.
@@ -322,7 +333,12 @@ async fn regression_tell_stopped_pagination() {
     assert!(stopped.len() <= 10);
 }
 
-/// Test: aria2.getGlobalStat returns correct field names (camelCase).
+/// Test: aria2.getGlobalStat returns correct field names (camelCase) AND
+/// all values as JSON strings (matches original aria2 `util::itos`/`uitos`).
+///
+/// Per `RpcMethodImpl.cc:1382-1394`, every GlobalStat field is emitted as a
+/// JSON string — plugins (AriaNg, YAAM) parse them as strings. Returning
+/// numbers silently breaks them.
 #[tokio::test]
 async fn regression_global_stat_camel_case_fields() {
     let engine = RpcEngine::new();
@@ -351,6 +367,25 @@ async fn regression_global_stat_camel_case_fields() {
         stat.get("numStopped").is_some(),
         "numStopped field required"
     );
+
+    // Verify ALL fields are JSON strings (not numbers) — matches original
+    // aria2 `util::itos()` / `util::uitos()` wire format.
+    for key in [
+        "downloadSpeed",
+        "uploadSpeed",
+        "numActive",
+        "numWaiting",
+        "numStopped",
+        "numStoppedTotal",
+    ] {
+        let v = stat.get(key).unwrap_or_else(|| panic!("{} missing", key));
+        assert!(
+            v.is_string(),
+            "GlobalStat field `{}` must be a JSON string (util::itos), got: {:?}",
+            key,
+            v
+        );
+    }
 }
 
 // =========================================================================
@@ -526,15 +561,70 @@ async fn regression_get_files_format() {
     let files: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert!(!files.is_empty());
 
-    // Each file entry should have required fields (snake_case format)
+    // Wire-format compatibility with original aria2 `createFileEntry`
+    // (RpcMethodImpl.cc:558-580): EVERY scalar field is a JSON string,
+    // field names are camelCase, and file index is 1-based.
     for file in &files {
-        assert!(file.get("index").is_some());
-        assert!(file.get("path").is_some());
-        assert!(file.get("length").is_some());
-        // Note: Field is snake_case "completed_length" not camelCase "completedLength"
-        assert!(file.get("completed_length").is_some() || file.get("completedLength").is_some());
-        assert!(file.get("selected").is_some());
-        assert!(file.get("uris").is_some());
+        // Field names must be camelCase (matching original aria2).
+        assert!(file.get("index").is_some(), "missing field: index");
+        assert!(file.get("path").is_some(), "missing field: path");
+        assert!(file.get("length").is_some(), "missing field: length");
+        assert!(
+            file.get("completedLength").is_some(),
+            "missing field: completedLength (camelCase, matching original aria2)"
+        );
+        assert!(file.get("selected").is_some(), "missing field: selected");
+        assert!(file.get("uris").is_some(), "missing field: uris");
+
+        // All scalars must be JSON STRINGS (matching util::itos() / uitos()).
+        // AriaNg / YAAM parse these as strings; emitting numbers silently
+        // breaks them.
+        assert!(
+            file.get("index").unwrap().is_string(),
+            "index must be a JSON string (util::uitos)"
+        );
+        assert!(
+            file.get("length").unwrap().is_string(),
+            "length must be a JSON string (util::itos)"
+        );
+        assert!(
+            file.get("completedLength").unwrap().is_string(),
+            "completedLength must be a JSON string (util::itos)"
+        );
+        assert!(
+            file.get("selected").unwrap().is_string(),
+            "selected must be a JSON string (VLB_TRUE / VLB_FALSE)"
+        );
+
+        // index is 1-based (matching original aria2 util::uitos(index)).
+        let idx_str = file.get("index").unwrap().as_str().unwrap();
+        let idx: u64 = idx_str.parse().expect("index should parse as integer");
+        assert!(idx >= 1, "index should be 1-based (>= 1), got {}", idx);
+
+        // selected is "true" or "false" (VLB_TRUE / VLB_FALSE).
+        let sel = file.get("selected").unwrap().as_str().unwrap();
+        assert!(
+            sel == "true" || sel == "false",
+            "selected must be \"true\" or \"false\", got {:?}",
+            sel
+        );
+
+        // uris array: each entry has `uri` (string) and `status` (lowercase
+        // "used" / "waiting" matching VLB_USED / VLB_WAITING).
+        let uris = file.get("uris").unwrap().as_array().unwrap();
+        for u in uris {
+            assert!(u.get("uri").is_some(), "missing uri field in uris[]");
+            assert!(
+                u.get("uri").unwrap().is_string(),
+                "uri must be a JSON string"
+            );
+            let status = u.get("status").and_then(|v| v.as_str());
+            assert!(
+                status == Some("used") || status == Some("waiting"),
+                "uri status must be lowercase \"used\"/\"waiting\", got {:?}",
+                status
+            );
+        }
     }
 }
 
@@ -649,17 +739,23 @@ async fn regression_unpause_all_format() {
 // URI/Position Management Methods (2 methods)
 // =========================================================================
 
-/// Test: aria2.changeUri modifies URI list.
+/// Test: aria2.changeUri returns `[delcount, addcount]` as integers.
+///
+/// Per original aria2 `ChangeUriRpcMethod::process` (RpcMethodImpl.cc:1296-1353),
+/// the result is a 2-element array of integers via `Integer::g(...)`: the
+/// number of URIs removed and the number of URIs added. These are NOT strings
+/// — this is the one exception to the "all numeric fields are JSON strings"
+/// rule, matching the original `List::g()` + `Integer::g()` wire format.
 #[tokio::test]
 async fn regression_change_uri_modifies_list() {
     let engine = RpcEngine::new();
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!([[
-            "http://example.com/file.zip",
-            "http://mirror1.example.com/file.zip"
-        ]]),
+        serde_json::json!([
+            ["http://example.com/file.zip",
+            "http://mirror1.example.com/file.zip"]
+        ]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -679,31 +775,40 @@ async fn regression_change_uri_modifies_list() {
     assert_success(&resp);
     let result: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(result.len(), 2);
-    assert_eq!(result[0].as_str().unwrap(), gid);
+    // delcount: 1 URI removed ("http://example.com/file.zip" existed)
+    assert_eq!(result[0].as_i64().unwrap(), 1);
+    // addcount: 1 URI added ("http://mirror2.example.com/file.zip")
+    assert_eq!(result[1].as_i64().unwrap(), 1);
 }
 
-/// Test: aria2.changePosition modifies URI position.
+/// Test: aria2.changePosition returns the target index as an integer.
+///
+/// Per original aria2 `ChangePositionRpcMethod::process` (RpcMethodImpl.cc:1226-1252),
+/// the wire format is `[gid: String, pos: Integer, how: String]` where `how` is
+/// one of `"POS_SET"`, `"POS_CUR"`, `"POS_END"`. The result is a single integer
+/// (the target index) via `Integer::g(destPos)` — NOT a string and NOT "OK".
 #[tokio::test]
 async fn regression_change_position_modifies_position() {
     let engine = RpcEngine::new();
 
+    // Add a task so the waiting queue is non-empty. changePosition operates
+    // on the queue of GIDs (sorted), not on URIs within a single task.
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!([[
-            "http://uri1.example.com/file",
-            "http://uri2.example.com/file",
-            "http://uri3.example.com/file"
-        ]]),
+        serde_json::json!(["http://example.com/file"]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let req = make_request("aria2.changePosition", serde_json::json!([gid, 0, 0, 2, 0]));
+    // Move to absolute position 0 (POS_SET). With a single task in the queue,
+    // the only valid target index is 0.
+    let req = make_request("aria2.changePosition", serde_json::json!([gid, 0, "POS_SET"]));
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
-    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK");
+    // Result is the target index as a JSON integer (NOT a string).
+    let result: i64 = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert_eq!(result, 0);
 }
 
 // =========================================================================
@@ -734,7 +839,14 @@ async fn regression_get_version_format() {
     );
 }
 
-/// Test: aria2.getSessionInfo returns sessionId.
+/// Test: aria2.getSessionInfo returns ONLY `sessionId` (matches original
+/// aria2 `GetSessionInfoRpcMethod::process`, RpcMethodImpl.cc:1254-1260).
+///
+/// The original aria2 puts only `KEY_SESSION_ID` into the response dict.
+/// aria2-rust's `SessionInfo` struct carries an internal `session_start_time`
+/// field for diagnostics, but it MUST be `#[serde(skip)]`-ed so it never
+/// leaks into the wire response. AriaNg validates the response shape and
+/// rejects unknown keys.
 #[tokio::test]
 async fn regression_get_session_info_format() {
     let engine = RpcEngine::new();
@@ -756,6 +868,20 @@ async fn regression_get_session_info_format() {
             .as_str()
             .unwrap()
             .is_empty()
+    );
+
+    // Verify NO extra fields are emitted — original aria2 returns only
+    // `sessionId`. `sessionStartTime` is an aria2-rust internal field and
+    // must NOT appear on the wire.
+    assert!(
+        session.get("sessionStartTime").is_none(),
+        "sessionStartTime must NOT be in wire response (only sessionId per original aria2)"
+    );
+    assert_eq!(
+        session.as_object().map(|o| o.len()).unwrap_or(0),
+        1,
+        "getSessionInfo response must contain exactly 1 field (sessionId), got: {:?}",
+        session
     );
 }
 
@@ -793,7 +919,13 @@ async fn regression_shutdown_format() {
     assert!(result.contains("OK"));
 }
 
-/// Test: aria2.forceShutdown returns "OK" with terminated count.
+/// Test: aria2.forceShutdown returns exactly "OK".
+///
+/// Per original aria2 `ForceShutdownRpcMethod::process` -> `goingShutdown` ->
+/// `createOKResponse()` (RpcMethodImpl.cc:1356-1379), the result is the bare
+/// string `"OK"` — nothing more. The actual cancellation of active downloads
+/// happens after a 3-second delay via `TimedHaltCommand`, not synchronously
+/// in the response body.
 #[tokio::test]
 async fn regression_force_shutdown_format() {
     let engine = RpcEngine::new();
@@ -812,8 +944,7 @@ async fn regression_force_shutdown_format() {
 
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(result.contains("OK"));
-    assert!(result.contains("terminated"));
+    assert_eq!(result, "OK");
 }
 
 /// Test: system.multicall executes multiple calls.
@@ -897,9 +1028,16 @@ async fn regression_list_methods_returns_36_methods() {
     assert!(methods.contains(&"system.listNotifications".to_string()));
 }
 
-/// Test: system.listNotifications returns 7 notifications.
+/// Test: system.listNotifications returns exactly 6 notifications (matches
+/// original aria2 `rpcNotificationsNames`).
+///
+/// Per `RpcMethodFactory.cc:99-107`, the original aria2 advertises 6 events
+/// when `ENABLE_BITTORRENT` is on (always-on for aria2-rust). The
+/// non-standard `aria2.onBtDownloadError` extension is intentionally NOT
+/// advertised to preserve plugin compatibility (AriaNg validates the
+/// response against the documented 6-event set).
 #[tokio::test]
-async fn regression_list_notifications_returns_7() {
+async fn regression_list_notifications_returns_6() {
     let engine = RpcEngine::new();
 
     let req = make_request("system.listNotifications", serde_json::json!([]));
@@ -909,8 +1047,8 @@ async fn regression_list_notifications_returns_7() {
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(
         notifications.len(),
-        7,
-        "Should return exactly 7 notifications"
+        6,
+        "Should return exactly 6 notifications (matching original aria2)"
     );
 
     // Verify notification names
@@ -920,6 +1058,11 @@ async fn regression_list_notifications_returns_7() {
     assert!(notifications.contains(&"aria2.onDownloadComplete".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadError".to_string()));
     assert!(notifications.contains(&"aria2.onBtDownloadComplete".to_string()));
+    // Verify the non-standard extension is NOT advertised.
+    assert!(
+        !notifications.contains(&"aria2.onBtDownloadError".to_string()),
+        "aria2.onBtDownloadError is non-standard and must NOT be in listNotifications"
+    );
 }
 
 // =========================================================================

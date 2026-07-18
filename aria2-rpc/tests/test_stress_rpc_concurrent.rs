@@ -235,8 +235,7 @@ async fn test_stress_websocket_event_publisher() {
         let publisher_clone = publisher.clone();
 
         publish_handles.push(tokio::spawn(async move {
-            let event =
-                DownloadEvent::download_start(format!("gid-{}", i), vec![json!({"index": i})]);
+            let event = DownloadEvent::download_start(format!("gid-{}", i));
 
             publisher_clone.publish_event(event).unwrap_or_else(|e| {
                 eprintln!("Publish error: {}", e);
@@ -291,7 +290,7 @@ fn test_stress_notification_batcher_high_throughput() {
 
     for i in 0..1000 {
         let gid = format!("gid-{}", i % 50); // 50 unique GIDs (creates duplicates)
-        let event = DownloadEvent::download_complete(gid, vec![json!({"index": i})]);
+        let event = DownloadEvent::download_complete(gid);
 
         if batcher.push(event) {
             // Auto-flush triggered
@@ -348,13 +347,13 @@ async fn test_stress_rpc_auth_concurrent() {
 
     let mut handles = Vec::new();
 
-    // 200 requests with valid token
+    // 200 requests with valid token (aria2 protocol: positional "token:<secret>")
     for i in 0..200 {
         let engine_clone = engine.clone();
 
         handles.push(tokio::spawn(async move {
             let request =
-                JsonRpcRequest::new("aria2.getVersion", json!({"token": "stress-test-token"}))
+                JsonRpcRequest::new("aria2.getVersion", json!(["token:stress-test-token"]))
                     .with_id(i);
 
             let response = engine_clone.handle_request(&request).await;
@@ -368,7 +367,7 @@ async fn test_stress_rpc_auth_concurrent() {
 
         handles.push(tokio::spawn(async move {
             let request =
-                JsonRpcRequest::new("aria2.getVersion", json!({"token": "wrong-token"})).with_id(i);
+                JsonRpcRequest::new("aria2.getVersion", json!(["token:wrong-token"])).with_id(i);
 
             let response = engine_clone.handle_request(&request).await;
             (i, response.is_error())
@@ -681,10 +680,7 @@ async fn test_stress_event_publish_subscribe_mixed() {
         let publisher_clone = publisher.clone();
 
         pub_handles.push(tokio::spawn(async move {
-            let event = DownloadEvent::download_complete(
-                format!("event-gid-{}", i),
-                vec![json!({"seq": i})],
-            );
+            let event = DownloadEvent::download_complete(format!("event-gid-{}", i));
 
             publisher_clone.publish_event(event).ok();
 

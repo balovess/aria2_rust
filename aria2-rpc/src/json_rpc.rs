@@ -172,6 +172,48 @@ impl JsonRpcRequest {
             )),
         }
     }
+
+    /// Extract and strip the aria2 secret token from request params.
+    ///
+    /// Implements the original aria2 RPC authentication protocol:
+    /// - **Positional params**: if `params[0]` is a string starting with
+    ///   `"token:"`, the prefix is stripped and the rest is returned as the
+    ///   secret. The token element is removed from the returned params.
+    /// - **Named params**: if `params.secret` exists as a string, it is
+    ///   returned and removed from the params object.
+    /// - Otherwise, returns `(None, params.clone())`.
+    ///
+    /// The returned params should replace `self.params` before dispatching
+    /// to the actual handler so that handlers never see the token.
+    ///
+    /// Reference: aria2 manual "Authentication" section — both positional
+    /// `token:<secret>` and named `secret` are supported.
+    pub fn extract_token(params: &serde_json::Value) -> (Option<String>, serde_json::Value) {
+        match params {
+            serde_json::Value::Array(arr) => {
+                if let Some(first) = arr.first()
+                    && let Some(s) = first.as_str()
+                    && let Some(secret) = s.strip_prefix("token:")
+                {
+                    // Strip the first element (token) from the array
+                    let new_arr: Vec<serde_json::Value> = arr.iter().skip(1).cloned().collect();
+                    return (Some(secret.to_string()), serde_json::Value::Array(new_arr));
+                }
+                (None, params.clone())
+            }
+            serde_json::Value::Object(map) => {
+                if let Some(secret_val) = map.get("secret")
+                    && let Some(secret) = secret_val.as_str()
+                {
+                    let mut new_map = map.clone();
+                    new_map.remove("secret");
+                    return (Some(secret.to_string()), serde_json::Value::Object(new_map));
+                }
+                (None, params.clone())
+            }
+            _ => (None, params.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -409,5 +451,130 @@ mod tests {
         let req = JsonRpcRequest::new("test", serde_json::json!([]));
         let val: String = req.get_param_or_default(0);
         assert!(val.is_empty());
+    }
+
+    // =========================================================================
+    // Token extraction tests (aria2 RPC authentication protocol)
+    // =========================================================================
+
+    #[test]
+    fn test_extract_token_positional_strips_token_prefix() {
+        // Standard positional protocol: params[0] = "token:<secret>"
+        let params = serde_json::json!(["token:my-secret", "http://example.com/file.iso"]);
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert_eq!(token.as_deref(), Some("my-secret"));
+        // After stripping, params should be the URL array without the token
+        assert_eq!(
+            new_params,
+            serde_json::json!(["http://example.com/file.iso"])
+        );
+    }
+
+    #[test]
+    fn test_extract_token_positional_with_complex_params() {
+        // Token + addUri params (uris array + options dict)
+        let params = serde_json::json!([
+            "token:secret123",
+            ["http://example.com/file1.iso", "http://example.com/file2.iso"],
+            {"dir": "/tmp", "out": "file.iso"}
+        ]);
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert_eq!(token.as_deref(), Some("secret123"));
+        assert_eq!(
+            new_params,
+            serde_json::json!([
+                ["http://example.com/file1.iso", "http://example.com/file2.iso"],
+                {"dir": "/tmp", "out": "file.iso"}
+            ])
+        );
+    }
+
+    #[test]
+    fn test_extract_token_named_secret_field() {
+        // Named params protocol: params.secret = "<secret>" (no "token:" prefix)
+        let params = serde_json::json!({"secret": "my-secret", "gid": "abc123"});
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert_eq!(token.as_deref(), Some("my-secret"));
+        // "secret" field should be removed but "gid" preserved
+        assert_eq!(new_params, serde_json::json!({"gid": "abc123"}));
+    }
+
+    #[test]
+    fn test_extract_token_no_token_in_array_returns_none() {
+        // Array without token prefix → no extraction, params unchanged
+        let params = serde_json::json!(["http://example.com/file.iso"]);
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert!(token.is_none());
+        assert_eq!(new_params, params);
+    }
+
+    #[test]
+    fn test_extract_token_non_string_first_element_returns_none() {
+        // First element is not a string → no extraction
+        let params = serde_json::json!([42, "http://example.com/file.iso"]);
+        let (token, _) = JsonRpcRequest::extract_token(&params);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn test_extract_token_string_without_token_prefix_returns_none() {
+        // First element is a string but doesn't start with "token:" → no extraction
+        let params = serde_json::json!(["http://example.com/file.iso", "options"]);
+        let (token, _) = JsonRpcRequest::extract_token(&params);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn test_extract_token_empty_token_secret_returns_empty_string() {
+        // Edge case: "token:" with empty secret after prefix
+        let params = serde_json::json!(["token:", "http://example.com/file.iso"]);
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert_eq!(token.as_deref(), Some(""));
+        assert_eq!(
+            new_params,
+            serde_json::json!(["http://example.com/file.iso"])
+        );
+    }
+
+    #[test]
+    fn test_extract_token_empty_array_returns_none() {
+        let params = serde_json::json!([]);
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert!(token.is_none());
+        assert_eq!(new_params, params);
+    }
+
+    #[test]
+    fn test_extract_token_object_without_secret_returns_none() {
+        let params = serde_json::json!({"gid": "abc", "status": "active"});
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert!(token.is_none());
+        assert_eq!(new_params, params);
+    }
+
+    #[test]
+    fn test_extract_token_object_with_non_string_secret_returns_none() {
+        // "secret" field exists but is not a string → no extraction
+        let params = serde_json::json!({"secret": 123, "gid": "abc"});
+        let (token, _) = JsonRpcRequest::extract_token(&params);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn test_extract_token_null_params_returns_none() {
+        let params = serde_json::Value::Null;
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert!(token.is_none());
+        assert_eq!(new_params, params);
+    }
+
+    #[test]
+    fn test_extract_token_positional_priority_over_named() {
+        // When params is an array, named "secret" field is not consulted
+        // (params can only be Array OR Object, not both, so no ambiguity)
+        let params = serde_json::json!(["token:positional-secret"]);
+        let (token, new_params) = JsonRpcRequest::extract_token(&params);
+        assert_eq!(token.as_deref(), Some("positional-secret"));
+        assert_eq!(new_params, serde_json::json!([]));
     }
 }

@@ -45,7 +45,11 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.pauseAll` - Pause all active downloads.
-    pub async fn handle_pause_all(&self) -> JsonRpcResponse {
+    ///
+    /// Returns `"OK"` per the aria2 RPC spec. The request `id` is preserved
+    /// on the response so callers (including WebSocket batch callers) can
+    /// correlate the result.
+    pub async fn handle_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let mut tasks = self.tasks.write().await;
         let mut count = 0usize;
         for state in tasks.values_mut() {
@@ -59,13 +63,15 @@ impl RpcEngine {
             }
         }
         JsonRpcResponse::success(
-            serde_json::Value::Null,
+            req.id.clone().unwrap_or_default(),
             format!("OK. {} tasks paused.", count),
         )
     }
 
     /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
-    pub async fn handle_force_pause_all(&self) -> JsonRpcResponse {
+    ///
+    /// See [`handle_pause_all`] for the response id semantics.
+    pub async fn handle_force_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let mut tasks_map = self.tasks.write().await;
 
         for task_state in tasks_map.values_mut() {
@@ -77,11 +83,13 @@ impl RpcEngine {
             }
         }
 
-        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
+        JsonRpcResponse::success(req.id.clone().unwrap_or_default(), serde_json::json!("OK"))
     }
 
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.
-    pub async fn handle_unpause_all(&self) -> JsonRpcResponse {
+    ///
+    /// See [`handle_pause_all`] for the response id semantics.
+    pub async fn handle_unpause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let mut tasks = self.tasks.write().await;
         let mut count = 0usize;
         for state in tasks.values_mut() {
@@ -91,7 +99,7 @@ impl RpcEngine {
             }
         }
         JsonRpcResponse::success(
-            serde_json::Value::Null,
+            req.id.clone().unwrap_or_default(),
             format!("OK. {} tasks resumed.", count),
         )
     }
@@ -144,21 +152,34 @@ impl RpcEngine {
                     Some(files_vec) if !files_vec.is_empty() => files_vec
                         .iter()
                         .enumerate()
-                        .map(|(i, f)| FileInfo {
-                            index: i,
-                            path: f.path.clone(),
-                            length: if f.length == 0 {
-                                state.total_length
-                            } else {
-                                f.length
-                            },
-                            completed_length: if f.completed_length == 0 {
-                                state.completed_length
-                            } else {
-                                f.completed_length
-                            },
-                            selected: f.selected,
-                            uris: f.uris.clone(),
+                        .map(|(i, f)| {
+                            // FileInfo scalars are stored as wire-format strings
+                            // (matching original aria2 `util::itos()`). Parse them
+                            // back to u64 to apply the "fall back to task totals
+                            // when the file entry has no length" rule, then
+                            // re-serialize. The index is 1-based to match the
+                            // original aria2 `util::uitos(index)` convention.
+                            let file_len: u64 = f.length.parse().unwrap_or(0);
+                            let file_completed: u64 =
+                                f.completed_length.parse().unwrap_or(0);
+                            FileInfo {
+                                index: (i + 1).to_string(),
+                                path: f.path.clone(),
+                                length: (if file_len == 0 {
+                                    state.total_length
+                                } else {
+                                    file_len
+                                })
+                                .to_string(),
+                                completed_length: (if file_completed == 0 {
+                                    state.completed_length
+                                } else {
+                                    file_completed
+                                })
+                                .to_string(),
+                                selected: f.selected.clone(),
+                                uris: f.uris.clone(),
+                            }
                         })
                         .collect(),
                     _ => {
@@ -186,34 +207,50 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.getServers` - Get active server connection information.
+    ///
+    /// Mirrors the original aria2 `GetServersRpcMethod::process`
+    /// (RpcMethodImpl.cc:1262-1294): throws `DL_ABORT_EX` (→ JSON-RPC error
+    /// code 1) with message `"No active download for GID#<hex>"` if the GID is
+    /// not found OR the download is not in `STATE_ACTIVE`. This ensures
+    /// clients like AriaNg only call `getServers` against actively downloading
+    /// tasks, matching the original semantics exactly.
     pub async fn handle_get_servers(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
         let tasks = self.tasks.read().await;
-        match tasks.get(&gid) {
-            Some(state) => {
-                let servers: Vec<ServerInfo> = state
-                    .uris
-                    .iter()
-                    .map(|u| ServerInfo::new(u.as_str()).with_download_speed(state.download_speed))
-                    .collect();
-
-                let result = vec![ServerInfoIndex { index: 0, servers }];
-
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(result).map_err(|e| {
-                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                    })?,
-                ))
+        let state = match tasks.get(&gid) {
+            Some(s) => s,
+            None => {
+                return Err(JsonRpcError::ServerError(
+                    1,
+                    format!("No active download for GID#{}", gid),
+                ));
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
-                "GID {} not found",
-                gid
-            ))),
+        };
+        // Reject non-active downloads — matches original `group->getState()
+        // != RequestGroup::STATE_ACTIVE` check.
+        if state.status.status != DownloadStatus::Active {
+            return Err(JsonRpcError::ServerError(
+                1,
+                format!("No active download for GID#{}", gid),
+            ));
         }
+        let servers: Vec<ServerInfo> = state
+            .uris
+            .iter()
+            .map(|u| ServerInfo::new(u.as_str()).with_download_speed(state.download_speed))
+            .collect();
+
+        let result = vec![ServerInfoIndex { index: 0, servers }];
+        drop(tasks);
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::to_value(result).map_err(|e| {
+                JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+            })?,
+        ))
     }
 
     /// Handle `aria2.getVersion` - Get version information with enabled features.
@@ -317,14 +354,42 @@ impl RpcEngine {
                     .handle_add_uri(&sub_request)
                     .await
                     .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.tellActive" => self.handle_tell_active(&sub_request).await?,
-                "aria2.getGlobalStat" => self.handle_global_stat().await,
+                // NOTE: `?` MUST NOT be used here — error isolation requires
+                // every sub-call to be converted into a (possibly error)
+                // response slot. Using `?` would propagate the error and
+                // abort the entire multicall, breaking AriaNg compatibility.
+                "aria2.tellActive" => self
+                    .handle_tell_active(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.tellWaiting" => self
+                    .handle_tell_waiting(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.tellStopped" => self
+                    .handle_tell_stopped(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.tellStatus" => self
+                    .handle_tell_status(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getGlobalStat" => self.handle_global_stat(&sub_request).await,
+                "aria2.getOption" => self
+                    .handle_get_option(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getGlobalOption" => self.handle_get_global_option().await,
                 "aria2.getUris" => self
                     .handle_get_uris(&sub_request)
                     .await
                     .unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.getFiles" => self
                     .handle_get_files(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.getPeers" => self
+                    .handle_get_peers(&sub_request)
                     .await
                     .unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.getServers" => self
@@ -337,6 +402,10 @@ impl RpcEngine {
                     .handle_purge_download_result(&sub_request)
                     .await
                     .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.removeDownloadResult" => self
+                    .handle_remove_download_result(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.saveSession" => self
                     .handle_save_session(&sub_request)
                     .await
@@ -345,8 +414,47 @@ impl RpcEngine {
                     .handle_change_position(&sub_request)
                     .await
                     .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.changeUri" => self
+                    .handle_change_uri(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.changeOption" => self
+                    .handle_change_option(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.changeGlobalOption" => self
+                    .handle_change_global_option(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.pause" => self
+                    .handle_pause(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.forcePause" => self
+                    .handle_force_pause(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.unpause" | "aria2.forceUnpause" => self
+                    .handle_unpause(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.pauseAll" => self.handle_pause_all(&sub_request).await,
+                "aria2.forcePauseAll" => self.handle_force_pause_all(&sub_request).await,
+                "aria2.unpauseAll" => self.handle_unpause_all(&sub_request).await,
+                "aria2.remove" => self
+                    .handle_remove(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.forceRemove" => self
                     .handle_force_remove(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.shutdown" => self
+                    .handle_shutdown(&sub_request)
+                    .await
+                    .unwrap_or_else(|e| e.into_response(Some(id))),
+                "aria2.forceShutdown" => self
+                    .handle_force_shutdown(&sub_request)
                     .await
                     .unwrap_or_else(|e| e.into_response(Some(id))),
                 "system.multicall" => JsonRpcResponse::error(
@@ -361,8 +469,16 @@ impl RpcEngine {
                 ),
             };
 
+            // Per original aria2 `SystemMulticallRpcMethod::execute` in
+            // `RpcMethodImpl.cc:1462-1469`: successful sub-call results are
+            // wrapped in a single-element array `[result]`, while error
+            // responses are pushed directly as `{"code":..., "message":...}`.
+            //
+            // The wrapping matches the XML-RPC `system.multicall` convention
+            // and is what AriaNg's `aria2TaskService.js` expects — it indexes
+            // results with `response.data[i][0]` to unwrap the value.
             match sub_response.result {
-                Some(result_value) => results.push(result_value),
+                Some(result_value) => results.push(serde_json::json!([result_value])),
                 None => {
                     if let Some(err) = sub_response.error {
                         results.push(serde_json::json!({

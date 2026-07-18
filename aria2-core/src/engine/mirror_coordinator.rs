@@ -321,6 +321,14 @@ impl MirrorCoordinator {
         self.segment_manager.has_failed_segments()
     }
 
+    /// Get the completed ranges from the segment manager.
+    ///
+    /// Returns a vector of (offset, length) tuples representing segments that
+    /// have been successfully downloaded.
+    pub fn completed_ranges(&self) -> Vec<(u64, u64)> {
+        self.segment_manager.completed_ranges()
+    }
+
     /// Check if there are pending segments.
     pub fn has_pending_segments(&self) -> bool {
         self.segment_manager.has_pending_segments()

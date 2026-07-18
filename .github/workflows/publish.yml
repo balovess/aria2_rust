@@ -53,6 +53,8 @@ jobs:
         run: |
           set -e
           for crate in aria2-protocol aria2-core aria2-rpc; do
+            # Read the expected version from the crate's own Cargo.toml
+            expected=$(grep -oP '^version\s*=\s*"\K[^"]+' "$crate/Cargo.toml")
             # Retry up to 3 times — crates.io may need a few seconds to index
             version=""
             for attempt in 1 2 3; do
@@ -61,11 +63,11 @@ jobs:
               echo "Attempt $attempt: $crate not yet indexed, retrying in 10s..."
               sleep 10
             done
-            echo "$crate max_version: $version"
-            if [ "$version" != "0.2.1" ]; then
-              echo "ERROR: $crate is not at version 0.2.1"
+            echo "$crate expected=$expected, published=$version"
+            if [ "$version" != "$expected" ]; then
+              echo "ERROR: $crate version mismatch: expected $expected, got $version"
               exit 1
             fi
             sleep 2
           done
-          echo "All crates verified at version 0.2.1"
+          echo "All crates verified"

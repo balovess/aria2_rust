@@ -139,31 +139,38 @@ impl DownloadEvent {
         self.method.clone()
     }
 
-    pub fn download_start(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
+    /// Build a notification for `aria2.onDownloadStart`.
+    ///
+    /// Per the original aria2 RPC spec, the `params` array contains a single
+    /// object with only the `gid` field: `[{"gid": "<16-hex>"}]`. No other
+    /// fields are emitted, matching `RpcMethodImpl.cc::sendDownloadEvent`.
+    pub fn download_start(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::DownloadStart,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+            vec![serde_json::json!({"gid": gid.into()})],
         )
     }
 
-    pub fn download_complete(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
+    /// Build a notification for `aria2.onDownloadComplete`.
+    /// See [`download_start`] for params format.
+    pub fn download_complete(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::DownloadComplete,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+            vec![serde_json::json!({"gid": gid.into()})],
         )
     }
 
-    pub fn download_error(
-        gid: impl Into<String>,
-        error_code: i32,
-        files: Vec<serde_json::Value>,
-    ) -> Self {
+    /// Build a notification for `aria2.onDownloadError`.
+    /// See [`download_start`] for params format.
+    pub fn download_error(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::DownloadError,
-            vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})],
+            vec![serde_json::json!({"gid": gid.into()})],
         )
     }
 
+    /// Build a notification for `aria2.onDownloadPause`.
+    /// See [`download_start`] for params format.
     pub fn download_pause(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::DownloadPause,
@@ -171,31 +178,35 @@ impl DownloadEvent {
         )
     }
 
-    pub fn download_stop(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
+    /// Build a notification for `aria2.onDownloadStop`.
+    /// See [`download_start`] for params format.
+    pub fn download_stop(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::DownloadStop,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+            vec![serde_json::json!({"gid": gid.into()})],
         )
     }
 
-    pub fn bt_download_complete(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
+    /// Build a notification for `aria2.onBtDownloadComplete`.
+    /// See [`download_start`] for params format.
+    pub fn bt_download_complete(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::BtDownloadComplete,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
+            vec![serde_json::json!({"gid": gid.into()})],
         )
     }
 
-    pub fn bt_download_error(
-        gid: impl Into<String>,
-        error_code: i32,
-        files: Vec<serde_json::Value>,
-    ) -> Self {
+    /// Build a notification for `aria2.onBtDownloadError`.
+    /// See [`download_start`] for params format.
+    pub fn bt_download_error(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::BtDownloadError,
-            vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})],
+            vec![serde_json::json!({"gid": gid.into()})],
         )
     }
 
+    /// Build a notification for `aria2.onDownloadResume`.
+    /// See [`download_start`] for params format.
     pub fn download_resume(gid: impl Into<String>) -> Self {
         Self::new(
             EventType::DownloadResume,
@@ -481,8 +492,7 @@ mod tests {
 
     #[test]
     fn test_download_event_creation() {
-        let event =
-            DownloadEvent::download_start("abc123", vec![serde_json::json!({"path": "/file.iso"})]);
+        let event = DownloadEvent::download_start("abc123");
         assert_eq!(event.event_type().unwrap(), EventType::DownloadStart);
         assert_eq!(event.method(), "aria2.onDownloadStart");
         assert_eq!(event.params().len(), 1);
@@ -490,39 +500,71 @@ mod tests {
 
     #[test]
     fn test_download_event_serialization() {
-        let event = DownloadEvent::download_error("def456", -1, vec![serde_json::json!({})]);
+        let event = DownloadEvent::download_error("def456");
         let json = event.to_json().unwrap();
         assert!(json.contains("\"method\":\"aria2.onDownloadError\""));
-        assert!(json.contains("\"errorCode\":-1"));
+        // Per aria2 spec, params must contain only gid — no errorCode.
+        assert!(!json.contains("errorCode"));
+        assert!(json.contains("\"gid\":\"def456\""));
     }
 
     #[test]
     fn test_all_event_constructors() {
-        let _ = DownloadEvent::download_start("g1", vec![]);
+        let _ = DownloadEvent::download_start("g1");
         let _ = DownloadEvent::download_pause("g2");
-        let _ = DownloadEvent::download_stop("g3", vec![]);
-        let _ = DownloadEvent::download_complete("g4", vec![]);
-        let _ = DownloadEvent::download_error("g5", 0, vec![]);
-        let _ = DownloadEvent::bt_download_complete("g6", vec![]);
-        let _ = DownloadEvent::bt_download_error("g7", 0, vec![]);
+        let _ = DownloadEvent::download_stop("g3");
+        let _ = DownloadEvent::download_complete("g4");
+        let _ = DownloadEvent::download_error("g5");
+        let _ = DownloadEvent::bt_download_complete("g6");
+        let _ = DownloadEvent::bt_download_error("g7");
         let _ = DownloadEvent::download_resume("g8");
     }
 
     #[test]
+    fn test_download_event_params_only_contain_gid() {
+        // Per aria2 RPC spec, all notification params must be `[{"gid": "..."}]`
+        // with no extra fields (no files, no errorCode).
+        let events = vec![
+            DownloadEvent::download_start("g1"),
+            DownloadEvent::download_complete("g2"),
+            DownloadEvent::download_error("g3"),
+            DownloadEvent::download_pause("g4"),
+            DownloadEvent::download_stop("g5"),
+            DownloadEvent::bt_download_complete("g6"),
+            DownloadEvent::bt_download_error("g7"),
+            DownloadEvent::download_resume("g8"),
+        ];
+        for event in &events {
+            let json = event.to_json().unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let params = parsed["params"].as_array().unwrap();
+            assert_eq!(params.len(), 1, "params should have exactly 1 element");
+            let param_obj = params[0].as_object().unwrap();
+            assert_eq!(
+                param_obj.len(),
+                1,
+                "param object should only contain gid, got: {:?}",
+                param_obj
+            );
+            assert!(param_obj.contains_key("gid"));
+        }
+    }
+
+    #[test]
     fn test_download_event_gid_extraction() {
-        let event = DownloadEvent::download_complete("gid-001", vec![]);
+        let event = DownloadEvent::download_complete("gid-001");
         assert_eq!(event.gid(), "gid-001");
 
-        let event2 = DownloadEvent::download_error("gid-err", -1, vec![]);
+        let event2 = DownloadEvent::download_error("gid-err");
         assert_eq!(event2.gid(), "gid-err");
     }
 
     #[test]
     fn test_download_event_event_type_str() {
-        let event = DownloadEvent::download_start("g1", vec![]);
+        let event = DownloadEvent::download_start("g1");
         assert_eq!(event.event_type_str(), "aria2.onDownloadStart");
 
-        let event2 = DownloadEvent::bt_download_complete("g2", vec![]);
+        let event2 = DownloadEvent::bt_download_complete("g2");
         assert_eq!(event2.event_type_str(), "aria2.onBtDownloadComplete");
     }
 
@@ -562,7 +604,7 @@ mod tests {
         let publisher = EventPublisher::new(16);
         let mut rx = publisher.subscribe("client-1", None).await;
 
-        let event = DownloadEvent::download_start("test-gid", vec![]);
+        let event = DownloadEvent::download_start("test-gid");
         let count = publisher.publish(EventType::DownloadStart, event).unwrap();
         assert_eq!(count, 1);
 
@@ -633,8 +675,8 @@ mod tests {
     fn test_dedup_same_event_replaces_old() {
         let mut batcher = NotificationBatcher::new().with_max_batch_size(100);
 
-        let event1 = DownloadEvent::download_complete("gid-same-001", vec![]);
-        let event2 = DownloadEvent::download_complete("gid-same-001", vec![]);
+        let event1 = DownloadEvent::download_complete("gid-same-001");
+        let event2 = DownloadEvent::download_complete("gid-same-001");
 
         batcher.push(event1);
         batcher.push(event2); // Should deduplicate: same GID + same event type
@@ -663,8 +705,8 @@ mod tests {
     fn test_different_events_not_deduped() {
         let mut batcher = NotificationBatcher::new().with_max_batch_size(100);
 
-        let complete = DownloadEvent::download_complete("gid-mixed-001", vec![]);
-        let error = DownloadEvent::download_error("gid-mixed-001", -1, vec![]);
+        let complete = DownloadEvent::download_complete("gid-mixed-001");
+        let error = DownloadEvent::download_error("gid-mixed-001");
 
         batcher.push(complete);
         batcher.push(error); // Different event type → NOT deduplicated
@@ -687,13 +729,13 @@ mod tests {
 
         // Push 19 events — no flush yet
         for i in 0..19 {
-            let flushed = batcher.push(DownloadEvent::download_start(format!("gid-{}", i), vec![]));
+            let flushed = batcher.push(DownloadEvent::download_start(format!("gid-{}", i)));
             assert!(!flushed, "Push {} should not trigger flush yet", i);
         }
         assert_eq!(batcher.pending_count(), 19);
 
         // Push 20th event — hits limit, should auto-flush
-        let flushed = batcher.push(DownloadEvent::download_start("gid-19", vec![]));
+        let flushed = batcher.push(DownloadEvent::download_start("gid-19"));
         assert!(flushed, "20th push should trigger auto-flush");
 
         // After auto-flush, pending should be empty (all 20 were drained)
@@ -715,10 +757,7 @@ mod tests {
 
         // Push some events
         for i in 0..5 {
-            batcher.push(DownloadEvent::download_complete(
-                format!("gid-timer-{}", i),
-                vec![],
-            ));
+            batcher.push(DownloadEvent::download_complete(format!("gid-timer-{}", i)));
         }
         assert_eq!(batcher.pending_count(), 5);
 
@@ -750,7 +789,7 @@ mod tests {
             .with_max_batch_size(100)
             .with_flush_interval_ms(60_000); // Long interval
 
-        batcher.push(DownloadEvent::download_start("gid-fresh", vec![]));
+        batcher.push(DownloadEvent::download_start("gid-fresh"));
 
         // Immediately after push, before interval elapses
         let result = batcher.maybe_flush();
@@ -773,9 +812,9 @@ mod tests {
     fn test_different_gids_not_deduped() {
         let mut batcher = NotificationBatcher::new().with_max_batch_size(100);
 
-        batcher.push(DownloadEvent::download_complete("gid-a", vec![]));
-        batcher.push(DownloadEvent::download_complete("gid-b", vec![]));
-        batcher.push(DownloadEvent::download_complete("gid-c", vec![]));
+        batcher.push(DownloadEvent::download_complete("gid-a"));
+        batcher.push(DownloadEvent::download_complete("gid-b"));
+        batcher.push(DownloadEvent::download_complete("gid-c"));
 
         assert_eq!(
             batcher.pending_count(),

@@ -1,0 +1,59 @@
+# ── Auto-tag on merge to master ──────────────────────────────────────────
+# Reads the binary (aria2) version from its Cargo.toml and creates a
+# lightweight tag v{version} if one doesn't already exist.
+# The tag triggers release.yml (binaries, Docker, PyPI/NPM) and
+# publish.yml (crates.io).
+#
+# Prerequisites:
+#   Repository secret RELEASE_PAT — a GitHub PAT with scope `repo`.
+#   Created by a machine user or personal account that has push access.
+#   PAT is required (not GITHUB_TOKEN) so that the resulting tag push
+#   triggers the tag-based release/publish workflows.
+
+name: Tag Release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read binary version
+        id: version
+        run: |
+          VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' aria2/Cargo.toml)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git tag -l "$TAG" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag $TAG already exists — skipping"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag $TAG does not exist — will create"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}

@@ -281,8 +281,10 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
+ "futures-util",
  "quick-xml",
  "rand 0.8.5",
+ "reqwest",
  "rustls 0.23.40",
  "rustls-pemfile 2.2.0",
  "serde",
@@ -291,10 +293,11 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite 0.20.1",
  "tokio-util",
  "tower-http 0.5.2",
  "tracing",
- "tungstenite",
+ "tungstenite 0.20.1",
  "windows-sys 0.59.0",
 ]
 
@@ -385,6 +388,7 @@ checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "http 1.4.0",
@@ -403,8 +407,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1 0.10.6",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tower",
  "tower-layer",
  "tower-service",
@@ -3008,6 +3014,8 @@ dependencies = [
  "rustls 0.23.40",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -3984,6 +3992,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "212d5dcb2a1ce06d81107c3d0ffa3121fe974b73f068c8282cb1c32328113b6c"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.20.1",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.24.0",
+]
+
+[[package]]
 name = "tokio-uring"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4173,6 +4205,24 @@ dependencies = [
  "sha1 0.10.6",
  "thiserror 1.0.69",
  "url",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http 1.4.0",
+ "httparse",
+ "log",
+ "rand 0.8.5",
+ "sha1 0.10.6",
+ "thiserror 1.0.69",
  "utf-8",
 ]
 

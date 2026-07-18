@@ -9,7 +9,7 @@ pub struct ResumeHelper {
     continue_opt: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResumeState {
     pub existing_length: u64,
     pub control_file: Option<ControlFile>,

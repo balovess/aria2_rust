@@ -69,7 +69,13 @@ async fn test_list_notifications_returns_all_events() {
     assert!(resp.is_success());
 
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(notifications.len(), 7);
+    // Matches original aria2 `rpcNotificationsNames` (6 events with
+    // ENABLE_BITTORRENT, which is always-on for aria2-rust).
+    assert_eq!(
+        notifications.len(),
+        6,
+        "Must match original aria2: 6 notifications (no onBtDownloadError)"
+    );
 }
 
 #[tokio::test]
@@ -96,9 +102,14 @@ async fn test_list_notifications_contains_bt_events() {
 
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
 
-    // BitTorrent-specific events
+    // BitTorrent-specific event — only `aria2.onBtDownloadComplete` is in the
+    // original aria2 `rpcNotificationsNames`. `aria2.onBtDownloadError` is a
+    // non-standard aria2-rust extension and must NOT be advertised.
     assert!(notifications.contains(&"aria2.onBtDownloadComplete".to_string()));
-    assert!(notifications.contains(&"aria2.onBtDownloadError".to_string()));
+    assert!(
+        !notifications.contains(&"aria2.onBtDownloadError".to_string()),
+        "aria2.onBtDownloadError is a non-standard extension and must NOT be in listNotifications"
+    );
 }
 
 #[tokio::test]
