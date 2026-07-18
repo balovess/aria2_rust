@@ -9,9 +9,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Branch guard: only master branch can publish ────────────
+  check-branch:
+    name: Check tag is on master
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify tag is on master
+        run: |
+          git fetch origin master
+          if ! git merge-base --is-ancestor ${{ github.sha }} origin/master; then
+            echo "ERROR: Tag must be on master branch"
+            exit 1
+          fi
+          echo "Tag is on master, proceeding..."
+
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    needs: [check-branch]
     
     steps:
       - uses: actions/checkout@v4
