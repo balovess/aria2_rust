@@ -84,7 +84,7 @@ jobs:
     name: Test (${{ matrix.label }})
     needs: [changes]
     runs-on: ${{ matrix.os }}
-    if: ${{ !contains(github.event.pull_request.labels.*.name, matrix.skip_label) }}
+    if: ${{ github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, matrix.skip_label) }}
     strategy:
       fail-fast: false
       matrix:
