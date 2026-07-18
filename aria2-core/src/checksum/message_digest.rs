@@ -206,7 +206,7 @@ mod tests {
         for ch in hex.chars() {
             assert!(
                 ch.is_ascii_digit() || ('a'..='f').contains(&ch),
-                "hex 应为小写: {}",
+                "hex should be lowercase: {}",
                 hex
             );
         }
@@ -236,6 +236,6 @@ mod tests {
     fn test_different_data_different_hash() {
         let h1 = MessageDigest::hash_hex(HashType::Md5, b"first data");
         let h2 = MessageDigest::hash_hex(HashType::Md5, b"second data");
-        assert_ne!(h1, h2, "不同数据应产生不同哈希值");
+        assert_ne!(h1, h2, "different data should produce different hash value");
     }
 }

@@ -9,6 +9,7 @@ use crate::engine::TaskState;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, FileInfo, StatusInfo, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
+use aria2_core::checksum::checksum::Checksum;
 use aria2_core::constants as core_constants;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
@@ -459,6 +460,13 @@ impl RpcEngine {
             .ok_or_else(|| JsonRpcError::InternalError("Invalid GID generated".into()))?;
 
         let dl_options = rpc_options_to_download_options(&options);
+
+        // Validate checksum format at task creation time, before any download starts.
+        if let Some((ref algo, ref val)) = dl_options.checksum {
+            Checksum::from_type_and_value(algo, val).map_err(|e| {
+                JsonRpcError::InvalidParams(format!("Invalid checksum: {}", e))
+            })?;
+        }
 
         // Start a real download if we have shared engine state
         if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {

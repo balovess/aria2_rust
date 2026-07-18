@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::checksum::checksum::Checksum;
+use crate::checksum::message_digest::HashType;
 use crate::constants;
 use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus, ProgressUpdate};
@@ -617,6 +620,40 @@ impl Command for DownloadCommand {
         self.drain_progress_aggregator().await;
 
         if download_result.is_ok() {
+            // Verify checksum if configured
+            {
+                let g = self.group.read().await;
+                if let Some((ref algo, ref expected)) = g.options().checksum
+                    && let Some(ht) = HashType::from_str(algo) {
+                        let cs = Checksum::new(ht, expected)?;
+                        let file = tokio::fs::File::open(&self.output_path).await
+                            .map_err(|e| Aria2Error::Io(format!("Failed to open file for checksum verification: {}", e)))?;
+                        let mut reader = tokio::io::BufReader::with_capacity(65536, file);
+                        let mut validator = cs.create_validator();
+                        let mut buf = vec![0u8; 65536];
+                        loop {
+                            let n = reader.read(&mut buf).await
+                                .map_err(|e| Aria2Error::Io(format!("Read error during checksum verification: {}", e)))?;
+                            if n == 0 { break; }
+                            validator.update(&buf[..n]);
+                        }
+                        if !validator.finalize()? {
+                            tracing::error!(
+                                algo = %algo,
+                                path = %self.output_path.display(),
+                                "Checksum mismatch"
+                            );
+                            return Err(Aria2Error::Checksum(
+                                format!("{} checksum mismatch for {}", algo, self.output_path.display())
+                            ));
+                        }
+                        tracing::info!(
+                            algo = %algo,
+                            path = %self.output_path.display(),
+                            "Checksum verified successfully"
+                        );
+                    }
+            }
             self.completed = true;
             let g = self.group.write().await;
             let total = g.total_length();

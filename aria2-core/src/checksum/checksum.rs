@@ -11,12 +11,12 @@ impl Checksum {
     pub fn new(hash_type: HashType, hex_digest: &str) -> Result<Self> {
         let hex = hex_digest.trim().to_lowercase();
         if hex.is_empty() {
-            return Err(Aria2Error::Parse("校验和值不能为空".to_string()));
+            return Err(Aria2Error::Parse("checksum value cannot be empty".to_string()));
         }
         let expected_len = hash_type.digest_length() * 2;
         if hex.len() != expected_len {
             return Err(Aria2Error::Parse(format!(
-                "{} 校验和长度不匹配: 期望 {} 字符(hex), 实际 {}",
+                "{} checksum length mismatch: expected {} hex chars, got {}",
                 hash_type.as_str(),
                 expected_len,
                 hex.len()
@@ -25,7 +25,7 @@ impl Checksum {
         for (i, ch) in hex.chars().enumerate() {
             if !ch.is_ascii_hexdigit() {
                 return Err(Aria2Error::Parse(format!(
-                    "校验和包含非法字符 '{}' 在位置 {}",
+                    "invalid hex character '{}' at position {}",
                     ch, i
                 )));
             }
@@ -39,7 +39,7 @@ impl Checksum {
 
     pub fn from_type_and_value(type_str: &str, value_str: &str) -> Result<Self> {
         let ht = HashType::from_str(type_str)
-            .ok_or_else(|| Aria2Error::Parse(format!("未知哈希算法: {}", type_str)))?;
+            .ok_or_else(|| Aria2Error::Parse(format!("unknown hash algorithm: {}", type_str)))?;
         Self::new(ht, value_str)
     }
 
@@ -145,7 +145,7 @@ mod tests {
         validator.update(b"bc");
         assert!(validator.finalize().unwrap());
 
-        assert!(cs.verify(b"abc"), "流式验证应与一次性验证一致");
+        assert!(cs.verify(b"abc"), "streaming verification should match one-shot verification");
     }
 
     #[test]
