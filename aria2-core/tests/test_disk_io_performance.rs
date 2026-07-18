@@ -725,9 +725,10 @@ async fn test_write_strategy_throughput_comparison() {
         );
     }
 
-    // Strategy 4: Batched writes
+    // Strategy 4: Batched writes via BatchedDiskWriter (SeekableDiskWriter)
     {
-        use aria2_core::engine::batched_disk_writer::BatchedDiskWriter;
+        use aria2_core::filesystem::batched_disk_writer::BatchedDiskWriter;
+        use aria2_core::filesystem::disk_writer::SeekableDiskWriter;
         let path = dir.path().join("batched_write.bin");
         let mut writer = BatchedDiskWriter::new(&path).with_threshold(256 * 1024); // 256 KB batch threshold
 

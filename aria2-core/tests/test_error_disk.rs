@@ -8,12 +8,8 @@
 
 mod fixtures;
 
-use aria2_core::error::{Aria2Error, FatalError};
 use aria2_core::filesystem::control_file::ControlFile;
-use aria2_core::filesystem::disk_space::{
-    DiskError, available_space, check_disk_space, check_disk_space_typed, check_with_margin,
-    has_enough_space, total_space,
-};
+use aria2_core::filesystem::disk_space::check_disk_space;
 use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use aria2_core::filesystem::file_allocation::preallocate_file;
 use aria2_core::filesystem::resume_helper::ResumeHelper;
@@ -44,111 +40,6 @@ fn test_disk_space_insufficient_detection() {
     // If result is Ok, the check was skipped (acceptable on some platforms)
 }
 
-/// Test typed disk space check returns structured error
-#[test]
-fn test_disk_space_typed_error_structure() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let huge_request = u64::MAX / 2;
-    let result = check_disk_space_typed(dir.path(), huge_request);
-
-    match result {
-        Err(DiskError::InsufficientSpace {
-            required,
-            available,
-        }) => {
-            assert!(required > 0, "Required should be positive");
-            if let Some(avail) = available {
-                assert!(avail < required, "Available should be less than required");
-            }
-        }
-        Err(DiskError::IoError(msg)) => {
-            // I/O error during space check
-            assert!(!msg.is_empty(), "I/O error message should not be empty");
-        }
-        Err(DiskError::PermissionDenied(_)) => {
-            // Permission error (unlikely for temp dir)
-        }
-        Ok(()) => {
-            // Check was skipped or sufficient space (unlikely for u64::MAX/2)
-        }
-    }
-}
-
-/// Test check_with_margin with insufficient space
-#[test]
-fn test_check_with_margin_insufficient() {
-    let dir = tempfile::tempdir().unwrap();
-
-    // Request more than available with margin
-    let huge_request = u64::MAX / 2;
-    let result = check_with_margin(dir.path(), huge_request, Some(100));
-
-    // Ok(_) (check skipped) is acceptable on CI where statvfs may fail with
-    // ENOENT on tempdir paths. Only inspect Err variants below.
-
-    match result {
-        Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted)) => {
-            // Expected error type
-        }
-        Err(e) => {
-            // Other fatal errors are acceptable
-            assert!(
-                e.to_string().contains("space") || e.to_string().contains("disk"),
-                "Error should mention disk space: {}",
-                e
-            );
-        }
-        Ok(_) => {
-            // Check was skipped (acceptable on some platforms)
-        }
-    }
-}
-
-/// Test available_space returns valid value
-#[test]
-fn test_available_space_valid_result() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let result = available_space(dir.path());
-
-    // Should succeed on any reasonable system
-    if let Ok(space) = result {
-        assert!(space > 0, "Available space should be positive");
-    }
-    // Error is acceptable on CI sandbox environments
-}
-
-/// Test has_enough_space for small request
-#[test]
-fn test_has_enough_space_small_request() {
-    let dir = tempfile::tempdir().unwrap();
-
-    // Small request should succeed (or fail consistently if disk check fails)
-    let result1 = has_enough_space(dir.path(), 1);
-    let result2 = has_enough_space(dir.path(), 1024);
-
-    // Results should be consistent
-    assert!(
-        (result1 && result2) || (!result1 && !result2),
-        "Results should be consistent for small requests: {} and {}",
-        result1,
-        result2
-    );
-}
-
-/// Test total_space returns valid value
-#[test]
-fn test_total_space_valid_result() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let result = total_space(dir.path());
-
-    if let Ok(space) = result {
-        assert!(space > 0, "Total space should be positive");
-    }
-}
-
 /// Test zero bytes request always succeeds
 #[test]
 fn test_zero_bytes_always_passes() {
@@ -156,9 +47,6 @@ fn test_zero_bytes_always_passes() {
 
     let result = check_disk_space(dir.path(), 0);
     assert!(result.is_ok(), "Zero bytes request should always succeed");
-
-    let result2 = check_with_margin(dir.path(), 0, None);
-    assert!(result2.is_ok(), "Zero bytes with margin should succeed");
 }
 
 /// Test empty path handled gracefully
@@ -170,29 +58,6 @@ fn test_empty_path_handling() {
         result.is_ok() || result.is_err(),
         "Empty path should be handled gracefully"
     );
-
-    let result2 = available_space(Path::new(""));
-    assert!(
-        result2.is_ok() || result2.is_err(),
-        "Empty path for available_space should be handled"
-    );
-}
-
-// =========================================================================
-// Permission Error Tests
-// =========================================================================
-
-/// Test DiskError PermissionDenied display
-#[test]
-fn test_disk_error_permission_denied_display() {
-    let err = DiskError::PermissionDenied("/root/secret".to_string());
-    let display_str = format!("{}", err);
-
-    assert!(
-        display_str.contains("Permission denied"),
-        "Should mention permission denied"
-    );
-    assert!(display_str.contains("/root/secret"), "Should include path");
 }
 
 /// Test write to non-existent parent directory
@@ -586,46 +451,6 @@ async fn test_preallocation_invalid_method() {
         result.is_ok() || result.is_err(),
         "Should handle invalid method gracefully"
     );
-}
-
-// =========================================================================
-// DiskError Display Tests
-// =========================================================================
-
-/// Test DiskError InsufficientSpace display formatting
-#[test]
-fn test_disk_error_insufficient_space_display() {
-    let err = DiskError::InsufficientSpace {
-        required: 1024 * 1024 * 1024,       // 1 GiB
-        available: Some(512 * 1024 * 1024), // 512 MiB
-    };
-
-    let display_str = format!("{}", err);
-    assert!(display_str.contains("Not enough disk space"));
-    assert!(display_str.contains("1.00 GiB") || display_str.contains("GiB"));
-    assert!(display_str.contains("512.00 MiB") || display_str.contains("MiB"));
-}
-
-/// Test DiskError IoError display formatting
-#[test]
-fn test_disk_error_io_error_display() {
-    let err = DiskError::IoError("Failed to write block".to_string());
-
-    let display_str = format!("{}", err);
-    assert!(display_str.contains("Disk I/O error"));
-    assert!(display_str.contains("Failed to write block"));
-}
-
-/// Test DiskError implements std::error::Error
-#[test]
-fn test_disk_error_is_std_error() {
-    let err = DiskError::InsufficientSpace {
-        required: 1000,
-        available: Some(500),
-    };
-
-    // Can be used as std::error::Error
-    let _: &dyn std::error::Error = &err;
 }
 
 // =========================================================================

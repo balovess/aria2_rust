@@ -1,5 +1,4 @@
 pub mod active_output_registry;
-pub mod batched_disk_writer;
 pub mod bt_choke_manager;
 pub mod bt_connection_pool;
 pub mod bt_download_command;
