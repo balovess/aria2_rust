@@ -624,35 +624,50 @@ impl Command for DownloadCommand {
             {
                 let g = self.group.read().await;
                 if let Some((ref algo, ref expected)) = g.options().checksum
-                    && let Some(ht) = HashType::from_str(algo) {
-                        let cs = Checksum::new(ht, expected)?;
-                        let file = tokio::fs::File::open(&self.output_path).await
-                            .map_err(|e| Aria2Error::Io(format!("Failed to open file for checksum verification: {}", e)))?;
-                        let mut reader = tokio::io::BufReader::with_capacity(65536, file);
-                        let mut validator = cs.create_validator();
-                        let mut buf = vec![0u8; 65536];
-                        loop {
-                            let n = reader.read(&mut buf).await
-                                .map_err(|e| Aria2Error::Io(format!("Read error during checksum verification: {}", e)))?;
-                            if n == 0 { break; }
-                            validator.update(&buf[..n]);
+                    && let Some(ht) = HashType::from_str(algo)
+                {
+                    let cs = Checksum::new(ht, expected)?;
+                    let file = tokio::fs::File::open(&self.output_path)
+                        .await
+                        .map_err(|e| {
+                            Aria2Error::Io(format!(
+                                "Failed to open file for checksum verification: {}",
+                                e
+                            ))
+                        })?;
+                    let mut reader = tokio::io::BufReader::with_capacity(65536, file);
+                    let mut validator = cs.create_validator();
+                    let mut buf = vec![0u8; 65536];
+                    loop {
+                        let n = reader.read(&mut buf).await.map_err(|e| {
+                            Aria2Error::Io(format!(
+                                "Read error during checksum verification: {}",
+                                e
+                            ))
+                        })?;
+                        if n == 0 {
+                            break;
                         }
-                        if !validator.finalize()? {
-                            tracing::error!(
-                                algo = %algo,
-                                path = %self.output_path.display(),
-                                "Checksum mismatch"
-                            );
-                            return Err(Aria2Error::Checksum(
-                                format!("{} checksum mismatch for {}", algo, self.output_path.display())
-                            ));
-                        }
-                        tracing::info!(
+                        validator.update(&buf[..n]);
+                    }
+                    if !validator.finalize()? {
+                        tracing::error!(
                             algo = %algo,
                             path = %self.output_path.display(),
-                            "Checksum verified successfully"
+                            "Checksum mismatch"
                         );
+                        return Err(Aria2Error::Checksum(format!(
+                            "{} checksum mismatch for {}",
+                            algo,
+                            self.output_path.display()
+                        )));
                     }
+                    tracing::info!(
+                        algo = %algo,
+                        path = %self.output_path.display(),
+                        "Checksum verified successfully"
+                    );
+                }
             }
             self.completed = true;
             let g = self.group.write().await;

@@ -463,9 +463,8 @@ impl RpcEngine {
 
         // Validate checksum format at task creation time, before any download starts.
         if let Some((ref algo, ref val)) = dl_options.checksum {
-            Checksum::from_type_and_value(algo, val).map_err(|e| {
-                JsonRpcError::InvalidParams(format!("Invalid checksum: {}", e))
-            })?;
+            Checksum::from_type_and_value(algo, val)
+                .map_err(|e| JsonRpcError::InvalidParams(format!("Invalid checksum: {}", e)))?;
         }
 
         // Start a real download if we have shared engine state

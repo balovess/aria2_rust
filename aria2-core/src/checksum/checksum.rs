@@ -11,7 +11,9 @@ impl Checksum {
     pub fn new(hash_type: HashType, hex_digest: &str) -> Result<Self> {
         let hex = hex_digest.trim().to_lowercase();
         if hex.is_empty() {
-            return Err(Aria2Error::Parse("checksum value cannot be empty".to_string()));
+            return Err(Aria2Error::Parse(
+                "checksum value cannot be empty".to_string(),
+            ));
         }
         let expected_len = hash_type.digest_length() * 2;
         if hex.len() != expected_len {
@@ -145,7 +147,10 @@ mod tests {
         validator.update(b"bc");
         assert!(validator.finalize().unwrap());
 
-        assert!(cs.verify(b"abc"), "streaming verification should match one-shot verification");
+        assert!(
+            cs.verify(b"abc"),
+            "streaming verification should match one-shot verification"
+        );
     }
 
     #[test]
