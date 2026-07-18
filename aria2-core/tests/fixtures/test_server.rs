@@ -67,7 +67,10 @@ impl TestServer {
         buf
     }
 
-    async fn handle_async_request(stream: &mut tokio::net::TcpStream, request: &[u8]) -> std::io::Result<()> {
+    async fn handle_async_request(
+        stream: &mut tokio::net::TcpStream,
+        request: &[u8],
+    ) -> std::io::Result<()> {
         let request_str = String::from_utf8_lossy(request);
         let first_line = request_str.lines().next().unwrap_or("");
         let mut parts = first_line.split(' ');
@@ -90,22 +93,33 @@ impl TestServer {
             }
             "/files/disconnect_range_test.bin" => {
                 let range_header = if request_str.contains("Range:") {
-                    Some(request_str.split("Range: ").nth(1).and_then(|r| r.lines().next()).unwrap_or(""))
-                } else { None };
+                    Some(
+                        request_str
+                            .split("Range: ")
+                            .nth(1)
+                            .and_then(|r| r.lines().next())
+                            .unwrap_or(""),
+                    )
+                } else {
+                    None
+                };
 
-                if let Some(range) = range_header {
-                    if let Some((start_str, _)) = range.trim().strip_prefix("bytes=").and_then(|r| r.split_once('-')) {
-                        let start: usize = start_str.parse().unwrap_or(0);
-                        if start >= 100 && start < 200 {
-                            let partial_response = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes=100-149/250\r\nContent-Length: 50\r\n\r\n";
-                            stream.write_all(partial_response).await?;
-                            stream.flush().await?;
-                            let partial_body: Vec<u8> = (100..125).map(|i| i as u8).collect();
-                            stream.write_all(&partial_body).await?;
-                            stream.flush().await?;
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            return Ok(());
-                        }
+                if let Some(range) = range_header
+                    && let Some((start_str, _)) = range
+                        .trim()
+                        .strip_prefix("bytes=")
+                        .and_then(|r| r.split_once('-'))
+                {
+                    let start: usize = start_str.parse().unwrap_or(0);
+                    if (100..200).contains(&start) {
+                        let partial_response = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes=100-149/250\r\nContent-Length: 50\r\n\r\n";
+                        stream.write_all(partial_response).await?;
+                        stream.flush().await?;
+                        let partial_body: Vec<u8> = (100..125).map(|i| i as u8).collect();
+                        stream.write_all(&partial_body).await?;
+                        stream.flush().await?;
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        return Ok(());
                     }
                 }
 
@@ -196,7 +210,7 @@ impl TestServer {
                         let start: usize = start_str.parse().unwrap_or(0);
                         let end: usize = end_str.parse().unwrap_or(99);
                         let total = 200u8;
-                        
+
                         if start >= 100 && request_str.contains("fail_on_second") {
                             b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
                         } else {
@@ -223,8 +237,8 @@ impl TestServer {
                         let start: usize = start_str.parse().unwrap_or(0);
                         let end: usize = end_str.parse().unwrap_or(99);
                         let total = 250u8;
-                        
-                        if start >= 100 && start < 200 {
+
+                        if (100..200).contains(&start) {
                             b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
                         } else {
                             let body: Vec<u8> = (start..=end.min(total as usize)).map(|i| i as u8).collect();
@@ -250,8 +264,8 @@ impl TestServer {
                         let start: usize = start_str.parse().unwrap_or(0);
                         let end: usize = end_str.parse().unwrap_or(99);
                         let total = 2000000u64;
-                        
-                        if start >= 500000 && start < 1000000 {
+
+                        if (500000..1000000).contains(&start) {
                             format!(
                                 "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\n\r\n",
                                 total
@@ -281,8 +295,8 @@ impl TestServer {
                         let start: usize = start_str.parse().unwrap_or(0);
                         let end: usize = end_str.parse().unwrap_or(99);
                         let total = 2000000u64;
-                        
-                        if start >= 500000 && start < 1000000 {
+
+                        if (500000..1000000).contains(&start) {
                             b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
                         } else {
                             let actual_end = std::cmp::min(end, (total - 1) as usize);

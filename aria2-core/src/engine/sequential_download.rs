@@ -8,7 +8,9 @@ use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::filesystem::disk_writer::{CachedDiskWriter, DefaultDiskWriter, DiskWriter, SeekableDiskWriter};
+use crate::filesystem::disk_writer::{
+    CachedDiskWriter, DefaultDiskWriter, DiskWriter, SeekableDiskWriter,
+};
 use crate::filesystem::resume_helper::{ResumeHelper, ResumeState};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::RequestGroup;
@@ -22,7 +24,6 @@ pub struct SequentialDownloader {
     client: Arc<reqwest::Client>,
     output_path: std::path::PathBuf,
     headers: Vec<(String, String)>,
-    use_hyper: bool,
     cookie_helper: CookieHelper,
     progress_updater: ProgressUpdater,
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -33,7 +34,6 @@ impl SequentialDownloader {
         client: Arc<reqwest::Client>,
         output_path: std::path::PathBuf,
         headers: Vec<(String, String)>,
-        use_hyper: bool,
         cookie_helper: CookieHelper,
         progress_updater: ProgressUpdater,
         group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -42,7 +42,6 @@ impl SequentialDownloader {
             client,
             output_path,
             headers,
-            use_hyper,
             cookie_helper,
             progress_updater,
             group,
@@ -60,9 +59,14 @@ impl SequentialDownloader {
 
         #[cfg(target_os = "linux")]
         {
+            let no_proxy = {
+                let guard = self.group.read().await;
+                let opts = guard.options();
+                opts.http_proxy.is_none() && opts.all_proxy.is_none()
+            };
             if !resume_state.should_resume
                 && total_length > 0
-                && self.use_hyper
+                && no_proxy
                 && !uri.starts_with("https://")
                 && self.headers.is_empty()
                 && self.cookie_helper.build_cookie_header(uri).is_none()
@@ -72,7 +76,8 @@ impl SequentialDownloader {
                     Err(e) => {
                         tracing::debug!(
                             "Splice download failed for {}, falling back to streaming: {}",
-                            uri, e
+                            uri,
+                            e
                         );
                     }
                 }
@@ -224,7 +229,9 @@ impl SequentialDownloader {
         let gaps = Self::find_all_gaps(completed_ranges, total_length);
         tracing::info!(
             "Starting sequential download with gaps: uri={}, total={}, gaps={:?}",
-            uri, total_length, gaps
+            uri,
+            total_length,
+            gaps
         );
 
         if gaps.is_empty() {
@@ -283,9 +290,11 @@ impl SequentialDownloader {
                     Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
                     return GapDownloadResult {
                         completed_gaps,
-                        error: Some(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                            message: format!("HTTP request failed: {}", e),
-                        })),
+                        error: Some(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: format!("HTTP request failed: {}", e),
+                            },
+                        )),
                     };
                 }
             };
@@ -296,7 +305,8 @@ impl SequentialDownloader {
             if !status.is_success() && status.as_u16() != 206 {
                 tracing::warn!(
                     "Gap download failed with HTTP status {} ({}), cleaning up partial data",
-                    status, range_header
+                    status,
+                    range_header
                 );
                 Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
                 let error = if status.as_u16() >= 500 {
@@ -304,9 +314,10 @@ impl SequentialDownloader {
                         code: status.as_u16(),
                     })
                 } else {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(
-                        format!("HTTP error: {}", status),
-                    ))
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "HTTP error: {}",
+                        status
+                    )))
                 };
                 return GapDownloadResult {
                     completed_gaps,
@@ -329,9 +340,11 @@ impl SequentialDownloader {
                         Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
                         return GapDownloadResult {
                             completed_gaps,
-                            error: Some(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                                message: e.to_string(),
-                            })),
+                            error: Some(Aria2Error::Recoverable(
+                                RecoverableError::TemporaryNetworkFailure {
+                                    message: e.to_string(),
+                                },
+                            )),
                         };
                     }
                 };
@@ -350,9 +363,9 @@ impl SequentialDownloader {
                         Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
                         return GapDownloadResult {
                             completed_gaps,
-                            error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Write failed: {}", e
-                            )))),
+                            error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(
+                                format!("Write failed: {}", e),
+                            ))),
                         };
                     }
                 }
@@ -362,7 +375,8 @@ impl SequentialDownloader {
                 stream_offset += data_len;
                 bytes_downloaded += data_len;
 
-                if completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64 {
+                if completed_bytes - last_progress_update >= constants::PROGRESS_UPDATE_BYTES as u64
+                {
                     self.progress_updater
                         .update_progress(
                             completed_bytes,
@@ -395,9 +409,9 @@ impl SequentialDownloader {
             tracing::warn!("Flush failed during gap download: {}", e);
             return GapDownloadResult {
                 completed_gaps,
-                error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "Flush failed: {}", e
-                )))),
+                error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(
+                    format!("Flush failed: {}", e),
+                ))),
             };
         }
 
@@ -441,13 +455,25 @@ impl SequentialDownloader {
         }
     }
 
-    async fn cleanup_partial_gap(writer: &mut CachedDiskWriter, gap_start: u64, bytes_written: u64) {
+    async fn cleanup_partial_gap(
+        writer: &mut CachedDiskWriter,
+        gap_start: u64,
+        bytes_written: u64,
+    ) {
         if bytes_written == 0 {
             return;
         }
         let zero_data = vec![0u8; bytes_written as usize];
-        if let Err(e) = writer.write_bytes_at(gap_start, bytes::Bytes::from(zero_data)).await {
-            tracing::warn!("Failed to cleanup partial gap at {} ({} bytes): {}", gap_start, bytes_written, e);
+        if let Err(e) = writer
+            .write_bytes_at(gap_start, bytes::Bytes::from(zero_data))
+            .await
+        {
+            tracing::warn!(
+                "Failed to cleanup partial gap at {} ({} bytes): {}",
+                gap_start,
+                bytes_written,
+                e
+            );
         }
     }
 
@@ -516,12 +542,16 @@ impl SequentialDownloader {
             {
                 tracing::info!(
                     "Sequential download with gaps retry #{} (waiting {:?}), {} ranges already completed...",
-                    attempt, wait, accumulated_completed.len()
+                    attempt,
+                    wait,
+                    accumulated_completed.len()
                 );
                 tokio::time::sleep(wait).await;
             }
 
-            let result = self.execute_with_gaps(uri, total_length, &accumulated_completed).await;
+            let result = self
+                .execute_with_gaps(uri, total_length, &accumulated_completed)
+                .await;
 
             if !result.completed_gaps.is_empty() {
                 tracing::info!(
@@ -537,12 +567,15 @@ impl SequentialDownloader {
                 return Ok(());
             }
 
-            tracing::warn!("Sequential download with gaps attempt #{} failed: {}", attempt + 1, result.error.as_ref().unwrap());
+            tracing::warn!(
+                "Sequential download with gaps attempt #{} failed: {}",
+                attempt + 1,
+                result.error.as_ref().unwrap()
+            );
             last_err = result.error;
 
             if retry_policy.is_exhausted(attempt)
-                || !retry_policy
-                    .should_retry_error(&format!("{:?}", last_err.as_ref().unwrap()))
+                || !retry_policy.should_retry_error(&format!("{:?}", last_err.as_ref().unwrap()))
             {
                 break;
             }
@@ -570,7 +603,8 @@ impl SequentialDownloader {
             {
                 tracing::info!(
                     "Sequential download retry #{} (waiting {:?})...",
-                    attempt, wait
+                    attempt,
+                    wait
                 );
                 tokio::time::sleep(wait).await;
             }
@@ -595,6 +629,49 @@ impl SequentialDownloader {
                 message: "All retries failed".into(),
             })
         }))
+    }
+}
+
+impl SequentialDownloader {
+    #[cfg(target_os = "linux")]
+    async fn try_splice_sequential(&mut self, uri: &str, total_length: u64) -> Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.output_path)?;
+
+        let bytes = crate::http::splice_http::try_splice_download(uri, 0, total_length, &file, 0)
+            .await
+            .map_err(|e| Aria2Error::Io(format!("splice download failed: {e}")))?;
+
+        let final_speed = {
+            let g = self.group.read().await;
+            let elapsed = g.elapsed_time().await;
+            match elapsed {
+                Some(d) if d.as_secs_f64() > 0.0 => (bytes as f64 / d.as_secs_f64()) as u64,
+                _ => 0,
+            }
+        };
+
+        {
+            let mut g = self.group.write().await;
+            g.set_total_length(bytes).await;
+            g.set_total_length_atomic(bytes);
+            g.update_progress(bytes).await;
+            g.set_completed_length(bytes);
+            g.update_speed(final_speed, 0).await;
+            g.set_download_speed_cached(final_speed);
+            g.complete().await?;
+        }
+
+        tracing::info!(
+            "Sequential download (splice) complete: {} ({} bytes)",
+            self.output_path.display(),
+            bytes
+        );
+        self.cookie_helper.save_cookies_if_configured();
+        Ok(())
     }
 }
 
@@ -733,48 +810,5 @@ mod tests {
         let ranges = &[(0, 200), (100, 150), (300, 50)];
         let gaps = SequentialDownloader::find_all_gaps(ranges, 500);
         assert_eq!(gaps, vec![(250, 50), (350, 150)]);
-    }
-}
-
-impl SequentialDownloader {
-    #[cfg(target_os = "linux")]
-    async fn try_splice_sequential(&mut self, uri: &str, total_length: u64) -> Result<()> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&self.output_path)?;
-
-        let bytes = crate::http::splice_http::try_splice_download(uri, 0, total_length, &file, 0)
-            .await
-            .map_err(|e| Aria2Error::Io(format!("splice download failed: {e}")))?;
-
-        let final_speed = {
-            let g = self.group.read().await;
-            let elapsed = g.elapsed_time().await;
-            match elapsed {
-                Some(d) if d.as_secs_f64() > 0.0 => (bytes as f64 / d.as_secs_f64()) as u64,
-                _ => 0,
-            }
-        };
-
-        {
-            let mut g = self.group.write().await;
-            g.set_total_length(bytes).await;
-            g.set_total_length_atomic(bytes);
-            g.update_progress(bytes).await;
-            g.set_completed_length(bytes);
-            g.update_speed(final_speed, 0).await;
-            g.set_download_speed_cached(final_speed);
-            g.complete().await?;
-        }
-
-        tracing::info!(
-            "Sequential download (splice) complete: {} ({} bytes)",
-            self.output_path.display(),
-            bytes
-        );
-        self.cookie_helper.save_cookies_if_configured();
-        Ok(())
     }
 }

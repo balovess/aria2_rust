@@ -17,10 +17,17 @@ impl RangeProber {
 
     pub async fn probe_range_support(&self, uri: &str, total_length: u64) -> bool {
         let probe_stage_1 = self.probe_single_range(uri, "bytes=0-0").await;
-        tracing::debug!("Range probe stage 1 (bytes=0-0) for {}: {}", uri, probe_stage_1);
+        tracing::debug!(
+            "Range probe stage 1 (bytes=0-0) for {}: {}",
+            uri,
+            probe_stage_1
+        );
 
         if !probe_stage_1 {
-            tracing::info!("Range probe stage 1 failed for {}, falling back to sequential", uri);
+            tracing::info!(
+                "Range probe stage 1 failed for {}, falling back to sequential",
+                uri
+            );
             return false;
         }
 
@@ -33,13 +40,16 @@ impl RangeProber {
         let probe_stage_2 = self.probe_single_range(uri, &range_header).await;
         tracing::debug!(
             "Range probe stage 2 ({}) for {}: {}",
-            range_header, uri, probe_stage_2
+            range_header,
+            uri,
+            probe_stage_2
         );
 
         if !probe_stage_2 {
             tracing::info!(
                 "Range probe stage 2 failed for {} ({}), falling back to sequential",
-                uri, range_header
+                uri,
+                range_header
             );
         }
 
@@ -47,11 +57,13 @@ impl RangeProber {
     }
 
     pub async fn probe_single_range(&self, uri: &str, range_header: &str) -> bool {
-        let mut req = self
-            .client
-            .get(uri)
-            .header("Range", range_header)
-            .timeout(Duration::from_secs(constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS));
+        let mut req =
+            self.client
+                .get(uri)
+                .header("Range", range_header)
+                .timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                ));
         for (name, value) in &self.headers {
             req = req.header(name, value);
         }
@@ -61,10 +73,7 @@ impl RangeProber {
                 status == 206
             }
             Err(e) => {
-                tracing::warn!(
-                    "Range probe failed for {} ({}): {}",
-                    uri, range_header, e
-                );
+                tracing::warn!("Range probe failed for {} ({}): {}", uri, range_header, e);
                 false
             }
         }

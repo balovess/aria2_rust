@@ -94,9 +94,13 @@ impl ProgressUpdater {
         if speed > 0 {
             self.atomic_metrics.record_throughput(speed);
             if let Some(ref monitor) = self.perf_monitor {
-                let metrics =
-                    crate::util::perf_monitor::Metrics::new(speed, elapsed.as_millis() as u64, 0, 0)
-                        .with_label("download_speed");
+                let metrics = crate::util::perf_monitor::Metrics::new(
+                    speed,
+                    elapsed.as_millis() as u64,
+                    0,
+                    0,
+                )
+                .with_label("download_speed");
                 monitor.record_metric("download_speed", metrics);
             }
         }

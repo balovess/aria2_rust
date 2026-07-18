@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::constants;
 use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus, ProgressUpdate};
-use crate::engine::concurrent_download::{ConcurrentDownloader, ConcurrentDownloadResult};
+use crate::engine::concurrent_download::{ConcurrentDownloadResult, ConcurrentDownloader};
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::range_prober::RangeProber;
@@ -31,14 +31,12 @@ pub struct DownloadCommand {
     started: bool,
     completed: bool,
     completed_bytes: u64,
-    continue_enabled: bool,
     file_allocation: String,
     mmap_threshold: u64,
     secure_falloc: bool,
     cookie_storage: Arc<CookieStorage>,
     cookie_file: Option<String>,
     no_proxy_matcher: Option<NoProxyMatcher>,
-    use_hyper: bool,
     stat_man: Arc<ServerStatMan>,
     perf_monitor: Option<Arc<PerformanceMonitor>>,
     atomic_metrics: Arc<AtomicMetrics>,
@@ -84,8 +82,8 @@ impl DownloadCommand {
         let path = std::path::PathBuf::from(&dir).join(&filename);
         let headers = options.parsed_headers();
 
-        let use_hyper = options.http_proxy.is_none() && options.all_proxy.is_none();
-        let client = if use_hyper {
+        let no_proxy = options.http_proxy.is_none() && options.all_proxy.is_none();
+        let client = if no_proxy {
             client_pool::get_global_client()
         } else {
             let mut builder = reqwest::Client::builder()
@@ -118,22 +116,20 @@ impl DownloadCommand {
                 && let Some(ref all_proxy) = options.all_proxy
             {
                 match ProxyUrl::parse(all_proxy) {
-                    Ok(parsed) => {
-                        match parsed.protocol {
-                            crate::http::socks_connector::ProxyProtocol::Http
-                            | crate::http::socks_connector::ProxyProtocol::Https => {
-                                if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
-                                    builder = builder.proxy(p);
-                                }
-                            }
-                            _ => {
-                                tracing::info!(
-                                    "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
-                                    all_proxy
-                                );
+                    Ok(parsed) => match parsed.protocol {
+                        crate::http::socks_connector::ProxyProtocol::Http
+                        | crate::http::socks_connector::ProxyProtocol::Https => {
+                            if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
+                                builder = builder.proxy(p);
                             }
                         }
-                    }
+                        _ => {
+                            tracing::info!(
+                                "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
+                                all_proxy
+                            );
+                        }
+                    },
                     Err(e) => {
                         warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, e);
                     }
@@ -166,7 +162,6 @@ impl DownloadCommand {
             started: false,
             completed: false,
             completed_bytes: 0,
-            continue_enabled: true,
             file_allocation: options
                 .file_allocation
                 .clone()
@@ -179,7 +174,6 @@ impl DownloadCommand {
                 .no_proxy
                 .as_ref()
                 .map(|np| NoProxyMatcher::from_env_value(np)),
-            use_hyper,
             stat_man: Arc::new(ServerStatMan::new()),
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
@@ -270,8 +264,6 @@ impl DownloadCommand {
             path.display()
         );
 
-        let use_hyper = options.http_proxy.is_none() && options.all_proxy.is_none();
-
         let cookie_file = options.cookie_file.clone();
         let cookie_storage = Arc::new(CookieStorage::new());
 
@@ -286,7 +278,6 @@ impl DownloadCommand {
             started: false,
             completed: false,
             completed_bytes: 0,
-            continue_enabled: true,
             file_allocation: options
                 .file_allocation
                 .clone()
@@ -299,7 +290,6 @@ impl DownloadCommand {
                 .no_proxy
                 .as_ref()
                 .map(|np| NoProxyMatcher::from_env_value(np)),
-            use_hyper,
             stat_man: Arc::new(ServerStatMan::new()),
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
@@ -342,17 +332,20 @@ impl DownloadCommand {
             return;
         }
         if let Some(rx) = self.progress_receiver.take() {
-            let handle = crate::engine::download_engine::DownloadEngine::spawn_progress_aggregator(Arc::clone(&self.group), rx);
+            let handle = crate::engine::download_engine::DownloadEngine::spawn_progress_aggregator(
+                Arc::clone(&self.group),
+                rx,
+            );
             self.progress_aggregator_handle = Some(handle);
         }
     }
 
     pub(crate) async fn drain_progress_aggregator(&mut self) {
         self.progress_sender = None;
-        if let Some(handle) = self.progress_aggregator_handle.take() {
-            if let Err(e) = handle.await {
-                warn!("Progress aggregator task ended unexpectedly: {}", e);
-            }
+        if let Some(handle) = self.progress_aggregator_handle.take()
+            && let Err(e) = handle.await
+        {
+            warn!("Progress aggregator task ended unexpectedly: {}", e);
         }
     }
 
@@ -513,7 +506,7 @@ impl Command for DownloadCommand {
             false
         };
 
-        let resume_helper = ResumeHelper::new(&self.output_path, self.continue_enabled);
+        let resume_helper = ResumeHelper::new(&self.output_path, true);
         let resume_state = resume_helper.detect(total_length).await?;
 
         if resume_state.is_complete {
@@ -565,7 +558,6 @@ impl Command for DownloadCommand {
                     Arc::clone(&self.client),
                     self.output_path.clone(),
                     self.headers.clone(),
-                    self.use_hyper,
                     cookie_helper.clone(),
                     progress_updater.clone(),
                     Arc::clone(&self.group),
@@ -589,7 +581,6 @@ impl Command for DownloadCommand {
                             Arc::clone(&self.client),
                             self.output_path.clone(),
                             self.headers.clone(),
-                            self.use_hyper,
                             cookie_helper,
                             progress_updater,
                             Arc::clone(&self.group),
@@ -610,7 +601,6 @@ impl Command for DownloadCommand {
                 Arc::clone(&self.client),
                 self.output_path.clone(),
                 self.headers.clone(),
-                self.use_hyper,
                 cookie_helper,
                 progress_updater,
                 Arc::clone(&self.group),

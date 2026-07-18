@@ -17,7 +17,14 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::RequestGroup;
 
 type SegmentFetchFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = (u32, std::result::Result<bytes::Bytes, crate::error::Aria2Error>)> + Send>,
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    u32,
+                    std::result::Result<bytes::Bytes, crate::error::Aria2Error>,
+                ),
+            > + Send,
+    >,
 >;
 
 pub enum ConcurrentDownloadResult {
@@ -29,7 +36,6 @@ pub struct ConcurrentDownloader {
     client: Arc<reqwest::Client>,
     output_path: std::path::PathBuf,
     headers: Vec<(String, String)>,
-    use_hyper: bool,
     cookie_helper: CookieHelper,
     progress_updater: ProgressUpdater,
     group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -38,11 +44,11 @@ pub struct ConcurrentDownloader {
 }
 
 impl ConcurrentDownloader {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Arc<reqwest::Client>,
         output_path: std::path::PathBuf,
         headers: Vec<(String, String)>,
-        use_hyper: bool,
         cookie_helper: CookieHelper,
         progress_updater: ProgressUpdater,
         group: Arc<tokio::sync::RwLock<RequestGroup>>,
@@ -53,7 +59,6 @@ impl ConcurrentDownloader {
             client,
             output_path,
             headers,
-            use_hyper,
             cookie_helper,
             progress_updater,
             group,
@@ -85,7 +90,10 @@ impl ConcurrentDownloader {
 
         tracing::info!(
             "Concurrent download started: split={}, max_conn={}, segment_size={} bytes, total={}",
-            split, max_conn, seg_size, total_length
+            split,
+            max_conn,
+            seg_size,
+            total_length
         );
 
         let mut manager =
@@ -104,7 +112,8 @@ impl ConcurrentDownloader {
             self.progress_updater.reset(resume_state.start_offset);
             tracing::debug!(
                 "Resume: marked {} bytes as completed, continuing from offset {}",
-                resume_state.existing_length, resume_state.start_offset
+                resume_state.existing_length,
+                resume_state.start_offset
             );
         } else {
             self.progress_updater.reset(0);
@@ -113,7 +122,8 @@ impl ConcurrentDownloader {
         let cookie_hdr = self.cookie_helper.build_cookie_header(uri);
 
         let use_mmap = self.file_allocation == "mmap" && total_length >= self.mmap_threshold;
-        let mut writer = CachedDiskWriter::new_with_mmap(&self.output_path, Some(total_length), None, use_mmap);
+        let mut writer =
+            CachedDiskWriter::new_with_mmap(&self.output_path, Some(total_length), None, use_mmap);
 
         let limiter = options
             .max_download_limit
@@ -137,7 +147,7 @@ impl ConcurrentDownloader {
                 match manager.next_pending_segment_for_mirror(0) {
                     Some((seg_idx, offset, length)) => {
                         let url = uri.to_string();
-                        let dl = HttpSegmentDownloader::new(&self.client, self.use_hyper);
+                        let dl = HttpSegmentDownloader::new(&self.client);
                         let ch = cookie_hdr.clone();
                         let headers = self.headers.clone();
                         active_segs.insert(seg_idx, offset);
@@ -171,7 +181,9 @@ impl ConcurrentDownloader {
                         },
                     ));
                 }
-                tracing::warn!("Concurrent download stuck: no active or pending segments but not complete");
+                tracing::warn!(
+                    "Concurrent download stuck: no active or pending segments but not complete"
+                );
                 break;
             }
 
@@ -186,7 +198,8 @@ impl ConcurrentDownloader {
                         let data_for_manager = data.clone();
                         writer.write_bytes_at(offset, data).await.map_err(|e| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Write failed: {}", e
+                                "Write failed: {}",
+                                e
                             )))
                         })?;
                         manager.complete_segment(seg_idx, data_for_manager);
@@ -216,8 +229,8 @@ impl ConcurrentDownloader {
                                 "RangeNotSatisfiable (416) detected"
                             );
                             let failure_ratio = total_416_count as f64 / split as f64;
-                            let threshold_exceeded =
-                                consecutive_416_count >= fallback_threshold_consecutive
+                            let threshold_exceeded = consecutive_416_count
+                                >= fallback_threshold_consecutive
                                 || failure_ratio >= fallback_threshold_ratio;
                             if threshold_exceeded {
                                 tracing::warn!(
@@ -240,7 +253,8 @@ impl ConcurrentDownloader {
 
         writer.flush().await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "Flush failed: {}", e
+                "Flush failed: {}",
+                e
             )))
         })?;
 
@@ -343,10 +357,12 @@ impl ConcurrentDownloader {
             max_retries: max_retries_per_segment,
         };
 
-        let selector = Box::new(crate::selector::adaptive_uri_selector::AdaptiveUriSelector::new_with_uris(
-            Arc::new(crate::selector::server_stat_man::ServerStatMan::new()),
-            uris.to_vec(),
-        ));
+        let selector = Box::new(
+            crate::selector::adaptive_uri_selector::AdaptiveUriSelector::new_with_uris(
+                Arc::new(crate::selector::server_stat_man::ServerStatMan::new()),
+                uris.to_vec(),
+            ),
+        );
 
         let segment_manager = ConcurrentSegmentManager::new_with_selector(
             total_length,
@@ -356,23 +372,26 @@ impl ConcurrentDownloader {
             selector,
         );
 
-        let mut coordinator = crate::engine::mirror_coordinator::MirrorCoordinator::with_segment_manager(
-            Arc::new(crate::selector::server_stat_man::ServerStatMan::new()),
-            Box::new(crate::selector::uri_selector::InorderUriSelector::new()),
-            segment_manager,
-            mirror_config,
-            uris.to_vec(),
-        );
+        let mut coordinator =
+            crate::engine::mirror_coordinator::MirrorCoordinator::with_segment_manager(
+                Arc::new(crate::selector::server_stat_man::ServerStatMan::new()),
+                Box::new(crate::selector::uri_selector::InorderUriSelector::new()),
+                segment_manager,
+                mirror_config,
+                uris.to_vec(),
+            );
 
         if resume_state.should_resume {
             tracing::debug!(
                 "Resume: existing {} bytes, continuing from offset {}",
-                resume_state.existing_length, resume_state.start_offset
+                resume_state.existing_length,
+                resume_state.start_offset
             );
         }
 
         let use_mmap = self.file_allocation == "mmap" && total_length >= self.mmap_threshold;
-        let mut writer = CachedDiskWriter::new_with_mmap(&self.output_path, Some(total_length), None, use_mmap);
+        let mut writer =
+            CachedDiskWriter::new_with_mmap(&self.output_path, Some(total_length), None, use_mmap);
         self.progress_updater.reset(0);
 
         let mut consecutive_416_count = 0u32;
@@ -387,10 +406,13 @@ impl ConcurrentDownloader {
             {
                 tracing::info!(
                     "Starting segment {} download: mirror={}, offset={}, size={}",
-                    seg_idx, mirror_idx, offset, length
+                    seg_idx,
+                    mirror_idx,
+                    offset,
+                    length
                 );
 
-                let downloader = HttpSegmentDownloader::new(&self.client, self.use_hyper);
+                let downloader = HttpSegmentDownloader::new(&self.client);
                 let seg_start = Instant::now();
 
                 let cookie_hdr = self.cookie_helper.build_cookie_header(&mirror_url);
@@ -424,7 +446,8 @@ impl ConcurrentDownloader {
                         let data_for_coordinator = data.clone();
                         writer.write_bytes_at(offset, data).await.map_err(|e| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Write failed: {}", e
+                                "Write failed: {}",
+                                e
                             )))
                         })?;
 
@@ -438,7 +461,9 @@ impl ConcurrentDownloader {
                     Err(e) => {
                         tracing::warn!(
                             "Segment {} download failed (mirror={}): {}",
-                            seg_idx, mirror_idx, e
+                            seg_idx,
+                            mirror_idx,
+                            e
                         );
 
                         let is_416 = matches!(
@@ -455,8 +480,8 @@ impl ConcurrentDownloader {
                                 "RangeNotSatisfiable (416) detected"
                             );
                             let failure_ratio = total_416_count as f64 / split as f64;
-                            let threshold_exceeded =
-                                consecutive_416_count >= fallback_threshold_consecutive
+                            let threshold_exceeded = consecutive_416_count
+                                >= fallback_threshold_consecutive
                                 || failure_ratio >= fallback_threshold_ratio;
                             if threshold_exceeded {
                                 tracing::warn!(
@@ -514,7 +539,8 @@ impl ConcurrentDownloader {
 
         writer.flush().await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "Flush failed: {}", e
+                "Flush failed: {}",
+                e
             )))
         })?;
 
@@ -540,7 +566,8 @@ impl ConcurrentDownloader {
 
         {
             let mut g = self.group.write().await;
-            g.set_total_length(self.progress_updater.last_progress_update()).await;
+            g.set_total_length(self.progress_updater.last_progress_update())
+                .await;
             g.set_total_length_atomic(self.progress_updater.last_progress_update());
             g.set_completed_length(self.progress_updater.last_progress_update());
             g.update_speed(final_speed, 0).await;
