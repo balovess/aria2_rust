@@ -272,15 +272,36 @@ impl App {
     /// Load configuration from a file.
     ///
     /// If no path is provided, looks for ~/.aria2/aria2.conf
+    /// Matching original aria2 behavior (option_processing.cc):
+    /// - `HOME` first on all platforms, then USERPROFILE, then HOMEDRIVE+HOMEPATH.
+    /// - When `--conf-path` is explicitly given and file not found → error.
+    /// - When default path is not found → silently skip (graceful fallback).
     pub async fn load_config_file(
         &mut self,
         path: Option<&str>,
     ) -> std::result::Result<(), String> {
         let conf_path = if let Some(p) = path {
+            // --conf-path explicitly given: error if file doesn't exist
+            // (matches original aria2 option_processing.cc lines 254-260)
+            if !std::path::Path::new(p).exists() {
+                let msg = format!("Config file not found: {}", p);
+                eprintln!("[-] {}", msg);
+                return Err(msg);
+            }
             p.to_string()
         } else {
+            // Home resolution matching original aria2 util.cc getHomeDir():
+            // 1. HOME (primary on all platforms)
+            // 2. USERPROFILE (Windows fallback)
+            // 3. HOMEDRIVE+HOMEPATH (last resort Windows fallback)
+            // 4. "." (fallback if nothing works)
             let home = std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
+                .or_else(|| {
+                    let drive = std::env::var_os("HOMEDRIVE")?;
+                    let path = std::env::var_os("HOMEPATH")?;
+                    Some(std::path::Path::new(&drive).join(&path).into())
+                })
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| ".".to_string());
 
@@ -290,15 +311,20 @@ impl App {
                 crate::constants::CONFIG_DIR_NAME,
                 crate::constants::CONFIG_FILE_NAME
             );
+
+            eprintln!("[*] Looking for config file at: {}", candidate);
+
             if std::path::Path::new(&candidate).exists() {
                 candidate
             } else {
+                eprintln!("[*] Config file not found, using default options");
                 return Ok(());
             }
         };
 
         let mut conf = self.config.write().await;
         conf.load_file(&conf_path).await;
+        eprintln!("[+] Loaded config file: {}", conf_path);
         Ok(())
     }
 

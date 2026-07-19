@@ -121,6 +121,7 @@ impl WebSeedClient {
     /// ```
     pub fn new(base_url: &str) -> Self {
         debug!(url = base_url, "Creating WebSeedClient");
+        crate::http::client_pool::ensure_rustls_provider();
 
         // Build client with sensible defaults for large file downloads
         let client = reqwest::Client::builder()
@@ -141,6 +142,7 @@ impl WebSeedClient {
     /// Create a WebSeedClient with shared stats (for aggregated statistics).
     pub fn with_shared_stats(base_url: &str, stats: Arc<WebSeedStats>) -> Self {
         debug!(url = base_url, "Creating WebSeedClient with shared stats");
+        crate::http::client_pool::ensure_rustls_provider();
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))

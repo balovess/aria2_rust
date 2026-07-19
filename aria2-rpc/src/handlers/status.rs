@@ -2,6 +2,8 @@
 //!
 //! Handlers for querying download status and global statistics.
 
+use std::sync::atomic::Ordering;
+
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, GlobalStat, StatusInfo};
@@ -21,26 +23,9 @@ impl RpcEngine {
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
                 let g = group_lock.read().await;
-                let status = g.status().await;
-                if status.is_active() {
+                if g.status().await.is_active() {
                     let gid_hex = gid.to_hex_string();
-                    let total = g.get_total_length_atomic();
-                    let completed = g.get_completed_length();
-                    result.push(
-                        StatusInfo::new(&gid_hex)
-                            .with_status(status)
-                            .with_total_length(total)
-                            .with_completed_length(completed)
-                            .with_download_speed(g.get_download_speed_cached())
-                            .with_upload_length(g.get_uploaded_length())
-                            .with_upload_speed(0)
-                            .with_connections(
-                                g.options()
-                                    .split
-                                    .unwrap_or(aria2_core::constants::DEFAULT_SPLIT)
-                                    as u16,
-                            ),
-                    );
+                    result.push(Self::build_status_from_group(&g, &gid_hex).await);
                 }
             }
             result
@@ -73,22 +58,7 @@ impl RpcEngine {
                 let g = group_lock.read().await;
                 if g.status().await == DownloadStatus::Waiting {
                     let gid_hex = gid.to_hex_string();
-                    let total = g.get_total_length_atomic();
-                    let completed = g.get_completed_length();
-                    result.push(
-                        StatusInfo::new(&gid_hex)
-                            .with_status(DownloadStatus::Waiting)
-                            .with_total_length(total)
-                            .with_completed_length(completed)
-                            .with_download_speed(0)
-                            .with_upload_speed(0)
-                            .with_connections(
-                                g.options()
-                                    .split
-                                    .unwrap_or(aria2_core::constants::DEFAULT_SPLIT)
-                                    as u16,
-                            ),
-                    );
+                    result.push(Self::build_status_from_group(&g, &gid_hex).await);
                 }
             }
             result.into_iter().skip(offset).take(num).collect()
@@ -110,21 +80,42 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.tellStopped` - List stopped/completed downloads with pagination.
+    ///
+    /// When `RequestGroupMan` is available, iterates all groups and filters for
+    /// completed, errored, or removed downloads using live `build_status_from_group`.
+    /// Otherwise falls back to the `stopped_tasks` placeholder.
     pub async fn handle_tell_stopped(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let offset: usize = req.get_param_or_default(0);
         let num: usize = req.get_param_or_default(1);
-        let stopped = self.stopped_tasks.read().await;
-        let result: Vec<&StatusInfo> = stopped
-            .iter()
-            .skip(offset.min(stopped.len()))
-            .take(num)
-            .collect();
+        let stopped: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            let mut result = Vec::new();
+            for (gid, group_lock) in man.all_groups() {
+                let g = group_lock.read().await;
+                match g.status().await {
+                    DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed => {
+                        let gid_hex = gid.to_hex_string();
+                        result.push(Self::build_status_from_group(&g, &gid_hex).await);
+                    }
+                    _ => {}
+                }
+            }
+            result.into_iter().skip(offset).take(num).collect()
+        } else {
+            let stopped = self.stopped_tasks.read().await;
+            stopped
+                .iter()
+                .skip(offset.min(stopped.len()))
+                .take(num)
+                .cloned()
+                .collect()
+        };
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::to_value(result)
+            serde_json::to_value(stopped)
                 .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
         ))
     }
@@ -166,7 +157,7 @@ impl RpcEngine {
             num_active: active,
             num_waiting: waiting,
             num_stopped: stopped,
-            num_stopped_total: stopped,
+            num_stopped_total: self.num_stopped_total.load(Ordering::Relaxed),
         };
         JsonRpcResponse::success(serde_json::Value::Null, stat.to_json_value())
     }

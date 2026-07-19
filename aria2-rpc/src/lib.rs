@@ -58,6 +58,7 @@ pub mod constants;
 pub mod engine;
 pub mod handlers;
 pub mod json_rpc;
+pub mod rpc_helpers;
 pub mod server;
 pub mod types;
 pub mod websocket;

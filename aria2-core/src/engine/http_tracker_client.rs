@@ -211,6 +211,7 @@ pub fn is_https_tracker(url: &str) -> bool {
 /// # Arguments
 /// * `timeout_secs` - Request timeout in seconds
 pub fn build_tracker_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    crate::http::client_pool::ensure_rustls_provider();
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()

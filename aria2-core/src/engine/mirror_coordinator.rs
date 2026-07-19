@@ -339,6 +339,11 @@ impl MirrorCoordinator {
         self.segment_manager.progress()
     }
 
+    /// Get total number of bytes downloaded across all completed segments.
+    pub fn completed_bytes(&self) -> u64 {
+        self.segment_manager.completed_bytes()
+    }
+
     /// Get the total number of segments.
     pub fn num_segments(&self) -> usize {
         self.segment_manager.num_segments()

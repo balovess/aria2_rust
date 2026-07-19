@@ -7,10 +7,25 @@
 use once_cell::sync::Lazy;
 use reqwest::Client;
 use std::sync::Arc;
+use std::sync::Once;
 use std::time::Duration;
+
+/// Ensure the rustls ring crypto provider is installed.
+///
+/// Required when reqwest is built with `rustls-no-provider` (no aws-lc-rs).
+/// Must be called before any `reqwest::Client` is constructed.
+pub fn ensure_rustls_provider() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("Failed to install ring crypto provider for rustls");
+    });
+}
 
 /// Global HTTP client instance for connection reuse.
 static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
+    ensure_rustls_provider();
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
@@ -53,6 +68,7 @@ pub fn create_custom_client(
     timeout: Duration,
     pool_max_idle_per_host: usize,
 ) -> Arc<Client> {
+    ensure_rustls_provider();
     let client = Client::builder()
         .connect_timeout(connect_timeout)
         .timeout(timeout)

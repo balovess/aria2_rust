@@ -179,6 +179,67 @@ async fn async_zero_fill<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result
     Ok(())
 }
 
+/// Try to enable `SE_MANAGE_VOLUME_PRIVILEGE` in the process token.
+///
+/// `SetFileValidData` requires this privilege to allocate real disk blocks
+/// (rather than sparse holes). For processes running with administrator
+/// rights, the privilege exists in the token but is disabled by default —
+/// this function enables it. For non-admin processes, the privilege is not
+/// present, and the function returns `false` (the caller falls back to sparse
+/// files, which is the correct behavior for that case).
+///
+/// Returns `true` if the privilege was successfully enabled, `false` otherwise.
+#[cfg(windows)]
+fn try_enable_volume_privilege() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW,
+        SE_MANAGE_VOLUME_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+        TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token_handle = std::ptr::null_mut();
+    let result = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token_handle,
+        )
+    };
+    if result == 0 {
+        return false;
+    }
+
+    let mut luid: windows_sys::Win32::Foundation::LUID = unsafe { std::mem::zeroed() };
+    if unsafe { LookupPrivilegeValueW(std::ptr::null(), SE_MANAGE_VOLUME_NAME, &mut luid) } == 0 {
+        unsafe {
+            CloseHandle(token_handle);
+        }
+        return false;
+    }
+
+    let mut tp: TOKEN_PRIVILEGES = unsafe { std::mem::zeroed() };
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = 2; // SE_PRIVILEGE_ENABLED
+
+    let ret = unsafe {
+        AdjustTokenPrivileges(
+            token_handle,
+            0,
+            &tp,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    unsafe {
+        CloseHandle(token_handle);
+    }
+    ret != 0
+}
+
 /// Allocate file space using platform-native preallocation syscalls.
 /// This method attempts true disk-space allocation (avoiding sparse files)
 /// when the platform and filesystem support it, with graceful fallbacks.
@@ -332,6 +393,10 @@ async fn fallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64, secure: bool) -
         // scope, using a boolean flag to carry the result across the scope
         // boundary.
         adaptor.truncate(length).await?;
+        // Attempt to enable SE_MANAGE_VOLUME_PRIVILEGE — this exists in the
+        // token for admin processes but is disabled by default. Non-admin
+        // processes will fail here and correctly fall back to sparse files.
+        let _ = try_enable_volume_privilege();
         let valid_data_succeeded: bool = if let Some(handle) = adaptor.windows_raw_handle() {
             // Extend the valid data length up to `length`, forcing the
             // filesystem to allocate real blocks rather than a sparse hole.
@@ -449,12 +514,35 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
 
     #[cfg(windows)]
     {
-        let metadata = tokio::fs::metadata(parent)
-            .await
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+        use std::os::windows::ffi::OsStrExt;
 
-        let free = metadata.len();
-        if free > 0 { Ok(free) } else { Ok(u64::MAX / 2) }
+        // Get absolute path for GetDiskFreeSpaceEx
+        let abs_path = match std::fs::canonicalize(parent) {
+            Ok(p) => p,
+            Err(_) => {
+                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
+            }
+        };
+
+        // Convert path to wide string with null terminator
+        let mut wide_path: Vec<u16> = abs_path.as_os_str().encode_wide().collect();
+        wide_path.push(0);
+
+        let mut free_bytes_available: u64 = 0;
+        let result = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide_path.as_ptr(),
+                &mut free_bytes_available as *mut u64 as *mut _,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        if result == 0 {
+            Err(Aria2Error::Io("Failed to get disk space".to_string()))
+        } else {
+            Ok(free_bytes_available)
+        }
     }
 
     #[cfg(all(not(unix), not(windows)))]

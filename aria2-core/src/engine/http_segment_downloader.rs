@@ -2,10 +2,12 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::engine::command::ProgressUpdate;
 // Re-export score_source for convenience
 pub use crate::selector::adaptive_uri_selector::{
     score_source_raw as score_source, score_source_raw,
@@ -222,6 +224,11 @@ impl HttpSegmentDownloader {
         Ok(false)
     }
 
+    /// Download a byte range from a URL.
+    ///
+    /// Downloads the specified byte range from the given URL. If `progress_tx` is
+    /// provided, periodic progress updates (segment-relative bytes downloaded) will
+    /// be sent through the channel, enabling smooth progress reporting for RPC clients.
     pub async fn download_range(
         &self,
         url: &str,
@@ -229,6 +236,7 @@ impl HttpSegmentDownloader {
         length: u64,
         cookie_header: Option<&str>,
         headers: &[(String, String)],
+        progress_tx: Option<&mpsc::UnboundedSender<ProgressUpdate>>,
     ) -> Result<bytes::Bytes> {
         if length == 0 {
             return Ok(bytes::Bytes::new());
@@ -292,10 +300,28 @@ impl HttpSegmentDownloader {
         // Use BytesMut for efficient stream accumulation
         let mut data = bytes::BytesMut::with_capacity(length as usize);
         let mut stream = response.bytes_stream();
+        let mut last_reported_progress = 0u64;
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
-                Ok(bytes) => data.extend_from_slice(&bytes),
+                Ok(bytes) => {
+                    data.extend_from_slice(&bytes);
+                    // Report per-chunk progress if a progress channel is provided
+                    let downloaded = data.len() as u64;
+                    if let Some(ref tx) = progress_tx {
+                        if downloaded - last_reported_progress
+                            >= constants::PROGRESS_UPDATE_BYTES as u64
+                        {
+                            let update = ProgressUpdate {
+                                completed_bytes: offset + downloaded,
+                                download_speed: 0,
+                                upload_speed: 0,
+                            };
+                            let _ = tx.send(update);
+                            last_reported_progress = downloaded;
+                        }
+                    }
+                }
                 Err(e) => {
                     return Err(Aria2Error::Recoverable(
                         RecoverableError::TemporaryNetworkFailure {
@@ -346,7 +372,7 @@ mod tests {
         let client = reqwest::Client::new();
         let dl = HttpSegmentDownloader::new(&client);
         let result = dl
-            .download_range("http://example.com", 0, 0, None, &[])
+            .download_range("http://example.com", 0, 0, None, &[], None)
             .await;
         assert!(result.is_ok(), "zero-length range should return empty vec");
         assert!(result.unwrap().is_empty());
@@ -384,7 +410,7 @@ mod tests {
             .unwrap();
         let dl = HttpSegmentDownloader::new(&client);
 
-        let result = dl.download_range(&url, 99999, 100, None, &[]).await;
+        let result = dl.download_range(&url, 99999, 100, None, &[], None).await;
         assert!(result.is_err(), "416 should be an error");
 
         // Wait for server with timeout
@@ -425,7 +451,7 @@ mod tests {
         let dl = HttpSegmentDownloader::new(&client);
 
         let result_404 = dl
-            .download_range("http://httpbin.org/status/404", 0, 100, None, &[])
+            .download_range("http://httpbin.org/status/404", 0, 100, None, &[], None)
             .await;
         assert!(result_404.is_err(), "404 should be fatal error");
     }

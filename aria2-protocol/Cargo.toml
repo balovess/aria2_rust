@@ -1,6 +1,6 @@
 [package]
 name = "aria2-protocol"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -24,7 +24,9 @@ tracing.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
 
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "gzip", "brotli", "socks", "http2"] }
+# Use rustls-no-provider to avoid pulling in aws-lc-rs (STATUS_STACK_BUFFER_OVERRUN on Windows).
+# ring is available via direct dependencies, so rustls auto-selects it.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "gzip", "brotli", "socks", "http2"] }
 # hyper dependency removed: aria2-protocol does not use hyper directly (verified
 # via `rg "hyper::" aria2-protocol/src/` — zero matches). reqwest 0.13.4 brings
 # in hyper 1.x transitively, so no direct hyper dependency is needed here.
@@ -45,8 +47,7 @@ rand = "0.8"
 num-bigint-dig = "0.8"
 num-traits = "0.2"
 getrandom = "0.2"
-russh = { version = "0.59", features = ["ring"] }
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
+russh = { version = "0.59", default-features = false, features = ["ring", "rsa"] }
 bitflags = "2.4"
 dirs = "5"
 

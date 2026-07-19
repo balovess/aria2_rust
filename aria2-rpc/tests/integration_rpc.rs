@@ -341,8 +341,11 @@ async fn test_change_option_propagates_to_running_group() {
     assert!(get_resp.is_success());
     let opts: HashMap<String, serde_json::Value> =
         serde_json::from_value(get_resp.result.unwrap()).unwrap();
+    // Wire format: numbers are strings
     assert_eq!(
-        opts.get("max-download-limit").and_then(|v| v.as_u64()),
+        opts.get("max-download-limit")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok()),
         Some(102400),
         "getOption should reflect the new max-download-limit"
     );
@@ -416,9 +419,15 @@ async fn test_change_option_unknown_gid_stores_in_task_opts() {
     assert!(get_resp.is_success());
     let opts: HashMap<String, serde_json::Value> =
         serde_json::from_value(get_resp.result.unwrap()).unwrap();
+    // Wire format: all numbers are serialized as strings to match original aria2.
+    let max_retries_val = opts.get("max-retries").unwrap();
+    assert!(
+        max_retries_val.is_string(),
+        "max-retries should be a string in wire format"
+    );
     assert_eq!(
-        opts.get("max-retries").and_then(|v| v.as_u64()),
-        Some(7),
+        max_retries_val.as_str(),
+        Some("7"),
         "getOption should return the stored max-retries"
     );
 }

@@ -116,6 +116,10 @@ pub struct GeneralArgs {
     #[arg(long = "conf-path")]
     pub conf_path: Option<PathBuf>,
 
+    /// Disable loading configuration file
+    #[arg(long = "no-conf")]
+    pub no_conf: bool,
+
     /// URI input file
     #[arg(short = 'i', long = "input-file")]
     pub input_file: Option<PathBuf>,

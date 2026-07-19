@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
 use crate::types::{
-    DownloadStatus, FileInfo, PeerInfo, ServerInfoIndex, SessionInfo, StatusInfo, UriInfo,
+    DownloadStatus, PeerInfo, SessionInfo, StatusInfo, UriInfo,
     UriStatus, VersionInfo,
 };
 use crate::websocket::{DownloadEvent, EventType};
@@ -89,39 +89,36 @@ async fn test_tell_status_has_real_progress_data() {
     assert!(tell_resp.is_success(), "tellStatus should succeed");
 
     let status_val = tell_resp.result.unwrap();
-    let status: StatusInfo = serde_json::from_value(status_val).unwrap();
-
+    // Wire format: all numbers are strings matching original aria2
     assert_eq!(
-        status.total_length,
-        Some(10485760),
-        "total_length should be 10MB"
+        status_val["totalLength"].as_str(),
+        Some("10485760"),
+        "totalLength should be string '10485760'"
     );
     assert_eq!(
-        status.completed_length,
-        Some(5242880),
-        "completed_length should be 5MB (50%)"
+        status_val["completedLength"].as_str(),
+        Some("5242880"),
+        "completedLength should be string '5242880'"
     );
     assert_eq!(
-        status.upload_length,
-        Some(1024),
-        "upload_length should be 1KB"
+        status_val["uploadLength"].as_str(),
+        Some("1024"),
+        "uploadLength should be string '1024'"
     );
     assert_eq!(
-        status.download_speed,
-        Some(1048576),
-        "download_speed should be 1MB/s"
+        status_val["downloadSpeed"].as_str(),
+        Some("1048576"),
+        "downloadSpeed should be string '1048576'"
     );
     assert_eq!(
-        status.upload_speed,
-        Some(512),
-        "upload_speed should be 512B/s"
+        status_val["uploadSpeed"].as_str(),
+        Some("512"),
+        "uploadSpeed should be string '512'"
     );
-    assert_eq!(status.connections, Some(3), "connections should be 3");
-
-    let expected_percent = (5242880.0 / 10485760.0) * 100.0;
-    assert!(
-        (status.progress_percent() - expected_percent).abs() < 0.01,
-        "progress percent should be ~50%"
+    assert_eq!(
+        status_val["connections"].as_str(),
+        Some("3"),
+        "connections should be string '3'"
     );
 }
 
@@ -168,30 +165,29 @@ async fn test_tell_status_includes_upload_fields() {
     assert!(tell_resp.is_success());
 
     let status_val = tell_resp.result.unwrap();
-    let status: StatusInfo = serde_json::from_value(status_val).unwrap();
-
+    // Wire format: all values are strings matching original aria2
     assert!(
-        status.upload_length.is_some(),
-        "upload_length field must be present"
+        status_val.get("uploadLength").is_some(),
+        "uploadLength field must be present"
     );
     assert!(
-        status.upload_speed.is_some(),
-        "upload_speed field must be present"
+        status_val.get("uploadSpeed").is_some(),
+        "uploadSpeed field must be present"
     );
     assert_eq!(
-        status.upload_length,
-        Some(536870912),
-        "upload_length should reflect seeding contribution"
+        status_val["uploadLength"].as_str(),
+        Some("536870912"),
+        "uploadLength should be string '536870912'"
     );
     assert_eq!(
-        status.upload_speed,
-        Some(1048576),
-        "upload_speed should show current seeding rate"
+        status_val["uploadSpeed"].as_str(),
+        Some("1048576"),
+        "uploadSpeed should be string '1048576'"
     );
     assert_eq!(
-        status.connections,
-        Some(10),
-        "connections should show peer count"
+        status_val["connections"].as_str(),
+        Some("10"),
+        "connections should be string '10'"
     );
 }
 
@@ -211,19 +207,23 @@ async fn test_get_peers_returns_peer_list() {
             peer_id: "p1".to_string(),
             ip: "10.0.0.1".to_string(),
             port: 6881,
+            bitfield: None,
             am_choking: false,
             peer_choking: true,
             download_speed: 100000,
             upload_speed: 50000,
+            seeder: None,
         },
         PeerInfo {
             peer_id: "p2".to_string(),
             ip: "10.0.0.2".to_string(),
             port: 6882,
+            bitfield: None,
             am_choking: true,
             peer_choking: false,
             download_speed: 200000,
             upload_speed: 75000,
+            seeder: None,
         },
     ];
     engine.set_task_peers(&gid, peers.clone()).await;
@@ -235,10 +235,27 @@ async fn test_get_peers_returns_peer_list() {
         "getPeers should succeed for existing GID"
     );
 
-    let result_peers: Vec<PeerInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result_peers.len(), 2, "Should return 2 peers");
-    assert_eq!(result_peers[0].peer_id, "p1");
-    assert_eq!(result_peers[1].ip, "10.0.0.2");
+    let peers_val = resp.result.unwrap();
+    let peers_array = peers_val.as_array().unwrap();
+    assert_eq!(peers_array.len(), 2, "Should return 2 peers");
+    // Wire format: all numbers as strings, booleans as "true"/"false"
+    assert_eq!(peers_array[0]["peerId"].as_str(), Some("p1"));
+    assert_eq!(peers_array[1]["ip"].as_str(), Some("10.0.0.2"));
+    assert_eq!(peers_array[0]["port"].as_str(), Some("6881"));
+    assert_eq!(
+        peers_array[0]["amChoking"].as_str(),
+        Some("false"),
+        "booleans should be 'false' string"
+    );
+    assert_eq!(
+        peers_array[0]["peerChoking"].as_str(),
+        Some("true"),
+        "booleans should be 'true' string"
+    );
+    assert_eq!(
+        peers_array[0]["downloadSpeed"].as_str(),
+        Some("100000")
+    );
 }
 
 #[tokio::test]
@@ -293,10 +310,10 @@ async fn test_unpause_all_resumes_paused_tasks() {
     let tell_req = JsonRpcRequest::new("aria2.tellStatus", serde_json::json!([gid])).with_id(4);
     let tell_resp = engine.handle_request(&tell_req).await;
     assert!(tell_resp.is_success());
-    let status: StatusInfo = serde_json::from_value(tell_resp.result.unwrap()).unwrap();
+    let status_val = tell_resp.result.unwrap();
     assert_eq!(
-        status.status,
-        DownloadStatus::Active,
+        status_val["status"].as_str(),
+        Some("active"),
         "Task should be Active after unpauseAll"
     );
 }
@@ -327,10 +344,16 @@ async fn test_change_uri_adds_uris() {
 
     let result = change_resp.result.unwrap();
     let arr = result.as_array().unwrap();
-    assert_eq!(arr[0], gid, "First element of result should be gid");
+    // Handler returns [delCount, addCount]; wire format: all numbers as strings
     assert_eq!(
-        arr[1], 0,
-        "Second element should be 0 (no file index change)"
+        arr[0].as_str(),
+        Some("0"),
+        "First element should be delCount (0 deletions)"
+    );
+    assert_eq!(
+        arr[1].as_str(),
+        Some("2"),
+        "Second element should be addCount (2 URIs added)"
     );
 }
 
@@ -723,10 +746,10 @@ async fn test_force_remove_cancels_immediately() {
     let tell_req = JsonRpcRequest::new("aria2.tellStatus", serde_json::json!([gid])).with_id(2);
     let tell_resp = engine.handle_request(&tell_req).await;
     assert!(tell_resp.is_success());
-    let status: StatusInfo = serde_json::from_value(tell_resp.result.unwrap()).unwrap();
+    let status_val = tell_resp.result.unwrap();
     assert_eq!(
-        status.status,
-        DownloadStatus::Active,
+        status_val["status"].as_str(),
+        Some("active"),
         "Task should be active initially"
     );
 
@@ -740,10 +763,10 @@ async fn test_force_remove_cancels_immediately() {
         tell_resp2.is_success(),
         "tellStatus should still work after forceRemove"
     );
-    let status_after: StatusInfo = serde_json::from_value(tell_resp2.result.unwrap()).unwrap();
+    let status_after_val = tell_resp2.result.unwrap();
     assert_eq!(
-        status_after.status,
-        DownloadStatus::Removed,
+        status_after_val["status"].as_str(),
+        Some("removed"),
         "Task should be marked as Removed after forceRemove"
     );
 }
@@ -775,10 +798,10 @@ async fn test_batch_gids_force_remove() {
             JsonRpcRequest::new("aria2.tellStatus", serde_json::json!([gid])).with_id(20);
         let tell_resp = engine.handle_request(&tell_req).await;
         assert!(tell_resp.is_success());
-        let status: StatusInfo = serde_json::from_value(tell_resp.result.unwrap()).unwrap();
+        let status_val = tell_resp.result.unwrap();
         assert_eq!(
-            status.status,
-            DownloadStatus::Removed,
+            status_val["status"].as_str(),
+            Some("removed"),
             "GID {} should be Removed after batch forceRemove",
             gid
         );
@@ -887,15 +910,22 @@ async fn test_get_files_valid_gid_returns_file_list() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success(), "getFiles should succeed for valid GID");
 
-    let files: Vec<FileInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(!files.is_empty(), "Should return at least one file");
+    let files = resp.result.unwrap();
+    eprintln!("DEBUG get_files response: {}", serde_json::to_string_pretty(&files).unwrap());
+    assert!(
+        files.as_array().map_or(false, |a| !a.is_empty()),
+        "Should return at least one file"
+    );
+    let file0 = &files[0];
     assert_eq!(
-        files[0].length, 10485760,
-        "File length should match total_length"
+        file0["length"].as_str(),
+        Some("10485760"),
+        "File length should match total_length (as string)"
     );
     assert_eq!(
-        files[0].completed_length, 5242880,
-        "completedLength should match completed_length"
+        file0["completedLength"].as_str(),
+        Some("5242880"),
+        "completedLength should match completed_length (as string)"
     );
 }
 
@@ -920,13 +950,22 @@ async fn test_get_files_zero_completed_length() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
 
-    let files: Vec<FileInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(files[0].length, 0, "New task should have zero length");
+    let files = resp.result.unwrap();
     assert_eq!(
-        files[0].completed_length, 0,
-        "New task should have zero completed"
+        files[0]["length"].as_str(),
+        Some("0"),
+        "New task should have zero length (as string)"
     );
-    assert!(files[0].selected, "Default file should be selected");
+    assert_eq!(
+        files[0]["completedLength"].as_str(),
+        Some("0"),
+        "New task should have zero completed (as string)"
+    );
+    assert_eq!(
+        files[0]["selected"].as_str(),
+        Some("true"),
+        "Default file should be selected (as string)"
+    );
 }
 
 #[tokio::test]
@@ -939,10 +978,11 @@ async fn test_get_files_selected_field() {
 
     let req = JsonRpcRequest::new("aria2.getFiles", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;
-    let files: Vec<FileInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(
-        files[0].selected,
-        "FileInfo.selected should default to true"
+    let files = resp.result.unwrap();
+    assert_eq!(
+        files[0]["selected"].as_str(),
+        Some("true"),
+        "FileInfo.selected should default to true (as string)"
     );
 }
 
@@ -968,21 +1008,32 @@ async fn test_get_servers_valid_gid_returns_server_list() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success(), "getServers should succeed for valid GID");
 
-    let servers: Vec<ServerInfoIndex> = serde_json::from_value(resp.result.unwrap()).unwrap();
+    let servers = resp.result.unwrap();
+    let arr = servers.as_array().unwrap();
     assert_eq!(
-        servers.len(),
+        arr.len(),
         1,
         "Single-file download should have 1 ServerInfoIndex"
     );
-    assert_eq!(servers[0].index, 0, "File index should be 0");
-    assert_eq!(servers[0].servers.len(), 2, "Should have 2 server entries");
     assert_eq!(
-        servers[0].servers[0].uri, "http://dl.example.com/file.bin",
+        arr[0]["index"].as_str(),
+        Some("0"),
+        "File index should be 0 (as string)"
+    );
+    assert_eq!(
+        arr[0]["servers"].as_array().map(|a| a.len()),
+        Some(2),
+        "Should have 2 server entries"
+    );
+    assert_eq!(
+        arr[0]["servers"][0]["uri"].as_str(),
+        Some("http://dl.example.com/file.bin"),
         "First server URI should match"
     );
     assert_eq!(
-        servers[0].servers[0].download_speed, 1048576,
-        "Download speed should match task progress"
+        arr[0]["servers"][0]["downloadSpeed"].as_str(),
+        Some("1048576"),
+        "Download speed should match task progress (as string)"
     );
 }
 
@@ -1009,13 +1060,15 @@ async fn test_get_servers_zero_download_speed() {
     let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
-    let servers: Vec<ServerInfoIndex> = serde_json::from_value(resp.result.unwrap()).unwrap();
+    let servers = resp.result.unwrap();
     assert_eq!(
-        servers[0].servers[0].download_speed, 0,
-        "No-progress task should have 0 speed"
+        servers[0]["servers"][0]["downloadSpeed"].as_str(),
+        Some("0"),
+        "No-progress task should have 0 speed (as string)"
     );
     assert_eq!(
-        servers[0].servers[0].current_uri, servers[0].servers[0].uri,
+        servers[0]["servers"][0]["currentUri"].as_str(),
+        servers[0]["servers"][0]["uri"].as_str(),
         "current_uri should equal uri when no redirect"
     );
 }
@@ -1032,10 +1085,10 @@ async fn test_get_servers_empty_uri_list() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
 
-    let servers: Vec<ServerInfoIndex> = serde_json::from_value(resp.result.unwrap()).unwrap();
+    let servers = resp.result.unwrap();
     assert_eq!(
-        servers[0].servers.len(),
-        1,
+        servers[0]["servers"].as_array().map(|a| a.len()),
+        Some(1),
         "Single URI should produce 1 server entry"
     );
 }

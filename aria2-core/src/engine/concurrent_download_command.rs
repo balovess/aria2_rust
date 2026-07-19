@@ -65,7 +65,9 @@ impl ConcurrentDownloadCommand {
         let group = RequestGroup::new(gid, urls.clone(), options.clone());
         let max_conn = options.max_connection_per_server.unwrap_or(2);
 
-        let client = reqwest::Client::builder()
+        let client = {
+            crate::http::client_pool::ensure_rustls_provider();
+            reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(300))
             .user_agent("aria2-rust/0.1.0")
@@ -76,7 +78,8 @@ impl ConcurrentDownloadCommand {
                     "HTTP client build failed: {}",
                     e
                 )))
-            })?;
+            })?
+        };
 
         let alloc = "prealloc".to_string();
         let secure = options.secure_falloc;

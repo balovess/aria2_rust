@@ -3,6 +3,7 @@
 //! Handlers for creating, removing, pausing, and resuming download tasks.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use crate::engine::RpcEngine;
 use crate::engine::TaskState;
@@ -30,7 +31,17 @@ impl RpcEngine {
             ));
         };
         let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
+        let position: Option<usize> = req.get_param::<i64>(2).ok().and_then(|p| {
+            if p >= 0 { Some(p as usize) } else { None }
+        });
         let gid = self.add_task(uris, opts).await?;
+        if let Some(pos) = position {
+            let pos_req = JsonRpcRequest::new(
+                "aria2.changePosition",
+                serde_json::json!([&gid, pos as i64, "POS_SET"]),
+            );
+            let _ = self.handle_change_position(&pos_req).await;
+        }
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             gid,
@@ -38,12 +49,43 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.addTorrent` - Add a BitTorrent download.
+    ///
+    /// Original aria2 signature: `[torrent, uris?, opts?, pos?]`
+    /// - param[0]: Base64-encoded torrent data (required)
+    /// - param[1]: Additional URIs/trackers (optional, array of strings)
+    /// - param[2]: Options dict (optional)
+    /// - param[3]: Position in queue (optional)
+    ///
+    /// For backward compatibility, if param[1] is an object (not an array),
+    /// it is treated as the options dict (old 3-param style).
     pub async fn handle_add_torrent(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let torrent_data: String = req.get_param(0)?;
-        let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
+
+        // Detect whether param[1] is URIs (array) or opts (object) for backward compatibility.
+        // Original: [torrent, uris?, opts?, pos?]
+        // Old Rust:  [torrent, opts?, pos?]
+        let (additional_uris, opts, position) = match req.get_param::<Vec<String>>(1) {
+            Ok(uris) => {
+                // 4-parameter signature: [torrent, uris, opts, pos]
+                let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(2);
+                let position: Option<usize> = req.get_param::<i64>(3).ok().and_then(|p| {
+                    if p >= 0 { Some(p as usize) } else { None }
+                });
+                (uris, opts, position)
+            }
+            Err(_) => {
+                // Backward compatible: param[1] is opts, param[2] is pos
+                let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
+                let position: Option<usize> = req.get_param::<i64>(2).ok().and_then(|p| {
+                    if p >= 0 { Some(p as usize) } else { None }
+                });
+                (vec![], opts, position)
+            }
+        };
+
         let _dir = opts
             .get("dir")
             .and_then(|v| v.as_str())
@@ -71,18 +113,25 @@ impl RpcEngine {
             ));
         }
 
-        let gid = self
-            .add_task(
-                vec![format!(
-                    "torrent://{}",
-                    &decoded_bytes[..std::cmp::min(32, decoded_bytes.len())]
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<String>()
-                )],
-                opts,
-            )
-            .await?;
+        // Build URIs: primary torrent URI + additional URIs/trackers from param[1]
+        let mut uris = vec![format!(
+            "torrent://{}",
+            &decoded_bytes[..std::cmp::min(32, decoded_bytes.len())]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        )];
+        uris.extend(additional_uris);
+
+        let gid = self.add_task(uris, opts).await?;
+        // Apply position parameter if provided (original aria2 behavior)
+        if let Some(pos) = position {
+            let pos_req = JsonRpcRequest::new(
+                "aria2.changePosition",
+                serde_json::json!([&gid, pos as i64, "POS_SET"]),
+            );
+            let _ = self.handle_change_position(&pos_req).await;
+        }
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             gid,
@@ -90,12 +139,17 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.addMetalink` - Add downloads from Metalink XML.
+    ///
+    /// Original aria2 signature: `[metalink, opts?, pos?]`
     pub async fn handle_add_metalink(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let metalink_data: String = req.get_param(0)?;
         let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
+        let position: Option<usize> = req.get_param::<i64>(2).ok().and_then(|p| {
+            if p >= 0 { Some(p as usize) } else { None }
+        });
 
         let decoded_bytes = if metalink_data.starts_with("data:") {
             base64::Engine::decode(
@@ -120,6 +174,13 @@ impl RpcEngine {
         let gid = self
             .add_task(vec!["metalink://download".to_string()], opts)
             .await?;
+        if let Some(pos) = position {
+            let pos_req = JsonRpcRequest::new(
+                "aria2.changePosition",
+                serde_json::json!([&gid, pos as i64, "POS_SET"]),
+            );
+            let _ = self.handle_change_position(&pos_req).await;
+        }
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             gid,
@@ -134,10 +195,19 @@ impl RpcEngine {
         let gid: String = req.get_param(0)?;
         let mut tasks = self.tasks.write().await;
         match tasks.remove(&gid) {
-            Some(_) => Ok(JsonRpcResponse::success(
-                req.id.clone().unwrap_or_default(),
-                serde_json::json!([gid]),
-            )),
+            Some(state) => {
+                self.num_stopped_total.fetch_add(1, Ordering::Relaxed);
+                // Build file info from the removed task's URIs for WebSocket notification
+                let file_info = build_file_info_from_uris(&state.uris);
+                let _ = self.event_publisher.publish(
+                    EventType::DownloadStop,
+                    DownloadEvent::download_stop(&gid, file_info),
+                );
+                Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!([gid]),
+                ))
+            },
             None => Err(JsonRpcError::MethodNotFound(format!(
                 "GID {} not found",
                 gid
@@ -248,6 +318,19 @@ impl RpcEngine {
                 state.status.status = DownloadStatus::Removed;
             }
         }
+        let removed_count = gids.len();
+        self.num_stopped_total.fetch_add(removed_count, Ordering::Relaxed);
+
+        // Publish DownloadStop events for each removed task
+        for gid in &gids {
+            if let Some(state) = tasks.get(gid) {
+                let file_info = build_file_info_from_uris(&state.uris);
+                let _ = self.event_publisher.publish(
+                    EventType::DownloadStop,
+                    DownloadEvent::download_stop(gid, file_info),
+                );
+            }
+        }
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -256,6 +339,8 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.changeUri` - Add/remove URIs for an existing download.
+    ///
+    /// Returns `[delCount, addCount]` matching original aria2 behavior.
     pub async fn handle_change_uri(
         &self,
         req: &JsonRpcRequest,
@@ -276,17 +361,26 @@ impl RpcEngine {
             .get_mut(&gid)
             .ok_or_else(|| JsonRpcError::MethodNotFound(format!("GID {} not found", gid)))?;
 
-        if let Some(to_remove) = del_uris {
+        // Count deletions before modifying
+        let del_count = if let Some(ref to_remove) = del_uris {
+            let before = state.uris.len();
             state.uris.retain(|u| !to_remove.contains(u));
-        }
+            before - state.uris.len()
+        } else {
+            0
+        };
 
-        if let Some(to_add) = add_uris {
+        let add_count = if let Some(to_add) = add_uris {
+            let count = to_add.len();
             state.uris.extend(to_add);
-        }
+            count
+        } else {
+            0
+        };
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::json!([gid, 0]),
+            serde_json::json!([del_count, add_count]),
         ))
     }
 
@@ -508,16 +602,112 @@ impl RpcEngine {
             .with_total_length(0)
             .with_completed_length(0)
             .with_files(vec![FileInfo::new("", 0)]);
-        let state = TaskState::new(status, options, uris);
+        let state = TaskState::new(status, options, uris.clone());
         {
             let mut tasks = self.tasks.write().await;
             tasks.insert(gid_str.clone(), state);
         }
+        // Build file info for the start notification (with empty URIs as used)
+        let file_info: Vec<serde_json::Value> = if uris.is_empty() {
+            vec![serde_json::json!({
+                "index": 1,
+                "path": "",
+                "length": 0,
+                "completedLength": 0,
+                "selected": true,
+                "uris": []
+            })]
+        } else {
+            uris.iter().enumerate().map(|(i, u)| {
+                serde_json::json!({
+                    "index": i + 1,
+                    "path": u,
+                    "length": 0,
+                    "completedLength": 0,
+                    "selected": true,
+                    "uris": [{"uri": u, "status": "used"}]
+                })
+            }).collect()
+        };
         let _ = self.event_publisher.publish(
             EventType::DownloadStart,
-            DownloadEvent::download_start(&gid_str, vec![]),
+            DownloadEvent::download_start(&gid_str, file_info),
         );
         Ok(gid_str)
+    }
+
+    /// Build a complete StatusInfo from a RequestGroup read guard.
+    ///
+    /// Populates all available fields: progress, files, BT metadata, etc.
+    /// This is the shared helper used by `get_status`, `tellActive`,
+    /// `tellWaiting`, and `tellStopped`.
+    pub(crate) async fn build_status_from_group(
+        g: &aria2_core::request::request_group::RequestGroup,
+        gid_hex: &str,
+    ) -> StatusInfo {
+        let status = g.status().await;
+        let total = g.get_total_length_atomic();
+        let completed = g.get_completed_length();
+        let dl_speed = g.get_download_speed_cached();
+        let uploaded = g.get_uploaded_length();
+        let ul_speed = g.upload_speed().await;
+        let dir = g.options().dir.clone().unwrap_or_default();
+        let uris: Vec<String> = g.uris().to_vec();
+        let first_uri = uris.first().cloned().unwrap_or_default();
+        let files = vec![FileInfo::new(first_uri, total)
+            .with_completed(completed)
+            .with_index(1)];
+        let connections = g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16;
+
+        // BT-specific fields: bitfield, piece length, num pieces, info hash
+        let bt_info_hash = g.get_bt_info_hash_hex_async().await;
+        let is_bt = bt_info_hash.is_some();
+        let mut bt_bitfield = None;
+        let mut bt_piece_length = None;
+        let mut bt_num_pieces = None;
+        if is_bt {
+            let np = g.get_bt_num_pieces();
+            bt_num_pieces = Some(np);
+            bt_piece_length = Some(g.get_bt_piece_length() as u64);
+            if np > 0 {
+                bt_bitfield = g.get_bt_bitfield().await
+                    .map(|bf| bf.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+            }
+        }
+
+        let mut info = StatusInfo::new(gid_hex)
+            .with_status(status.clone())
+            .with_total_length(total)
+            .with_completed_length(completed)
+            .with_upload_length(uploaded)
+            .with_download_speed(dl_speed)
+            .with_upload_speed(ul_speed)
+            .with_connections(connections)
+            .with_dir(dir)
+            .with_files(files);
+
+        // Attach BT-specific fields only when applicable
+        if let Some(bf) = bt_bitfield {
+            info = info.with_bitfield(bf);
+        }
+        if let Some(pl) = bt_piece_length {
+            info = info.with_piece_length(pl);
+        }
+        if let Some(np) = bt_num_pieces {
+            info = info.with_num_pieces(np);
+        }
+        if let Some(ih) = bt_info_hash {
+            info = info.with_info_hash(ih);
+        }
+
+        // Extract error message from Error status
+        if let DownloadStatus::Error(ref msg) = status {
+            info = info.with_error_message(msg.clone());
+            // -1 for unknown errors (original aria2 convention)
+            info = info.with_error_code(-1);
+        }
+
+        info
     }
 
     /// Internal helper to get current status info for a task.
@@ -531,29 +721,7 @@ impl RpcEngine {
             let man = group_man.read().await;
             if let Some(group_lock) = man.group_by_hex(gid) {
                 let g = group_lock.read().await;
-                let status = g.status().await;
-                let total = g.get_total_length_atomic();
-                let completed = g.get_completed_length();
-                let dl_speed = g.get_download_speed_cached();
-                let uploaded = g.get_uploaded_length();
-                let dir = g.options().dir.clone().unwrap_or_default();
-                let uris: Vec<String> = g.uris().to_vec();
-                let first_uri = uris.first().cloned().unwrap_or_default();
-                let files = vec![FileInfo::new(first_uri, total).with_completed(completed)];
-                return Some(
-                    StatusInfo::new(gid)
-                        .with_status(status)
-                        .with_total_length(total)
-                        .with_completed_length(completed)
-                        .with_upload_length(uploaded)
-                        .with_download_speed(dl_speed)
-                        .with_upload_speed(0)
-                        .with_connections(
-                            g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16,
-                        )
-                        .with_dir(dir)
-                        .with_files(files),
-                );
+                return Some(Self::build_status_from_group(&g, gid).await);
             }
         }
         // Fallback to tasks map (placeholder, for tests/no-engine mode)
@@ -658,5 +826,35 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         header,
         user_agent: get_str("user-agent"),
         referer: get_str("referer"),
+    }
+}
+
+/// Build file_info JSON array from URIs for WebSocket events.
+///
+/// Produces the same structure used in `add_task()`:
+/// ```json
+/// [{"index": 1, "path": "uri", "length": 0, "completedLength": 0, "selected": true, "uris": [{"uri": "..", "status": "used"}]}]
+/// ```
+fn build_file_info_from_uris(uris: &[String]) -> Vec<serde_json::Value> {
+    if uris.is_empty() {
+        vec![serde_json::json!({
+            "index": 1,
+            "path": "",
+            "length": 0,
+            "completedLength": 0,
+            "selected": true,
+            "uris": []
+        })]
+    } else {
+        uris.iter().enumerate().map(|(i, u)| {
+            serde_json::json!({
+                "index": i + 1,
+                "path": u,
+                "length": 0,
+                "completedLength": 0,
+                "selected": true,
+                "uris": [{"uri": u, "status": "used"}]
+            })
+        }).collect()
     }
 }

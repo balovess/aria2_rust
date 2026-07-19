@@ -61,7 +61,9 @@ impl MetalinkDownloadCommand {
             .collect();
         let group = RequestGroup::new(gid, urls, options.clone());
 
-        let client = reqwest::Client::builder()
+        let client = {
+            crate::http::client_pool::ensure_rustls_provider();
+            reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(300))
             .user_agent("aria2-rust/0.1.0")
@@ -72,7 +74,8 @@ impl MetalinkDownloadCommand {
                     "HTTP client build failed: {}",
                     e
                 )))
-            })?;
+            })?
+        };
 
         info!(
             "MetalinkDownloadCommand created: {} -> {} ({} mirrors)",

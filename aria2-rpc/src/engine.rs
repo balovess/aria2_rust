@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
+use super::rpc_helpers::to_aria2_wire_format;
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
 use super::websocket::EventPublisher;
@@ -42,6 +44,8 @@ pub struct RpcEngine {
     /// When set, `aria2.addUri` starts real downloads by sending a
     /// `DownloadCommand` through this channel.
     pub(crate) cmd_tx: Option<mpsc::UnboundedSender<Box<dyn Command>>>,
+    /// Cumulative count of stopped downloads since session start (atomic).
+    pub(crate) num_stopped_total: AtomicUsize,
 }
 
 /// Internal state for an active download task.
@@ -100,7 +104,7 @@ impl TaskState {
     /// Called before returning status to ensure all progress fields
     /// are reflected in the response.
     pub(crate) fn update_status_info(&mut self) {
-        let mut status = StatusInfo::new(&self.status.gid)
+        let status = StatusInfo::new(&self.status.gid)
             .with_status(self.status.status.clone())
             .with_total_length(self.total_length)
             .with_completed_length(self.completed_length)
@@ -110,9 +114,7 @@ impl TaskState {
             .with_connections(self.connections)
             .with_dir(self.status.dir.clone().unwrap_or_default())
             .with_files(self.status.files.clone().unwrap_or_default());
-        if let Some(ref tf) = self.torrent_files {
-            status = status.with_torrent_files(tf.clone());
-        }
+        // TODO: Construct BittorrentInfo from self.torrent_files (Task 19)
         self.status = status;
     }
 
@@ -169,6 +171,7 @@ impl RpcEngine {
             auth_middleware: RpcAuthMiddleware::default(),
             group_man: None,
             cmd_tx: None,
+            num_stopped_total: AtomicUsize::new(0),
         }
     }
 
@@ -304,7 +307,7 @@ impl RpcEngine {
             return auth_err.into_response(req.id.clone());
         }
 
-        match req.method.as_str() {
+        let mut resp = match req.method.as_str() {
             "aria2.addUri" => self
                 .handle_add_uri(req)
                 .await
@@ -429,7 +432,13 @@ impl RpcEngine {
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
             _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),
+        };
+        // Apply aria2 wire format: convert all numbers to strings and booleans to
+        // "true"/"false" strings, matching the original aria2 JSON-RPC response format.
+        if let Some(result) = resp.result.take() {
+            resp.result = Some(to_aria2_wire_format(result));
         }
+        resp
     }
 }
 

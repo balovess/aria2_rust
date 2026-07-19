@@ -679,7 +679,17 @@ async fn regression_change_uri_modifies_list() {
     assert_success(&resp);
     let result: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(result.len(), 2);
-    assert_eq!(result[0].as_str().unwrap(), gid);
+    // changeUri returns [delCount, addCount] matching original aria2
+    assert_eq!(
+        result[0].as_str(),
+        Some("1"),
+        "delCount should be 1 (1 URI removed)"
+    );
+    assert_eq!(
+        result[1].as_str(),
+        Some("1"),
+        "addCount should be 1 (1 URI added)"
+    );
 }
 
 /// Test: aria2.changePosition modifies URI position.

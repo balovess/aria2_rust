@@ -93,13 +93,20 @@ impl App {
 
         // verbose is handled via log-level config option
 
-        // Use --conf-path from CLI if provided, else fall back to default
-        let conf_path = cli
-            .general
-            .conf_path
-            .as_ref()
-            .and_then(|p| p.to_str())
-            .map(|s| s.to_string());
+        // Handle --no-conf and --conf-path (matching original aria2 option_processing.cc):
+        // - --no-conf: skip config file loading entirely
+        // - --conf-path: use explicit path (error if not found)
+        // - neither: use default ~/.aria2/aria2.conf
+        let conf_path = if cli.general.no_conf {
+            eprintln!("[*] --no-conf set, skipping config file loading");
+            None
+        } else {
+            cli.general
+                .conf_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string())
+        };
 
         self.load_env().await;
 

@@ -1,6 +1,6 @@
 [package]
 name = "aria2-core"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -47,7 +47,10 @@ sha2 = "0.10"
 adler32 = "1.2"
 digest = "0.10"
 aria2-protocol = { workspace = true, features = ["bittorrent", "metalink", "sftp"] }
-reqwest = { version = "0.13.4", features = ["stream", "rustls", "gzip", "http2"], default-features = false }
+# Use rustls-no-provider to avoid pulling in aws-lc-rs (STATUS_STACK_BUFFER_OVERRUN on Windows).
+# The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
+# automatically use ring as the crypto provider.
+reqwest = { version = "0.13.4", features = ["stream", "rustls-no-provider", "gzip", "http2"], default-features = false }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
@@ -64,6 +67,9 @@ bzip2-rs = "0.1"
 zeroize = "1.8"
 hex = "0.4"
 ring = "0.17"
+# rustls with ring provider; required for installing the crypto provider when
+# reqwest uses `rustls-no-provider` (avoids aws-lc-rs ABI conflict on Windows).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rc4 = "0.2"
 once_cell = "1.19"
 dashmap = "5.5"
@@ -72,7 +78,7 @@ dashmap = "5.5"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)

@@ -4,6 +4,7 @@ use std::time::Instant;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use reqwest;
+use tokio::sync::mpsc;
 
 use crate::constants;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
@@ -153,7 +154,7 @@ impl ConcurrentDownloader {
                         active_segs.insert(seg_idx, offset);
                         let fut = Box::pin(async move {
                             let result = dl
-                                .download_range(&url, offset, length, ch.as_deref(), &headers)
+                                .download_range(&url, offset, length, ch.as_deref(), &headers, None)
                                 .await;
                             (seg_idx, result)
                         });
@@ -417,6 +418,19 @@ impl ConcurrentDownloader {
 
                 let cookie_hdr = self.cookie_helper.build_cookie_header(&mirror_url);
 
+                // Create progress channel for per-chunk progress reporting during this segment
+                let (seg_progress_tx, mut seg_progress_rx) =
+                    mpsc::unbounded_channel::<crate::engine::command::ProgressUpdate>();
+
+                // Spawn listener for per-chunk progress updates
+                let group_for_progress = Arc::clone(&self.group);
+                let progress_handle = tokio::spawn(async move {
+                    while let Some(update) = seg_progress_rx.recv().await {
+                        let g = group_for_progress.read().await;
+                        g.set_completed_length(update.completed_bytes);
+                    }
+                });
+
                 let result = downloader
                     .download_range(
                         &mirror_url,
@@ -424,8 +438,13 @@ impl ConcurrentDownloader {
                         length,
                         cookie_hdr.as_deref(),
                         &self.headers,
+                        Some(&seg_progress_tx),
                     )
                     .await;
+
+                // Drop sender to signal progress listener to stop
+                drop(seg_progress_tx);
+                let _ = progress_handle.await;
 
                 match result {
                     Ok(data) => {
@@ -502,15 +521,7 @@ impl ConcurrentDownloader {
                     }
                 }
 
-                let completed_bytes = {
-                    let total = coordinator.num_segments() as u64;
-                    let progress_pct = coordinator.progress();
-                    if total > 0 {
-                        (progress_pct / 100.0 * total as f64) as u64
-                    } else {
-                        0
-                    }
-                };
+                let completed_bytes = coordinator.completed_bytes();
 
                 self.progress_updater
                     .update_progress(
