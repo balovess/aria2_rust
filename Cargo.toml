@@ -32,6 +32,17 @@ async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 aria2-protocol = { path = "aria2-protocol", version = "0.2.2" }
 aria2-core = { path = "aria2-core", version = "0.2.2" }
+aria2-rpc = { path = "aria2-rpc", version = "0.2.2" }
+
+# Cross-crate: unify to workspace-level
+reqwest = { version = "0.13", default-features = false }
+tokio-tungstenite = "0.21"
+base64 = "0.21"
+hex = "0.4"
+rand = "0.8"
+tempfile = "3.8"
+rustls = { version = "0.23", default-features = false }
+rustls-pemfile = "2.1"
 
 [workspace.metadata.release]
 # Release workflow settings
@@ -54,3 +65,14 @@ allow-branch = ["main", "master"]
 # individually; the binary has its own program-level version).
 consolidate-commits = false
 shared-version = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 8
+panic = "abort"
+strip = true
+
+# Maximize intra-crate optimization for the binary crate only
+[profile.release.package.aria2]
+codegen-units = 1

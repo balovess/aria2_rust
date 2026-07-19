@@ -693,7 +693,7 @@ async fn test_change_position_move_uri() {
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
     let change_req =
-        JsonRpcRequest::new("aria2.changePosition", serde_json::json!([gid, 0, 0, 2, 0]))
+        JsonRpcRequest::new("aria2.changePosition", serde_json::json!([gid, 0, "POS_SET"]))
             .with_id(2);
     let change_resp = engine.handle_request(&change_req).await;
     assert!(
@@ -702,7 +702,7 @@ async fn test_change_position_move_uri() {
     );
 
     let result: String = serde_json::from_value(change_resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK", "Should return OK");
+    assert_eq!(result, "0", "Should return new position 0");
 }
 
 #[tokio::test]
@@ -719,7 +719,7 @@ async fn test_change_position_invalid_how() {
 
     let req = JsonRpcRequest::new(
         "aria2.changePosition",
-        serde_json::json!([gid, 0, null, null, 99]),
+        serde_json::json!([gid, 0, "INVALID"]),
     )
     .with_id(2);
     let resp = engine.handle_request(&req).await;

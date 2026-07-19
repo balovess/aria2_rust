@@ -1,6 +1,6 @@
 [package]
 name = "aria2"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -24,9 +24,9 @@ name = "test_config_file"
 path = "tests/regression/test_config_file.rs"
 
 [dependencies]
-aria2-core = { path = "../aria2-core" }
-aria2-protocol = { path = "../aria2-protocol" }
-aria2-rpc = { path = "../aria2-rpc" }
+aria2-core.workspace = true
+aria2-protocol.workspace = true
+aria2-rpc.workspace = true
 
 tokio.workspace = true
 tracing.workspace = true
@@ -42,8 +42,8 @@ libc = "0.2"
 signal-hook = "0.3"
 
 [dev-dependencies]
-tempfile = "3"
-base64 = "0.22"
+tempfile.workspace = true
+base64.workspace = true
 
 [features]
 default = ["http", "bittorrent", "rpc"]

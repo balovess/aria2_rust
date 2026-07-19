@@ -33,7 +33,7 @@ pub struct RpcEngine {
     /// Completed/stopped task results
     pub(crate) stopped_tasks: Arc<RwLock<Vec<StatusInfo>>>,
     /// Event publisher for WebSocket notifications
-    pub(crate) event_publisher: Arc<EventPublisher>,
+    pub event_publisher: Arc<EventPublisher>,
     /// Authentication middleware for token-based RPC auth
     pub(crate) auth_middleware: RpcAuthMiddleware,
     /// Shared download group manager (for live progress queries and task tracking).
@@ -302,7 +302,15 @@ impl RpcEngine {
         let id = req.id.clone().unwrap_or(serde_json::Value::Null);
 
         // Authenticate: extract token from params and validate
-        let token = req.params.get("token").and_then(|v| v.as_str());
+        // Support both array-style ("token:xxx" as first param element)
+        // and object-style ({"token": "xxx"}) params for backward compatibility.
+        let token = if let Some(arr) = req.params.as_array() {
+            arr.first()
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.strip_prefix("token:"))
+        } else {
+            req.params.get("token").and_then(|v| v.as_str())
+        };
         if let Err(auth_err) = self.auth_middleware.validate(token) {
             return auth_err.into_response(req.id.clone());
         }

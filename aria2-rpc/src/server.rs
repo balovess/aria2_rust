@@ -601,7 +601,9 @@ impl RpcServer {
         // Build router
         let app = Router::new()
             .route("/jsonrpc", post(handle_jsonrpc))
-            .route("/jsonrpc", get(handle_jsonrpc_get)) // For GET requests
+            .route("/jsonrpc", get(handle_jsonrpc_or_ws)) // GET + WebSocket upgrade
+            .route("/rpc", post(handle_jsonrpc))
+            .route("/ws", get(ws_handler)) // WebSocket upgrade (backward compat)
             .route("/", get(root_handler))
             .layer(cors_layer)
             .with_state(state);
@@ -653,7 +655,9 @@ async fn root_handler() -> impl axum::response::IntoResponse {
             "name": crate::constants::RPC_SERVER_NAME,
             "version": env!("CARGO_PKG_VERSION"),
             "endpoints": {
-                "jsonrpc": crate::constants::RPC_ENDPOINT_PATH
+                "jsonrpc": crate::constants::RPC_ENDPOINT_PATH,
+                "rpc": "/rpc",
+                "ws": "/ws"
             }
         })),
     )
@@ -673,18 +677,121 @@ async fn handle_jsonrpc(
     (StatusCode::OK, Json(response))
 }
 
-/// Handle JSON-RPC GET requests (for debugging)
-async fn handle_jsonrpc_get() -> impl axum::response::IntoResponse {
+/// Handle GET requests at `/jsonrpc`.
+///
+/// Supports two modes:
+/// 1. **WebSocket upgrade** — If the request has `Upgrade: websocket` headers,
+///    the connection is upgraded to WebSocket for real-time download events.
+/// 2. **Regular GET** — Returns an informational message.
+///
+/// This dual behavior is required because Aria2 Explorer initiates WebSocket
+/// connections at `/jsonrpc` (not `/ws`), while other clients may use GET for
+/// health checks or debugging.
+async fn handle_jsonrpc_or_ws(
+    axum::extract::State(state): axum::extract::State<RpcState>,
+    ws: Option<axum::extract::ws::WebSocketUpgrade>,
+) -> impl axum::response::IntoResponse {
     use axum::http::StatusCode;
     use axum::response::Json;
     use serde_json::json;
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "error": "GET method not supported. Use POST for JSON-RPC requests."
-        })),
-    )
+    use axum::response::IntoResponse;
+
+    match ws {
+        Some(upgrade) => {
+            // WebSocket upgrade request from Aria2 Explorer or other clients
+            upgrade.on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
+        }
+        None => {
+            // Regular GET request
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "error": "Use POST for JSON-RPC requests, or connect via WebSocket at /jsonrpc (ws://)"
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Handle WebSocket upgrade requests.
+///
+/// Upgrades HTTP connections to WebSocket protocol for real-time
+/// download event notifications (progress, completion, errors, etc.).
+async fn ws_handler(
+    axum::extract::State(state): axum::extract::State<RpcState>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
+}
+
+/// Handle an upgraded WebSocket connection.
+///
+/// Subscribes to the engine's event publisher and forwards events
+/// to the connected WebSocket client as JSON-RPC notifications.
+/// Detects client disconnect via incoming messages and cleans up.
+async fn handle_ws_socket(
+    mut socket: axum::extract::ws::WebSocket,
+    engine: std::sync::Arc<crate::engine::RpcEngine>,
+) {
+    use tokio::sync::broadcast;
+
+    // Subscribe to the engine's event publisher
+    let mut rx = engine.event_publisher.subscribe("ws-conn", None).await;
+
+    loop {
+        tokio::select! {
+            // Wait for events from the engine
+            result = rx.recv() => {
+                match result {
+                    Ok((_event_type, event)) => {
+                        if let Ok(json_str) = event.to_json() {
+                            if socket
+                                .send(axum::extract::ws::Message::Text(json_str.into()))
+                                .await
+                                .is_err()
+                            {
+                                break; // Client disconnected
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket client lagged by {} events", n);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break; // Engine shut down
+                    }
+                }
+            }
+
+            // Wait for incoming messages from client (to detect disconnect)
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(axum::extract::ws::Message::Close(_))) | None => {
+                        break; // Client disconnected
+                    }
+                    Some(Ok(axum::extract::ws::Message::Ping(data))) => {
+                        // Respond to ping with pong
+                        let _ = socket
+                            .send(axum::extract::ws::Message::Pong(data))
+                            .await;
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!("WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {
+                        // Ignore other message types (pong, etc.)
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::debug!("WebSocket client disconnected");
 }
 
 impl std::fmt::Debug for RpcServer {

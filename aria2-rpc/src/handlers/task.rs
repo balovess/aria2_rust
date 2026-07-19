@@ -193,6 +193,15 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
+
+        // Propagate to RequestGroupMan when available
+        if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+                let _ = man.remove_group(gid_parsed).await;
+            }
+        }
+
         let mut tasks = self.tasks.write().await;
         match tasks.remove(&gid) {
             Some(state) => {
@@ -221,6 +230,15 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
+
+        // Propagate to RequestGroupMan when available
+        if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+                let _ = man.pause_group(gid_parsed).await;
+            }
+        }
+
         let mut tasks = self.tasks.write().await;
         match tasks.get_mut(&gid) {
             Some(state) => {
@@ -243,6 +261,14 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
+
+        // Propagate to RequestGroupMan when available
+        if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+                let _ = man.pause_group(gid_parsed).await;
+            }
+        }
 
         let mut tasks_map = self.tasks.write().await;
         match tasks_map.get_mut(&gid) {
@@ -269,6 +295,15 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
+
+        // Propagate to RequestGroupMan when available
+        if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+                let _ = man.unpause_group(gid_parsed).await;
+            }
+        }
+
         let mut tasks = self.tasks.write().await;
         match tasks.get_mut(&gid) {
             Some(state) => {
@@ -311,6 +346,16 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gids = super::parse_gids(req, 0)?;
+
+        // Propagate to RequestGroupMan when available
+        if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            for gid in &gids {
+                if let Some(gid_parsed) = GroupId::from_hex_string(gid) {
+                    let _ = man.remove_group(gid_parsed).await;
+                }
+            }
+        }
 
         let mut tasks = self.tasks.write().await;
         for gid in &gids {
@@ -409,67 +454,51 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.changePosition` - Change URI position within a download.
+    ///
+    /// Original aria2 signature: `[gid, pos, how]`
+    /// - `pos`: Relative or absolute position (i64)
+    /// - `how`: `"POS_SET"`, `"POS_CUR"`, or `"POS_END"`
+    ///
+    /// Returns the new absolute position on success.
     pub async fn handle_change_position(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let gid = req.get_param::<String>(0)?;
-        let _file_index: usize = req.get_param(1)?;
-        let del_pos: Option<usize> = req.get_param(2).ok();
-        let add_pos: Option<usize> = req.get_param(3).ok();
-        let how: u8 = req.get_param_or_default(4);
-
-        if how > 2 {
-            return Ok(JsonRpcResponse::error(
-                req.id.clone().unwrap_or_default(),
-                -32602,
-                format!("Invalid 'how' value: {}", how),
-            ));
-        }
+        let gid: String = req.get_param(0)?;
+        let pos: i64 = req.get_param(1)?;
+        let how: String = req.get_param_or_default(2);
 
         let mut tasks = self.tasks.write().await;
         let state = tasks
             .get_mut(&gid)
             .ok_or_else(|| JsonRpcError::MethodNotFound(format!("GID {} not found", gid)))?;
 
-        match (del_pos, add_pos) {
-            (Some(del), Some(add)) => {
-                if del < state.uris.len() && add <= state.uris.len() {
-                    let uri = state.uris.remove(del);
-                    state.uris.insert(add.min(state.uris.len()), uri);
-                    return Ok(JsonRpcResponse::success(
-                        req.id.clone().unwrap_or_default(),
-                        serde_json::Value::String("OK".into()),
-                    ));
-                }
+        let len = state.uris.len() as i64;
+        let current_pos = 0i64;
+
+        let new_pos = match how.as_str() {
+            "POS_SET" => pos,
+            "POS_CUR" => current_pos + pos,
+            "POS_END" => (len + pos).max(0),
+            _ => {
+                return Err(JsonRpcError::InvalidParams(format!(
+                    "Invalid 'how' value: {}. Must be POS_SET, POS_CUR, or POS_END",
+                    how
+                )));
             }
-            (Some(del), None) => {
-                if del < state.uris.len() {
-                    state.uris.remove(del);
-                    return Ok(JsonRpcResponse::success(
-                        req.id.clone().unwrap_or_default(),
-                        serde_json::Value::String("OK".into()),
-                    ));
-                }
-            }
-            (None, Some(add)) => {
-                if !state.uris.is_empty() && add <= state.uris.len() {
-                    let uri = state.uris.pop().ok_or_else(|| {
-                        JsonRpcError::InternalError("No URIs available".to_string())
-                    })?;
-                    state.uris.insert(add, uri);
-                    return Ok(JsonRpcResponse::success(
-                        req.id.clone().unwrap_or_default(),
-                        serde_json::Value::String("OK".into()),
-                    ));
-                }
-            }
-            (None, None) => {}
+        };
+
+        let new_pos = new_pos.max(0).min((len - 1).max(0)) as usize;
+
+        // Move the URI at index 0 (first URI) to new_pos
+        if !state.uris.is_empty() && new_pos < state.uris.len() {
+            let uri = state.uris.remove(0);
+            state.uris.insert(new_pos, uri);
         }
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::Value::String("OK".into()),
+            serde_json::json!(new_pos as i64),
         ))
     }
 
@@ -699,6 +728,12 @@ impl RpcEngine {
         if let Some(ih) = bt_info_hash {
             info = info.with_info_hash(ih);
         }
+
+        // Additional progress fields
+        info = info.with_num_seeders(0);
+        // verified_length and verify_integrity_pending - use available progress data
+        info = info.with_verified_length(g.get_completed_length());
+        info = info.with_verify_integrity_pending("false");
 
         // Extract error message from Error status
         if let DownloadStatus::Error(ref msg) = status {

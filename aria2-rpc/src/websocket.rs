@@ -54,6 +54,7 @@ pub enum EventType {
     DownloadStop,
     DownloadComplete,
     DownloadError,
+    BtCacheChanged,
     BtDownloadComplete,
     BtDownloadError,
     DownloadResume,
@@ -67,6 +68,7 @@ impl EventType {
             Self::DownloadStop => crate::constants::WS_EVENT_DOWNLOAD_STOP,
             Self::DownloadComplete => crate::constants::WS_EVENT_DOWNLOAD_COMPLETE,
             Self::DownloadError => crate::constants::WS_EVENT_DOWNLOAD_ERROR,
+            Self::BtCacheChanged => crate::constants::WS_EVENT_BT_CACHE_CHANGED,
             Self::BtDownloadComplete => crate::constants::WS_EVENT_BT_DOWNLOAD_COMPLETE,
             Self::BtDownloadError => crate::constants::WS_EVENT_BT_DOWNLOAD_ERROR,
             Self::DownloadResume => crate::constants::WS_EVENT_DOWNLOAD_RESUME,
@@ -80,6 +82,7 @@ impl EventType {
             crate::constants::WS_EVENT_DOWNLOAD_STOP => Some(Self::DownloadStop),
             crate::constants::WS_EVENT_DOWNLOAD_COMPLETE => Some(Self::DownloadComplete),
             crate::constants::WS_EVENT_DOWNLOAD_ERROR => Some(Self::DownloadError),
+            crate::constants::WS_EVENT_BT_CACHE_CHANGED => Some(Self::BtCacheChanged),
             crate::constants::WS_EVENT_BT_DOWNLOAD_COMPLETE => Some(Self::BtDownloadComplete),
             crate::constants::WS_EVENT_BT_DOWNLOAD_ERROR => Some(Self::BtDownloadError),
             crate::constants::WS_EVENT_DOWNLOAD_RESUME => Some(Self::DownloadResume),
@@ -200,6 +203,13 @@ impl DownloadEvent {
         Self::new(
             EventType::DownloadResume,
             vec![serde_json::json!({"gid": gid.into()})],
+        )
+    }
+
+    pub fn bt_cache_changed(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
+        Self::new(
+            EventType::BtCacheChanged,
+            vec![serde_json::json!({"gid": gid.into(), "files": files})],
         )
     }
 }
@@ -503,9 +513,10 @@ mod tests {
         let _ = DownloadEvent::download_stop("g3", vec![]);
         let _ = DownloadEvent::download_complete("g4", vec![]);
         let _ = DownloadEvent::download_error("g5", 0, vec![]);
-        let _ = DownloadEvent::bt_download_complete("g6", vec![]);
-        let _ = DownloadEvent::bt_download_error("g7", 0, vec![]);
-        let _ = DownloadEvent::download_resume("g8");
+        let _ = DownloadEvent::bt_cache_changed("g6", vec![]);
+        let _ = DownloadEvent::bt_download_complete("g7", vec![]);
+        let _ = DownloadEvent::bt_download_error("g8", 0, vec![]);
+        let _ = DownloadEvent::download_resume("g9");
     }
 
     #[test]

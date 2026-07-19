@@ -1,6 +1,6 @@
 //! RPC API regression tests for aria2-rust.
 //!
-//! These tests verify that all 36 RPC methods return values in the expected format
+//! These tests verify that all 37 RPC methods return values in the expected format
 //! and maintain compatibility with the original aria2 RPC specification.
 
 use aria2_rpc::engine::RpcEngine;
@@ -708,12 +708,12 @@ async fn regression_change_position_modifies_position() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let req = make_request("aria2.changePosition", serde_json::json!([gid, 0, 0, 2, 0]));
+    let req = make_request("aria2.changePosition", serde_json::json!([gid, 2, "POS_SET"]));
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK");
+    assert_eq!(result, "2", "Should return the new absolute position as string");
 }
 
 // =========================================================================
@@ -894,7 +894,7 @@ async fn regression_list_methods_returns_36_methods() {
 
     assert_success(&resp);
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(methods.len(), 36, "Should return exactly 36 methods");
+    assert_eq!(methods.len(), 37, "Should return exactly 37 methods");
 
     // Verify key methods are present
     assert!(methods.contains(&"aria2.addUri".to_string()));
