@@ -518,6 +518,77 @@ mod tests {
         assert!(resp.is_error());
     }
 
+    /// Verify that `aria2.remove` cancels the task's `CancellationToken`.
+    ///
+    /// Before the fix, `handle_remove` removed the task from the map but
+    /// never called `cancel_token.cancel()`, so the running `DownloadCommand`
+    /// had no way to know it should stop. The download kept running in the
+    /// background until it finished.
+    #[tokio::test]
+    async fn test_handle_remove_cancels_token() {
+        let engine = RpcEngine::new();
+
+        let add_req =
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        // Clone the CancellationToken before remove so we can inspect it
+        // afterwards (the task is removed from the map by handle_remove).
+        let cancel_token = {
+            let tasks = engine.tasks.read().await;
+            tasks
+                .get(&gid)
+                .and_then(|s| s.cancel_token.clone())
+                .expect("TaskState should have a cancel_token")
+        };
+        assert!(!cancel_token.is_cancelled(), "token should not be cancelled before remove");
+
+        let remove_req =
+            JsonRpcRequest::new("aria2.remove", serde_json::json!([gid])).with_id(2);
+        let remove_resp = engine.handle_request(&remove_req).await;
+        assert!(remove_resp.is_success(), "aria2.remove should succeed");
+
+        assert!(
+            cancel_token.is_cancelled(),
+            "CancellationToken must be cancelled after aria2.remove so the running DownloadCommand can stop"
+        );
+        assert_eq!(engine.task_count().await, 0, "task should be removed from the map");
+    }
+
+    /// Verify that `aria2.forceRemove` cancels the task's `CancellationToken`.
+    ///
+    /// Before the fix, `handle_force_remove` set the status to `Removed` but
+    /// never called `cancel_token.cancel()`.
+    #[tokio::test]
+    async fn test_handle_force_remove_cancels_token() {
+        let engine = RpcEngine::new();
+
+        let add_req =
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        let add_resp = engine.handle_request(&add_req).await;
+        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+        let cancel_token = {
+            let tasks = engine.tasks.read().await;
+            tasks
+                .get(&gid)
+                .and_then(|s| s.cancel_token.clone())
+                .expect("TaskState should have a cancel_token")
+        };
+        assert!(!cancel_token.is_cancelled(), "token should not be cancelled before forceRemove");
+
+        let remove_req =
+            JsonRpcRequest::new("aria2.forceRemove", serde_json::json!([gid])).with_id(2);
+        let remove_resp = engine.handle_request(&remove_req).await;
+        assert!(remove_resp.is_success(), "aria2.forceRemove should succeed");
+
+        assert!(
+            cancel_token.is_cancelled(),
+            "CancellationToken must be cancelled after aria2.forceRemove so the running DownloadCommand can stop"
+        );
+    }
+
     #[tokio::test]
     async fn test_handle_pause_and_unpause() {
         let engine = RpcEngine::new();

@@ -412,11 +412,33 @@ impl DownloadCommand {
             self.perf_monitor.clone(),
         )
     }
+
+    /// Non-blocking check whether the underlying RequestGroup has been
+    /// cancelled (status set to `Removed` by `aria2.remove` /
+    /// `aria2.forceRemove`).
+    ///
+    /// Returns `Err` with a `DownloadFailed` error when the group has been
+    /// removed, so the caller can abort the download promptly. Uses
+    /// `try_read` on the outer group lock so it is safe to call from hot
+    /// download loops; when the lock is contended the method treats the
+    /// download as still running (returns `Ok(())`) and the caller will
+    /// re-check on the next iteration.
+    fn check_cancelled(&self) -> Result<()> {
+        match self.group.try_read() {
+            Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
+                "Download cancelled by user".into(),
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[async_trait]
 impl Command for DownloadCommand {
     async fn execute(&mut self) -> Result<()> {
+        // Check for early cancellation (task removed before execution started).
+        self.check_cancelled()?;
+
         if !self.started {
             self.group.write().await.start().await?;
             self.started = true;
@@ -438,6 +460,11 @@ impl Command for DownloadCommand {
             uri,
             self.output_path.display()
         );
+
+        // Re-check cancellation after the HEAD probe / pre-allocation work so
+        // a remove issued while we were doing filesystem setup is honoured
+        // before any network transfer begins.
+        self.check_cancelled()?;
 
         if let Some(parent) = self.output_path.parent()
             && !parent.exists()
@@ -528,6 +555,18 @@ impl Command for DownloadCommand {
             self.completed = true;
             release_path(&self.output_path);
             return Ok(());
+        }
+
+        // Final cancellation check before kicking off the (potentially long)
+        // network transfer. If the task was removed during the HEAD probe or
+        // resume detection, abort now rather than downloading data that will
+        // just be discarded. This is placed before `spawn_progress_aggregator`
+        // so a cancelled task does not spawn an unnecessary aggregator task.
+        // Release the registered output path so future downloads can reuse
+        // the filename.
+        if let Err(e) = self.check_cancelled() {
+            release_path(&self.output_path);
+            return Err(e);
         }
 
         self.spawn_progress_aggregator();
@@ -787,6 +826,67 @@ mod tests {
         assert_eq!(
             completed, 4096,
             "aggregator should have applied the progress update to RequestGroup"
+        );
+    }
+
+    /// Verify that `check_cancelled()` returns `Ok(())` for a fresh group
+    /// (status = Waiting) and `Err(DownloadFailed)` after the group is
+    /// marked `Removed`.
+    #[tokio::test]
+    async fn test_check_cancelled_returns_ok_for_active_group() {
+        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(10),
+            vec!["http://example.com/file.bin".to_string()],
+            DownloadOptions::default(),
+        )));
+
+        let cmd = DownloadCommand::new_with_group(
+            group,
+            "http://example.com/file.bin",
+            &DownloadOptions::default(),
+            None,
+            None,
+        )
+        .expect("DownloadCommand::new_with_group should succeed");
+
+        // Fresh group (Waiting status) — not cancelled.
+        assert!(
+            cmd.check_cancelled().is_ok(),
+            "check_cancelled() should return Ok for a fresh (non-removed) group"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_cancelled_returns_err_after_remove() {
+        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(11),
+            vec!["http://example.com/file.bin".to_string()],
+            DownloadOptions::default(),
+        )));
+
+        let cmd = DownloadCommand::new_with_group(
+            Arc::clone(&group),
+            "http://example.com/file.bin",
+            &DownloadOptions::default(),
+            None,
+            None,
+        )
+        .expect("DownloadCommand::new_with_group should succeed");
+
+        // Simulate `aria2.remove` / `aria2.forceRemove` which calls
+        // RequestGroupMan::remove_group -> group.remove().
+        {
+            let mut g = group.write().await;
+            g.remove().await.unwrap();
+        }
+
+        let err = cmd.check_cancelled().expect_err(
+            "check_cancelled() should return Err after the group is marked Removed",
+        );
+        assert!(
+            matches!(err, Aria2Error::DownloadFailed(_)),
+            "expected DownloadFailed error, got {:?}",
+            err
         );
     }
 }

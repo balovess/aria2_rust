@@ -155,13 +155,22 @@ impl DownloadEngine {
                 smoother.record_bytes(delta);
 
                 let g = group.write().await;
+                // Always apply byte progress.
                 g.update_progress(update.completed_bytes).await;
                 g.set_completed_length(update.completed_bytes);
 
+                // Speed: use EMA-smoothed speed when available; fall back to
+                // the sender's raw speed sample when the smoother hasn't
+                // produced a value yet (first sample window). Skip the speed
+                // write entirely when both are 0 so a previously cached speed
+                // (e.g. from a prior update) is preserved.
                 let smoothed = smoother.smoothed_speed() as u64;
                 if smoothed > 0 {
                     g.update_speed(smoothed, update.upload_speed).await;
                     g.set_download_speed_cached(smoothed);
+                } else if update.download_speed > 0 {
+                    g.update_speed(update.download_speed, update.upload_speed).await;
+                    g.set_download_speed_cached(update.download_speed);
                 }
                 last_bytes = update.completed_bytes;
             }

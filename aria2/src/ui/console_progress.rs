@@ -105,14 +105,14 @@ impl ConsoleProgressReporter {
             let task_status = match &status {
                 DownloadStatus::Active => TaskStatus::Active,
                 DownloadStatus::Waiting => TaskStatus::Waiting,
-                DownloadStatus::Complete => TaskStatus::Complete,
-                DownloadStatus::Error(_) => TaskStatus::Error,
+                DownloadStatus::Complete => continue,
+                DownloadStatus::Error(_) => continue,
                 DownloadStatus::Paused => TaskStatus::Waiting,
                 DownloadStatus::Removed => continue,
             };
 
             let completed = group.get_completed_length();
-            let total = group.total_length();
+            let total = group.get_total_length_atomic();
             let speed = group.get_download_speed_cached();
 
             let filename = group

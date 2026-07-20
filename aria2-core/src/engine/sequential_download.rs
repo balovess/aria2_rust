@@ -48,6 +48,22 @@ impl SequentialDownloader {
         }
     }
 
+    /// Non-blocking cancellation check.
+    ///
+    /// Returns `Err` when the underlying RequestGroup has been marked
+    /// `Removed` (by `aria2.remove` / `aria2.forceRemove`). Uses `try_read`
+    /// on the outer group lock so it is safe to call from the hot download
+    /// loop; a contended lock is treated as "not cancelled" and the caller
+    /// will re-check on the next iteration.
+    fn check_cancelled(&self) -> Result<()> {
+        match self.group.try_read() {
+            Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
+                "Download cancelled by user".into(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub async fn execute(
         &mut self,
         uri: &str,
@@ -166,6 +182,12 @@ impl SequentialDownloader {
         let write_piece = constants::RATE_LIMITER_CHUNK_SIZE;
 
         while let Some(chunk) = stream.next().await {
+            // Check whether the task was removed between chunks. This is the
+            // primary cancellation signal: `aria2.remove` /
+            // `aria2.forceRemove` sets the RequestGroup status to `Removed`,
+            // which `is_removed()` observes without blocking.
+            self.check_cancelled()?;
+
             let data: bytes::Bytes = chunk.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                     message: e.to_string(),
@@ -268,6 +290,17 @@ impl SequentialDownloader {
         let mut completed_gaps: Vec<(u64, u64)> = Vec::new();
 
         for (gap_start, gap_length) in gaps {
+            // Check whether the task was removed before starting the next gap.
+            // This is the primary cancellation signal: `aria2.remove` /
+            // `aria2.forceRemove` sets the RequestGroup status to `Removed`,
+            // which `is_removed()` observes without blocking.
+            if let Err(e) = self.check_cancelled() {
+                return GapDownloadResult {
+                    completed_gaps,
+                    error: Some(e),
+                };
+            }
+
             let gap_end = gap_start + gap_length - 1;
             let range_header = format!("bytes={}-{}", gap_start, gap_end);
             tracing::debug!("Sequential Range request for gap: {}", range_header);
@@ -330,6 +363,18 @@ impl SequentialDownloader {
             let mut bytes_downloaded = 0u64;
 
             while let Some(chunk_result) = stream.next().await {
+                // Check whether the task was removed between chunks. This is
+                // the primary cancellation signal: `aria2.remove` /
+                // `aria2.forceRemove` sets the RequestGroup status to
+                // `Removed`, which `is_removed()` observes without blocking.
+                if let Err(e) = self.check_cancelled() {
+                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    return GapDownloadResult {
+                        completed_gaps,
+                        error: Some(e),
+                    };
+                }
+
                 let data: bytes::Bytes = match chunk_result {
                     Ok(d) => d,
                     Err(e) => {

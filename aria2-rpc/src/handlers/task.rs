@@ -208,6 +208,16 @@ impl RpcEngine {
         let mut tasks = self.tasks.write().await;
         match tasks.remove(&gid) {
             Some(state) => {
+                // Cancel the CancellationToken so any running DownloadCommand
+                // is signalled to stop. The DownloadCommand also independently
+                // polls the RequestGroup status (set to `Removed` by
+                // `man.remove_group` above) as the primary cancellation signal,
+                // so cancelling the token here keeps behaviour consistent with
+                // `handle_force_pause` / `handle_force_shutdown`.
+                if let Some(cancel_token) = &state.cancel_token {
+                    cancel_token.cancel();
+                }
+
                 self.num_stopped_total.fetch_add(1, Ordering::Relaxed);
 
                 // Push removed task into stopped_tasks so it shows up in tellStopped
@@ -382,6 +392,15 @@ impl RpcEngine {
         for gid in &gids {
             if let Some(state) = tasks.get_mut(gid) {
                 state.status.status = DownloadStatus::Removed;
+                // Cancel the CancellationToken to interrupt any running
+                // DownloadCommand. `man.remove_group` above already set the
+                // RequestGroup status to `Removed` (the primary signal the
+                // download loop polls), but cancelling the token keeps this
+                // handler consistent with `handle_force_pause` /
+                // `handle_force_shutdown`.
+                if let Some(cancel_token) = &state.cancel_token {
+                    cancel_token.cancel();
+                }
             }
         }
         let removed_count = gids.len();

@@ -452,6 +452,7 @@ impl RequestGroup {
         *status = DownloadStatus::Complete;
         *end_time = Some(std::time::Instant::now());
         *completed_length = self.total_length;
+        self.completed_length_atomic.store(self.total_length, Ordering::Relaxed);
 
         info!("Completing download task #{}", self.gid.value());
         Ok(())
@@ -470,6 +471,25 @@ impl RequestGroup {
 
     pub async fn status(&self) -> DownloadStatus {
         self.status.read().await.clone()
+    }
+
+    /// Non-blocking check whether this group has been marked as `Removed`.
+    ///
+    /// Uses `try_read` on the inner status lock so it is safe to call from
+    /// hot download loops without risking lock contention or deadlock. When
+    /// the lock is contended the method returns `false` (treats the task as
+    /// still running); the caller will re-check on the next iteration.
+    ///
+    /// This is the primary signal used by `DownloadCommand` and the
+    /// underlying downloaders to detect that `aria2.remove` /
+    /// `aria2.forceRemove` has been invoked: `RequestGroupMan::remove_group`
+    /// sets the status to `Removed`, and the running download observes it
+    /// here and aborts promptly.
+    pub fn is_removed(&self) -> bool {
+        match self.status.try_read() {
+            Ok(guard) => matches!(*guard, DownloadStatus::Removed),
+            Err(_) => false,
+        }
     }
 
     pub fn gid(&self) -> GroupId {
@@ -1239,5 +1259,51 @@ mod tests {
                 .update_option("unknown-option", serde_json::json!(1))
                 .await
         );
+    }
+
+    /// Verify that `is_removed()` correctly reflects the group's Removed
+    /// status, and that it is non-blocking (does not deadlock when the
+    /// status lock is contended).
+    #[tokio::test]
+    async fn test_is_removed_reflects_status() {
+        let mut group = RequestGroup::new(
+            GroupId::new(1),
+            vec!["http://example.com/file".to_string()],
+            DownloadOptions::default(),
+        );
+
+        // Fresh group is in Waiting state, not Removed.
+        assert!(!group.is_removed(), "fresh group should not be removed");
+
+        // Mark as Removed (as RequestGroupMan::remove_group does).
+        group.remove().await.unwrap();
+        assert!(
+            group.is_removed(),
+            "is_removed() must return true after group.remove()"
+        );
+    }
+
+    /// `is_removed()` must be safe to call while a write lock on the status
+    /// is held elsewhere. It uses `try_read` internally, so it should return
+    /// `false` (not deadlock, not block) when the lock is contended by a writer.
+    #[tokio::test]
+    async fn test_is_removed_returns_false_when_write_locked() {
+        let mut group = RequestGroup::new(
+            GroupId::new(1),
+            vec!["http://example.com/file".to_string()],
+            DownloadOptions::default(),
+        );
+        group.remove().await.unwrap();
+
+        // Hold a write lock on the inner status to simulate contention.
+        // This blocks try_read() on the same lock.
+        let _guard = group.status.write().await;
+        // is_removed() uses try_read(), which fails when a write lock is held.
+        // It must return false (not block, not panic).
+        assert!(
+            !group.is_removed(),
+            "is_removed() should return false when the status write lock is held (try_read fails)"
+        );
+        // Lock released when _guard drops.
     }
 }

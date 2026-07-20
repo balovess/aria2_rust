@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -7,6 +9,7 @@ use reqwest;
 use tokio::sync::mpsc;
 
 use crate::constants;
+use crate::engine::command::ProgressUpdate;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
@@ -65,6 +68,22 @@ impl ConcurrentDownloader {
             group,
             mmap_threshold,
             file_allocation,
+        }
+    }
+
+    /// Non-blocking cancellation check.
+    ///
+    /// Returns `Err` when the underlying RequestGroup has been marked
+    /// `Removed` (by `aria2.remove` / `aria2.forceRemove`). Uses `try_read`
+    /// on the outer group lock so it is safe to call from the download loop;
+    /// a contended lock is treated as "not cancelled" and the caller will
+    /// re-check on the next iteration.
+    fn check_cancelled(&self) -> Result<()> {
+        match self.group.try_read() {
+            Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
+                "Download cancelled by user".into(),
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -136,14 +155,28 @@ impl ConcurrentDownloader {
         }
 
         let mut active: FuturesUnordered<SegmentFetchFuture> = FuturesUnordered::new();
-        let mut active_segs: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
-        let mut completed_bytes = if resume_state.should_resume {
+        let mut active_segs: HashMap<u32, u64> = HashMap::new();
+        let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
+        // Per-segment tracker: stores the number of bytes the listener has
+        // added to total_inflight_bytes so we can roll back on failure.
+        let mut seg_reported: HashMap<u32, Arc<AtomicU64>> = HashMap::new();
+        let initial_completed = if resume_state.should_resume {
             resume_state.start_offset
         } else {
             0
         };
+        let total_inflight_bytes = Arc::new(AtomicU64::new(initial_completed));
+        let mut completed_bytes = initial_completed;
 
         loop {
+            // Check whether the task was removed. This is the primary
+            // cancellation signal: `aria2.remove` / `aria2.forceRemove` sets
+            // the RequestGroup status to `Removed`, which `is_removed()`
+            // observes without blocking. We check at the top of the loop so a
+            // cancellation is detected before spawning new segment fetches and
+            // before awaiting the next segment completion.
+            self.check_cancelled()?;
+
             while active.len() < max_conn {
                 match manager.next_pending_segment_for_mirror(0) {
                     Some((seg_idx, offset, length)) => {
@@ -152,10 +185,67 @@ impl ConcurrentDownloader {
                         let ch = cookie_hdr.clone();
                         let headers = self.headers.clone();
                         active_segs.insert(seg_idx, offset);
+
+                        // Create per-segment progress channel for real-time updates
+                        let (seg_progress_tx, mut seg_progress_rx) =
+                            mpsc::unbounded_channel::<ProgressUpdate>();
+                        let group_for_progress = Arc::clone(&self.group);
+                        let total_inflight = Arc::clone(&total_inflight_bytes);
+                        let seg_offset = offset;
+                        let seg_reported_arc = Arc::new(AtomicU64::new(0));
+
+                        let seg_reported_clone = Arc::clone(&seg_reported_arc);
+                        let speed_interval = std::time::Duration::from_millis(
+                            constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
+                        );
+                        let ph = tokio::spawn(async move {
+                            let mut last_reported = 0u64;
+                            let mut speed_sample_start = std::time::Instant::now();
+                            let mut speed_sample_bytes = 0u64;
+                            while let Some(update) = seg_progress_rx.recv().await {
+                                // Compute delta for this segment
+                                let downloaded =
+                                    update.completed_bytes.saturating_sub(seg_offset);
+                                let delta = downloaded.saturating_sub(last_reported);
+                                if delta > 0 {
+                                    last_reported = downloaded;
+                                    seg_reported_clone.store(last_reported, Ordering::Relaxed);
+                                    let total =
+                                        total_inflight.fetch_add(delta, Ordering::Relaxed)
+                                            + delta;
+                                    let g = group_for_progress.read().await;
+                                    g.set_completed_length(total);
+
+                                    // Update download speed at regular intervals
+                                    speed_sample_bytes += delta;
+                                    let elapsed = speed_sample_start.elapsed();
+                                    if elapsed >= speed_interval && elapsed.as_secs_f64() > 0.0 {
+                                        let speed = (speed_sample_bytes as f64
+                                            / elapsed.as_secs_f64())
+                                            as u64;
+                                        g.set_download_speed_cached(speed);
+                                        speed_sample_start = std::time::Instant::now();
+                                        speed_sample_bytes = 0;
+                                    }
+                                }
+                            }
+                        });
+                        progress_handles.insert(seg_idx, ph);
+                        seg_reported.insert(seg_idx, seg_reported_arc);
+
                         let fut = Box::pin(async move {
                             let result = dl
-                                .download_range(&url, offset, length, ch.as_deref(), &headers, None)
+                                .download_range(
+                                    &url,
+                                    offset,
+                                    length,
+                                    ch.as_deref(),
+                                    &headers,
+                                    Some(&seg_progress_tx),
+                                )
                                 .await;
+                            // Drop sender to signal progress listener to stop
+                            drop(seg_progress_tx);
                             (seg_idx, result)
                         });
                         active.push(fut);
@@ -163,7 +253,7 @@ impl ConcurrentDownloader {
                             seg_idx = seg_idx,
                             offset = offset,
                             length = length,
-                            "Spawned segment fetch"
+                            "Spawned segment fetch with progress channel"
                         );
                     }
                     None => break,
@@ -189,7 +279,14 @@ impl ConcurrentDownloader {
             }
 
             if let Some((seg_idx, result)) = active.next().await {
-                let offset = active_segs.remove(&seg_idx).unwrap_or(0);
+                let _offset = active_segs.remove(&seg_idx).unwrap_or(0);
+
+                // Await the per-segment progress listener so all in-flight
+                // updates have been flushed before we reconcile the total.
+                if let Some(ph) = progress_handles.remove(&seg_idx) {
+                    let _ = ph.await;
+                }
+
                 match result {
                     Ok(data) => {
                         let data_len = data.len();
@@ -197,7 +294,7 @@ impl ConcurrentDownloader {
                             lim.acquire_download(data_len as u64).await;
                         }
                         let data_for_manager = data.clone();
-                        writer.write_bytes_at(offset, data).await.map_err(|e| {
+                        writer.write_bytes_at(_offset, data).await.map_err(|e| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                                 "Write failed: {}",
                                 e
@@ -205,10 +302,25 @@ impl ConcurrentDownloader {
                         })?;
                         manager.complete_segment(seg_idx, data_for_manager);
                         completed_bytes += data_len as u64;
+                        // The listener's progress is now committed; remove the
+                        // per-segment tracker so it does not accumulate stale
+                        // entries if the same seg_idx is reused on retry.
+                        seg_reported.remove(&seg_idx);
+
+                        // Note: we do NOT reset total_inflight_bytes here
+                        // because other segments may have in-flight progress
+                        // already accumulated via their listeners.  The atomic
+                        // tracks "bytes received" (for real-time display) while
+                        // completed_bytes tracks "bytes committed to disk".
+
+                        // Use the atomic total for progress updates so that
+                        // in-flight progress from concurrent segments is not
+                        // overwritten by the committed-only value.
+                        let display_total = total_inflight_bytes.load(Ordering::Relaxed);
 
                         self.progress_updater
                             .update_progress(
-                                completed_bytes,
+                                display_total,
                                 constants::PROGRESS_UPDATE_BYTES as u64,
                                 constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
                             )
@@ -245,6 +357,14 @@ impl ConcurrentDownloader {
                             }
                         } else {
                             consecutive_416_count = 0;
+                        }
+                        // Roll back in-flight progress reported by this
+                        // segment's listener so the atomic does not overcount.
+                        if let Some(reported) = seg_reported.remove(&seg_idx) {
+                            let rollback = reported.load(Ordering::Relaxed);
+                            if rollback > 0 {
+                                total_inflight_bytes.fetch_sub(rollback, Ordering::Relaxed);
+                            }
                         }
                         manager.fail_segment(seg_idx);
                     }
@@ -402,6 +522,13 @@ impl ConcurrentDownloader {
         let mut should_fallback = false;
 
         while coordinator.has_pending_segments() || !coordinator.is_complete() {
+            // Check whether the task was removed before spawning the next
+            // segment download. This is the primary cancellation signal:
+            // `aria2.remove` / `aria2.forceRemove` sets the RequestGroup
+            // status to `Removed`, which `is_removed()` observes without
+            // blocking.
+            self.check_cancelled()?;
+
             while let Some((mirror_idx, mirror_url, (seg_idx, offset, length))) =
                 coordinator.select_mirror_for_segment()
             {
