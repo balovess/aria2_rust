@@ -13,7 +13,7 @@ async fn test_list_methods_returns_all_methods() {
     assert!(resp.is_success());
 
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(methods.len(), 36);
+    assert_eq!(methods.len(), 37);
 }
 
 #[tokio::test]

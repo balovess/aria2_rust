@@ -49,6 +49,7 @@ impl std::fmt::Display for TaskStatus {
 /// Progress data for a single download task.
 ///
 /// Contains all fields needed to render the task's progress bar line(s).
+#[derive(Clone)]
 pub struct TaskProgress {
     /// Global identifier for this task
     pub gid: String,

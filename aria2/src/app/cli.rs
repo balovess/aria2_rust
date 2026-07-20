@@ -155,6 +155,126 @@ pub struct GeneralArgs {
     /// Path to PID file for daemon process management
     #[arg(long = "pid-file")]
     pub pid_file: Option<PathBuf>,
+
+    /// Allow piece length change during download
+    #[arg(long = "allow-piece-length-change")]
+    pub allow_piece_length_change: bool,
+
+    /// Always resume download from available session data
+    #[arg(long = "always-resume")]
+    pub always_resume: bool,
+
+    /// Check file integrity by validating hash
+    #[arg(long = "check-integrity")]
+    pub check_integrity: bool,
+
+    /// Only download if newer than local file (HTTP conditional GET)
+    #[arg(long = "conditional-get")]
+    pub conditional_get: bool,
+
+    /// Read URIs from input file on-demand rather than at startup
+    #[arg(long = "deferred-input")]
+    pub deferred_input: bool,
+
+    /// Disable IPv6 support entirely
+    #[arg(long = "disable-ipv6")]
+    pub disable_ipv6: bool,
+
+    /// Only check hash integrity, do not download
+    #[arg(long = "hash-check-only")]
+    pub hash_check_only: bool,
+
+    /// Enable parameterized URI support (e.g. {a,b})
+    #[arg(long = "parameterized-uri")]
+    pub parameterized_uri: bool,
+
+    /// Start downloads in paused state
+    #[arg(long = "pause")]
+    pub pause: bool,
+
+    /// Remove control file before download
+    #[arg(long = "remove-control-file")]
+    pub remove_control_file: bool,
+
+    /// Reuse previously used URIs if connection fails
+    #[arg(long = "reuse-uri")]
+    pub reuse_uri: bool,
+
+    /// Save URIs that returned 404 as not found
+    #[arg(long = "save-not-found")]
+    pub save_not_found: bool,
+
+    /// Force sequential download of files
+    #[arg(long = "force-sequential")]
+    pub force_sequential: bool,
+
+    /// Disable netrc file parsing for authentication
+    #[arg(long = "no-netrc")]
+    pub no_netrc: bool,
+
+    /// Verify checksum for each chunk in real-time
+    #[arg(long = "realtime-chunk-checksum")]
+    pub realtime_chunk_checksum: bool,
+
+    /// Download result output format (default/full/hide)
+    #[arg(long = "download-result")]
+    pub download_result: Option<String>,
+
+    /// Display file sizes in human-readable format
+    #[arg(long = "human-readable")]
+    pub human_readable: bool,
+
+    /// Keep result of unfinished downloads in results list
+    #[arg(long = "keep-unfinished-download-result")]
+    pub keep_unfinished_download_result: bool,
+
+    /// Truncate console readout to fit terminal width
+    #[arg(long = "truncate-console-readout")]
+    pub truncate_console_readout: bool,
+
+    /// Output all console messages to stderr instead of stdout
+    #[arg(long = "stderr")]
+    pub stderr: bool,
+
+    /// Max number of download results to remember
+    #[arg(long = "max-download-result")]
+    pub max_download_result: Option<u64>,
+
+    /// Lowest download speed limit (if below, aborts)
+    #[arg(long = "lowest-speed-limit")]
+    pub lowest_speed_limit: Option<String>,
+
+    /// Max number of 404 not-found attempts (0=unlimited)
+    #[arg(long = "max-file-not-found")]
+    pub max_file_not_found: Option<u64>,
+
+    /// File size limit below which no file allocation occurs
+    #[arg(long = "no-file-allocation-limit")]
+    pub no_file_allocation_limit: Option<String>,
+
+    /// Stop aria2 when process with given PID exits (0=disabled)
+    #[arg(long = "stop-with-process")]
+    pub stop_with_process: Option<u64>,
+
+    /// URI selection algorithm (feedback/inorder/adaptive)
+    #[arg(long = "uri-selector")]
+    pub uri_selector: Option<String>,
+
+    /// Piece selection algorithm (default/inorder/geom/random)
+    #[arg(long = "stream-piece-selector")]
+    pub stream_piece_selector: Option<String>,
+
+    /// Network interface to bind to
+    #[arg(long = "interface")]
+    pub interface: Option<String>,
+
+    /// Comma-separated list of interfaces for multi-homed setups
+    #[arg(long = "multiple-interface")]
+    pub multiple_interface: Option<String>,
+
+    /// Set GID for the first download
+    #[arg(long = "gid")]
+    pub gid: Option<String>,
 }
 
 // =========================================================================
@@ -179,6 +299,42 @@ pub struct HttpFtpArgs {
     /// FTP proxy URL
     #[arg(short = 'F', long = "ftp-proxy")]
     pub ftp_proxy: Option<String>,
+
+    /// All proxy username
+    #[arg(long = "all-proxy-user")]
+    pub all_proxy_user: Option<String>,
+
+    /// All proxy password
+    #[arg(long = "all-proxy-passwd")]
+    pub all_proxy_passwd: Option<String>,
+
+    /// HTTP proxy username
+    #[arg(long = "http-proxy-user")]
+    pub http_proxy_user: Option<String>,
+
+    /// HTTP proxy password
+    #[arg(long = "http-proxy-passwd")]
+    pub http_proxy_passwd: Option<String>,
+
+    /// HTTPS proxy username
+    #[arg(long = "https-proxy-user")]
+    pub https_proxy_user: Option<String>,
+
+    /// HTTPS proxy password
+    #[arg(long = "https-proxy-passwd")]
+    pub https_proxy_passwd: Option<String>,
+
+    /// FTP proxy username
+    #[arg(long = "ftp-proxy-user")]
+    pub ftp_proxy_user: Option<String>,
+
+    /// FTP proxy password
+    #[arg(long = "ftp-proxy-passwd")]
+    pub ftp_proxy_passwd: Option<String>,
+
+    /// Proxy method (get/tunnel)
+    #[arg(long = "proxy-method")]
+    pub proxy_method: Option<String>,
 
     /// Proxy exclusion list (comma-separated domains)
     #[arg(short = 'N', long = "no-proxy")]
@@ -263,6 +419,66 @@ pub struct HttpFtpArgs {
     /// Use remote file timestamp
     #[arg(long = "remote-time")]
     pub remote_time: bool,
+
+    /// Enable HTTP persistent connection (keep-alive)
+    #[arg(long = "enable-http-keep-alive")]
+    pub enable_http_keep_alive: bool,
+
+    /// Enable HTTP/1.1 pipelining
+    #[arg(long = "enable-http-pipelining")]
+    pub enable_http_pipelining: bool,
+
+    /// Accept gzip-encoded HTTP responses
+    #[arg(long = "http-accept-gzip")]
+    pub http_accept_gzip: bool,
+
+    /// Send HTTP authentication header only after challenge
+    #[arg(long = "http-auth-challenge")]
+    pub http_auth_challenge: bool,
+
+    /// Send Cache-Control: no-cache with requests
+    #[arg(long = "http-no-cache")]
+    pub http_no_cache: bool,
+
+    /// Treat Content-Disposition filename as UTF-8
+    #[arg(long = "content-disposition-default-utf8")]
+    pub content_disposition_default_utf8: bool,
+
+    /// Use HEAD method for file existence checks
+    #[arg(long = "use-head")]
+    pub use_head: bool,
+
+    /// Omit Want-Digest header from HTTP requests
+    #[arg(long = "no-want-digest-header")]
+    pub no_want_digest_header: bool,
+
+    /// HTTP authentication username
+    #[arg(long = "http-user")]
+    pub http_user: Option<String>,
+
+    /// HTTP authentication password
+    #[arg(long = "http-passwd")]
+    pub http_passwd: Option<String>,
+
+    /// FTP authentication username
+    #[arg(long = "ftp-user")]
+    pub ftp_user: Option<String>,
+
+    /// FTP authentication password
+    #[arg(long = "ftp-passwd")]
+    pub ftp_passwd: Option<String>,
+
+    /// Use FTP passive mode
+    #[arg(long = "ftp-pasv")]
+    pub ftp_pasv: bool,
+
+    /// Reuse FTP data connection across downloads
+    #[arg(long = "ftp-reuse-connection")]
+    pub ftp_reuse_connection: bool,
+
+    /// FTP transfer type (binary/ascii)
+    #[arg(long = "ftp-type")]
+    pub ftp_type: Option<String>,
 }
 
 // =========================================================================
@@ -379,6 +595,90 @@ pub struct BitTorrentArgs {
     /// UDP port for uTP connections. 0 = auto-assign
     #[arg(long = "utp-listen-port")]
     pub utp_listen_port: Option<u64>,
+
+    /// Detach seed-only downloads from main session
+    #[arg(long = "bt-detach-seed-only")]
+    pub bt_detach_seed_only: bool,
+
+    /// Run hook after hash check
+    #[arg(long = "bt-enable-hook-after-hash-check")]
+    pub bt_enable_hook_after_hash_check: bool,
+
+    /// Comma-separated list of tracker announce URIs to exclude
+    #[arg(long = "bt-exclude-tracker")]
+    pub bt_exclude_tracker: Option<String>,
+
+    /// External IP address for BitTorrent
+    #[arg(long = "bt-external-ip")]
+    pub bt_external_ip: Option<String>,
+
+    /// Seed after hash check
+    #[arg(long = "bt-hash-check-seed")]
+    pub bt_hash_check_seed: bool,
+
+    /// Load saved metadata from previous session
+    #[arg(long = "bt-load-saved-metadata")]
+    pub bt_load_saved_metadata: bool,
+
+    /// Network interface for Local Peer Discovery
+    #[arg(long = "bt-lpd-interface")]
+    pub bt_lpd_interface: Option<String>,
+
+    /// Download only torrent metadata
+    #[arg(long = "bt-metadata-only")]
+    pub bt_metadata_only: bool,
+
+    /// Remove unselected files when --select-file is used
+    #[arg(long = "bt-remove-unselected-file")]
+    pub bt_remove_unselected_file: bool,
+
+    /// Require BitTorrent message encryption
+    #[arg(long = "bt-require-crypto")]
+    pub bt_require_crypto: bool,
+
+    /// Stop BT download after N seconds without progress
+    #[arg(long = "bt-stop-timeout")]
+    pub bt_stop_timeout: Option<u64>,
+
+    /// Comma-separated list of tracker announce URIs
+    #[arg(long = "bt-tracker")]
+    pub bt_tracker: Option<String>,
+
+    /// Connect timeout for tracker in seconds
+    #[arg(long = "bt-tracker-connect-timeout")]
+    pub bt_tracker_connect_timeout: Option<u64>,
+
+    /// Tracker announce interval in seconds
+    #[arg(long = "bt-tracker-interval")]
+    pub bt_tracker_interval: Option<u64>,
+
+    /// Timeout for tracker in seconds
+    #[arg(long = "bt-tracker-timeout")]
+    pub bt_tracker_timeout: Option<u64>,
+
+    /// DHT message timeout in seconds
+    #[arg(long = "dht-message-timeout")]
+    pub dht_message_timeout: Option<u64>,
+
+    /// Enable IPv6 DHT
+    #[arg(long = "enable-dht6")]
+    pub enable_dht6: bool,
+
+    /// IPv6 address for DHT to listen on
+    #[arg(long = "dht-listen-addr6")]
+    pub dht_listen_addr6: Option<String>,
+
+    /// Peer ID prefix for BitTorrent
+    #[arg(long = "peer-id-prefix")]
+    pub peer_id_prefix: Option<String>,
+
+    /// Peer agent string for BitTorrent
+    #[arg(long = "peer-agent")]
+    pub peer_agent: Option<String>,
+
+    /// Comma-separated list of file indices to download (BT/Metalink, 1-indexed)
+    #[arg(long = "select-file")]
+    pub select_file: Option<String>,
 }
 
 // =========================================================================
@@ -435,6 +735,18 @@ pub struct RpcArgs {
     /// Path to TLS private key file (PEM format)
     #[arg(long = "rpc-private-key")]
     pub rpc_private_key: Option<PathBuf>,
+
+    /// Allow all origins for RPC CORS (Access-Control-Allow-Origin: *)
+    #[arg(long = "rpc-allow-origin-all")]
+    pub rpc_allow_origin_all: bool,
+
+    /// Max RPC request body size
+    #[arg(long = "rpc-max-request-size")]
+    pub rpc_max_request_size: Option<String>,
+
+    /// Save uploaded torrent/metadata files to a directory
+    #[arg(long = "rpc-save-upload-metadata")]
+    pub rpc_save_upload_metadata: bool,
 }
 
 // =========================================================================

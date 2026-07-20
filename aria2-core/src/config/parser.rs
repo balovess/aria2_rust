@@ -79,19 +79,48 @@ impl ConfigParser {
 
     pub fn set_raw(&mut self, name: impl Into<String>, value: impl Into<String>) {
         let key = name.into();
+        let val_str = value.into();
         if let Some(def) = self.registry.get(key.as_str()) {
-            match def.parse_value(&value.into()) {
-                Ok(v) => {
-                    self.options.insert(key, v);
+            // Check if this option supports cumulative (appending) values
+            if def.cumulative_delimiter.is_some() && self.options.contains_key(&key) {
+                match def.parse_value(&val_str) {
+                    Ok(new_parsed) => {
+                        let existing = self.options.get(&key).cloned().unwrap_or(new_parsed.clone());
+                        match (existing, new_parsed) {
+                            (OptionValue::List(mut existing_list), OptionValue::List(new_items)) => {
+                                existing_list.extend(new_items);
+                                self.options.insert(key, OptionValue::List(existing_list));
+                            }
+                            (OptionValue::Str(existing_str), OptionValue::Str(new_str)) => {
+                                let delim = def.cumulative_delimiter.unwrap_or("");
+                                let combined = existing_str + delim + &new_str;
+                                self.options.insert(key, OptionValue::Str(combined));
+                            }
+                            (_, new) => {
+                                self.options.insert(key, new);
+                            }
+                        }
+                    }
+                    Err(e) => self.errors.push(ConfigError {
+                        source: ConfigSource::CommandLine,
+                        option: key.clone(),
+                        message: e,
+                    }),
                 }
-                Err(e) => self.errors.push(ConfigError {
-                    source: ConfigSource::CommandLine,
-                    option: key.clone(),
-                    message: e,
-                }),
+            } else {
+                match def.parse_value(&val_str) {
+                    Ok(v) => {
+                        self.options.insert(key, v);
+                    }
+                    Err(e) => self.errors.push(ConfigError {
+                        source: ConfigSource::CommandLine,
+                        option: key.clone(),
+                        message: e,
+                    }),
+                }
             }
         } else {
-            self.options.insert(key, OptionValue::Str(value.into()));
+            self.options.insert(key, OptionValue::Str(val_str));
         }
     }
 
@@ -118,8 +147,14 @@ impl ConfigParser {
             let arg = &args[i];
             if let Some(opt_name) = arg.strip_prefix("--") {
                 if opt_name.starts_with("no-") && opt_name.len() > 3 {
-                    let real_name = &opt_name[3..];
-                    self.set(real_name, OptionValue::Bool(false));
+                    // Check if `no-<name>` exists as a full option name first (e.g., "no-conf")
+                    if self.registry.contains(opt_name) {
+                        self.set(opt_name, OptionValue::Bool(true));
+                    } else {
+                        // `no-X` means set option X to false (e.g., "no-check-certificate")
+                        let real_name = &opt_name[3..];
+                        self.set(real_name, OptionValue::Bool(false));
+                    }
                 } else if opt_name.contains('=') {
                     let parts: Vec<&str> = opt_name.splitn(2, '=').collect();
                     if parts.len() == 2 {
@@ -180,6 +215,9 @@ impl ConfigParser {
                     let name = line[..eq_pos].trim();
                     let value = line[eq_pos + 1..].trim();
                     if !name.is_empty() {
+                        if !self.registry.contains(name) {
+                            tracing::warn!("Unknown option '{}' in config file '{}'", name, path);
+                        }
                         self.set_raw(name, value);
                     }
                 }
@@ -197,6 +235,35 @@ impl ConfigParser {
         }
     }
 
+    /// Parse standard proxy environment variables and map them to aria2 options.
+    ///
+    /// Reads these env vars (lowercase and uppercase variants):
+    /// - `http_proxy` / `HTTP_PROXY`  → `http-proxy`
+    /// - `https_proxy` / `HTTPS_PROXY` → `https-proxy`
+    /// - `ftp_proxy` / `FTP_PROXY`   → `ftp-proxy`
+    /// - `all_proxy` / `ALL_PROXY`   → `all-proxy`
+    /// - `no_proxy` / `NO_PROXY`     → `no-proxy`
+    ///
+    /// This should be called AFTER config file loading and BEFORE CLI arg parsing.
+    pub fn parse_proxy_env_vars(&mut self) {
+        self.sources.push(ConfigSource::Environment);
+        let proxy_vars: &[(&str, &str)] = &[
+            ("http_proxy", "http-proxy"),
+            ("https_proxy", "https-proxy"),
+            ("ftp_proxy", "ftp-proxy"),
+            ("all_proxy", "all-proxy"),
+            ("no_proxy", "no-proxy"),
+        ];
+        for (env_name, opt_name) in proxy_vars {
+            let value = std::env::var(env_name)
+                .or_else(|_| std::env::var(&env_name.to_uppercase()))
+                .unwrap_or_default();
+            if !value.is_empty() {
+                self.set_raw(*opt_name, &value);
+            }
+        }
+    }
+
     pub fn apply_defaults(&mut self) {
         self.sources.push(ConfigSource::Defaults);
         for def in self.registry.all().values() {
@@ -210,7 +277,7 @@ impl ConfigParser {
 
     pub fn load_defaults_first(&mut self) {
         self.apply_defaults();
-        self.parse_env_vars();
+        // Config file is loaded BEFORE env vars so that env vars can override
         let conf_path = self
             .get_str("conf-path")
             .map(|s| s.to_string())
@@ -218,6 +285,10 @@ impl ConfigParser {
         if !conf_path.is_empty() && std::path::Path::new(&conf_path).exists() {
             self.parse_file(&conf_path);
         }
+        // Env vars override config file values (higher priority)
+        self.parse_env_vars();
+        // Generic proxy env vars (lowest priority env source)
+        self.parse_proxy_env_vars();
     }
 
     pub fn options(&self) -> &HashMap<String, OptionValue> {

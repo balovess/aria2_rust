@@ -93,6 +93,7 @@ tokio-test = "0.4"
 criterion.workspace = true
 base64.workspace = true
 aria2-rpc.workspace = true
+aria2-protocol.workspace = true
 # sysinfo is used by the memory-footprint regression test (Phase F6) to sample
 # the process RSS while writing a file via PositionedDiskWriter. Pinned to 0.30
 # where `Process::memory()` returns bytes (in newer versions the API was split

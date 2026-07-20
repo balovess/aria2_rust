@@ -18,6 +18,7 @@ use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::session::save_session_command::SaveSessionCommand;
+use crate::util::speed_smooth::SpeedSmoother;
 
 /// Bookkeeping the engine retains for each spawned command task so it can
 /// enforce per-command timeouts and abort stalled tasks individually.
@@ -143,19 +144,24 @@ impl DownloadEngine {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut last_bytes: u64 = 0;
+            let mut smoother = SpeedSmoother::with_default_window(); // EMA N=10
             while let Some(update) = receiver.recv().await {
                 // Skip no-op updates: identical completed_bytes means nothing changed
                 // since the last applied update (e.g. a stale in-flight send).
                 if update.completed_bytes == last_bytes {
                     continue;
                 }
+                let delta = update.completed_bytes - last_bytes;
+                smoother.record_bytes(delta);
+
                 let g = group.write().await;
                 g.update_progress(update.completed_bytes).await;
                 g.set_completed_length(update.completed_bytes);
-                if update.download_speed > 0 {
-                    g.update_speed(update.download_speed, update.upload_speed)
-                        .await;
-                    g.set_download_speed_cached(update.download_speed);
+
+                let smoothed = smoother.smoothed_speed() as u64;
+                if smoothed > 0 {
+                    g.update_speed(smoothed, update.upload_speed).await;
+                    g.set_download_speed_cached(smoothed);
                 }
                 last_bytes = update.completed_bytes;
             }
@@ -728,18 +734,21 @@ mod tests {
             4096,
             "final completed_bytes should be 4096"
         );
-        assert_eq!(
-            g.get_download_speed_cached(),
-            1234,
-            "speed from the advancing update should be cached"
+        // Speed is now EMA-smoothed by the aggregator's SpeedSmoother.
+        // We cannot predict the exact EMA value in a unit test, but it must
+        // be > 0 (a positive delta was recorded).
+        assert!(
+            g.get_download_speed_cached() > 0,
+            "smoothed speed should be > 0 after positive delta, got {}",
+            g.get_download_speed_cached()
         );
     }
 
-    /// Verify the aggregator only refreshes the speed fields when a non-zero
-    /// `download_speed` is provided (0 means "no fresh sample this tick" and
-    /// must not zero out a previously cached speed).
+    /// Verify that the aggregator applies EMA-smoothed speed whenever a
+    /// positive byte delta is recorded, regardless of the sender's raw
+    /// `download_speed` sample.
     #[tokio::test]
-    async fn test_progress_aggregator_preserves_speed_on_zero_sample() {
+    async fn test_progress_aggregator_applies_smoothed_speed_on_delta() {
         let group = make_group();
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
@@ -766,10 +775,12 @@ mod tests {
 
         let g = group.read().await;
         assert_eq!(g.get_completed_length(), 8192, "bytes should advance");
-        assert_eq!(
-            g.get_download_speed_cached(),
-            5555,
-            "cached speed must be preserved when download_speed sample is 0"
+        // The smoothed speed is always computed from the byte delta and
+        // applied to the cached speed (replacing the seeded 5555).
+        assert!(
+            g.get_download_speed_cached() > 0,
+            "smoothed speed should be applied when delta > 0, got {}",
+            g.get_download_speed_cached()
         );
     }
 
@@ -794,5 +805,67 @@ mod tests {
         result
             .expect("aggregator task should exit cleanly")
             .expect("aggregator task should not panic");
+    }
+
+    /// Verify that EMA smoothing produces a stable, finite, positive speed
+    /// value after a sequence of positive byte deltas.
+    ///
+    /// This test avoids asserting exact speed bounds because the EMA's
+    /// instantaneous speed depends on real elapsed time (`delta / duration`),
+    /// which varies with scheduler timing. The detailed EMA convergence and
+    /// reaction behavior is covered by `speed_smooth::tests`.
+    #[tokio::test]
+    async fn test_progress_aggregator_smooths_speed() {
+        let group = make_group();
+        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+
+        let group_clone = Arc::clone(&group);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+
+        // Send a sequence of strictly increasing byte deltas, waiting long
+        // enough between sends to cross the smoother's SAMPLE_INTERVAL_MS
+        // (500ms) boundary so each delta triggers an EMA update.
+        let deltas: [u64; 3] = [10000, 5000, 20000];
+        for delta in &deltas {
+            let current = {
+                let g = group.read().await;
+                g.get_completed_length()
+            };
+            tx.send(ProgressUpdate {
+                completed_bytes: current + delta,
+                download_speed: 0, // Ignored — smoother computes from delta
+                upload_speed: 0,
+            })
+            .unwrap();
+
+            // Wait long enough for the smoother's SAMPLE_INTERVAL_MS to elapse
+            // so the next record_bytes triggers an EMA update.
+            tokio::time::sleep(Duration::from_millis(
+                crate::constants::HTTP_SPEED_UPDATE_INTERVAL_MS + 100,
+            ))
+            .await;
+        }
+
+        // Drain the channel.
+        drop(tx);
+        handle.await.expect("aggregator task should exit cleanly");
+
+        let g = group.read().await;
+        let final_speed = g.get_download_speed_cached();
+
+        // The EMA-smoothed speed must be positive and finite after recording
+        // positive deltas. We do not assert upper/lower bounds against the
+        // raw delta values because the smoother divides by real elapsed time
+        // (varies with scheduler jitter), not a fixed 1s window.
+        assert!(
+            final_speed > 0,
+            "EMA-smoothed speed should be > 0 after positive deltas, got {}",
+            final_speed
+        );
+        assert!(
+            final_speed < u64::MAX / 2,
+            "EMA-smoothed speed should be finite, got {}",
+            final_speed
+        );
     }
 }

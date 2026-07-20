@@ -576,7 +576,7 @@ async fn regression_get_servers_format() {
 // Bulk Operations Methods (3 methods)
 // =========================================================================
 
-/// Test: aria2.pauseAll returns "OK" with count.
+/// Test: aria2.pauseAll returns "OK".
 #[tokio::test]
 async fn regression_pause_all_format() {
     let engine = RpcEngine::new();
@@ -595,8 +595,14 @@ async fn regression_pause_all_format() {
 
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(result.contains("OK"));
-    assert!(result.contains("3"), "Should report 3 tasks paused");
+    assert_eq!(result, "OK");
+
+    // Verify all tasks are paused
+    let tell_req = make_request("aria2.tellActive", serde_json::json!([]));
+    let tell_resp = engine.handle_request(&tell_req).await;
+    let active: Vec<serde_json::Value> =
+        serde_json::from_value(tell_resp.result.unwrap()).unwrap();
+    assert_eq!(active.len(), 0, "No tasks should be active after pauseAll");
 }
 
 /// Test: aria2.forcePauseAll returns "OK".
@@ -864,15 +870,25 @@ async fn regression_purge_download_result_returns_ok() {
     assert_eq!(result, "OK");
 }
 
-/// Test: aria2.removeDownloadResult returns "OK".
+/// Test: aria2.removeDownloadResult returns "OK" for a valid stopped task.
 #[tokio::test]
 async fn regression_remove_download_result_returns_ok() {
     let engine = RpcEngine::new();
 
-    let req = make_request(
-        "aria2.removeDownloadResult",
-        serde_json::json!(["some-gid"]),
+    // First add a task, then force-remove it to populate stopped_tasks
+    let add_req = make_request(
+        "aria2.addUri",
+        serde_json::json!(["http://example.com/file"]),
     );
+    let add_resp = engine.handle_request(&add_req).await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    // Remove the task so it goes into download results
+    let remove_req = make_request("aria2.remove", serde_json::json!([gid]));
+    engine.handle_request(&remove_req).await;
+
+    // Now remove the download result
+    let req = make_request("aria2.removeDownloadResult", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);

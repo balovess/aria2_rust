@@ -23,6 +23,10 @@ path = "tests/regression/test_cli_options.rs"
 name = "test_config_file"
 path = "tests/regression/test_config_file.rs"
 
+[[test]]
+name = "test_rpc_notifications"
+path = "tests/regression/test_rpc_notifications.rs"
+
 [dependencies]
 aria2-core.workspace = true
 aria2-protocol.workspace = true

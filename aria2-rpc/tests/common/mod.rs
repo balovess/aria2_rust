@@ -21,12 +21,14 @@ use aria2_rpc::server::{RpcAuthMiddleware, RpcServer, ServerConfig};
 ///
 /// Must be called before any `reqwest::Client` is constructed when reqwest
 /// is built with `rustls-no-provider`.
+///
+/// Note: `install_default()` returns Err if a provider is already installed
+/// (e.g., by another module's initializer). That is fine — we only need to
+/// ensure a provider is present, not that we installed it.
 fn ensure_crypto_provider() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("Failed to install ring crypto provider for rustls");
+        let _ = rustls::crypto::ring::default_provider().install_default();
     });
 }
 

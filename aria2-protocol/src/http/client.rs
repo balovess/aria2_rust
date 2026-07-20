@@ -1,3 +1,4 @@
+use std::sync::Once;
 use std::time::Duration;
 
 use reqwest::{Certificate, Client, ClientBuilder, redirect};
@@ -36,8 +37,26 @@ pub struct HttpClient {
     options: HttpClientOptions,
 }
 
+/// Lazily install the `ring` crypto provider for rustls on first call.
+///
+/// Required when reqwest is built with the `rustls-no-provider` feature;
+/// without a provider, `ClientBuilder::build()` will panic.
+///
+/// Note: `install_default()` returns Err if a provider is already installed
+/// (e.g., by test helpers' `ensure_crypto_provider()`). That is fine — we
+/// only need to ensure a provider is present, not that we installed it.
+fn ensure_ring_provider() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 impl HttpClient {
     pub fn new(options: HttpClientOptions) -> Result<Self, String> {
+        // Ensure the TLS crypto provider is installed before constructing
+        // the reqwest Client (required for rustls-no-provider builds).
+        ensure_ring_provider();
         let mut builder = ClientBuilder::new()
             .connect_timeout(options.connect_timeout)
             .timeout(options.timeout)

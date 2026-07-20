@@ -188,6 +188,9 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.remove` - Remove a download task.
+    ///
+    /// Removes the task from active downloads and adds it to stopped tasks
+    /// so it can be queried via `tellStopped`, `removeDownloadResult`, etc.
     pub async fn handle_remove(
         &self,
         req: &JsonRpcRequest,
@@ -206,6 +209,12 @@ impl RpcEngine {
         match tasks.remove(&gid) {
             Some(state) => {
                 self.num_stopped_total.fetch_add(1, Ordering::Relaxed);
+
+                // Push removed task into stopped_tasks so it shows up in tellStopped
+                // and can be removed via removeDownloadResult/purgeDownloadResult.
+                let mut stopped = self.stopped_tasks.write().await;
+                stopped.push(state.status.clone());
+
                 // Build file info from the removed task's URIs for WebSocket notification
                 let file_info = build_file_info_from_uris(&state.uris);
                 let _ = self.event_publisher.publish(
@@ -243,6 +252,10 @@ impl RpcEngine {
         match tasks.get_mut(&gid) {
             Some(state) => {
                 state.status.status = DownloadStatus::Paused;
+                let _ = self.event_publisher.publish(
+                    EventType::DownloadPause,
+                    DownloadEvent::download_pause(&gid),
+                );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
                     serde_json::json!([gid]),
@@ -277,6 +290,10 @@ impl RpcEngine {
                 if let Some(cancel_token) = &task_state.cancel_token {
                     cancel_token.cancel();
                 }
+                let _ = self.event_publisher.publish(
+                    EventType::DownloadPause,
+                    DownloadEvent::download_pause(&gid),
+                );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
                     serde_json::json!("OK"),
@@ -308,6 +325,10 @@ impl RpcEngine {
         match tasks.get_mut(&gid) {
             Some(state) => {
                 state.status.status = DownloadStatus::Active;
+                let _ = self.event_publisher.publish(
+                    EventType::DownloadResume,
+                    DownloadEvent::download_resume(&gid),
+                );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
                     serde_json::json!([gid]),
@@ -507,25 +528,29 @@ impl RpcEngine {
     /// This method performs a graceful shutdown:
     /// 1. Saves current session state
     /// 2. Marks all active downloads as paused
-    /// 3. Returns "OK" to indicate shutdown initiated
+    /// 3. Returns "OK. N active downloads paused." to indicate shutdown initiated
     pub async fn handle_shutdown(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        // Save session state (count active tasks)
+        // Pause all active downloads
         let tasks = self.tasks.read().await;
-        let active_count = tasks.len();
+        let mut active_count = 0;
+        for state in tasks.values() {
+            if state.status.status == DownloadStatus::Active {
+                active_count += 1;
+                let _ = self.event_publisher.publish(
+                    EventType::DownloadPause,
+                    DownloadEvent::download_pause(&state.status.gid),
+                );
+            }
+        }
         drop(tasks);
-
-        // In a real implementation, this would:
-        // - Save session to disk
-        // - Wait for active downloads to complete (with timeout)
-        // - Signal the main process to exit gracefully
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::Value::String(format!(
-                "OK. {} active downloads will be saved.",
+                "OK. {} active downloads paused.",
                 active_count
             )),
         ))

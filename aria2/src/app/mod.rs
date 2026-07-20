@@ -275,8 +275,9 @@ impl App {
             None
         };
 
-        // Step 7: Run engine
-        let run_result = self.run_engine(rpc_enabled).await;
+        // Step 7: Run engine (always show console progress when stdout is interactive)
+        let show_progress = std::io::stdout().is_terminal();
+        let run_result = self.run_engine(rpc_enabled, show_progress).await;
 
         // Step 8: Shutdown RPC server
         if let Some(handle) = rpc_handle {

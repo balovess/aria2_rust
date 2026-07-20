@@ -29,6 +29,10 @@ async-trait.workspace = true
 # (rustls and rustls-pemfile removed: not used directly in protocol source code.
 #  The reqwest rustls-no-provider feature uses ring from aria2-core's crypto setup.)
 reqwest = { workspace = true, default-features = false, features = ["rustls-no-provider", "gzip", "brotli", "socks", "http2"] }
+# rustls with ring — used to self-install the crypto provider so that
+# reqwest (built with rustls-no-provider) can build clients independently
+# of aria2-core.
+rustls = { workspace = true, features = ["ring"] }
 quick-xml = "0.31"
 
 flate2 = "1.0"
@@ -63,11 +67,14 @@ criterion.workspace = true
 [[bench]]
 name = "protocol_bench"
 harness = false
+required-features = ["bittorrent"]
 
 [[bench]]
 name = "bitfield_bench"
 harness = false
+required-features = ["bittorrent"]
 
 [[bench]]
 name = "sequential_picker_bench"
 harness = false
+required-features = ["bittorrent"]

@@ -285,7 +285,18 @@ impl App {
     }
 
     /// Run the download engine event loop.
-    pub async fn run_engine(&self, keep_alive: bool) -> std::result::Result<(), String> {
+    ///
+    /// # Arguments
+    ///
+    /// * `keep_alive` - If true, the engine stays alive with no pending commands
+    ///   (used for RPC listen mode).
+    /// * `show_progress` - If true, periodically poll and render download
+    ///   progress to stdout via the [`ConsoleProgressReporter`].
+    pub async fn run_engine(
+        &self,
+        keep_alive: bool,
+        show_progress: bool,
+    ) -> std::result::Result<(), String> {
         let mut engine_lock: tokio::sync::MutexGuard<'_, Option<DownloadEngine>> =
             self.engine.lock().await;
         if let Some(mut engine) = engine_lock.take() {
@@ -304,8 +315,38 @@ impl App {
                 "Starting download engine, {} tasks total",
                 self.detected_inputs.len()
             );
-            let result: Result<(), _> = engine.run().await;
-            result.map_err(|e| format!("Engine runtime error: {}", e))
+
+            // Spawn the engine in a background task so we can run the progress
+            // reporter concurrently.
+            let engine_handle = tokio::spawn(async move { engine.run().await });
+
+            // Spawn the progress reporter if requested.
+            let (_reporter_stop_tx, reporter_handle) = if show_progress {
+                let group_man = self.request_man.clone();
+                let (mut reporter, stop_tx) =
+                    crate::ui::console_progress::ConsoleProgressReporter::new(group_man);
+                let handle = tokio::spawn(async move {
+                    reporter.run().await;
+                });
+                (Some(stop_tx), Some(handle))
+            } else {
+                (None, None)
+            };
+
+            // Wait for the engine to complete.
+            let result = engine_handle
+                .await
+                .map_err(|e| format!("Engine task panicked: {}", e))?
+                .map_err(|e| format!("Engine runtime error: {}", e));
+
+            // Signal the progress reporter to stop (dropping the sender is
+            // sufficient to close the oneshot channel).
+            drop(_reporter_stop_tx);
+            if let Some(handle) = reporter_handle {
+                let _ = handle.await;
+            }
+
+            result
         } else {
             Err("Engine not initialized".to_string())
         }

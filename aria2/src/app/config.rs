@@ -113,12 +113,51 @@ impl App {
         set_bool_true!("dry-run", g.dry_run);
         set_bool_true!("daemon", g.daemon);
         set_path!("pid-file", g.pid_file);
+        set_bool_true!("allow-piece-length-change", g.allow_piece_length_change);
+        set_bool_true!("always-resume", g.always_resume);
+        set_bool_true!("check-integrity", g.check_integrity);
+        set_bool_true!("conditional-get", g.conditional_get);
+        set_bool_true!("deferred-input", g.deferred_input);
+        set_bool_true!("disable-ipv6", g.disable_ipv6);
+        set_bool_true!("hash-check-only", g.hash_check_only);
+        set_bool_true!("parameterized-uri", g.parameterized_uri);
+        set_bool_true!("pause", g.pause);
+        set_bool_true!("remove-control-file", g.remove_control_file);
+        set_bool_true!("reuse-uri", g.reuse_uri);
+        set_bool_true!("save-not-found", g.save_not_found);
+        set_bool_true!("force-sequential", g.force_sequential);
+        set_bool_true!("no-netrc", g.no_netrc);
+        set_bool_true!("realtime-chunk-checksum", g.realtime_chunk_checksum);
+        set_str!("download-result", g.download_result);
+        set_bool_true!("human-readable", g.human_readable);
+        set_bool_true!("keep-unfinished-download-result", g.keep_unfinished_download_result);
+        set_bool_true!("truncate-console-readout", g.truncate_console_readout);
+        set_bool_true!("stderr", g.stderr);
+        set_u64!("max-download-result", g.max_download_result);
+        set_str!("lowest-speed-limit", g.lowest_speed_limit);
+        set_u64!("max-file-not-found", g.max_file_not_found);
+        set_str!("no-file-allocation-limit", g.no_file_allocation_limit);
+        set_u64!("stop-with-process", g.stop_with_process);
+        set_str!("uri-selector", g.uri_selector);
+        set_str!("stream-piece-selector", g.stream_piece_selector);
+        set_str!("interface", g.interface);
+        set_str!("multiple-interface", g.multiple_interface);
+        set_str!("gid", g.gid);
 
         // --- HTTP/FTP options ---
         set_str!("all-proxy", h.all_proxy);
         set_str!("http-proxy", h.http_proxy);
         set_str!("https-proxy", h.https_proxy);
         set_str!("ftp-proxy", h.ftp_proxy);
+        set_str!("all-proxy-user", h.all_proxy_user);
+        set_str!("all-proxy-passwd", h.all_proxy_passwd);
+        set_str!("http-proxy-user", h.http_proxy_user);
+        set_str!("http-proxy-passwd", h.http_proxy_passwd);
+        set_str!("https-proxy-user", h.https_proxy_user);
+        set_str!("https-proxy-passwd", h.https_proxy_passwd);
+        set_str!("ftp-proxy-user", h.ftp_proxy_user);
+        set_str!("ftp-proxy-passwd", h.ftp_proxy_passwd);
+        set_str!("proxy-method", h.proxy_method);
         set_str!("no-proxy", h.no_proxy);
         set_str!("user-agent", h.user_agent);
         set_str!("referer", h.referer);
@@ -151,6 +190,21 @@ impl App {
             set_bool_true!("continue", h.continue_dl);
         }
         set_bool_true!("remote-time", h.remote_time);
+        set_bool_true!("enable-http-keep-alive", h.enable_http_keep_alive);
+        set_bool_true!("enable-http-pipelining", h.enable_http_pipelining);
+        set_bool_true!("http-accept-gzip", h.http_accept_gzip);
+        set_bool_true!("http-auth-challenge", h.http_auth_challenge);
+        set_bool_true!("http-no-cache", h.http_no_cache);
+        set_bool_true!("content-disposition-default-utf8", h.content_disposition_default_utf8);
+        set_bool_true!("use-head", h.use_head);
+        set_bool_true!("no-want-digest-header", h.no_want_digest_header);
+        set_str!("http-user", h.http_user);
+        set_str!("http-passwd", h.http_passwd);
+        set_str!("ftp-user", h.ftp_user);
+        set_str!("ftp-passwd", h.ftp_passwd);
+        set_bool_true!("ftp-pasv", h.ftp_pasv);
+        set_bool_true!("ftp-reuse-connection", h.ftp_reuse_connection);
+        set_str!("ftp-type", h.ftp_type);
 
         // --- BitTorrent options ---
         set_f64!("seed-time", b.seed_time);
@@ -183,6 +237,27 @@ impl App {
         set_str!("bt-prioritize-piece", b.bt_prioritize_piece);
         set_bool_true!("enable-utp", b.enable_utp);
         set_u64!("utp-listen-port", b.utp_listen_port);
+        set_bool_true!("bt-detach-seed-only", b.bt_detach_seed_only);
+        set_bool_true!("bt-enable-hook-after-hash-check", b.bt_enable_hook_after_hash_check);
+        set_str!("bt-exclude-tracker", b.bt_exclude_tracker);
+        set_str!("bt-external-ip", b.bt_external_ip);
+        set_bool_true!("bt-hash-check-seed", b.bt_hash_check_seed);
+        set_bool_true!("bt-load-saved-metadata", b.bt_load_saved_metadata);
+        set_str!("bt-lpd-interface", b.bt_lpd_interface);
+        set_bool_true!("bt-metadata-only", b.bt_metadata_only);
+        set_bool_true!("bt-remove-unselected-file", b.bt_remove_unselected_file);
+        set_bool_true!("bt-require-crypto", b.bt_require_crypto);
+        set_u64!("bt-stop-timeout", b.bt_stop_timeout);
+        set_str!("bt-tracker", b.bt_tracker);
+        set_u64!("bt-tracker-connect-timeout", b.bt_tracker_connect_timeout);
+        set_u64!("bt-tracker-interval", b.bt_tracker_interval);
+        set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);
+        set_u64!("dht-message-timeout", b.dht_message_timeout);
+        set_bool_true!("enable-dht6", b.enable_dht6);
+        set_str!("dht-listen-addr6", b.dht_listen_addr6);
+        set_str!("peer-id-prefix", b.peer_id_prefix);
+        set_str!("peer-agent", b.peer_agent);
+        set_str!("select-file", b.select_file);
 
         // --- RPC options ---
         set_bool_true!("enable-rpc", r.enable_rpc);
@@ -197,6 +272,9 @@ impl App {
         set_bool_true!("rpc-secure", r.rpc_secure);
         set_path!("rpc-certificate", r.rpc_certificate);
         set_path!("rpc-private-key", r.rpc_private_key);
+        set_bool_true!("rpc-allow-origin-all", r.rpc_allow_origin_all);
+        set_str!("rpc-max-request-size", r.rpc_max_request_size);
+        set_bool_true!("rpc-save-upload-metadata", r.rpc_save_upload_metadata);
 
         // --- Advanced options ---
         set_str!("file-allocation", a.file_allocation);

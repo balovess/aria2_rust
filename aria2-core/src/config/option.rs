@@ -231,6 +231,10 @@ pub struct OptionDef {
     pub max: Option<u64>,
     pub deprecated: bool,
     pub hidden: bool,
+    /// If set, multiple calls to `set_raw` for this option will append values
+    /// separated by this delimiter rather than overwrite. Used for cumulative
+    /// options like `header` (delimiter: `"\n"`) and `bt-tracker`.
+    pub cumulative_delimiter: Option<&'static str>,
 }
 
 impl Default for OptionDef {
@@ -246,6 +250,7 @@ impl Default for OptionDef {
             max: None,
             deprecated: false,
             hidden: false,
+            cumulative_delimiter: None,
         }
     }
 }

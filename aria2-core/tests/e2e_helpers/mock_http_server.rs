@@ -86,6 +86,10 @@ pub fn partial_body(data: impl Into<Bytes>) -> Body {
 impl MockHttpServer {
     /// Start a new mock server (auto-binds to random port)
     pub async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // Ensure rustls crypto provider is installed before any reqwest::Client is built.
+        // Required because reqwest uses `rustls-no-provider` feature.
+        super::ensure_crypto_provider();
+
         let addr: SocketAddr = "127.0.0.1:0".parse()?;
         let routes: Arc<RwLock<Vec<RouteEntry>>> = Arc::new(RwLock::new(Vec::new()));
         let request_log: Arc<RwLock<Vec<RequestLog>>> = Arc::new(RwLock::new(Vec::new()));

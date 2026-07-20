@@ -16,11 +16,21 @@ impl RpcEngine {
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let _gid: String = req.get_param(0)?;
-        Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
-            "OK",
-        ))
+        let gid: String = req.get_param(0)?;
+        let mut stopped = self.stopped_tasks.write().await;
+        let original_len = stopped.len();
+        stopped.retain(|s| s.gid != gid);
+        if stopped.len() < original_len {
+            Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                "OK",
+            ))
+        } else {
+            Err(JsonRpcError::MethodNotFound(format!(
+                "GID {} not found in download results",
+                gid
+            )))
+        }
     }
 
     /// Handle `aria2.getPeers` - Get peer list for a BitTorrent download.
@@ -47,7 +57,6 @@ impl RpcEngine {
     /// Handle `aria2.pauseAll` - Pause all active downloads.
     pub async fn handle_pause_all(&self) -> JsonRpcResponse {
         let mut tasks = self.tasks.write().await;
-        let mut count = 0usize;
         for state in tasks.values_mut() {
             if state.status.status == DownloadStatus::Active {
                 state.status.status = DownloadStatus::Paused;
@@ -55,13 +64,9 @@ impl RpcEngine {
                     EventType::DownloadPause,
                     DownloadEvent::download_pause(&state.status.gid),
                 );
-                count += 1;
             }
         }
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            format!("OK. {} tasks paused.", count),
-        )
+        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
     }
 
     /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
@@ -83,17 +88,12 @@ impl RpcEngine {
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.
     pub async fn handle_unpause_all(&self) -> JsonRpcResponse {
         let mut tasks = self.tasks.write().await;
-        let mut count = 0usize;
         for state in tasks.values_mut() {
             if state.status.status == DownloadStatus::Paused {
                 state.status.status = DownloadStatus::Active;
-                count += 1;
             }
         }
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            format!("OK. {} tasks resumed.", count),
-        )
+        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
     }
 
     /// Handle `aria2.getUris` - Get URI list for a download with status.
