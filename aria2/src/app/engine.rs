@@ -6,13 +6,17 @@
 //! - Running the engine event loop
 
 use super::App;
+#[cfg(feature = "bittorrent")]
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+#[cfg(feature = "bittorrent")]
 use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
+#[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+#[cfg(feature = "sftp")]
 use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::validation::protocol_detector::InputType;
@@ -239,6 +243,7 @@ impl App {
                     )
                     .map_err(|e| format!("FTP download command failed: {}", e))?,
                 ),
+                #[cfg(feature = "sftp")]
                 InputType::SftpUrl => Box::new(
                     SftpDownloadCommand::new(
                         gid,
@@ -249,6 +254,7 @@ impl App {
                     )
                     .map_err(|e| format!("SFTP download command failed: {}", e))?,
                 ),
+                #[cfg(feature = "bittorrent")]
                 InputType::TorrentFile => {
                     let data = input
                         .file_data
@@ -259,6 +265,7 @@ impl App {
                             .map_err(|e| format!("BT download command failed: {}", e))?,
                     )
                 }
+                #[cfg(feature = "metalink")]
                 InputType::MetalinkFile => {
                     let data = input
                         .file_data
@@ -269,10 +276,23 @@ impl App {
                             .map_err(|e| format!("Metalink download command failed: {}", e))?,
                     )
                 }
+                #[cfg(feature = "bittorrent")]
                 InputType::MagnetLink => Box::new(
                     MagnetDownloadCommand::new(gid, &input.raw, &options, dir.as_deref())
                         .map_err(|e| format!("Magnet download command failed: {}", e))?,
                 ),
+                #[cfg(not(feature = "sftp"))]
+                InputType::SftpUrl => {
+                    return Err("SFTP support not enabled (compile with --features sftp)".to_string());
+                }
+                #[cfg(not(feature = "bittorrent"))]
+                InputType::TorrentFile | InputType::MagnetLink => {
+                    return Err("BitTorrent support not enabled (compile with --features bittorrent)".to_string());
+                }
+                #[cfg(not(feature = "metalink"))]
+                InputType::MetalinkFile => {
+                    return Err("Metalink support not enabled (compile with --features metalink)".to_string());
+                }
             };
 
             engine

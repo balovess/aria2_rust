@@ -102,6 +102,7 @@ pub mod validation;
 
 // Re-export commonly used types for downstream crates.
 // This avoids forcing consumers to depend on internal module paths.
+#[cfg(feature = "bittorrent")]
 pub use engine::multi_file_layout::TorrentFileEntry;
 pub use request::request_group::{DownloadStatus, RUNTIME_CHANGEABLE_OPTIONS};
 

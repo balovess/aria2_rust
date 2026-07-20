@@ -233,7 +233,7 @@ impl RpcEngine {
                 );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
-                    serde_json::json!([gid]),
+                    serde_json::json!(gid),
                 ))
             },
             None => Err(JsonRpcError::MethodNotFound(format!(
@@ -268,7 +268,7 @@ impl RpcEngine {
                 );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
-                    serde_json::json!([gid]),
+                    serde_json::json!(gid),
                 ))
             }
             None => Err(JsonRpcError::MethodNotFound(format!(
@@ -306,7 +306,7 @@ impl RpcEngine {
                 );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
-                    serde_json::json!("OK"),
+                    serde_json::json!(gid),
                 ))
             }
             None => Err(JsonRpcError::MethodNotFound(format!(
@@ -341,7 +341,7 @@ impl RpcEngine {
                 );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
-                    serde_json::json!([gid]),
+                    serde_json::json!(gid),
                 ))
             }
             None => Err(JsonRpcError::MethodNotFound(format!(
@@ -417,9 +417,11 @@ impl RpcEngine {
             }
         }
 
+        // Original aria2 returns the GID for single-GID calls.
+        let result_gid = gids.last().cloned().unwrap_or_default();
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            "OK",
+            serde_json::json!(result_gid),
         ))
     }
 
@@ -475,13 +477,7 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let dir = req.get_param_or_default::<String>(0);
-        if dir.is_empty() {
-            return Ok(JsonRpcResponse::error(
-                req.id.clone().unwrap_or_default(),
-                -32602,
-                "dir must not be empty",
-            ));
-        }
+        let _dir = if dir.is_empty() { ".".to_string() } else { dir };
 
         let tasks = self.tasks.read().await;
         let count = tasks.len();

@@ -55,7 +55,7 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.pauseAll` - Pause all active downloads.
-    pub async fn handle_pause_all(&self) -> JsonRpcResponse {
+    pub async fn handle_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let mut tasks = self.tasks.write().await;
         for state in tasks.values_mut() {
             if state.status.status == DownloadStatus::Active {
@@ -66,11 +66,11 @@ impl RpcEngine {
                 );
             }
         }
-        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
+        JsonRpcResponse::success(req.id.clone().unwrap_or_default(), serde_json::json!("OK"))
     }
 
     /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
-    pub async fn handle_force_pause_all(&self) -> JsonRpcResponse {
+    pub async fn handle_force_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let mut tasks_map = self.tasks.write().await;
 
         for task_state in tasks_map.values_mut() {
@@ -82,18 +82,18 @@ impl RpcEngine {
             }
         }
 
-        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
+        JsonRpcResponse::success(req.id.clone().unwrap_or_default(), serde_json::json!("OK"))
     }
 
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.
-    pub async fn handle_unpause_all(&self) -> JsonRpcResponse {
+    pub async fn handle_unpause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let mut tasks = self.tasks.write().await;
         for state in tasks.values_mut() {
             if state.status.status == DownloadStatus::Paused {
                 state.status.status = DownloadStatus::Active;
             }
         }
-        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
+        JsonRpcResponse::success(req.id.clone().unwrap_or_default(), serde_json::json!("OK"))
     }
 
     /// Handle `aria2.getUris` - Get URI list for a download with status.
@@ -318,7 +318,7 @@ impl RpcEngine {
                     .await
                     .unwrap_or_else(|e| e.into_response(Some(id))),
                 "aria2.tellActive" => self.handle_tell_active(&sub_request).await?,
-                "aria2.getGlobalStat" => self.handle_global_stat().await,
+                "aria2.getGlobalStat" => self.handle_global_stat(&sub_request).await,
                 "aria2.getUris" => self
                     .handle_get_uris(&sub_request)
                     .await

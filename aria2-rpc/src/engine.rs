@@ -9,6 +9,7 @@ use super::rpc_helpers::to_aria2_wire_format;
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
 use super::websocket::EventPublisher;
+#[cfg(feature = "bittorrent")]
 use aria2_core::TorrentFileEntry;
 use aria2_core::config::OptionRegistry;
 use aria2_core::engine::command::Command;
@@ -63,6 +64,7 @@ pub(crate) struct TaskState {
     #[allow(dead_code)] // Stored for future RPC getUris option reporting
     pub(crate) uris: Vec<String>,
     /// Torrent file entries (for BitTorrent downloads)
+    #[cfg(feature = "bittorrent")]
     pub(crate) torrent_files: Option<Vec<TorrentFileEntry>>,
     // === Dynamic progress fields (updated by download engine) ===
     pub(crate) total_length: u64,
@@ -87,6 +89,7 @@ impl TaskState {
             status,
             options,
             uris,
+            #[cfg(feature = "bittorrent")]
             torrent_files: None,
             total_length: 0,
             completed_length: 0,
@@ -269,6 +272,7 @@ impl RpcEngine {
     }
 
     /// Set torrent file entries for a BitTorrent download task.
+    #[cfg(feature = "bittorrent")]
     pub async fn set_task_torrent_files(&self, gid: &str, files: Vec<TorrentFileEntry>) -> bool {
         let mut tasks = self.tasks.write().await;
         if let Some(state) = tasks.get_mut(gid) {
@@ -360,7 +364,7 @@ impl RpcEngine {
                 .handle_tell_stopped(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getGlobalStat" => self.handle_global_stat().await,
+            "aria2.getGlobalStat" => self.handle_global_stat(req).await,
             "aria2.getUris" => self
                 .handle_get_uris(req)
                 .await
@@ -381,7 +385,7 @@ impl RpcEngine {
                 .handle_remove_download_result(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getGlobalOption" => self.handle_get_global_option().await,
+            "aria2.getGlobalOption" => self.handle_get_global_option(req).await,
             "aria2.changeGlobalOption" => self
                 .handle_change_global_option(req)
                 .await
@@ -398,9 +402,9 @@ impl RpcEngine {
                 .handle_get_peers(req)
                 .await
                 .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.pauseAll" => self.handle_pause_all().await,
-            "aria2.forcePauseAll" => self.handle_force_pause_all().await,
-            "aria2.unpauseAll" => self.handle_unpause_all().await,
+            "aria2.pauseAll" => self.handle_pause_all(req).await,
+            "aria2.forcePauseAll" => self.handle_force_pause_all(req).await,
+            "aria2.unpauseAll" => self.handle_unpause_all(req).await,
             "aria2.changeUri" => self
                 .handle_change_uri(req)
                 .await

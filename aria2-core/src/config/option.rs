@@ -854,6 +854,7 @@ impl OptionRegistry {
         };
         reg.register_general_options();
         reg.register_http_ftp_options();
+        #[cfg(feature = "bittorrent")]
         reg.register_bt_options();
         reg.register_rpc_options();
         reg.register_advanced_options();

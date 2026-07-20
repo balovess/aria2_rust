@@ -61,10 +61,10 @@ const VALID_OPTION_KEYS: &[&str] = &[
 
 impl RpcEngine {
     /// Handle `aria2.getGlobalOption` - Get global configuration options.
-    pub async fn handle_get_global_option(&self) -> JsonRpcResponse {
+    pub async fn handle_get_global_option(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let opts = self.global_opts.read().await;
         JsonRpcResponse::success(
-            serde_json::Value::Null,
+            req.id.clone().unwrap_or_default(),
             serde_json::to_value(&*opts).unwrap_or(serde_json::json!({})),
         )
     }

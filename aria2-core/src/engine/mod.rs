@@ -1,54 +1,88 @@
 pub mod active_output_registry;
-pub mod bt_choke_manager;
-pub mod bt_connection_pool;
-pub mod bt_download_command;
-#[cfg(test)]
-pub mod bt_download_command_tests;
-pub mod bt_download_execute;
-pub mod bt_download_seeding;
-pub mod bt_message_handler;
-pub mod bt_mse_handshake;
-#[cfg(test)]
-pub mod bt_mse_handshake_tests;
-pub mod bt_peer_connection;
-pub mod bt_peer_interaction;
-pub mod bt_piece_downloader;
-pub mod bt_piece_selector;
-pub mod bt_post_download_handler;
-pub mod bt_progress_info_file;
-#[cfg(test)]
-pub mod bt_progress_info_file_tests;
-pub mod bt_seed_manager;
-pub mod bt_tracker_comm;
-pub mod bt_upload_session;
-pub mod bt_web_seed;
 pub mod choking_algorithm;
 pub mod command;
 pub mod concurrent_download;
+#[cfg(feature = "metalink")]
 pub mod concurrent_download_command;
 pub mod concurrent_segment_manager;
 pub mod download_command;
 pub mod download_cookie;
 pub mod download_engine;
 pub mod download_progress;
-pub mod ftp_download_command;
 pub mod http_segment_downloader;
 pub mod http_tracker_client;
-pub mod lpd_manager;
-pub mod magnet_download_command;
-pub mod metadata_exchange;
-pub mod metalink_download_command;
 pub mod mirror_coordinator;
+#[cfg(feature = "bittorrent")]
 pub mod multi_file_layout;
 pub mod peer_stats;
 pub mod range_prober;
 pub mod resume_data;
 pub mod retry_policy;
 pub mod sequential_download;
-pub mod sftp_download_command;
 pub mod timer;
+
+// ── BitTorrent feature-gated modules ──────────────────────────────────
+#[cfg(feature = "bittorrent")]
+pub mod bt_choke_manager;
+#[cfg(feature = "bittorrent")]
+pub mod bt_connection_pool;
+#[cfg(feature = "bittorrent")]
+pub mod bt_download_command;
+#[cfg(all(test, feature = "bittorrent"))]
+pub mod bt_download_command_tests;
+#[cfg(feature = "bittorrent")]
+pub mod bt_download_execute;
+#[cfg(feature = "bittorrent")]
+pub mod bt_download_seeding;
+#[cfg(feature = "bittorrent")]
+pub mod bt_message_handler;
+#[cfg(feature = "bittorrent")]
+pub mod bt_mse_handshake;
+#[cfg(all(test, feature = "bittorrent"))]
+pub mod bt_mse_handshake_tests;
+#[cfg(feature = "bittorrent")]
+pub mod bt_peer_connection;
+#[cfg(feature = "bittorrent")]
+pub mod bt_peer_interaction;
+#[cfg(feature = "bittorrent")]
+pub mod bt_piece_downloader;
+#[cfg(feature = "bittorrent")]
+pub mod bt_piece_selector;
+#[cfg(feature = "bittorrent")]
+pub mod bt_post_download_handler;
+#[cfg(feature = "bittorrent")]
+pub mod bt_progress_info_file;
+#[cfg(all(test, feature = "bittorrent"))]
+pub mod bt_progress_info_file_tests;
+#[cfg(feature = "bittorrent")]
+pub mod bt_seed_manager;
+#[cfg(feature = "bittorrent")]
+pub mod bt_tracker_comm;
+#[cfg(feature = "bittorrent")]
+pub mod bt_upload_session;
+#[cfg(feature = "bittorrent")]
+pub mod bt_web_seed;
+#[cfg(feature = "bittorrent")]
+pub mod lpd_manager;
+#[cfg(feature = "bittorrent")]
+pub mod magnet_download_command;
+#[cfg(feature = "bittorrent")]
+pub mod metadata_exchange;
+#[cfg(feature = "bittorrent")]
 pub mod udp_tracker_client;
+#[cfg(feature = "bittorrent")]
 pub mod udp_tracker_manager;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_integration_tests;
+
+// ── Metalink feature-gated modules ────────────────────────────────────
+#[cfg(feature = "metalink")]
+pub mod metalink_download_command;
+
+// ── SFTP feature-gated modules ───────────────────────────────────────
+#[cfg(feature = "sftp")]
+pub mod sftp_download_command;
+
+// ── FTP (always included for now; can be gated later) ─────────────────
+pub mod ftp_download_command;

@@ -19,6 +19,9 @@ include = ["src/**/*", "../README.md", "../LICENSE"]
 # `tokio-uring` only builds on Linux. This is expected and documented.
 default = []
 io_uring = ["dep:tokio-uring"]
+bittorrent = ["aria2-protocol/bittorrent", "dep:rc4"]
+metalink = ["aria2-protocol/metalink"]
+sftp = ["aria2-protocol/sftp"]
 
 [dependencies]
 tokio.workspace = true
@@ -46,7 +49,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 adler32 = "1.2"
 digest = "0.10"
-aria2-protocol = { workspace = true, features = ["bittorrent", "metalink", "sftp"] }
+aria2-protocol = { workspace = true }
 # Use rustls-no-provider to avoid pulling in aws-lc-rs (STATUS_STACK_BUFFER_OVERRUN on Windows).
 # The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
 # automatically use ring as the crypto provider.
@@ -70,7 +73,7 @@ ring = "0.17"
 # rustls with ring provider; required for installing the crypto provider when
 # reqwest uses `rustls-no-provider` (avoids aws-lc-rs ABI conflict on Windows).
 rustls = { workspace = true, features = ["ring"] }
-rc4 = "0.2"
+rc4 = { version = "0.2", optional = true }
 once_cell = "1.19"
 dashmap = "5.5"
 

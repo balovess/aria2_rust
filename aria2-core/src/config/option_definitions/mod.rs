@@ -93,6 +93,7 @@
 //! | Y     | piece-length           | Adv.     | P2       |
 
 mod advanced;
+#[cfg(feature = "bittorrent")]
 mod bittorrent;
 mod general;
 mod http_ftp;
@@ -112,6 +113,7 @@ pub(super) trait RegisterOptions {
     fn register_http_ftp_options(&mut self);
 
     /// Register all BitTorrent category options (seeding, DHT, PEX, peers).
+    #[cfg(feature = "bittorrent")]
     fn register_bt_options(&mut self);
 
     /// Register all RPC category options (JSON-RPC/XML-RPC server settings).
@@ -124,6 +126,7 @@ pub(super) trait RegisterOptions {
     fn register_all_options(&mut self) {
         self.register_general_options();
         self.register_http_ftp_options();
+        #[cfg(feature = "bittorrent")]
         self.register_bt_options();
         self.register_rpc_options();
         self.register_advanced_options();

@@ -48,6 +48,10 @@ criterion.workspace = true
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_Foundation", "Win32_System_Threading"] }
 
+[features]
+default = []
+bittorrent = ["aria2-core/bittorrent"]
+
 [[bench]]
 name = "rpc_bench"
 harness = false

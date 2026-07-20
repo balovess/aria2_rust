@@ -28,16 +28,14 @@ async-trait.workspace = true
 # ring is available via direct dependencies, so rustls auto-selects it.
 # (rustls and rustls-pemfile removed: not used directly in protocol source code.
 #  The reqwest rustls-no-provider feature uses ring from aria2-core's crypto setup.)
-reqwest = { workspace = true, default-features = false, features = ["rustls-no-provider", "gzip", "brotli", "socks", "http2"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls-no-provider", "gzip", "http2"] }
 # rustls with ring — used to self-install the crypto provider so that
 # reqwest (built with rustls-no-provider) can build clients independently
 # of aria2-core.
 rustls = { workspace = true, features = ["ring"] }
-quick-xml = "0.31"
 
 flate2 = "1.0"
 base64.workspace = true
-base32 = "0.5"
 url = "2.5"
 md5 = "0.7"
 sha1 = "0.10"
@@ -45,19 +43,32 @@ sha2 = "0.10"
 digest = "0.10"
 hex.workspace = true
 rand.workspace = true
-num-bigint-dig = "0.8"
-num-traits = "0.2"
 getrandom = "0.2"
-russh = { version = "0.59", default-features = false, features = ["ring", "rsa"] }
 bitflags = "2.4"
-dirs = "5"
+
+# ── BitTorrent-only dependencies ──────────────────────────────────────
+num-bigint-dig = { version = "0.8", optional = true }
+num-traits = { version = "0.2", optional = true }
+
+# ── SFTP-only dependencies ────────────────────────────────────────────
+russh = { version = "0.59", default-features = false, features = ["ring", "rsa"], optional = true }
+
+# ── Metalink-only dependencies ────────────────────────────────────────
+quick-xml = { version = "0.31", optional = true }
+
+# ── Shared between bittorrent (magnet Base32) ────────────────────────
+base32 = { version = "0.5", optional = true }
+
+# ── SOCKS proxy support (optional, adds ~200KB) ──────────────────────
+# Disabled by default; enable via the "socks" feature if needed.
+# reqwest's socks feature pulls in the tokio-socks crate.
 
 [features]
 default = []
 http = []
-bittorrent = []
-metalink = []
-sftp = []
+bittorrent = ["dep:num-bigint-dig", "dep:num-traits", "dep:base32"]
+metalink = ["dep:quick-xml"]
+sftp = ["dep:russh"]
 
 [dev-dependencies]
 tempfile.workspace = true

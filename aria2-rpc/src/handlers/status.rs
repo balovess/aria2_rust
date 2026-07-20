@@ -123,7 +123,7 @@ impl RpcEngine {
     /// Handle `aria2.getGlobalStat` - Get global download statistics.
     ///
     /// Aggregates live speeds and counts from `RequestGroupMan` when available.
-    pub async fn handle_global_stat(&self) -> JsonRpcResponse {
+    pub async fn handle_global_stat(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let (dl_speed, ul_speed, active, waiting, stopped) =
             if let Some(group_man) = &self.group_man {
                 let man = group_man.read().await;
@@ -159,6 +159,6 @@ impl RpcEngine {
             num_stopped: stopped,
             num_stopped_total: self.num_stopped_total.load(Ordering::Relaxed),
         };
-        JsonRpcResponse::success(serde_json::Value::Null, stat.to_json_value())
+        JsonRpcResponse::success(req.id.clone().unwrap_or_default(), stat.to_json_value())
     }
 }

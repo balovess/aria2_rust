@@ -670,17 +670,12 @@ async fn test_save_session_handler_basic() {
 }
 
 #[tokio::test]
-async fn test_save_session_empty_dir_fails() {
+async fn test_save_session_empty_dir_defaults() {
     let engine = RpcEngine::new();
 
     let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([""])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_error(), "Empty dir should fail");
-    assert_eq!(
-        resp.error.unwrap().code,
-        -32602,
-        "Should be InvalidParams error"
-    );
+    assert!(resp.is_success(), "Empty dir should default to '.' and succeed");
 }
 
 #[tokio::test]
