@@ -197,7 +197,7 @@ async fn test_e2e_request_group_progress_tracking() {
     )
     .expect("Failed to create DownloadCommand");
 
-    let progress_before = cmd.group().await.progress().await;
+    let progress_before = cmd.group().progress();
     assert!(
         (progress_before - 0.0).abs() < f64::EPSILON,
         "Progress should be 0 before download"
@@ -205,14 +205,14 @@ async fn test_e2e_request_group_progress_tracking() {
 
     cmd.execute().await.expect("Download failed");
 
-    let progress_after = cmd.group().await.progress().await;
+    let progress_after = cmd.group().progress();
     assert!(
         (progress_after - 100.0).abs() < 1.0,
         "Progress should be near 100% after download, got: {}",
         progress_after
     );
 
-    let status = cmd.group().await.status().await;
+    let status = cmd.group().status();
     assert!(status.is_completed());
 }
 
@@ -233,7 +233,7 @@ async fn test_e2e_download_speed_reported() {
 
     cmd.execute().await.expect("Download failed");
 
-    let speed = cmd.group().await.download_speed().await;
+    let speed = cmd.group().download_speed();
     assert!(speed > 0, "Download speed should be > 0, got: {}", speed);
 }
 

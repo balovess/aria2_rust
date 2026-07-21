@@ -24,6 +24,7 @@ use tokio::time::sleep;
 use crate::ui::progress_bar::{ProgressBar, TaskProgress, TaskStatus};
 use aria2_core::request::request_group::DownloadStatus;
 use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 /// Console progress reporter that periodically polls `RequestGroupMan`
 /// and renders active download progress to stdout.
@@ -99,8 +100,8 @@ impl ConsoleProgressReporter {
         // Build TaskProgress list from active/waiting groups.
         let mut tasks: Vec<TaskProgress> = Vec::new();
         for (gid, group_lock) in &all_groups {
-            let group = group_lock.read().await;
-            let status = group.status().await;
+            let group = group_lock.recover();
+            let status = group.status();
 
             let task_status = match &status {
                 DownloadStatus::Active => TaskStatus::Active,

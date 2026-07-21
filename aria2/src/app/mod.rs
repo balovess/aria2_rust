@@ -216,7 +216,7 @@ impl App {
 
         // Check if there are any inputs (restored tasks or CLI URIs)
         let man = self.request_man.read().await;
-        let has_restored_tasks = man.count().await > 0;
+        let has_restored_tasks = man.count() > 0;
 
         // In daemon mode, we need RPC enabled to control the daemon
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);

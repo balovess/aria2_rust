@@ -178,7 +178,7 @@ impl DownloadCoordinator {
     /// * `DownloadSummary` with aggregate data
     pub async fn get_summary(&self) -> Result<DownloadSummary> {
         let group = &self.request_man;
-        let status = group.status().await;
+        let status = group.status();
         let is_active = status.is_active();
 
         if !is_active {
@@ -192,7 +192,7 @@ impl DownloadCoordinator {
 
         let completed = group.get_completed_length();
         let speed = group.get_download_speed_cached() as f64;
-        let elapsed = group.elapsed_time().await.unwrap_or_default();
+        let elapsed = group.elapsed_time().unwrap_or_default();
 
         Ok(DownloadSummary {
             active_count: 1,

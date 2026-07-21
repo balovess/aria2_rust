@@ -462,6 +462,7 @@ mod ftp_connection_tests {
 // 9.4 BT Piece Transfer Efficiency Tests
 // =============================================================================
 
+#[cfg(feature = "bittorrent")]
 mod bt_piece_tests {
     use super::*;
     use aria2_core::engine::bt_piece_downloader::PieceDownloadState;
@@ -1332,7 +1333,9 @@ mod serialization_tests {
     use super::*;
     use aria2_core::config::parser::ConfigParser;
     use aria2_core::session::session_entry::SessionEntry;
+    #[cfg(feature = "bittorrent")]
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+    #[cfg(feature = "bittorrent")]
     use std::collections::BTreeMap;
 
     /// Test session entry serialization performance
@@ -1396,6 +1399,7 @@ mod serialization_tests {
     }
 
     /// Test Bencode encoding/decoding performance
+    #[cfg(feature = "bittorrent")]
     #[test]
     fn test_bencode_perf() {
         let config = PerfTestConfig::quick();
@@ -1562,14 +1566,18 @@ mod regression_tests {
         // FTP
         ftp_list_parse_us: u64,
         // BT
+        #[cfg(feature = "bittorrent")]
         bt_piece_state_create_us: u64,
+        #[cfg(feature = "bittorrent")]
         bt_bitfield_create_us: u64,
+        #[cfg(feature = "bittorrent")]
         bt_sha1_256kb_us: u64,
         // Memory
         buffer_alloc_64kb_us: u64,
         hashmap_1000_us: u64,
         // Serialization
         session_serialize_small_us: u64,
+        #[cfg(feature = "bittorrent")]
         bencode_encode_us: u64,
         json_serialize_us: u64,
     }
@@ -1580,12 +1588,16 @@ mod regression_tests {
                 http_client_shared_us: 10,
                 http_header_parse_us: 100,
                 ftp_list_parse_us: 50,
+                #[cfg(feature = "bittorrent")]
                 bt_piece_state_create_us: 10,
+                #[cfg(feature = "bittorrent")]
                 bt_bitfield_create_us: 100,
+                #[cfg(feature = "bittorrent")]
                 bt_sha1_256kb_us: 1000,
                 buffer_alloc_64kb_us: 50,
                 hashmap_1000_us: 500,
                 session_serialize_small_us: 100,
+                #[cfg(feature = "bittorrent")]
                 bencode_encode_us: 100,
                 json_serialize_us: 200,
             }
@@ -1616,16 +1628,19 @@ mod regression_tests {
         }
 
         // Test BT piece state creation
-        let result = measure_repeated("bt_piece_state_create", &config, || {
-            let _ =
-                aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
-        });
-        if result.mean.as_micros() as u64 > baselines.bt_piece_state_create_us * 2 {
-            regressions.push(format!(
-                "BT piece state create: {} us > {} us (baseline)",
-                result.mean.as_micros(),
-                baselines.bt_piece_state_create_us
-            ));
+        #[cfg(feature = "bittorrent")]
+        {
+            let result = measure_repeated("bt_piece_state_create", &config, || {
+                let _ =
+                    aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
+            });
+            if result.mean.as_micros() as u64 > baselines.bt_piece_state_create_us * 2 {
+                regressions.push(format!(
+                    "BT piece state create: {} us > {} us (baseline)",
+                    result.mean.as_micros(),
+                    baselines.bt_piece_state_create_us
+                ));
+            }
         }
 
         // Test buffer allocation
@@ -1682,19 +1697,22 @@ mod regression_tests {
         );
 
         // BT
-        let result = measure_repeated("bt_piece_state", &config, || {
-            let _ =
-                aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
-        });
-        monitor.record_metric(
-            "bt",
-            Metrics::new(
-                result.throughput as u64,
-                result.mean.as_millis() as u64,
-                0,
-                0,
-            ),
-        );
+        #[cfg(feature = "bittorrent")]
+        {
+            let result = measure_repeated("bt_piece_state", &config, || {
+                let _ =
+                    aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
+            });
+            monitor.record_metric(
+                "bt",
+                Metrics::new(
+                    result.throughput as u64,
+                    result.mean.as_millis() as u64,
+                    0,
+                    0,
+                ),
+            );
+        }
 
         // Memory
         let result = measure_repeated("buffer_alloc", &config, || {

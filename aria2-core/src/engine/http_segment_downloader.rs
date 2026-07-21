@@ -13,6 +13,12 @@ pub use crate::selector::adaptive_uri_selector::{
     score_source_raw as score_source, score_source_raw,
 };
 
+/// A chunk of data to be written to disk at a specific offset.
+pub struct WriteChunk {
+    pub offset: u64,
+    pub data: bytes::Bytes,
+}
+
 pub struct HttpSegmentDownloader {
     client: reqwest::Client,
 }
@@ -297,8 +303,11 @@ impl HttpSegmentDownloader {
             _ => {}
         }
 
-        // Use BytesMut for efficient stream accumulation
-        let mut data = bytes::BytesMut::with_capacity(length as usize);
+        // Don't pre-allocate the full segment length — it can be very large
+        // (16 MB+) and wastes memory if the download fails early.  Start with
+        // a reasonable chunk size and let BytesMut grow organically.
+        let initial_cap = (length as usize).min(256 * 1024);
+        let mut data = bytes::BytesMut::with_capacity(initial_cap);
         let mut stream = response.bytes_stream();
         let mut last_reported_progress = 0u64;
 
@@ -347,6 +356,132 @@ impl HttpSegmentDownloader {
 
         // Freeze BytesMut to immutable Bytes (zero-cost conversion)
         Ok(data.freeze())
+    }
+
+    /// Streaming variant of [`download_range`](Self::download_range).
+    ///
+    /// Instead of accumulating all chunks in memory and returning the full buffer,
+    /// this method sends each chunk to `write_tx` as it arrives from the network,
+    /// enabling immediate disk writes without the 16 MB per-segment memory overhead.
+    ///
+    /// Returns the total number of bytes downloaded on success.
+    pub async fn download_range_streaming(
+        &self,
+        url: &str,
+        offset: u64,
+        length: u64,
+        cookie_header: Option<&str>,
+        headers: &[(String, String)],
+        progress_tx: Option<&mpsc::UnboundedSender<ProgressUpdate>>,
+        write_tx: &mpsc::UnboundedSender<WriteChunk>,
+    ) -> Result<u64> {
+        if length == 0 {
+            return Ok(0);
+        }
+
+        let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
+        debug!("HTTP Range request (streaming): {} ({})", range_header, url);
+
+        let mut req =
+            self.client
+                .get(url)
+                .header("Range", &range_header)
+                .timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                ));
+        if let Some(ch) = cookie_header {
+            req = req.header("Cookie", ch);
+        }
+        for (name, value) in headers {
+            req = req.header(name, value);
+        }
+        let response = req.send().await.map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("HTTP Range request failed: {}", e),
+            })
+        })?;
+
+        let status = response.status();
+        match status.as_u16() {
+            206 => {}
+            200 => {
+                warn!(
+                    "Server returned 200 instead of 206 for Range request (offset={}, len={}), reading full body",
+                    offset, length
+                );
+            }
+            416 => {
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::RangeNotSatisfiable {
+                        range: format!("bytes={}-{}", offset, offset + length.saturating_sub(1)),
+                    },
+                ));
+            }
+            code if (400..500).contains(&code) => {
+                return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                    format!("HTTP client error {}: {}", code, url),
+                )));
+            }
+            code if code >= 500 => {
+                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
+                    code,
+                }));
+            }
+            _ => {}
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut current_offset = offset;
+        let mut total_written = 0u64;
+        let mut last_reported_progress = 0u64;
+
+        while let Some(chunk_result) = stream.next().await {
+            let bytes = chunk_result.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("Stream read error: {}", e),
+                })
+            })?;
+            let chunk_len = bytes.len() as u64;
+
+            // Send chunk to writer immediately — no accumulation
+            let _ = write_tx.send(WriteChunk {
+                offset: current_offset,
+                data: bytes,
+            });
+
+            current_offset += chunk_len;
+            total_written += chunk_len;
+
+            // Report per-chunk progress if a progress channel is provided
+            if let Some(ref tx) = progress_tx {
+                if total_written - last_reported_progress
+                    >= constants::PROGRESS_UPDATE_BYTES as u64
+                {
+                    let update = ProgressUpdate {
+                        completed_bytes: offset + total_written,
+                        download_speed: 0,
+                        upload_speed: 0,
+                    };
+                    let _ = tx.send(update);
+                    last_reported_progress = total_written;
+                }
+            }
+        }
+
+        if total_written == 0 && length > 0 {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "Empty response for range {}-{} from {}",
+                        offset,
+                        offset + length.saturating_sub(1),
+                        url
+                    ),
+                },
+            ));
+        }
+
+        Ok(total_written)
     }
 }
 

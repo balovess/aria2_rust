@@ -13,7 +13,8 @@ use crate::filesystem::disk_writer::{
 };
 use crate::filesystem::resume_helper::{ResumeHelper, ResumeState};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::request::request_group::RequestGroup;
+use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub struct GapDownloadResult {
     pub completed_gaps: Vec<(u64, u64)>,
@@ -26,7 +27,9 @@ pub struct SequentialDownloader {
     headers: Vec<(String, String)>,
     cookie_helper: CookieHelper,
     progress_updater: ProgressUpdater,
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    /// Direct access to progress counters — avoids `RwLock` on the hot path.
+    progress: Arc<AtomicProgress>,
 }
 
 impl SequentialDownloader {
@@ -36,7 +39,8 @@ impl SequentialDownloader {
         headers: Vec<(String, String)>,
         cookie_helper: CookieHelper,
         progress_updater: ProgressUpdater,
-        group: Arc<tokio::sync::RwLock<RequestGroup>>,
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        progress: Arc<AtomicProgress>,
     ) -> Self {
         Self {
             client,
@@ -45,6 +49,7 @@ impl SequentialDownloader {
             cookie_helper,
             progress_updater,
             group,
+            progress,
         }
     }
 
@@ -76,7 +81,7 @@ impl SequentialDownloader {
         #[cfg(target_os = "linux")]
         {
             let no_proxy = {
-                let guard = self.group.read().await;
+                let guard = self.group.recover();
                 let opts = guard.options();
                 opts.http_proxy.is_none() && opts.all_proxy.is_none()
             };
@@ -147,9 +152,8 @@ impl SequentialDownloader {
             resp_length
         };
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(actual_total).await;
-            g.set_total_length_atomic(actual_total);
+            let g = self.group.recover();
+            g.set_total_length(actual_total);
         }
 
         let start_offset = if resume_state.should_resume {
@@ -160,7 +164,7 @@ impl SequentialDownloader {
 
         self.progress_updater.reset(start_offset);
 
-        let rate_limit = { self.group.read().await.options().max_download_limit };
+        let rate_limit = { self.group.recover().options().max_download_limit };
 
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
         let mut writer: Box<dyn DiskWriter> = match rate_limit {
@@ -169,8 +173,8 @@ impl SequentialDownloader {
                 let limiter = RateLimiter::new(&cfg);
                 tracing::debug!("Download speed limit enabled: {} bytes/s", rate);
                 {
-                    let g = self.group.read().await;
-                    g.set_rate_limiter(limiter.clone()).await;
+                    let g = self.group.recover();
+                    g.set_rate_limiter(limiter.clone());
                 }
                 Box::new(ThrottledWriter::new(raw_writer, limiter))
             }
@@ -215,8 +219,8 @@ impl SequentialDownloader {
         writer.finalize().await.ok();
 
         let final_speed = {
-            let g = self.group.read().await;
-            let elapsed = g.elapsed_time().await;
+            let g = self.group.recover();
+            let elapsed = g.elapsed_time();
             match elapsed {
                 Some(d) if d.as_secs_f64() > 0.0 => {
                     (completed_bytes as f64 / d.as_secs_f64()) as u64
@@ -225,12 +229,11 @@ impl SequentialDownloader {
             }
         };
         {
-            let mut g = self.group.write().await;
-            g.update_progress(completed_bytes).await;
-            g.update_speed(final_speed, 0).await;
-            g.set_completed_length(completed_bytes);
-            g.set_download_speed_cached(final_speed);
-            g.complete().await?;
+            self.progress.set_completed_length(completed_bytes);
+            self.progress.set_download_speed(final_speed);
+            self.progress.set_upload_speed(0);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         tracing::info!(
@@ -277,13 +280,13 @@ impl SequentialDownloader {
 
         let mut writer = CachedDiskWriter::new(&self.output_path, Some(total_length), None);
 
-        let rate_limit = { self.group.read().await.options().max_download_limit };
+        let rate_limit = { self.group.recover().options().max_download_limit };
         let limiter = rate_limit
             .filter(|&r| r > 0)
             .map(|r| RateLimiter::new(&RateLimiterConfig::new(Some(r), None)));
         if let Some(ref lim) = limiter {
-            let g = self.group.read().await;
-            g.set_rate_limiter(lim.clone()).await;
+            let g = self.group.recover();
+            g.set_rate_limiter(lim.clone());
         }
 
         let mut last_progress_update = completed_bytes;
@@ -461,8 +464,8 @@ impl SequentialDownloader {
         }
 
         let final_speed = {
-            let g = self.group.read().await;
-            let elapsed = g.elapsed_time().await;
+            let g = self.group.recover();
+            let elapsed = g.elapsed_time();
             match elapsed {
                 Some(d) if d.as_secs_f64() > 0.0 => {
                     (completed_bytes as f64 / d.as_secs_f64()) as u64
@@ -471,14 +474,12 @@ impl SequentialDownloader {
             }
         };
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(completed_bytes).await;
-            g.set_total_length_atomic(completed_bytes);
-            g.update_progress(completed_bytes).await;
-            g.update_speed(final_speed, 0).await;
-            g.set_completed_length(completed_bytes);
-            g.set_download_speed_cached(final_speed);
-            if let Err(e) = g.complete().await {
+            self.progress.set_total_length(completed_bytes);
+            self.progress.set_completed_length(completed_bytes);
+            self.progress.set_download_speed(final_speed);
+            self.progress.set_upload_speed(0);
+            let mut g = self.group.recover_mut();
+            if let Err(e) = g.complete() {
                 tracing::warn!("Failed to complete request group: {}", e);
                 return GapDownloadResult {
                     completed_gaps,
@@ -691,8 +692,8 @@ impl SequentialDownloader {
             .map_err(|e| Aria2Error::Io(format!("splice download failed: {e}")))?;
 
         let final_speed = {
-            let g = self.group.read().await;
-            let elapsed = g.elapsed_time().await;
+            let g = self.group.recover();
+            let elapsed = g.elapsed_time();
             match elapsed {
                 Some(d) if d.as_secs_f64() > 0.0 => (bytes as f64 / d.as_secs_f64()) as u64,
                 _ => 0,
@@ -700,14 +701,12 @@ impl SequentialDownloader {
         };
 
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(bytes).await;
-            g.set_total_length_atomic(bytes);
-            g.update_progress(bytes).await;
-            g.set_completed_length(bytes);
-            g.update_speed(final_speed, 0).await;
-            g.set_download_speed_cached(final_speed);
-            g.complete().await?;
+            self.progress.set_total_length(bytes);
+            self.progress.set_completed_length(bytes);
+            self.progress.set_download_speed(final_speed);
+            self.progress.set_upload_speed(0);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         tracing::info!(

@@ -3,6 +3,8 @@
 //! Exercises BT progress persistence, post-download hooks, LPD peer discovery,
 //! MSE encrypted handshake, and tracker multi-peer distribution end-to-end.
 
+#![cfg(feature = "bittorrent")]
+
 mod fixtures;
 
 mod test_harness;

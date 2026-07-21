@@ -180,7 +180,7 @@ impl RpcEngine {
         // `changes` is cloned because we also consume it for task_opts below.
         if let Some(ref group_man) = self.group_man {
             let gm = group_man.read().await;
-            if let Err(e) = gm.update_group_options(&gid, changes.clone()).await {
+            if let Err(e) = gm.update_group_options(&gid, changes.clone()) {
                 // "not found" means the task isn't registered in group_man yet
                 // — that's acceptable, the change will apply from task_opts on
                 // start. Any other error is propagated as InvalidParams.

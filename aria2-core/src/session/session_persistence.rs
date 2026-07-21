@@ -24,13 +24,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::engine::resume_data::{ResumeData, ResumeDataExt};
 use crate::http::cookie_storage::CookieJar;
 use crate::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
 use crate::selector::server_stat_man::ServerStatMan;
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// Filename for global session options saved alongside .aria2 files
 const SESSION_OPTIONS_FILENAME: &str = "session_options.json";
@@ -137,7 +137,7 @@ impl SessionPersistence {
     ///
     /// Each command is saved as `{gid}.aria2` in JSON format.
     /// Global options are saved as `session_options.json`.
-    pub async fn save_state(&self, groups: &[Arc<RwLock<RequestGroup>>]) -> Result<usize, String> {
+    pub async fn save_state(&self, groups: &[Arc<std::sync::RwLock<RequestGroup>>]) -> Result<usize, String> {
         // Ensure session directory exists
         tokio::fs::create_dir_all(&self.session_dir)
             .await
@@ -152,10 +152,10 @@ impl SessionPersistence {
         let mut saved = 0usize;
 
         for group_lock in groups.iter() {
-            let group = group_lock.read().await;
+            let group = group_lock.recover();
 
             // Convert RequestGroup to ResumeData
-            match ResumeData::from_request_group(&group).await {
+            match ResumeData::from_request_group(&group) {
                 Ok(resume_data) => {
                     let file_name = format!("{}.aria2", resume_data.gid);
                     let path = self.session_dir.join(&file_name);
@@ -228,7 +228,7 @@ impl SessionPersistence {
     /// - Partial restoration is allowed (some files may fail)
     pub async fn load_state(
         &mut self,
-        groups: &mut Vec<Arc<RwLock<RequestGroup>>>,
+        groups: &mut Vec<Arc<std::sync::RwLock<RequestGroup>>>,
     ) -> Result<usize, String> {
         if !self.session_dir.exists() {
             debug!(
@@ -262,7 +262,7 @@ impl SessionPersistence {
                     // Restore command from resume data
                     match Self::restore_command(&resume_data) {
                         Ok(group) => {
-                            groups.push(Arc::new(RwLock::new(group)));
+                            groups.push(Arc::new(std::sync::RwLock::new(group)));
                             loaded += 1;
                             info!(
                                 gid = %resume_data.gid,
@@ -381,7 +381,7 @@ impl SessionPersistence {
     /// A JoinHandle that can be used to cancel the auto-save task
     pub fn start_auto_save(
         &self,
-        groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>>,
+        groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         if !self.auto_save_enabled {
             debug!("Auto-save is disabled");
@@ -423,7 +423,7 @@ impl SessionPersistence {
     /// Save global options summary to session directory
     async fn save_global_options(
         &self,
-        _groups: &[Arc<RwLock<RequestGroup>>],
+        _groups: &[Arc<std::sync::RwLock<RequestGroup>>],
     ) -> Result<(), String> {
         let opts_path = self.session_dir.join(SESSION_OPTIONS_FILENAME);
 
@@ -618,20 +618,20 @@ impl SessionPersistence {
     /// * `Err(String)` - Error message if critical failure occurs
     pub async fn save_active_only(
         &self,
-        groups: &[Arc<RwLock<RequestGroup>>],
+        groups: &[Arc<std::sync::RwLock<RequestGroup>>],
     ) -> Result<usize, String> {
         let mut count = 0;
         for group in groups {
-            let g = group.read().await;
-            let status = g.status().await;
+            let g = group.recover();
+            let status = g.status();
 
             // Only save if actively downloading or waiting
             match status {
                 DownloadStatus::Active | DownloadStatus::Waiting => {
                     drop(g);
                     // Convert and save this single group
-                    let group_read = group.read().await;
-                    match ResumeData::from_request_group(&group_read).await {
+                    let group_read = group.recover();
+                    match ResumeData::from_request_group(&group_read) {
                         Ok(resume_data) => {
                             drop(group_read);
                             let file_name = format!("{}.aria2", resume_data.gid);
@@ -675,18 +675,18 @@ impl SessionPersistence {
     /// * `Err(String)` - Error message if critical failure occurs
     pub async fn save_completed(
         &self,
-        groups: &[Arc<RwLock<RequestGroup>>],
+        groups: &[Arc<std::sync::RwLock<RequestGroup>>],
     ) -> Result<usize, String> {
         let mut count = 0;
         for group in groups {
-            let g = group.read().await;
-            let status = g.status().await;
+            let g = group.recover();
+            let status = g.status();
 
             if status.is_completed() || matches!(status, DownloadStatus::Complete) {
                 drop(g);
                 // Convert and save this completed group
-                let group_read = group.read().await;
-                match ResumeData::from_request_group(&group_read).await {
+                let group_read = group.recover();
+                match ResumeData::from_request_group(&group_read) {
                     Ok(resume_data) => {
                         drop(group_read);
                         let file_name = format!("{}.aria2", resume_data.gid);
@@ -892,7 +892,7 @@ mod tests {
     }
 
     /// Helper to create test RequestGroups
-    fn create_test_groups(count: usize) -> Vec<Arc<RwLock<RequestGroup>>> {
+    fn create_test_groups(count: usize) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
         let mut groups = Vec::new();
         for i in 0..count {
             let gid = GroupId::new(i as u64 + 1000);
@@ -902,7 +902,7 @@ mod tests {
                 split: Some(4),
                 ..Default::default()
             };
-            let group = Arc::new(RwLock::new(RequestGroup::new(gid, vec![uri], options)));
+            let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(gid, vec![uri], options)));
             groups.push(group);
         }
         groups
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(saved, 2, "Should save 2 commands");
 
         // Load into empty groups vector
-        let mut loaded_groups: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let mut loaded_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
         let loaded = persistence
             .load_state(&mut loaded_groups)
             .await
@@ -987,7 +987,7 @@ mod tests {
         // Verify restored groups have URIs
         let mut found_uris: Vec<String> = Vec::new();
         for group_lock in &loaded_groups {
-            let group = group_lock.read().await;
+            let group = group_lock.recover();
             for uri in group.uris() {
                 found_uris.push(uri.clone());
             }
@@ -1012,7 +1012,7 @@ mod tests {
         let persistence = SessionPersistence::new(&session_dir);
 
         // Save empty groups list - should succeed without error
-        let empty_groups: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let empty_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
         let result = persistence.save_state(&empty_groups).await;
 
         assert!(result.is_ok(), "Saving empty session should not error");
@@ -1070,7 +1070,7 @@ mod tests {
             .expect("Should write valid file");
 
         let mut persistence = SessionPersistence::new(&session_dir);
-        let mut loaded_groups: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let mut loaded_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
 
         // Load should succeed despite corrupt file
         let result = persistence.load_state(&mut loaded_groups).await;
@@ -1095,7 +1095,7 @@ mod tests {
             PathBuf::from("/tmp/aria2_nonexistent_test_dir_that_should_not_exist_12345");
         let mut persistence = SessionPersistence::new(&nonexistent_dir);
 
-        let mut groups: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let mut groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
         let result = persistence.load_state(&mut groups).await;
 
         assert!(result.is_ok(), "Nonexistent dir should return Ok");
@@ -1172,7 +1172,7 @@ mod tests {
             split: Some(16),
             ..Default::default()
         };
-        let group = Arc::new(RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
             vec!["http://example.com/special_file.iso".to_string()],
             options,
@@ -1180,7 +1180,7 @@ mod tests {
 
         // Set some progress
         {
-            let g = group.write().await;
+            let g = group.recover_mut();
             g.set_total_length_atomic(10485760); // 10MB
             g.set_completed_length(5242880); // 5MB
         }
@@ -1190,12 +1190,12 @@ mod tests {
         assert_eq!(saved, 1);
 
         // Load back
-        let mut loaded: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let mut loaded: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
         let loaded_count = persistence.load_state(&mut loaded).await.unwrap();
         assert_eq!(loaded_count, 1);
 
         // Verify the loaded group has correct URIs
-        let restored = loaded[0].read().await;
+        let restored = loaded[0].read().unwrap();
         let uris = restored.uris();
         assert_eq!(uris.len(), 1);
         assert!(uris[0].contains("special_file.iso"));
@@ -1218,24 +1218,24 @@ mod tests {
         let persistence = SessionPersistence::new(&session_dir);
 
         // Create groups with different statuses
-        let mut groups: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let mut groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
 
         // Active download (should be saved)
         let active_gid = GroupId::new(1001);
-        let active_group = Arc::new(RwLock::new(RequestGroup::new(
+        let active_group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             active_gid,
             vec!["http://example.com/active.bin".to_string()],
             DownloadOptions::default(),
         )));
         {
-            let mut g = active_group.write().await;
-            g.start().await.unwrap(); // Set to Active status
+            let mut g = active_group.recover_mut();
+            g.start().unwrap(); // Set to Active status
         }
         groups.push(active_group);
 
         // Waiting download (should be saved)
         let waiting_gid = GroupId::new(1002);
-        let waiting_group = Arc::new(RwLock::new(RequestGroup::new(
+        let waiting_group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             waiting_gid,
             vec!["http://example.com/waiting.bin".to_string()],
             DownloadOptions::default(),
@@ -1245,14 +1245,14 @@ mod tests {
 
         // Completed download (should NOT be saved)
         let complete_gid = GroupId::new(1003);
-        let complete_group = Arc::new(RwLock::new(RequestGroup::new(
+        let complete_group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             complete_gid,
             vec!["http://example.com/complete.bin".to_string()],
             DownloadOptions::default(),
         )));
         {
-            let mut g = complete_group.write().await;
-            g.complete().await.unwrap(); // Set to Complete status
+            let mut g = complete_group.recover_mut();
+            g.complete().unwrap(); // Set to Complete status
         }
         groups.push(complete_group);
 
@@ -1419,7 +1419,7 @@ mod tests {
         );
 
         // Save session (includes cookies)
-        let groups: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
         let _saved = persistence_with_cookies.save_state(&groups).await.unwrap();
 
         // Verify cookies.json file was created
@@ -1431,7 +1431,7 @@ mod tests {
 
         // Load into new instance (without pre-set cookies)
         let mut persistence_new = SessionPersistence::new(&session_dir);
-        let mut loaded_groups: Vec<Arc<RwLock<RequestGroup>>> = Vec::new();
+        let mut loaded_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
         let _loaded = persistence_new
             .load_state(&mut loaded_groups)
             .await

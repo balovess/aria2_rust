@@ -17,7 +17,9 @@ pub const HTTP_SPEED_UPDATE_INTERVAL_MS: u64 = 500;
 pub const HTTP_DEFAULT_ERROR_CODE: u16 = 500;
 
 // HTTP client pool defaults (higher concurrency than per-download defaults)
-pub const HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST: usize = 16;
+// Increased from 16 to 64 to support high-concurrency multi-segment downloads
+// where 16+ connections to the same host is common (split=5 * max-connection=4 = 20)
+pub const HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST: usize = 64;
 pub const HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS: u64 = 300;
 
 // HTTP connection manager config defaults

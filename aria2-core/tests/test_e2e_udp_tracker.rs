@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
     AnnounceParams, AsyncUdpTrackerClient, UdpAction, UdpEvent, UdpTrackerClient,
 };

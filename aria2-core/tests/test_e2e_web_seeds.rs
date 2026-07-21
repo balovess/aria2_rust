@@ -3,6 +3,8 @@
 //! Tests that aria2-rust can download torrent pieces from HTTP web seeds
 //! when peer swarm is unavailable or insufficient.
 
+#![cfg(feature = "bittorrent")]
+
 mod e2e_helpers;
 
 use e2e_helpers::mock_http_server::MockHttpServer;

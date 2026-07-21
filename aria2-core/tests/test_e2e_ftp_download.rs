@@ -160,7 +160,7 @@ async fn test_e2e_ftp_request_group_progress_tracking() {
     )
     .expect("创建FtpDownloadCommand失败");
 
-    let progress_before = cmd.group().await.progress().await;
+    let progress_before = cmd.group().progress();
     assert!(
         (progress_before - 0.0).abs() < f64::EPSILON,
         "下载前进度应为0"
@@ -168,14 +168,14 @@ async fn test_e2e_ftp_request_group_progress_tracking() {
 
     cmd.execute().await.expect("FTP下载失败");
 
-    let progress_after = cmd.group().await.progress().await;
+    let progress_after = cmd.group().progress();
     assert!(
         (progress_after - 100.0).abs() < 1.0,
         "下载后进度应接近100%, got: {}",
         progress_after
     );
 
-    let status = cmd.group().await.status().await;
+    let status = cmd.group().status();
     assert!(status.is_completed());
 }
 

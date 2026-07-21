@@ -9,6 +9,8 @@
 //! - Multicast Group: 239.192.152.143:6771
 //! - Message Format: Hash: <info_hash>\nPort: <port>\nToken: <token>\n
 
+#![cfg(feature = "bittorrent")]
+
 mod fixtures;
 use fixtures::mock_lpd_peer::{MockLpdPeer, MockLpdServer, make_test_info_hash};
 

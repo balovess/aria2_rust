@@ -31,6 +31,7 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 // Re-export protocol layer types for use in this module
 use aria2_protocol::sftp::connection::{HostKeyCheckingMode, SshConnection, SshError, SshOptions};
@@ -49,7 +50,7 @@ use aria2_protocol::sftp::session::SftpSession;
 /// and cleanup.
 pub struct SftpDownloadCommand {
     /// The request group that owns this download (tracks state, progress, etc.)
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
     /// Local filesystem path where the downloaded file will be written
     output_path: std::path::PathBuf,
     /// Whether the command has started executing (prevents double-start)
@@ -126,7 +127,7 @@ impl SftpDownloadCommand {
         );
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group: Arc::new(std::sync::RwLock::new(group)),
             output_path: path,
             started: false,
             completed_bytes: 0,
@@ -204,8 +205,8 @@ impl SftpDownloadCommand {
     }
 
     /// Get a read-only reference to the request group.
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 
     /// Build SshOptions from the command's stored credentials.
@@ -310,7 +311,7 @@ impl Command for SftpDownloadCommand {
         // Phase 0: Initialization
         // -----------------------------------------------------------------
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
@@ -411,8 +412,8 @@ impl Command for SftpDownloadCommand {
 
         // Update RequestGroup with total length
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(total_length).await;
+            let g = self.group.recover();
+            g.set_total_length(total_length);
         }
 
         // -----------------------------------------------------------------
@@ -434,7 +435,7 @@ impl Command for SftpDownloadCommand {
 
         // Apply rate limiting if configured
         let rate_limit = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.options().max_download_limit
         };
         let mut writer: Box<dyn DiskWriter> = match rate_limit {
@@ -504,15 +505,15 @@ impl Command for SftpDownloadCommand {
 
             // Update progress in RequestGroup
             {
-                let g = self.group.write().await;
-                g.update_progress(self.completed_bytes).await;
+                let g = self.group.recover();
+                g.update_progress(self.completed_bytes);
 
                 // Periodic speed calculation (every ~500ms)
                 let elapsed = last_speed_update.elapsed();
                 if elapsed.as_millis() >= constants::SFTP_SPEED_UPDATE_INTERVAL_MS as u128 {
                     let delta = self.completed_bytes - last_completed;
                     let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
-                    g.update_speed(speed, 0).await;
+                    g.update_speed(speed, 0);
                     last_speed_update = Instant::now();
                     last_completed = self.completed_bytes;
                 }
@@ -550,10 +551,12 @@ impl Command for SftpDownloadCommand {
 
         // Mark RequestGroup as complete
         {
-            let mut g = self.group.write().await;
-            g.update_progress(self.completed_bytes).await;
-            g.update_speed(final_speed, 0).await;
-            g.complete().await?;
+            let g = self.group.recover();
+            g.update_progress(self.completed_bytes);
+            g.update_speed(final_speed, 0);
+            drop(g);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         info!(
@@ -618,7 +621,7 @@ mod tests {
     #[test]
     fn test_build_ssh_options_without_password() {
         let cmd = SftpDownloadCommand {
-            group: Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+            group: Arc::new(std::sync::RwLock::new(RequestGroup::new(
                 GroupId::new(99),
                 vec!["sftp://user@host/file".to_string()],
                 DownloadOptions::default(),
@@ -712,7 +715,7 @@ mod tests {
     /// Helper to create a test command instance
     fn create_test_cmd() -> SftpDownloadCommand {
         SftpDownloadCommand {
-            group: Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+            group: Arc::new(std::sync::RwLock::new(RequestGroup::new(
                 GroupId::new(1),
                 vec!["sftp://testuser:secretpass@example.com:2222/path/to/file.zip".to_string()],
                 DownloadOptions::default(),

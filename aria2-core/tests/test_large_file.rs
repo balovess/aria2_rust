@@ -1,4 +1,6 @@
-use aria2_core::segment::{Bitfield, Segment};
+use aria2_core::segment::Segment;
+#[cfg(feature = "bittorrent")]
+use aria2_core::segment::Bitfield;
 use aria2_core::ui::ProgressBar;
 
 #[test]
@@ -25,6 +27,7 @@ fn test_segment_single_4gb_plus_range() {
     assert_eq!(seg.length(), 5u64 * 1024 * 1024 * 1024);
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_bitfield_large_index() {
     let mut bf = Bitfield::new(100000);

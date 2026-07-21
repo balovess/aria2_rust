@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![cfg(feature = "bittorrent")]
 
 //! DHT integration tests for aria2-core
 //!

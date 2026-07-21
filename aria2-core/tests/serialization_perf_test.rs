@@ -131,8 +131,10 @@ fn test_serialization_performance() {
     println!("\n3. Bencode Encoding Performance");
     println!("---------------------------------");
 
-    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
-    use std::collections::BTreeMap;
+    #[cfg(feature = "bittorrent")]
+    {
+        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+        use std::collections::BTreeMap;
 
     // Small dict
     let mut dict_small = BTreeMap::new();
@@ -224,6 +226,8 @@ fn test_serialization_performance() {
         format_duration(time)
     );
     println!("    Per operation: {:?}", time / 1000);
+
+    } // end #[cfg(feature = "bittorrent")]
 
     // Test Config parsing
     println!("\n5. Config Parsing Performance");

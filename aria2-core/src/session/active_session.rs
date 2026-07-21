@@ -3,10 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::RwLock;
-
 use super::session_serializer::{self, SessionEntry};
 use crate::request::request_group::RequestGroup;
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// 活跃会话管理器 - 负责会话的加载、保存和自动保存
 pub struct ActiveSessionManager {
@@ -92,13 +91,13 @@ impl ActiveSessionManager {
     /// - `Err(String)`: 保存失败时的错误信息
     pub async fn save_session(
         &self,
-        groups: &[Arc<RwLock<RequestGroup>>],
+        groups: &[Arc<std::sync::RwLock<RequestGroup>>],
     ) -> Result<usize, String> {
         // 序列化所有组为 SessionEntry 列表
         let mut entries = Vec::new();
         for group_lock in groups {
-            let group = group_lock.read().await;
-            if let Some(entry) = session_serializer::group_to_entry(&group).await {
+            let group = group_lock.recover();
+            if let Some(entry) = session_serializer::group_to_entry(&group) {
                 entries.push(entry);
             }
         }
@@ -150,7 +149,7 @@ impl ActiveSessionManager {
     /// - 此方法会启动一个无限循环的后台任务
     /// - 只有当 dirty flag 为 true 时才会执行保存操作
     /// - 保存成功后会清除 dirty flag
-    pub fn start_auto_save(self: &Arc<Self>, groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>>) {
+    pub fn start_auto_save(self: &Arc<Self>, groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>>) {
         let mgr = Arc::clone(self);
 
         tracing::info!(
@@ -239,14 +238,14 @@ mod tests {
             split: Some(4),
             ..Default::default()
         };
-        let group1 = Arc::new(RwLock::new(RequestGroup::new(
+        let group1 = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid1,
             vec!["http://example.com/file1.zip".to_string()],
             options1,
         )));
 
         let gid2 = GroupId::new(0xabcdef01);
-        let group2 = Arc::new(RwLock::new(RequestGroup::new(
+        let group2 = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid2,
             vec![
                 "http://mirror.com/file2.iso".to_string(),
@@ -318,7 +317,7 @@ mod tests {
             Duration::from_millis(50), // 短间隔以加速测试
         ));
 
-        let groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>> = Arc::new(RwLock::new(Vec::new()));
+        let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> = Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
         // 启动自动保存（此时 dirty=false）
         manager.start_auto_save(Arc::clone(&groups));
@@ -343,7 +342,7 @@ mod tests {
 
         // 创建测试组
         let gid = GroupId::new(12345);
-        let group = Arc::new(RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
             vec!["http://test.com/file.bin".to_string()],
             DownloadOptions::default(),
@@ -377,7 +376,7 @@ mod tests {
 
         // 第一次保存
         let gid1 = GroupId::new(1);
-        let group1 = Arc::new(RwLock::new(RequestGroup::new(
+        let group1 = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid1,
             vec!["http://first.com/a.txt".to_string()],
             DownloadOptions::default(),
@@ -387,7 +386,7 @@ mod tests {
 
         // 第二次保存不同的内容
         let gid2 = GroupId::new(2);
-        let group2 = Arc::new(RwLock::new(RequestGroup::new(
+        let group2 = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid2,
             vec!["http://second.com/b.txt".to_string()],
             DownloadOptions::default(),
@@ -421,7 +420,7 @@ mod tests {
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
         // 保存空列表
-        let empty_groups: Vec<Arc<RwLock<RequestGroup>>> = vec![];
+        let empty_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = vec![];
         let result = manager.save_session(&empty_groups).await;
 
         assert!(result.is_ok(), "保存空列表应成功");
@@ -449,14 +448,14 @@ mod tests {
 
         // 创建测试组
         let gid = GroupId::new(99999);
-        let group = Arc::new(RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
             vec!["http://auto-save-test.com/data.bin".to_string()],
             DownloadOptions::default(),
         )));
 
-        let groups: Arc<RwLock<Vec<Arc<RwLock<RequestGroup>>>>> =
-            Arc::new(RwLock::new(vec![group]));
+        let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> =
+            Arc::new(tokio::sync::RwLock::new(vec![group]));
 
         // 启动自动保存
         manager.start_auto_save(Arc::clone(&groups));

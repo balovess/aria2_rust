@@ -78,7 +78,7 @@ async fn test_add_uri_with_array_headers_stored_in_group() {
     let group_lock = man
         .group_by_hex(&gid)
         .expect("group should be registered in RequestGroupMan");
-    let g = group_lock.read().await;
+    let g = group_lock.read().unwrap();
     let opts = g.options();
 
     assert_eq!(
@@ -119,7 +119,7 @@ async fn test_add_uri_with_string_headers_stored_in_group() {
 
     let man = group_man.read().await;
     let group_lock = man.group_by_hex(&gid).expect("group should exist");
-    let g = group_lock.read().await;
+    let g = group_lock.read().unwrap();
     let opts = g.options();
 
     // Newline-separated string should be split into individual headers
@@ -156,8 +156,8 @@ async fn test_tell_status_returns_live_progress() {
     {
         let man = group_man.read().await;
         let group_lock = man.group_by_hex(&gid).unwrap();
-        let mut g = group_lock.write().await;
-        g.start().await.unwrap(); // Status → Active
+        let mut g = group_lock.write().unwrap();
+        g.start().unwrap(); // Status → Active
         g.set_total_length_atomic(10_000_000);
         g.set_completed_length(4_200_000);
         g.set_download_speed_cached(512_000);
@@ -207,11 +207,11 @@ async fn test_get_global_stat_aggregates_live_data() {
         let man = group_man.read().await;
         let g1 = man.group_by_hex(&gid1).unwrap();
         let g2 = man.group_by_hex(&gid2).unwrap();
-        let mut rg1 = g1.write().await;
-        rg1.start().await.unwrap();
+        let mut rg1 = g1.write().unwrap();
+        rg1.start().unwrap();
         rg1.set_download_speed_cached(300_000);
-        let mut rg2 = g2.write().await;
-        rg2.start().await.unwrap();
+        let mut rg2 = g2.write().unwrap();
+        rg2.start().unwrap();
         rg2.set_download_speed_cached(200_000);
     }
 
@@ -246,8 +246,8 @@ async fn test_tell_active_lists_active_downloads() {
     {
         let man = group_man.read().await;
         let g1 = man.group_by_hex(&gid1).unwrap();
-        let mut rg1 = g1.write().await;
-        rg1.start().await.unwrap();
+        let mut rg1 = g1.write().unwrap();
+        rg1.start().unwrap();
     }
 
     // tellActive should include both (is_active() returns true for Active AND Waiting)
@@ -284,8 +284,8 @@ async fn test_progress_changes_reflected_in_tell_status() {
     {
         let man = group_man.read().await;
         let g = man.group_by_hex(&gid).unwrap();
-        let mut rg = g.write().await;
-        rg.start().await.unwrap();
+        let mut rg = g.write().unwrap();
+        rg.start().unwrap();
         rg.set_total_length_atomic(1_000_000);
         rg.set_completed_length(100_000);
         rg.set_download_speed_cached(50_000);
@@ -303,7 +303,7 @@ async fn test_progress_changes_reflected_in_tell_status() {
     {
         let man = group_man.read().await;
         let g = man.group_by_hex(&gid).unwrap();
-        let rg = g.read().await; // atomic setters only need &self
+        let rg = g.read().unwrap(); // atomic setters only need &self
         rg.set_completed_length(500_000);
         rg.set_download_speed_cached(120_000);
     }

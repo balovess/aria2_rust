@@ -512,7 +512,7 @@ pub trait ResumeDataExt: Sized {
     /// * `Err(String)` - Extraction error with context
     fn from_request_group(
         group: &RequestGroup,
-    ) -> impl std::future::Future<Output = Result<Self, String>> + Send;
+    ) -> Result<Self, String>;
 
     /// Convert ResumeData back to restorable state components
     ///
@@ -591,7 +591,7 @@ pub struct MirrorRestoreInfo {
 }
 
 impl ResumeDataExt for ResumeData {
-    async fn from_request_group(group: &RequestGroup) -> Result<Self, String> {
+    fn from_request_group(group: &RequestGroup) -> Result<Self, String> {
         // Extract identity
         let gid = group.gid().to_hex_string();
 
@@ -613,8 +613,8 @@ impl ResumeDataExt for ResumeData {
         let completed_length = group.get_completed_length();
         let uploaded_length = group.get_uploaded_length();
 
-        // Extract status (async, requires lock)
-        let dl_status = group.status().await;
+        // Extract status (requires lock)
+        let dl_status = group.status();
         let status_str = match dl_status {
             DownloadStatus::Active => "active",
             DownloadStatus::Waiting => "waiting",
@@ -690,7 +690,7 @@ impl ResumeDataExt for ResumeData {
         }
 
         // Extract BT-specific fields
-        let bt_bitfield = group.get_bt_bitfield().await;
+        let bt_bitfield = group.get_bt_bitfield();
 
         // Determine if this is a BT download from URI pattern
         let is_bt = raw_uris
@@ -2240,7 +2240,6 @@ mod tests {
 
         // Extract resume data from the live RequestGroup
         let resume_data: ResumeData = <ResumeData as ResumeDataExt>::from_request_group(&group)
-            .await
             .expect("Extraction from RequestGroup should succeed");
 
         // Verify extraction produced valid data
@@ -2309,12 +2308,10 @@ mod tests {
         group.set_completed_length(536870912); // 512 MB
         group.set_uploaded_length(134217728); // 128 MB seeded
         group
-            .set_bt_bitfield(Some(vec![0xFF, 0xFF, 0x00, 0x00]))
-            .await;
+            .set_bt_bitfield(Some(vec![0xFF, 0xFF, 0x00, 0x00]));
 
         // Extract
         let resume_data: ResumeData = <ResumeData as ResumeDataExt>::from_request_group(&group)
-            .await
             .expect("BT extraction should succeed");
 
         // Verify BT detection

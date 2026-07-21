@@ -14,6 +14,7 @@ use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+#[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::rate_limiter::RateLimiterConfig;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
@@ -262,6 +263,7 @@ async fn engine_ftp_download_basic() {
 }
 
 /// D4: Metalink download via MetalinkDownloadCommand
+#[cfg(feature = "metalink")]
 ///
 /// Tests Metalink-based download which can mirror from multiple URLs.
 /// Uses a metalink XML document pointing to our mock HTTP server.
@@ -337,6 +339,7 @@ async fn engine_metalink_download_basic() {
 }
 
 /// D6: BT progress persistence (.aria2 control file creation)
+#[cfg(feature = "bittorrent")]
 ///
 /// Tests that BtDownloadCommand with BtProgressManager enabled
 /// creates progress tracking files during/after download.
@@ -442,6 +445,7 @@ async fn engine_bt_progress_persistence() {
 }
 
 /// D7: BT hook chain fires on completion
+#[cfg(feature = "bittorrent")]
 ///
 /// Tests that post-download hooks (MoveHook, TouchHook) are executed
 /// when a BT download completes.
@@ -657,6 +661,7 @@ async fn engine_error_cleanup_on_failure() {
 // ============================================================================
 
 /// D5: BitTorrent download with tracker
+#[cfg(feature = "bittorrent")]
 ///
 /// Tests full BT download workflow through DownloadEngine:
 /// - Creates BtDownloadCommand with torrent

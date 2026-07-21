@@ -10,10 +10,11 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// FTP download command that handles the complete download lifecycle
 pub struct FtpDownloadCommand {
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
     output_path: std::path::PathBuf,
     started: bool,
     completed_bytes: u64,
@@ -74,7 +75,7 @@ impl FtpDownloadCommand {
         );
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group: Arc::new(std::sync::RwLock::new(group)),
             output_path: path,
             started: false,
             completed_bytes: 0,
@@ -149,8 +150,8 @@ impl FtpDownloadCommand {
     }
 
     /// Get read access to the request group
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 
     /// Classify FTP response code to determine error handling strategy
@@ -593,7 +594,7 @@ impl Command for FtpDownloadCommand {
     /// Execute the FTP download with full lifecycle management
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
@@ -691,8 +692,8 @@ impl FtpDownloadCommand {
 
         // Update total length in request group
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(file_size.unwrap_or(0)).await;
+            let g = self.group.recover();
+            g.set_total_length(file_size.unwrap_or(0));
         }
 
         // Step 5: Set resume offset if applicable
@@ -746,7 +747,7 @@ impl FtpDownloadCommand {
         // Step 9: Setup disk writer with optional rate limiting
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
         let rate_limit = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.options().max_download_limit
         };
         let mut writer: Box<dyn DiskWriter> = if let Some(rate) = rate_limit.filter(|&r| r > 0) {
@@ -810,8 +811,8 @@ impl FtpDownloadCommand {
 
             // Update progress in request group
             {
-                let g = self.group.write().await;
-                g.update_progress(self.completed_bytes).await;
+                let g = self.group.recover();
+                g.update_progress(self.completed_bytes);
 
                 // Update speed calculation every 500ms
                 let elapsed = last_speed_update.elapsed();
@@ -822,7 +823,7 @@ impl FtpDownloadCommand {
                     } else {
                         0
                     };
-                    g.update_speed(speed, 0).await;
+                    g.update_speed(speed, 0);
                     last_speed_update = Instant::now();
                     last_completed = self.completed_bytes;
                 }
@@ -855,10 +856,12 @@ impl FtpDownloadCommand {
 
         // Update final status in request group
         {
-            let mut g = self.group.write().await;
-            g.update_progress(self.completed_bytes).await;
-            g.update_speed(final_speed, 0).await;
-            g.complete().await?;
+            let g = self.group.recover();
+            g.update_progress(self.completed_bytes);
+            g.update_speed(final_speed, 0);
+            drop(g);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         Ok(())

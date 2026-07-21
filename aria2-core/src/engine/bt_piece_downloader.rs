@@ -291,7 +291,7 @@ impl PieceDataProvider for FileBackedPieceProvider {
 struct CoalescedWrite {
     file_idx: usize,
     file_offset: u64,
-    data: Vec<u8>,
+    data: bytes::Bytes,
 }
 
 /// Maximum gap (in bytes) between two writes to the same file that will still
@@ -421,7 +421,7 @@ pub async fn write_piece_to_multi_files(
 pub async fn write_piece_to_multi_files_coalesced(
     layout: &MultiFileLayout,
     piece_idx: u32,
-    piece_data: &[u8],
+    piece_data: &bytes::Bytes,
     _piece_length: u32,
 ) -> Result<()> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -429,7 +429,9 @@ pub async fn write_piece_to_multi_files_coalesced(
     // ------------------------------------------------------------------
     // Phase 1: Collect all raw write operations
     // ------------------------------------------------------------------
-    let mut raw_writes: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+    // bytes::Bytes::slice() is zero-copy (just bumps the refcount),
+    // avoiding a full data clone for each file boundary.
+    let mut raw_writes: Vec<(usize, u64, bytes::Bytes)> = Vec::new();
     let mut data_offset = 0usize;
 
     while data_offset < piece_data.len() {
@@ -447,7 +449,7 @@ pub async fn write_piece_to_multi_files_coalesced(
                 raw_writes.push((
                     file_idx,
                     file_offset,
-                    piece_data[data_offset..data_offset + write_len].to_vec(),
+                    piece_data.slice(data_offset..data_offset + write_len),
                 ));
                 data_offset += write_len;
             } else {
@@ -466,19 +468,24 @@ pub async fn write_piece_to_multi_files_coalesced(
     // ------------------------------------------------------------------
     // Phase 3: Coalesce adjacent writes within COALESCE_GAP
     // ------------------------------------------------------------------
+    // For the common case (no coalescing needed), we keep the zero-copy
+    // bytes::Bytes slice. When coalescing is required, we switch to
+    // BytesMut for efficient concatenation, then freeze back to Bytes.
     let mut coalesced: Vec<CoalescedWrite> = Vec::new();
 
     for (file_idx, file_offset, data) in raw_writes {
         if let Some(last) = coalesced.last_mut() {
             let last_end = last.file_offset + last.data.len() as u64;
             if last.file_idx == file_idx && file_offset <= last_end + COALESCE_GAP {
-                // Extend or gap-fill then extend
+                // Need to concatenate — switch to BytesMut for this entry
+                let mut buf = bytes::BytesMut::from(last.data.as_ref());
                 if file_offset > last_end {
                     // Fill gap with zeros (sparse region)
-                    last.data
-                        .extend_from_slice(&vec![0u8; (file_offset - last_end) as usize]);
+                    let gap = (file_offset - last_end) as usize;
+                    buf.resize(buf.len() + gap, 0u8);
                 }
-                last.data.extend_from_slice(&data);
+                buf.extend_from_slice(&data);
+                last.data = buf.freeze();
                 continue;
             }
         }

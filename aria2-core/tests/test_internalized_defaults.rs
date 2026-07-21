@@ -93,7 +93,7 @@ async fn test_default_download_uses_progress_channel() {
     // Build a shared RequestGroup and keep an Arc clone for post-download
     // verification. The command receives its own clone; we do NOT move our
     // reference into it.
-    let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
         GroupId::new(1002),
         vec![url.clone()],
         DownloadOptions::default(),
@@ -116,7 +116,7 @@ async fn test_default_download_uses_progress_channel() {
     // The aggregator applies channel updates to the group's atomic
     // completed_length mirror. After execute() returns (which drains the
     // aggregator), completed_length must reflect the downloaded bytes.
-    let completed = { group_for_assertion.read().await.get_completed_length() };
+    let completed = { group_for_assertion.read().unwrap().get_completed_length() };
     assert_eq!(
         completed,
         1024 * 1024,

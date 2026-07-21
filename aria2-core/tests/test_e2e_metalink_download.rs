@@ -1,3 +1,5 @@
+#![cfg(feature = "metalink")]
+
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
@@ -177,18 +179,18 @@ async fn test_e2e_metalink_progress_tracking() {
     )
     .expect("创建MetalinkDownloadCommand失败");
 
-    let progress_before = cmd.group().await.progress().await;
+    let progress_before = cmd.group().progress();
     assert!((progress_before - 0.0).abs() < 1.0, "下载前进度应为0%");
 
     cmd.execute().await.expect("Metalink下载失败");
 
-    let progress_after = cmd.group().await.progress().await;
+    let progress_after = cmd.group().progress();
     assert!(
         (progress_after - 100.0).abs() < 1.0,
         "下载后进度应接近100%, got: {}",
         progress_after
     );
 
-    let status = cmd.group().await.status().await;
+    let status = cmd.group().status();
     assert!(status.is_completed());
 }

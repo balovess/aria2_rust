@@ -8,6 +8,12 @@ use aria2::app::App;
 use aria2::app::cli::{CliArgs, Commands};
 use clap::{CommandFactory, Parser};
 
+// Use mimalloc as the global allocator for better multi-threaded throughput.
+// On Windows, the system allocator has higher lock contention under concurrent
+// allocations; mimalloc's per-thread caches significantly reduce this.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() {
     let cli = CliArgs::parse();

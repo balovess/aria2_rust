@@ -313,7 +313,6 @@ async fn setup_group_man_with_group() -> (Arc<RwLock<RequestGroupMan>>, String) 
                 vec!["http://example.com/file.bin".to_string()],
                 DownloadOptions::default(),
             )
-            .await
             .expect("add_group should succeed")
     };
     (man, gid.to_hex_string())
@@ -359,7 +358,7 @@ async fn test_change_option_propagates_to_running_group() {
         .await
         .group_by_id(gid)
         .expect("group should still exist");
-    let g = group.read().await;
+    let g = group.read().unwrap();
     assert_eq!(
         g.options().max_download_limit,
         Some(102400),

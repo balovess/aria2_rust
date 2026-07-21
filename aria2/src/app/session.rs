@@ -8,6 +8,7 @@
 use super::App;
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::session::active_session::ActiveSessionManager;
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -91,17 +92,17 @@ impl App {
             // Add group through RequestGroupMan
             {
                 let man = self.request_man.read().await;
-                match man.add_group(entry.uris.clone(), opts).await {
+                match man.add_group(entry.uris.clone(), opts) {
                     Ok(gid) => {
                         restored_count += 1;
                         info!("Successfully restored task #{}", gid.value());
 
                         // Store BT bitfield if present
                         if entry.bitfield.is_some()
-                            && let Some(group_lock) = man.get_group(gid).await
+                            && let Some(group_lock) = man.get_group(gid)
                         {
-                            let group = group_lock.write().await;
-                            *group.bt_bitfield.write().await = entry.bitfield.clone();
+                            let group = group_lock.recover_mut();
+                            *group.bt_bitfield.recover_mut() = entry.bitfield.clone();
                             debug!(
                                 "Set BT bitfield for GID={}, bits={}",
                                 gid.value(),
@@ -154,7 +155,7 @@ impl App {
 
         // Get all active groups
         let man = self.request_man.read().await;
-        let groups = man.list_groups().await;
+        let groups = man.list_groups();
 
         if groups.is_empty() {
             info!("No active download tasks, skipping session save");

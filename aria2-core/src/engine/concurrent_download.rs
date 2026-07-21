@@ -13,19 +13,20 @@ use crate::engine::command::ProgressUpdate;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
-use crate::engine::http_segment_downloader::HttpSegmentDownloader;
+use crate::engine::http_segment_downloader::{HttpSegmentDownloader, WriteChunk};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
-use crate::request::request_group::RequestGroup;
+use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 type SegmentFetchFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = (
                     u32,
-                    std::result::Result<bytes::Bytes, crate::error::Aria2Error>,
+                    std::result::Result<u64, crate::error::Aria2Error>,
                 ),
             > + Send,
     >,
@@ -42,7 +43,9 @@ pub struct ConcurrentDownloader {
     headers: Vec<(String, String)>,
     cookie_helper: CookieHelper,
     progress_updater: ProgressUpdater,
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    /// Direct access to progress counters — avoids `RwLock` on the hot path.
+    progress: Arc<AtomicProgress>,
     mmap_threshold: u64,
     file_allocation: String,
 }
@@ -55,7 +58,8 @@ impl ConcurrentDownloader {
         headers: Vec<(String, String)>,
         cookie_helper: CookieHelper,
         progress_updater: ProgressUpdater,
-        group: Arc<tokio::sync::RwLock<RequestGroup>>,
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        progress: Arc<AtomicProgress>,
         mmap_threshold: u64,
         file_allocation: String,
     ) -> Self {
@@ -66,6 +70,7 @@ impl ConcurrentDownloader {
             cookie_helper,
             progress_updater,
             group,
+            progress,
             mmap_threshold,
             file_allocation,
         }
@@ -95,12 +100,10 @@ impl ConcurrentDownloader {
         max_retries_per_segment: u32,
     ) -> Result<ConcurrentDownloadResult> {
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(total_length).await;
-            g.set_total_length_atomic(total_length);
+            self.group.recover().set_total_length(total_length);
         }
 
-        let options = self.group.read().await.options().clone();
+        let options = self.group.recover().options_arc();
         let split = options.split.unwrap_or(1) as usize;
         let max_conn = options
             .max_connection_per_server
@@ -150,8 +153,8 @@ impl ConcurrentDownloader {
             .filter(|&r| r > 0)
             .map(|r| RateLimiter::new(&RateLimiterConfig::new(Some(r), None)));
         if let Some(ref limiter) = limiter {
-            let g = self.group.read().await;
-            g.set_rate_limiter(limiter.clone()).await;
+            let g = self.group.recover();
+            g.set_rate_limiter(limiter.clone());
         }
 
         let mut active: FuturesUnordered<SegmentFetchFuture> = FuturesUnordered::new();
@@ -167,6 +170,10 @@ impl ConcurrentDownloader {
         };
         let total_inflight_bytes = Arc::new(AtomicU64::new(initial_completed));
         let mut completed_bytes = initial_completed;
+
+        // Write channel: segment futures send chunks as they arrive,
+        // the main loop drains them to disk via tokio::select!
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
 
         loop {
             // Check whether the task was removed. This is the primary
@@ -184,12 +191,13 @@ impl ConcurrentDownloader {
                         let dl = HttpSegmentDownloader::new(&self.client);
                         let ch = cookie_hdr.clone();
                         let headers = self.headers.clone();
+                        let seg_write_tx = write_tx.clone();
                         active_segs.insert(seg_idx, offset);
 
                         // Create per-segment progress channel for real-time updates
                         let (seg_progress_tx, mut seg_progress_rx) =
                             mpsc::unbounded_channel::<ProgressUpdate>();
-                        let group_for_progress = Arc::clone(&self.group);
+                        let progress_for_listener = Arc::clone(&self.progress);
                         let total_inflight = Arc::clone(&total_inflight_bytes);
                         let seg_offset = offset;
                         let seg_reported_arc = Arc::new(AtomicU64::new(0));
@@ -213,8 +221,9 @@ impl ConcurrentDownloader {
                                     let total =
                                         total_inflight.fetch_add(delta, Ordering::Relaxed)
                                             + delta;
-                                    let g = group_for_progress.read().await;
-                                    g.set_completed_length(total);
+
+                                    // Lock-free progress update — no RwLock acquisition needed.
+                                    progress_for_listener.set_completed_length(total);
 
                                     // Update download speed at regular intervals
                                     speed_sample_bytes += delta;
@@ -223,7 +232,7 @@ impl ConcurrentDownloader {
                                         let speed = (speed_sample_bytes as f64
                                             / elapsed.as_secs_f64())
                                             as u64;
-                                        g.set_download_speed_cached(speed);
+                                        progress_for_listener.set_download_speed(speed);
                                         speed_sample_start = std::time::Instant::now();
                                         speed_sample_bytes = 0;
                                     }
@@ -235,13 +244,14 @@ impl ConcurrentDownloader {
 
                         let fut = Box::pin(async move {
                             let result = dl
-                                .download_range(
+                                .download_range_streaming(
                                     &url,
                                     offset,
                                     length,
                                     ch.as_deref(),
                                     &headers,
                                     Some(&seg_progress_tx),
+                                    &seg_write_tx,
                                 )
                                 .await;
                             // Drop sender to signal progress listener to stop
@@ -261,6 +271,18 @@ impl ConcurrentDownloader {
             }
 
             if active.is_empty() {
+                // Drain any remaining write chunks before checking completion
+                while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+                    if let Some(ref lim) = limiter {
+                        lim.acquire_download(data.len() as u64).await;
+                    }
+                    writer.write_bytes_at(offset, data).await.map_err(|e| {
+                        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                            "Write failed: {}",
+                            e
+                        )))
+                    })?;
+                }
                 if manager.is_complete() {
                     tracing::debug!("All segments complete");
                     break;
@@ -278,98 +300,144 @@ impl ConcurrentDownloader {
                 break;
             }
 
-            if let Some((seg_idx, result)) = active.next().await {
-                let _offset = active_segs.remove(&seg_idx).unwrap_or(0);
-
-                // Await the per-segment progress listener so all in-flight
-                // updates have been flushed before we reconcile the total.
-                if let Some(ph) = progress_handles.remove(&seg_idx) {
-                    let _ = ph.await;
+            // Drain any pending writes first (non-blocking)
+            while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+                if let Some(ref lim) = limiter {
+                    lim.acquire_download(data.len() as u64).await;
                 }
+                writer.write_bytes_at(offset, data).await.map_err(|e| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Write failed: {}",
+                        e
+                    )))
+                })?;
+            }
 
-                match result {
-                    Ok(data) => {
-                        let data_len = data.len();
+            // Use tokio::select! to drain writes concurrently while waiting
+            // for segment completions — prevents chunks from piling up in the
+            // channel while other segments are still downloading.
+            tokio::select! {
+                // A segment completed
+                Some((seg_idx, result)) = active.next() => {
+                    // Drain writes again after a segment completes
+                    while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
                         if let Some(ref lim) = limiter {
-                            lim.acquire_download(data_len as u64).await;
+                            lim.acquire_download(data.len() as u64).await;
                         }
-                        let data_for_manager = data.clone();
-                        writer.write_bytes_at(_offset, data).await.map_err(|e| {
+                        writer.write_bytes_at(offset, data).await.map_err(|e| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                                 "Write failed: {}",
                                 e
                             )))
                         })?;
-                        manager.complete_segment(seg_idx, data_for_manager);
-                        completed_bytes += data_len as u64;
-                        // The listener's progress is now committed; remove the
-                        // per-segment tracker so it does not accumulate stale
-                        // entries if the same seg_idx is reused on retry.
-                        seg_reported.remove(&seg_idx);
-
-                        // Note: we do NOT reset total_inflight_bytes here
-                        // because other segments may have in-flight progress
-                        // already accumulated via their listeners.  The atomic
-                        // tracks "bytes received" (for real-time display) while
-                        // completed_bytes tracks "bytes committed to disk".
-
-                        // Use the atomic total for progress updates so that
-                        // in-flight progress from concurrent segments is not
-                        // overwritten by the committed-only value.
-                        let display_total = total_inflight_bytes.load(Ordering::Relaxed);
-
-                        self.progress_updater
-                            .update_progress(
-                                display_total,
-                                constants::PROGRESS_UPDATE_BYTES as u64,
-                                constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
-                            )
-                            .await;
                     }
-                    Err(e) => {
-                        tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
-                        let is_416 = matches!(
-                            &e,
-                            Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. })
-                        );
-                        if is_416 {
-                            consecutive_416_count += 1;
-                            total_416_count += 1;
-                            tracing::warn!(
-                                seg_idx = seg_idx,
-                                consecutive_416 = consecutive_416_count,
-                                total_416 = total_416_count,
-                                "RangeNotSatisfiable (416) detected"
+
+                    let _offset = active_segs.remove(&seg_idx).unwrap_or(0);
+
+                    // Await the per-segment progress listener so all in-flight
+                    // updates have been flushed before we reconcile the total.
+                    if let Some(ph) = progress_handles.remove(&seg_idx) {
+                        let _ = ph.await;
+                    }
+
+                    match result {
+                        Ok(total_written) => {
+                            manager.complete_segment(seg_idx, total_written as usize);
+                            completed_bytes += total_written;
+                            // The listener's progress is now committed; remove the
+                            // per-segment tracker so it does not accumulate stale
+                            // entries if the same seg_idx is reused on retry.
+                            seg_reported.remove(&seg_idx);
+
+                            // Note: we do NOT reset total_inflight_bytes here
+                            // because other segments may have in-flight progress
+                            // already accumulated via their listeners.  The atomic
+                            // tracks "bytes received" (for real-time display) while
+                            // completed_bytes tracks "bytes committed to disk".
+
+                            // Use the atomic total for progress updates so that
+                            // in-flight progress from concurrent segments is not
+                            // overwritten by the committed-only value.
+                            let display_total = total_inflight_bytes.load(Ordering::Relaxed);
+
+                            self.progress_updater
+                                .update_progress(
+                                    display_total,
+                                    constants::PROGRESS_UPDATE_BYTES as u64,
+                                    constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
+                            let is_416 = matches!(
+                                &e,
+                                Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. })
                             );
-                            let failure_ratio = total_416_count as f64 / split as f64;
-                            let threshold_exceeded = consecutive_416_count
-                                >= fallback_threshold_consecutive
-                                || failure_ratio >= fallback_threshold_ratio;
-                            if threshold_exceeded {
+                            if is_416 {
+                                consecutive_416_count += 1;
+                                total_416_count += 1;
                                 tracing::warn!(
-                                    uri = uri,
+                                    seg_idx = seg_idx,
                                     consecutive_416 = consecutive_416_count,
-                                    failure_ratio = failure_ratio,
-                                    "Fallback to sequential mode triggered due to RangeNotSatisfiable errors"
+                                    total_416 = total_416_count,
+                                    "RangeNotSatisfiable (416) detected"
                                 );
-                                should_fallback = true;
-                                break;
+                                let failure_ratio = total_416_count as f64 / split as f64;
+                                let threshold_exceeded = consecutive_416_count
+                                    >= fallback_threshold_consecutive
+                                    || failure_ratio >= fallback_threshold_ratio;
+                                if threshold_exceeded {
+                                    tracing::warn!(
+                                        uri = uri,
+                                        consecutive_416 = consecutive_416_count,
+                                        failure_ratio = failure_ratio,
+                                        "Fallback to sequential mode triggered due to RangeNotSatisfiable errors"
+                                    );
+                                    should_fallback = true;
+                                    break;
+                                }
+                            } else {
+                                consecutive_416_count = 0;
                             }
-                        } else {
-                            consecutive_416_count = 0;
-                        }
-                        // Roll back in-flight progress reported by this
-                        // segment's listener so the atomic does not overcount.
-                        if let Some(reported) = seg_reported.remove(&seg_idx) {
-                            let rollback = reported.load(Ordering::Relaxed);
-                            if rollback > 0 {
-                                total_inflight_bytes.fetch_sub(rollback, Ordering::Relaxed);
+                            // Roll back in-flight progress reported by this
+                            // segment's listener so the atomic does not overcount.
+                            if let Some(reported) = seg_reported.remove(&seg_idx) {
+                                let rollback = reported.load(Ordering::Relaxed);
+                                if rollback > 0 {
+                                    total_inflight_bytes.fetch_sub(rollback, Ordering::Relaxed);
+                                }
                             }
+                            manager.fail_segment(seg_idx);
                         }
-                        manager.fail_segment(seg_idx);
                     }
                 }
+                // A write chunk arrived while segments are still running
+                Some(WriteChunk { offset, data }) = write_rx.recv() => {
+                    if let Some(ref lim) = limiter {
+                        lim.acquire_download(data.len() as u64).await;
+                    }
+                    writer.write_bytes_at(offset, data).await.map_err(|e| {
+                        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                            "Write failed: {}",
+                            e
+                        )))
+                    })?;
+                }
             }
+        }
+
+        // Final drain: ensure all pending write chunks are flushed to disk
+        while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+            if let Some(ref lim) = limiter {
+                lim.acquire_download(data.len() as u64).await;
+            }
+            writer.write_bytes_at(offset, data).await.map_err(|e| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                    "Write failed: {}",
+                    e
+                )))
+            })?;
         }
 
         writer.flush().await.map_err(|e| {
@@ -389,8 +457,8 @@ impl ConcurrentDownloader {
         }
 
         let final_speed = {
-            let g = self.group.read().await;
-            let elapsed = g.elapsed_time().await;
+            let g = self.group.recover();
+            let elapsed = g.elapsed_time();
             match elapsed {
                 Some(d) if d.as_secs_f64() > 0.0 => {
                     (completed_bytes as f64 / d.as_secs_f64()) as u64
@@ -399,12 +467,11 @@ impl ConcurrentDownloader {
             }
         };
         {
-            let mut g = self.group.write().await;
-            g.update_progress(completed_bytes).await;
-            g.update_speed(final_speed, 0).await;
-            g.set_completed_length(completed_bytes);
-            g.set_download_speed_cached(final_speed);
-            g.complete().await?;
+            self.progress.set_completed_length(completed_bytes);
+            self.progress.set_download_speed(final_speed);
+            self.progress.set_upload_speed(0);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         tracing::info!(
@@ -425,12 +492,12 @@ impl ConcurrentDownloader {
     ) -> Result<ConcurrentDownloadResult> {
         tracing::info!(
             "Using concurrent download mode (split={}, max_retries/segment={})",
-            self.group.read().await.options().split.unwrap_or(1),
+            self.group.recover().options().split.unwrap_or(1),
             max_retries_per_segment
         );
 
         let all_uris: Vec<String> = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.uris().to_vec()
         };
 
@@ -459,12 +526,12 @@ impl ConcurrentDownloader {
         resume_state: &ResumeState,
         max_retries_per_segment: u32,
     ) -> Result<ConcurrentDownloadResult> {
-        let split = self.group.read().await.options().split.unwrap_or(1) as u64;
+        let split = self.group.recover().options().split.unwrap_or(1) as u64;
         let segment_size = total_length.div_ceil(split);
         let max_conn = self
             .group
             .read()
-            .await
+            .unwrap()
             .options()
             .max_connection_per_server
             .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
@@ -550,22 +617,25 @@ impl ConcurrentDownloader {
                     mpsc::unbounded_channel::<crate::engine::command::ProgressUpdate>();
 
                 // Spawn listener for per-chunk progress updates
-                let group_for_progress = Arc::clone(&self.group);
+                let progress_for_listener = Arc::clone(&self.progress);
                 let progress_handle = tokio::spawn(async move {
                     while let Some(update) = seg_progress_rx.recv().await {
-                        let g = group_for_progress.read().await;
-                        g.set_completed_length(update.completed_bytes);
+                        // Lock-free progress update — no RwLock acquisition needed.
+                        progress_for_listener.set_completed_length(update.completed_bytes);
                     }
                 });
 
+                let (write_tx, mut write_rx) =
+                    mpsc::unbounded_channel::<WriteChunk>();
                 let result = downloader
-                    .download_range(
+                    .download_range_streaming(
                         &mirror_url,
                         offset,
                         length,
                         cookie_hdr.as_deref(),
                         &self.headers,
                         Some(&seg_progress_tx),
+                        &write_tx,
                     )
                     .await;
 
@@ -573,11 +643,22 @@ impl ConcurrentDownloader {
                 drop(seg_progress_tx);
                 let _ = progress_handle.await;
 
+                // Drain all pending write chunks to disk — the download is
+                // complete so all chunks have been sent into the channel.
+                while let Ok(WriteChunk { offset: chunk_off, data }) = write_rx.try_recv() {
+                    writer.write_bytes_at(chunk_off, data).await.map_err(|e| {
+                        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                            "Write failed: {}",
+                            e
+                        )))
+                    })?;
+                }
+
                 match result {
-                    Ok(data) => {
+                    Ok(bytes_downloaded) => {
                         let elapsed = seg_start.elapsed();
                         let speed = if elapsed.as_secs_f64() > 0.0 {
-                            (data.len() as f64 / elapsed.as_secs_f64()) as u64
+                            (bytes_downloaded as f64 / elapsed.as_secs_f64()) as u64
                         } else {
                             0
                         };
@@ -585,22 +666,14 @@ impl ConcurrentDownloader {
                         tracing::debug!(
                             "Segment {} complete: {} bytes, speed={} B/s",
                             seg_idx,
-                            data.len(),
+                            bytes_downloaded,
                             speed
                         );
-
-                        let data_for_coordinator = data.clone();
-                        writer.write_bytes_at(offset, data).await.map_err(|e| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Write failed: {}",
-                                e
-                            )))
-                        })?;
 
                         coordinator.on_segment_complete(
                             mirror_idx,
                             seg_idx,
-                            data_for_coordinator,
+                            bytes_downloaded as usize,
                             speed,
                         );
                     }
@@ -692,8 +765,8 @@ impl ConcurrentDownloader {
         }
 
         let final_speed = {
-            let g = self.group.read().await;
-            let elapsed = g.elapsed_time().await;
+            let g = self.group.recover();
+            let elapsed = g.elapsed_time();
             match elapsed {
                 Some(d) if d.as_secs_f64() > 0.0 => {
                     (self.progress_updater.last_progress_update() as f64 / d.as_secs_f64()) as u64
@@ -703,14 +776,13 @@ impl ConcurrentDownloader {
         };
 
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(self.progress_updater.last_progress_update())
-                .await;
-            g.set_total_length_atomic(self.progress_updater.last_progress_update());
-            g.set_completed_length(self.progress_updater.last_progress_update());
-            g.update_speed(final_speed, 0).await;
-            g.set_download_speed_cached(final_speed);
-            g.complete().await?;
+            let last = self.progress_updater.last_progress_update();
+            self.progress.set_total_length(last);
+            self.progress.set_completed_length(last);
+            self.progress.set_download_speed(final_speed);
+            self.progress.set_upload_speed(0);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         tracing::info!(

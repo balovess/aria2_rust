@@ -157,7 +157,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
 
         let dir = std::env::temp_dir();

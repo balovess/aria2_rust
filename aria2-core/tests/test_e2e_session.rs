@@ -126,13 +126,12 @@ async fn test_e2e_atomic_write() {
             vec!["http://example.com/atomic_test.bin".into()],
             DownloadOptions::default(),
         )
-        .await
         .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_atomic_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups().await;
+    let groups = man.read().await.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     assert!(path.exists());
@@ -187,13 +186,12 @@ async fn test_e2e_full_roundtrip_file_io() {
                 ..Default::default()
             },
         )
-        .await
         .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_roundtrip_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups().await;
+    let groups = man.read().await.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     let loaded = load_from_file(&path).await.unwrap();
@@ -268,13 +266,12 @@ async fn test_e2e_full_options_roundtrip_file_io() {
                 ..Default::default()
             },
         )
-        .await
         .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_full_opts_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups().await;
+    let groups = man.read().await.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     let loaded = load_from_file(&path).await.unwrap();

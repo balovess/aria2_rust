@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 mod fixtures;
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
@@ -305,7 +307,7 @@ async fn test_e2e_bt_progress_tracking() {
     )
     .unwrap();
 
-    let progress_before = cmd.group().await.progress().await;
+    let progress_before = cmd.group().progress();
     assert!(
         (progress_before - 0.0).abs() < f64::EPSILON,
         "下载前进度应为0"
@@ -313,13 +315,13 @@ async fn test_e2e_bt_progress_tracking() {
 
     cmd.execute().await.expect("BT下载失败");
 
-    let progress_after = cmd.group().await.progress().await;
+    let progress_after = cmd.group().progress();
     assert!(
         (progress_after - 100.0).abs() < 1.0,
         "下载后进度应接近100%, got: {}",
         progress_after
     );
 
-    let status = cmd.group().await.status().await;
+    let status = cmd.group().status();
     assert!(status.is_completed());
 }

@@ -1026,12 +1026,13 @@ pub(crate) mod tests {
         layout.create_directories().unwrap();
 
         let piece_data: Vec<u8> = (0..=255u8).collect();
+        let piece_bytes = bytes::Bytes::from(piece_data.clone());
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             BtDownloadCommand::write_piece_to_multi_files_coalesced(
                 &layout,
                 0,
-                &piece_data,
+                &piece_bytes,
                 layout.piece_length(),
             ),
         )
@@ -1114,11 +1115,12 @@ pub(crate) mod tests {
 
         // Piece data that spans all three files (512 bytes total)
         let piece_data: Vec<u8> = (0..512u64).map(|i| (i % 251) as u8).collect();
+        let piece_bytes = bytes::Bytes::from(piece_data.clone());
 
         BtDownloadCommand::write_piece_to_multi_files_coalesced(
             &layout,
             0,
-            &piece_data,
+            &piece_bytes,
             layout.piece_length(),
         )
         .await
@@ -1164,6 +1166,7 @@ pub(crate) mod tests {
         };
 
         let piece_data: Vec<u8> = (0..384u64).map(|i| ((i * 7 + 13) % 256) as u8).collect();
+        let piece_bytes = bytes::Bytes::from(piece_data.clone());
 
         // --- Original writer ---
         let dir_orig = std::env::temp_dir().join(format!("cmp_orig_{}", std::process::id()));
@@ -1191,7 +1194,7 @@ pub(crate) mod tests {
         BtDownloadCommand::write_piece_to_multi_files_coalesced(
             &layout_coal,
             0,
-            &piece_data,
+            &piece_bytes,
             layout_coal.piece_length(),
         )
         .await

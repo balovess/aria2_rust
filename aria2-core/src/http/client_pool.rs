@@ -46,6 +46,7 @@ static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
         .tcp_keepalive(Some(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
         )))
+        .tcp_nodelay(true)
         .build()
         .expect("Failed to create global HTTP client");
 
@@ -85,6 +86,7 @@ pub fn create_custom_client(
         .tcp_keepalive(Some(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
         )))
+        .tcp_nodelay(true)
         .build()
         .expect("Failed to create custom HTTP client");
 

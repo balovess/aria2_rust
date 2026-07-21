@@ -6,6 +6,7 @@ use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use crate::engine::bt_upload_session::BtSeedingConfig;
 use crate::error::Result;
+use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
     pub async fn run_seeding_phase(
@@ -26,7 +27,7 @@ impl BtDownloadCommand {
             self.multi_file_layout.clone(),
         ));
 
-        let upload_limit = { self.group.read().await.options().max_upload_limit };
+        let upload_limit = { self.group.recover().options().max_upload_limit };
         let config = BtSeedingConfig {
             max_upload_bytes_per_sec: upload_limit,
             max_peers_to_unchoke: 4,

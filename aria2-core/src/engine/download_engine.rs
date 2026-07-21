@@ -19,6 +19,8 @@ use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::session::save_session_command::SaveSessionCommand;
 use crate::util::speed_smooth::SpeedSmoother;
+#[cfg(test)]
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// Bookkeeping the engine retains for each spawned command task so it can
 /// enforce per-command timeouts and abort stalled tasks individually.
@@ -139,7 +141,8 @@ impl DownloadEngine {
     /// progress channel in its constructor. External callers rarely need to
     /// invoke this directly.
     pub fn spawn_progress_aggregator(
-        group: Arc<RwLock<RequestGroup>>,
+        _group: Arc<std::sync::RwLock<RequestGroup>>,
+        progress: Arc<crate::request::request_group::AtomicProgress>,
         mut receiver: mpsc::UnboundedReceiver<ProgressUpdate>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -154,10 +157,8 @@ impl DownloadEngine {
                 let delta = update.completed_bytes - last_bytes;
                 smoother.record_bytes(delta);
 
-                let g = group.write().await;
-                // Always apply byte progress.
-                g.update_progress(update.completed_bytes).await;
-                g.set_completed_length(update.completed_bytes);
+                // Lock-free progress update — no RwLock acquisition needed.
+                progress.set_completed_length(update.completed_bytes);
 
                 // Speed: use EMA-smoothed speed when available; fall back to
                 // the sender's raw speed sample when the smoother hasn't
@@ -166,11 +167,11 @@ impl DownloadEngine {
                 // (e.g. from a prior update) is preserved.
                 let smoothed = smoother.smoothed_speed() as u64;
                 if smoothed > 0 {
-                    g.update_speed(smoothed, update.upload_speed).await;
-                    g.set_download_speed_cached(smoothed);
+                    progress.set_download_speed(smoothed);
+                    progress.set_upload_speed(update.upload_speed);
                 } else if update.download_speed > 0 {
-                    g.update_speed(update.download_speed, update.upload_speed).await;
-                    g.set_download_speed_cached(update.download_speed);
+                    progress.set_download_speed(update.download_speed);
+                    progress.set_upload_speed(update.upload_speed);
                 }
                 last_bytes = update.completed_bytes;
             }
@@ -644,10 +645,10 @@ mod tests {
     use crate::engine::command::ProgressUpdate;
     use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
-    /// Helper: build a fresh `RequestGroup` wrapped in an `Arc<RwLock<..>>`,
+    /// Helper: build a fresh `RequestGroup` wrapped in an `Arc<std::sync::RwLock<..>>`,
     /// the same shape `DownloadCommand` and the aggregator use.
-    fn make_group() -> Arc<RwLock<RequestGroup>> {
-        Arc::new(RwLock::new(RequestGroup::new(
+    fn make_group() -> Arc<std::sync::RwLock<RequestGroup>> {
+        Arc::new(std::sync::RwLock::new(RequestGroup::new(
             GroupId::new(1),
             vec!["http://example.com/file.bin".to_string()],
             DownloadOptions::default(),
@@ -664,7 +665,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
 
         // Send a sequence of strictly increasing updates.
         tx.send(ProgressUpdate {
@@ -688,7 +689,7 @@ mod tests {
         handle.await.expect("aggregator task should exit cleanly");
 
         // The atomic mirror is set by `set_completed_length`; verify final value.
-        let atomic_val = { group.read().await.get_completed_length() };
+        let atomic_val = { group.recover().get_completed_length() };
         assert_eq!(
             atomic_val, 5000,
             "aggregator should have applied the latest completed_bytes (5000)"
@@ -704,7 +705,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
 
         // First real update.
         tx.send(ProgressUpdate {
@@ -737,7 +738,7 @@ mod tests {
         drop(tx);
         handle.await.expect("aggregator task should exit cleanly");
 
-        let g = group.read().await;
+        let g = group.recover();
         assert_eq!(
             g.get_completed_length(),
             4096,
@@ -763,12 +764,12 @@ mod tests {
 
         // Seed the group with a known cached speed before starting the aggregator.
         {
-            let g = group.read().await;
+            let g = group.recover();
             g.set_download_speed_cached(5555);
         }
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
 
         // Advance bytes but send a 0 speed sample (no fresh measurement).
         tx.send(ProgressUpdate {
@@ -782,7 +783,7 @@ mod tests {
         drop(tx);
         handle.await.expect("aggregator task should exit cleanly");
 
-        let g = group.read().await;
+        let g = group.recover();
         assert_eq!(g.get_completed_length(), 8192, "bytes should advance");
         // The smoothed speed is always computed from the byte delta and
         // applied to the cached speed (replacing the seeded 5555).
@@ -800,7 +801,7 @@ mod tests {
         let group = make_group();
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
-        let handle = DownloadEngine::spawn_progress_aggregator(group, rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(group.clone(), group.recover().progress.clone(), rx);
 
         // Drop the only sender; the aggregator's `recv().await` returns None.
         drop(tx);
@@ -829,7 +830,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
 
         // Send a sequence of strictly increasing byte deltas, waiting long
         // enough between sends to cross the smoother's SAMPLE_INTERVAL_MS
@@ -837,7 +838,7 @@ mod tests {
         let deltas: [u64; 3] = [10000, 5000, 20000];
         for delta in &deltas {
             let current = {
-                let g = group.read().await;
+                let g = group.recover();
                 g.get_completed_length()
             };
             tx.send(ProgressUpdate {
@@ -859,7 +860,7 @@ mod tests {
         drop(tx);
         handle.await.expect("aggregator task should exit cleanly");
 
-        let g = group.read().await;
+        let g = group.recover();
         let final_speed = g.get_download_speed_cached();
 
         // The EMA-smoothed speed must be positive and finite after recording

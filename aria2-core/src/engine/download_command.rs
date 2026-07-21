@@ -23,12 +23,15 @@ use crate::http::client_pool;
 use crate::http::cookie::Cookie;
 use crate::http::cookie_storage::CookieStorage;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub struct DownloadCommand {
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    /// Direct access to progress counters — avoids `RwLock` on the hot path.
+    progress: Arc<AtomicProgress>,
     client: Arc<reqwest::Client>,
     output_path: std::path::PathBuf,
     started: bool,
@@ -57,7 +60,7 @@ impl DownloadCommand {
         output_dir: Option<&str>,
         output_name: Option<&str>,
     ) -> Result<Self> {
-        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
             vec![uri.to_string()],
             options.clone(),
@@ -66,12 +69,16 @@ impl DownloadCommand {
     }
 
     pub fn new_with_group(
-        group: Arc<tokio::sync::RwLock<RequestGroup>>,
+        group: Arc<std::sync::RwLock<RequestGroup>>,
         uri: &str,
         options: &DownloadOptions,
         output_dir: Option<&str>,
         output_name: Option<&str>,
     ) -> Result<Self> {
+        let progress = group
+            .try_read()
+            .map(|g| g.progress.clone())
+            .unwrap_or_else(|_| Arc::new(AtomicProgress::new()));
         let dir = output_dir
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
@@ -160,6 +167,7 @@ impl DownloadCommand {
 
         Ok(Self {
             group,
+            progress,
             client,
             output_path: path,
             started: false,
@@ -232,7 +240,7 @@ impl DownloadCommand {
         output_name: Option<&str>,
         client: Arc<reqwest::Client>,
     ) -> Result<Self> {
-        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
             vec![uri.to_string()],
             options.clone(),
@@ -241,13 +249,17 @@ impl DownloadCommand {
     }
 
     pub fn new_with_group_and_client(
-        group: Arc<tokio::sync::RwLock<RequestGroup>>,
+        group: Arc<std::sync::RwLock<RequestGroup>>,
         uri: &str,
         options: &DownloadOptions,
         output_dir: Option<&str>,
         output_name: Option<&str>,
         client: Arc<reqwest::Client>,
     ) -> Result<Self> {
+        let progress = group
+            .try_read()
+            .map(|g| g.progress.clone())
+            .unwrap_or_else(|_| Arc::new(AtomicProgress::new()));
         let dir = output_dir
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
@@ -276,6 +288,7 @@ impl DownloadCommand {
 
         Ok(Self {
             group,
+            progress,
             client,
             output_path: path,
             started: false,
@@ -337,6 +350,7 @@ impl DownloadCommand {
         if let Some(rx) = self.progress_receiver.take() {
             let handle = crate::engine::download_engine::DownloadEngine::spawn_progress_aggregator(
                 Arc::clone(&self.group),
+                Arc::clone(&self.progress),
                 rx,
             );
             self.progress_aggregator_handle = Some(handle);
@@ -378,12 +392,12 @@ impl DownloadCommand {
             .unwrap_or_else(|| constants::DEFAULT_HOST.to_string())
     }
 
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 
-    pub async fn group_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, RequestGroup> {
-        self.group.write().await
+    pub fn group_mut(&self) -> std::sync::RwLockWriteGuard<'_, RequestGroup> {
+        self.group.recover_mut()
     }
 
     pub fn no_proxy_matcher(&self) -> Option<&NoProxyMatcher> {
@@ -408,6 +422,7 @@ impl DownloadCommand {
         ProgressUpdater::new(
             self.progress_sender.clone(),
             Arc::clone(&self.group),
+            Arc::clone(&self.progress),
             Arc::clone(&self.atomic_metrics),
             self.perf_monitor.clone(),
         )
@@ -440,12 +455,12 @@ impl Command for DownloadCommand {
         self.check_cancelled()?;
 
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
         let uri = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.uris().first().cloned().unwrap_or_default()
         };
 
@@ -546,12 +561,13 @@ impl Command for DownloadCommand {
                 resume_state.existing_length
             );
             self.completed_bytes = resume_state.existing_length;
-            let mut g = self.group.write().await;
-            g.set_total_length(self.completed_bytes).await;
-            g.update_progress(self.completed_bytes).await;
-            g.set_total_length_atomic(self.completed_bytes);
+            let g = self.group.recover();
+            g.set_total_length(self.completed_bytes);
+            g.update_progress(self.completed_bytes);
             g.set_completed_length(self.completed_bytes);
-            g.complete().await?;
+            drop(g);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
             self.completed = true;
             release_path(&self.output_path);
             return Ok(());
@@ -582,7 +598,7 @@ impl Command for DownloadCommand {
                 .await?;
             }
 
-            let options = self.group.read().await.options().clone();
+            let options = self.group.recover().options_arc();
             let split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
 
             let cookie_helper = self.create_cookie_helper();
@@ -596,6 +612,7 @@ impl Command for DownloadCommand {
                     );
                 }
                 let max_retries = options.max_retries;
+                let progress_arc = Arc::clone(&self.progress);
                 let mut concurrent_downloader = ConcurrentDownloader::new(
                     Arc::clone(&self.client),
                     self.output_path.clone(),
@@ -603,6 +620,7 @@ impl Command for DownloadCommand {
                     cookie_helper.clone(),
                     progress_updater.clone(),
                     Arc::clone(&self.group),
+                    progress_arc,
                     self.mmap_threshold,
                     self.file_allocation.clone(),
                 );
@@ -626,6 +644,7 @@ impl Command for DownloadCommand {
                             cookie_helper,
                             progress_updater,
                             Arc::clone(&self.group),
+                            Arc::clone(&self.progress),
                         );
                         return sequential_downloader.execute_with_gaps_with_retry(
                             &uri,
@@ -646,6 +665,7 @@ impl Command for DownloadCommand {
                 cookie_helper,
                 progress_updater,
                 Arc::clone(&self.group),
+                Arc::clone(&self.progress),
             );
             sequential_downloader.execute_with_retry(
                 &uri,
@@ -660,58 +680,60 @@ impl Command for DownloadCommand {
 
         if download_result.is_ok() {
             // Verify checksum if configured
+            // Extract checksum config before any .await to avoid holding std::sync::RwLockReadGuard across await points
+            let checksum_config = {
+                let g = self.group.recover();
+                g.options().checksum.clone()
+            };
+            if let Some((ref algo, ref expected)) = checksum_config
+                && let Some(ht) = HashType::from_str(algo)
             {
-                let g = self.group.read().await;
-                if let Some((ref algo, ref expected)) = g.options().checksum
-                    && let Some(ht) = HashType::from_str(algo)
-                {
-                    let cs = Checksum::new(ht, expected)?;
-                    let file = tokio::fs::File::open(&self.output_path)
-                        .await
-                        .map_err(|e| {
-                            Aria2Error::Io(format!(
-                                "Failed to open file for checksum verification: {}",
-                                e
-                            ))
-                        })?;
-                    let mut reader = tokio::io::BufReader::with_capacity(65536, file);
-                    let mut validator = cs.create_validator();
-                    let mut buf = vec![0u8; 65536];
-                    loop {
-                        let n = reader.read(&mut buf).await.map_err(|e| {
-                            Aria2Error::Io(format!(
-                                "Read error during checksum verification: {}",
-                                e
-                            ))
-                        })?;
-                        if n == 0 {
-                            break;
-                        }
-                        validator.update(&buf[..n]);
+                let cs = Checksum::new(ht, expected)?;
+                let file = tokio::fs::File::open(&self.output_path)
+                    .await
+                    .map_err(|e| {
+                        Aria2Error::Io(format!(
+                            "Failed to open file for checksum verification: {}",
+                            e
+                        ))
+                    })?;
+                let mut reader = tokio::io::BufReader::with_capacity(65536, file);
+                let mut validator = cs.create_validator();
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    let n = reader.read(&mut buf).await.map_err(|e| {
+                        Aria2Error::Io(format!(
+                            "Read error during checksum verification: {}",
+                            e
+                        ))
+                    })?;
+                    if n == 0 {
+                        break;
                     }
-                    if !validator.finalize()? {
-                        tracing::error!(
-                            algo = %algo,
-                            path = %self.output_path.display(),
-                            "Checksum mismatch"
-                        );
-                        return Err(Aria2Error::Checksum(format!(
-                            "{} checksum mismatch for {}",
-                            algo,
-                            self.output_path.display()
-                        )));
-                    }
-                    tracing::info!(
+                    validator.update(&buf[..n]);
+                }
+                if !validator.finalize()? {
+                    tracing::error!(
                         algo = %algo,
                         path = %self.output_path.display(),
-                        "Checksum verified successfully"
+                        "Checksum mismatch"
                     );
+                    return Err(Aria2Error::Checksum(format!(
+                        "{} checksum mismatch for {}",
+                        algo,
+                        self.output_path.display()
+                    )));
                 }
+                tracing::info!(
+                    algo = %algo,
+                    path = %self.output_path.display(),
+                    "Checksum verified successfully"
+                );
             }
             self.completed = true;
-            let g = self.group.write().await;
+            let g = self.group.recover();
             let total = g.total_length();
-            g.update_progress(total).await;
+            g.update_progress(total);
             g.set_completed_length(total);
         }
         release_path(&self.output_path);
@@ -789,7 +811,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_progress_updates_flow_through_channel() {
-        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             GroupId::new(2),
             vec!["http://example.com/file.bin".to_string()],
             DownloadOptions::default(),
@@ -822,7 +844,7 @@ mod tests {
         assert!(!cmd.has_progress_sender());
         assert!(!cmd.has_progress_aggregator_handle());
 
-        let completed = { group_clone.read().await.get_completed_length() };
+        let completed = { group_clone.recover().get_completed_length() };
         assert_eq!(
             completed, 4096,
             "aggregator should have applied the progress update to RequestGroup"
@@ -834,7 +856,7 @@ mod tests {
     /// marked `Removed`.
     #[tokio::test]
     async fn test_check_cancelled_returns_ok_for_active_group() {
-        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             GroupId::new(10),
             vec!["http://example.com/file.bin".to_string()],
             DownloadOptions::default(),
@@ -858,7 +880,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_cancelled_returns_err_after_remove() {
-        let group = Arc::new(tokio::sync::RwLock::new(RequestGroup::new(
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             GroupId::new(11),
             vec!["http://example.com/file.bin".to_string()],
             DownloadOptions::default(),
@@ -876,8 +898,8 @@ mod tests {
         // Simulate `aria2.remove` / `aria2.forceRemove` which calls
         // RequestGroupMan::remove_group -> group.remove().
         {
-            let mut g = group.write().await;
-            g.remove().await.unwrap();
+            let mut g = group.recover_mut();
+            g.remove().unwrap();
         }
 
         let err = cmd.check_cancelled().expect_err(

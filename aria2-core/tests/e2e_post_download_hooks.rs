@@ -3,6 +3,8 @@
 //! Tests the complete hook system including MoveHook, RenameHook,
 //! and hook chain execution order.
 
+#![cfg(feature = "bittorrent")]
+
 mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;

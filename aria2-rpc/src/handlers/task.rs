@@ -14,6 +14,7 @@ use aria2_core::checksum::checksum::Checksum;
 use aria2_core::constants as core_constants;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 impl RpcEngine {
     /// Handle `aria2.addUri` - Add a new download task from URI(s).
@@ -201,7 +202,7 @@ impl RpcEngine {
         if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
             if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-                let _ = man.remove_group(gid_parsed).await;
+                let _ = man.remove_group(gid_parsed);
             }
         }
 
@@ -254,7 +255,7 @@ impl RpcEngine {
         if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
             if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-                let _ = man.pause_group(gid_parsed).await;
+                let _ = man.pause_group(gid_parsed);
             }
         }
 
@@ -289,7 +290,7 @@ impl RpcEngine {
         if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
             if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-                let _ = man.pause_group(gid_parsed).await;
+                let _ = man.pause_group(gid_parsed);
             }
         }
 
@@ -327,7 +328,7 @@ impl RpcEngine {
         if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
             if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-                let _ = man.unpause_group(gid_parsed).await;
+                let _ = man.unpause_group(gid_parsed);
             }
         }
 
@@ -383,7 +384,7 @@ impl RpcEngine {
             let man = group_man.read().await;
             for gid in &gids {
                 if let Some(gid_parsed) = GroupId::from_hex_string(gid) {
-                    let _ = man.remove_group(gid_parsed).await;
+                    let _ = man.remove_group(gid_parsed);
                 }
             }
         }
@@ -634,7 +635,6 @@ impl RpcEngine {
         if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
             let man = group_man.read().await;
             man.add_group_with_gid(gid, uris.clone(), dl_options.clone())
-                .await
                 .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
 
             let group = man.group_by_id(gid).ok_or_else(|| {
@@ -710,16 +710,16 @@ impl RpcEngine {
     /// Populates all available fields: progress, files, BT metadata, etc.
     /// This is the shared helper used by `get_status`, `tellActive`,
     /// `tellWaiting`, and `tellStopped`.
-    pub(crate) async fn build_status_from_group(
+    pub(crate) fn build_status_from_group(
         g: &aria2_core::request::request_group::RequestGroup,
         gid_hex: &str,
     ) -> StatusInfo {
-        let status = g.status().await;
+        let status = g.status();
         let total = g.get_total_length_atomic();
         let completed = g.get_completed_length();
         let dl_speed = g.get_download_speed_cached();
         let uploaded = g.get_uploaded_length();
-        let ul_speed = g.upload_speed().await;
+        let ul_speed = g.get_upload_speed_cached();
         let dir = g.options().dir.clone().unwrap_or_default();
         let uris: Vec<String> = g.uris().to_vec();
         let first_uri = uris.first().cloned().unwrap_or_default();
@@ -729,7 +729,7 @@ impl RpcEngine {
         let connections = g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16;
 
         // BT-specific fields: bitfield, piece length, num pieces, info hash
-        let bt_info_hash = g.get_bt_info_hash_hex_async().await;
+        let bt_info_hash = g.get_bt_info_hash_hex();
         let is_bt = bt_info_hash.is_some();
         let mut bt_bitfield = None;
         let mut bt_piece_length = None;
@@ -739,7 +739,7 @@ impl RpcEngine {
             bt_num_pieces = Some(np);
             bt_piece_length = Some(g.get_bt_piece_length() as u64);
             if np > 0 {
-                bt_bitfield = g.get_bt_bitfield().await
+                bt_bitfield = g.get_bt_bitfield()
                     .map(|bf| bf.iter().map(|b| format!("{:02x}", b)).collect::<String>());
             }
         }
@@ -795,8 +795,8 @@ impl RpcEngine {
         if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
             if let Some(group_lock) = man.group_by_hex(gid) {
-                let g = group_lock.read().await;
-                return Some(Self::build_status_from_group(&g, gid).await);
+                let g = group_lock.recover();
+                return Some(Self::build_status_from_group(&g, gid));
             }
         }
         // Fallback to tasks map (placeholder, for tests/no-engine mode)

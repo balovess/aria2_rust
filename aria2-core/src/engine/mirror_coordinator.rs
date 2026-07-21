@@ -174,14 +174,14 @@ impl MirrorCoordinator {
         &mut self,
         mirror_idx: usize,
         seg_idx: u32,
-        data: bytes::Bytes,
+        len: usize,
         bytes_per_sec: u64,
     ) -> bool {
         let is_multi = self.segment_manager.mirror_active_segments(mirror_idx) > 1;
 
         let success =
             self.segment_manager
-                .report_segment_complete(seg_idx, data, bytes_per_sec, is_multi);
+                .report_segment_complete(seg_idx, len, bytes_per_sec, is_multi);
 
         if success {
             // Check if we should rebalance connections
@@ -354,11 +354,6 @@ impl MirrorCoordinator {
         self.urls.len()
     }
 
-    /// Get the assembled data if download is complete.
-    pub fn assemble(&self) -> Option<Vec<u8>> {
-        self.segment_manager.assemble()
-    }
-
     /// Get the server statistics manager.
     pub fn stat_man(&self) -> &Arc<ServerStatMan> {
         &self.stat_man
@@ -468,7 +463,7 @@ mod tests {
         let success = coord.on_segment_complete(
             mirror_idx,
             seg_idx,
-            bytes::Bytes::from(vec![0xAB; 500_000]),
+            500_000,
             1_000_000,
         );
         assert!(success);
@@ -517,7 +512,7 @@ mod tests {
         coord.on_segment_complete(
             mirror_idx,
             seg_idx,
-            bytes::Bytes::from(vec![0xAB; 500_000]),
+            500_000,
             1_000_000,
         );
         assert!((coord.progress() - 50.0).abs() < 0.01);
@@ -527,30 +522,11 @@ mod tests {
         coord.on_segment_complete(
             mirror_idx2,
             seg_idx2,
-            bytes::Bytes::from(vec![0xCD; 500_000]),
+            500_000,
             1_000_000,
         );
         assert!((coord.progress() - 100.0).abs() < 0.01);
         assert!(coord.is_complete());
-    }
-
-    #[test]
-    fn test_assemble() {
-        let mut coord = create_test_coordinator();
-
-        // Not complete yet
-        assert!(coord.assemble().is_none());
-
-        // Complete all segments
-        let (m1, _, (s1, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(m1, s1, bytes::Bytes::from(vec![0xAB; 500_000]), 1_000_000);
-
-        let (m2, _, (s2, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(m2, s2, bytes::Bytes::from(vec![0xCD; 500_000]), 1_000_000);
-
-        // Now should be able to assemble
-        let data = coord.assemble().unwrap();
-        assert_eq!(data.len(), 1_000_000);
     }
 
     #[test]
@@ -697,7 +673,7 @@ mod tests {
         let success = coord.on_segment_complete(
             mirror_idx,
             seg_idx,
-            bytes::Bytes::from(vec![0xAB; 500_000]),
+            500_000,
             2_000_000,
         );
         assert!(success);

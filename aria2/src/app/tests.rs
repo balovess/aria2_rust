@@ -87,7 +87,7 @@ ftp://server.com/bigfile.bin
 
     // Verify RequestGroupMan has corresponding groups
     let man = app.request_man.read().await;
-    let group_count = man.count().await;
+    let group_count = man.count();
     assert_eq!(group_count, 3, "RequestGroupMan should have 3 groups");
 }
 
@@ -173,7 +173,7 @@ http://example.com/paused4.iso
     assert_eq!(count, 2, "Should only restore 2 non-completed entries");
 
     let man = app.request_man.read().await;
-    let group_count = man.count().await;
+    let group_count = man.count();
     assert_eq!(group_count, 2, "RequestGroupMan should have 2 groups");
 }
 
@@ -213,11 +213,9 @@ async fn test_save_session_on_shutdown() {
             vec!["http://example.com/file1.zip".to_string()],
             opts.clone(),
         )
-        .await
         .expect("Failed to add group 1");
 
         man.add_group(vec!["http://mirror.com/file2.iso".to_string()], opts)
-            .await
             .expect("Failed to add group 2");
     }
 
@@ -389,11 +387,11 @@ async fn test_bt_bitfield_preserved_on_restore() {
 
     // Verify bitfield is preserved in RequestGroup
     let man = app.request_man.read().await;
-    let groups = man.list_groups().await;
+    let groups = man.list_groups();
     assert_eq!(groups.len(), 1, "Should have 1 group");
 
-    let group = groups[0].read().await;
-    let bitfield = group.bt_bitfield.read().await;
+    let group = groups[0].read().unwrap();
+    let bitfield = group.bt_bitfield.read().unwrap();
     assert!(bitfield.is_some(), "BT bitfield should be preserved");
     assert_eq!(
         bitfield.as_ref().unwrap(),
@@ -490,6 +488,6 @@ http://example.com/new2.iso
     );
 
     let man = app.request_man.read().await;
-    let group_count = man.count().await;
+    let group_count = man.count();
     assert_eq!(group_count, 0, "Should not add any groups");
 }

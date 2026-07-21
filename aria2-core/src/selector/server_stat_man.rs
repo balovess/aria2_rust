@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use crate::selector::server_stat::{ServerStat, ServerStatSnapshot};
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// Container for serialized server statistics file.
 ///
@@ -48,7 +49,7 @@ impl ServerStatMan {
     }
 
     pub fn get_or_create(&self, host: &str) -> Arc<ServerStat> {
-        let mut map = self.stats.write().unwrap();
+        let mut map = self.stats.recover_mut();
         if let Some(stat) = map.get(host) {
             Arc::clone(stat)
         } else {
@@ -59,7 +60,7 @@ impl ServerStatMan {
     }
 
     pub fn find_stat(&self, host: &str) -> Option<Arc<ServerStat>> {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
         map.get(host).cloned()
     }
 
@@ -69,22 +70,22 @@ impl ServerStatMan {
     }
 
     pub fn get_all_stats(&self) -> Vec<Arc<ServerStat>> {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
         map.values().cloned().collect()
     }
 
     pub fn remove(&self, host: &str) {
-        let mut map = self.stats.write().unwrap();
+        let mut map = self.stats.recover_mut();
         map.remove(host);
     }
 
     pub fn count(&self) -> usize {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
         map.len()
     }
 
     pub fn hosts(&self) -> Vec<String> {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
         map.keys().cloned().collect()
     }
 
@@ -93,7 +94,7 @@ impl ServerStatMan {
     /// Clones the existing ServerStat, applies failure info via set_failure_info,
     /// and replaces the entry in the map so all future Arc holders see the update.
     pub fn mark_failure(&self, host: &str, error_code: u16) {
-        let mut map = self.stats.write().unwrap();
+        let mut map = self.stats.recover_mut();
         if let Some(stat_arc) = map.get(host) {
             // Dereference Arc to get inner ServerStat, then clone the inner value
             let inner: &ServerStat = stat_arc;
@@ -132,7 +133,7 @@ impl ServerStatMan {
     /// println!("Saved {} servers", saved);
     /// ```
     pub fn save_to_file(&self, path: &Path) -> Result<usize, String> {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
 
         let servers: Vec<ServerStatSnapshot> =
             map.values().map(|stat| stat.to_snapshot()).collect();
@@ -197,7 +198,7 @@ impl ServerStatMan {
             .map_err(|e| format!("Invalid server stat file format: {}", e))?;
 
         let count = file_content.servers.len();
-        let mut map = self.stats.write().unwrap();
+        let mut map = self.stats.recover_mut();
 
         for snapshot in file_content.servers {
             let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
@@ -223,7 +224,7 @@ impl ServerStatMan {
     pub async fn save_to_file_async(&self, path: &Path) -> Result<usize, String> {
         let path = path.to_path_buf();
         let snapshots: Vec<ServerStatSnapshot> = {
-            let map = self.stats.read().unwrap();
+            let map = self.stats.recover();
             map.values().map(|stat| stat.to_snapshot()).collect()
         };
 
@@ -272,7 +273,7 @@ impl ServerStatMan {
             .map_err(|e| format!("Invalid server stat file format: {}", e))?;
 
         let count = file_content.servers.len();
-        let mut map = self.stats.write().unwrap();
+        let mut map = self.stats.recover_mut();
         for snapshot in file_content.servers {
             let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
             map.insert(snapshot.host, stat);

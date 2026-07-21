@@ -10,10 +10,11 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::metalink::parser::UrlEntry;
 
 pub struct MetalinkDownloadCommand {
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
     client: reqwest::Client,
     output_path: std::path::PathBuf,
     started: bool,
@@ -85,7 +86,7 @@ impl MetalinkDownloadCommand {
         );
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group: Arc::new(std::sync::RwLock::new(group)),
             client,
             output_path: path,
             started: false,
@@ -95,8 +96,8 @@ impl MetalinkDownloadCommand {
         })
     }
 
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 }
 
@@ -104,7 +105,7 @@ impl MetalinkDownloadCommand {
 impl Command for MetalinkDownloadCommand {
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
@@ -180,7 +181,7 @@ impl Command for MetalinkDownloadCommand {
 
                     let raw_writer = DefaultDiskWriter::new(&resolved_output_path);
                     let rate_limit = {
-                        let g = self.group.read().await;
+                        let g = self.group.recover();
                         g.options().max_download_limit
                     };
                     let mut writer: Box<dyn DiskWriter> = match rate_limit {
@@ -196,10 +197,12 @@ impl Command for MetalinkDownloadCommand {
                     self.completed_bytes = data.len() as u64;
 
                     {
-                        let mut g = self.group.write().await;
-                        g.update_progress(self.completed_bytes).await;
-                        g.update_speed(self.completed_bytes, 0).await;
-                        g.complete().await?;
+                        let g = self.group.recover();
+                        g.update_progress(self.completed_bytes);
+                        g.update_speed(self.completed_bytes, 0);
+                        drop(g);
+                        let mut g = self.group.recover_mut();
+                        g.complete()?;
                     }
 
                     info!(
@@ -273,9 +276,8 @@ impl MetalinkDownloadCommand {
             .unwrap_or(0);
 
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(total_length.max(expected_size.unwrap_or(0)))
-                .await;
+            let g = self.group.recover();
+            g.set_total_length(total_length.max(expected_size.unwrap_or(0)));
         }
 
         let mut data = Vec::with_capacity(total_length as usize);
@@ -297,9 +299,9 @@ impl MetalinkDownloadCommand {
             if elapsed.as_millis() >= 500 {
                 let delta = self.completed_bytes - last_completed;
                 let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
-                let g = self.group.write().await;
-                g.update_progress(self.completed_bytes).await;
-                g.update_speed(speed, 0).await;
+                let g = self.group.recover();
+                g.update_progress(self.completed_bytes);
+                g.update_speed(speed, 0);
                 last_speed_update = Instant::now();
                 last_completed = self.completed_bytes;
             }

@@ -70,7 +70,7 @@
 //!         ..Default::default()
 //!     };
 //!
-//!     match man.add_group(vec!["http://example.com/file.zip".into()], opts).await {
+//!     match man.add_group(vec!["http://example.com/file.zip".into()], opts) {
 //!         Ok(gid) => println!("Started: #{}", gid.value()),
 //!         Err(e) => eprintln!("Error: {}", e),
 //!     }

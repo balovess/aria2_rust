@@ -46,10 +46,10 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{DownloadStatus, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 // Re-export core types from session_entry module
 pub use super::session_entry::{
@@ -73,10 +73,9 @@ pub use super::session_entry::{
 ///
 /// # Note
 ///
-/// This function extracts information from both synchronous fields and
-/// async methods on the RequestGroup.
-pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
-    let status = group.status().await;
+/// This function extracts information from synchronous fields and methods on the RequestGroup.
+pub fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
+    let status = group.status();
 
     match status {
         DownloadStatus::Complete | DownloadStatus::Removed | DownloadStatus::Error(_) => None,
@@ -113,13 +112,13 @@ pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
                 _ => None,
             };
 
-            // Get BT bitfield if available (async operation)
-            let bitfield = group.get_bt_bitfield().await;
+            // Get BT bitfield if available
+            let bitfield = group.get_bt_bitfield();
 
             // Get BT metadata fields (Task 5: session persistence enhancement)
             let num_pieces = group.get_bt_num_pieces();
             let piece_length = group.get_bt_piece_length();
-            let info_hash_hex = group.get_bt_info_hash_hex_async().await;
+            let info_hash_hex = group.get_bt_info_hash_hex();
 
             Some(SessionEntry {
                 gid,
@@ -168,7 +167,7 @@ pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
 ///
 /// # Arguments
 ///
-/// * `groups` - Slice of Arc<RwLock<RequestGroup>> references
+/// * `groups` - Slice of Arc<std::sync::RwLock<RequestGroup>> references
 ///
 /// # Returns
 ///
@@ -184,20 +183,20 @@ pub async fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
 /// ```rust,no_run
 /// use aria2_core::session::session_serializer::serialize_groups;
 /// use std::sync::Arc;
-/// use tokio::sync::RwLock;
+/// use std::sync::RwLock;
 ///
 /// #[tokio::main]
 /// async fn main() {
 ///     let groups: Vec<Arc<RwLock<aria2_core::request::request_group::RequestGroup>>> = vec![];
-///     let _content = serialize_groups(&groups).await.unwrap();
+///     let _content = serialize_groups(&groups).unwrap();
 /// }
 /// ```
-pub async fn serialize_groups(groups: &[Arc<RwLock<RequestGroup>>]) -> Result<String> {
+pub fn serialize_groups(groups: &[Arc<std::sync::RwLock<RequestGroup>>]) -> Result<String> {
     let mut output = String::new();
 
     for group_lock in groups {
-        let group = group_lock.read().await;
-        if let Some(entry) = group_to_entry(&group).await {
+        let group = group_lock.recover();
+        if let Some(entry) = group_to_entry(&group) {
             output.push_str(&entry.serialize());
             output.push('\n');
         }
@@ -348,7 +347,7 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 /// # Arguments
 ///
 /// * `path` - Target path for the session file
-/// * `groups` - Slice of Arc<RwLock<RequestGroup>> references to serialize
+/// * `groups` - Slice of Arc<std::sync::RwLock<RequestGroup>> references to serialize
 ///
 /// # Returns
 ///
@@ -372,7 +371,7 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 /// use aria2_core::session::session_serializer::save_to_file;
 /// use std::path::Path;
 /// use std::sync::Arc;
-/// use tokio::sync::RwLock;
+/// use std::sync::RwLock;
 ///
 /// #[tokio::main]
 /// async fn main() {
@@ -381,8 +380,8 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 ///     save_to_file(path, &groups).await.unwrap();
 /// }
 /// ```
-pub async fn save_to_file(path: &Path, groups: &[Arc<RwLock<RequestGroup>>]) -> Result<()> {
-    let content = serialize_groups(groups).await?;
+pub async fn save_to_file(path: &Path, groups: &[Arc<std::sync::RwLock<RequestGroup>>]) -> Result<()> {
+    let content = serialize_groups(groups)?;
     let tmp_path = path.with_extension("sess.tmp");
 
     tokio::fs::write(&tmp_path, &content).await.map_err(|e| {

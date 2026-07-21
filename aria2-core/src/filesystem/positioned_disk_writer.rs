@@ -182,11 +182,20 @@ impl SeekableDiskWriter for PositionedDiskWriter {
 
     async fn flush(&mut self) -> Result<()> {
         let guard = self.lock_file()?;
-        if let Some(ref file) = *guard {
-            // sync_all (fsync) ensures durability. pwrite already placed data
-            // in the kernel page cache (visible to other readers); sync_all
-            // forces it to stable storage.
-            file.sync_all()?;
+        if let Some(ref _file) = *guard {
+            // Do NOT call sync_all (fsync) here — that is only needed on
+            // close/finalize to guarantee durability. The download hot path
+            // calls flush() to push data from the write-back cache to the
+            // kernel page cache (via pwrite), and sync_all would force a
+            // disk barrier on every cache flush, drastically reducing
+            // throughput on SSDs and especially HDDs.
+            //
+            // pwrite already places data in the kernel page cache where it
+            // is visible to other readers and safe from process crashes.
+            // sync_all is deferred to `close()`.
+            //
+            // If callers need explicit durability (e.g., session save),
+            // they should call `close()` instead of `flush()`.
         }
         Ok(())
     }
@@ -204,6 +213,21 @@ impl SeekableDiskWriter for PositionedDiskWriter {
 
     fn path(&self) -> &Path {
         &self.path
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        let guard = self.lock_file()?;
+        if let Some(ref file) = *guard {
+            // Ensure all buffered data reaches stable storage before closing.
+            // This is the ONLY place sync_all (fsync) is called — the hot-path
+            // flush() intentionally skips it for throughput.
+            file.sync_all()?;
+        }
+        // Drop the file handle by taking it out of the Option
+        drop(guard);
+        let mut guard = self.lock_file()?;
+        *guard = None;
+        Ok(())
     }
 }
 

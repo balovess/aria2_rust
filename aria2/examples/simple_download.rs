@@ -93,7 +93,7 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         ..Default::default()
     };
 
-    match man.add_group(vec![uri.to_string()], download_opts).await {
+    match man.add_group(vec![uri.to_string()], download_opts) {
         Ok(gid) => vec![gid.value()],
         Err(e) => {
             eprintln!("添加任务失败: {}", e);

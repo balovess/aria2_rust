@@ -21,12 +21,12 @@ use tokio::sync::RwLock;
 /// Measure download throughput (bytes/sec) over a `window` by polling
 /// `RequestGroup::get_completed_length()` (lock-free atomic read).
 async fn measure_speed(
-    group: &Arc<RwLock<aria2_core::request::request_group::RequestGroup>>,
+    group: &Arc<std::sync::RwLock<aria2_core::request::request_group::RequestGroup>>,
     window: Duration,
 ) -> u64 {
-    let start_bytes = group.read().await.get_completed_length();
+    let start_bytes = group.read().unwrap().get_completed_length();
     tokio::time::sleep(window).await;
-    let end_bytes = group.read().await.get_completed_length();
+    let end_bytes = group.read().unwrap().get_completed_length();
     let delta = end_bytes.saturating_sub(start_bytes);
     ((delta as f64) / window.as_secs_f64()) as u64
 }
@@ -48,13 +48,13 @@ async fn rpc_change_option(engine: &RpcEngine, gid_hex: &str, options: serde_jso
 /// consumed before we begin measuring — otherwise the burst inflates the
 /// first speed sample.
 async fn wait_until_progress(
-    group: &Arc<RwLock<aria2_core::request::request_group::RequestGroup>>,
+    group: &Arc<std::sync::RwLock<aria2_core::request::request_group::RequestGroup>>,
     threshold: u64,
     timeout: Duration,
 ) -> u64 {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let bytes = group.read().await.get_completed_length();
+        let bytes = group.read().unwrap().get_completed_length();
         if bytes >= threshold {
             return bytes;
         }
@@ -89,7 +89,6 @@ async fn test_e2e_rpc_change_option_increases_download_rate() {
         .read()
         .await
         .add_group_with_gid(gid, vec![url.clone()], options.clone())
-        .await
         .unwrap();
     let gid_hex = gid.to_hex_string();
     let group = group_man
@@ -182,7 +181,6 @@ async fn test_e2e_rpc_change_option_to_unlimited() {
         .read()
         .await
         .add_group_with_gid(gid, vec![url.clone()], options.clone())
-        .await
         .unwrap();
     let gid_hex = gid.to_hex_string();
     let group = group_man
@@ -212,7 +210,7 @@ async fn test_e2e_rpc_change_option_to_unlimited() {
     println!("Speed at 100 KB/s limit: {} bytes/s", speed_limited);
 
     // Record bytes just before the rate change.
-    let bytes_before = group.read().await.get_completed_length();
+    let bytes_before = group.read().unwrap().get_completed_length();
 
     // Call aria2.changeOption via RPC to set unlimited (0 = unlimited).
     rpc_change_option(&engine, &gid_hex, json!({"max-download-limit": 0})).await;
@@ -223,7 +221,7 @@ async fn test_e2e_rpc_change_option_to_unlimited() {
     // speed burst. If the download already completed during this window, the
     // delta will still be large (proving the unlimited rate works).
     let speed_unlimited = measure_speed(&group, Duration::from_secs(2)).await;
-    let bytes_after = group.read().await.get_completed_length();
+    let bytes_after = group.read().unwrap().get_completed_length();
     println!(
         "Speed unlimited: {} bytes/s (bytes {} -> {})",
         speed_unlimited, bytes_before, bytes_after

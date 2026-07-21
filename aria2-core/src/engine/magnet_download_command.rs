@@ -7,9 +7,10 @@ use crate::engine::command::{Command, CommandStatus};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub struct MagnetDownloadCommand {
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
     magnet_uri: String,
     output_path: std::path::PathBuf,
     started: bool,
@@ -52,7 +53,7 @@ impl MagnetDownloadCommand {
         );
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group: Arc::new(std::sync::RwLock::new(group)),
             magnet_uri: magnet_uri.to_string(),
             output_path: path,
             started: false,
@@ -61,8 +62,8 @@ impl MagnetDownloadCommand {
         })
     }
 
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 
     /// BEP 0027 (Private Torrent) enforcement after metadata exchange.
@@ -113,7 +114,7 @@ impl MagnetDownloadCommand {
 impl Command for MagnetDownloadCommand {
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
@@ -135,8 +136,8 @@ impl Command for MagnetDownloadCommand {
             })?;
         }
 
-        let enable_dht = { self.group.read().await.options().enable_dht };
-        let dht_port = { self.group.read().await.options().dht_listen_port };
+        let enable_dht = { self.group.recover().options().enable_dht };
+        let dht_port = { self.group.recover().options().dht_listen_port };
 
         if enable_dht && self.dht_engine.is_none() {
             let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
@@ -204,7 +205,7 @@ impl Command for MagnetDownloadCommand {
 
         use crate::engine::bt_download_command::BtDownloadCommand;
         let mut bt_cmd = BtDownloadCommand::new(
-            self.group.read().await.gid(),
+            self.group.recover().gid(),
             &torrent_bytes,
             &DownloadOptions::default(),
             self.output_path.parent().and_then(|p| p.to_str()),
@@ -216,7 +217,7 @@ impl Command for MagnetDownloadCommand {
             engine.shutdown();
         }
 
-        self.completed_bytes = self.group.read().await.total_length();
+        self.completed_bytes = self.group.recover().total_length();
 
         info!("Magnet download complete: {}", self.output_path.display());
         Ok(())

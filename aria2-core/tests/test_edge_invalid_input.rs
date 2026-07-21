@@ -4,7 +4,9 @@
 
 mod fixtures;
 
+#[cfg(feature = "bittorrent")]
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
+#[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::validation::protocol_detector::detect;
@@ -133,6 +135,7 @@ fn test_invalid_uri_with_null_byte() {
 // Corrupted Torrent File Tests
 // =============================================================================
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_corrupted_torrent_random_bytes() {
     let corrupted: Vec<u8> = vec![0x00, 0xFF, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56];
@@ -148,6 +151,7 @@ fn test_corrupted_torrent_random_bytes() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_corrupted_torrent_partial_bencode() {
     // Incomplete bencode - starts with 'd' but invalid structure
@@ -164,6 +168,7 @@ fn test_corrupted_torrent_partial_bencode() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_corrupted_torrent_missing_info() {
     // Valid bencode structure but missing required 'info' key
@@ -180,6 +185,7 @@ fn test_corrupted_torrent_missing_info() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_corrupted_torrent_invalid_announce() {
     // Torrent with invalid announce URL
@@ -194,6 +200,7 @@ fn test_corrupted_torrent_invalid_announce() {
     let _ = result;
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_corrupted_torrent_negative_length() {
     // Torrent with negative file length (invalid)
@@ -209,6 +216,7 @@ fn test_corrupted_torrent_negative_length() {
     let _ = result;
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_corrupted_torrent_zero_pieces() {
     // Torrent with empty pieces hash
@@ -225,6 +233,7 @@ fn test_corrupted_torrent_zero_pieces() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_corrupted_torrent_truncated() {
     // Truncated torrent file
@@ -273,6 +282,7 @@ fn test_corrupted_torrent_json_content() {
 // Corrupted Metalink File Tests
 // =============================================================================
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_random_bytes() {
     let corrupted: Vec<u8> = vec![0x00, 0xFF, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56];
@@ -288,6 +298,7 @@ fn test_corrupted_metalink_random_bytes() {
     );
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_malformed_xml() {
     // Malformed XML - unclosed tags
@@ -305,6 +316,7 @@ fn test_corrupted_metalink_malformed_xml() {
     );
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_missing_files() {
     // Metalink without files element
@@ -323,6 +335,7 @@ fn test_corrupted_metalink_missing_files() {
     );
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_empty_file_name() {
     // Metalink with empty file name
@@ -337,6 +350,7 @@ fn test_corrupted_metalink_empty_file_name() {
     let _ = result;
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_negative_size() {
     // Metalink with negative file size
@@ -351,6 +365,7 @@ fn test_corrupted_metalink_negative_size() {
     let _ = result;
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_invalid_url() {
     // Metalink with invalid URL
@@ -365,6 +380,7 @@ fn test_corrupted_metalink_invalid_url() {
     let _ = result;
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_truncated() {
     // Truncated metalink file
@@ -379,6 +395,7 @@ fn test_corrupted_metalink_truncated() {
     assert!(result.is_err(), "Truncated metalink should return error");
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_corrupted_metalink_wrong_namespace() {
     // Metalink with wrong namespace
@@ -533,6 +550,7 @@ fn test_multiple_invalid_uris_no_panic() {
     }
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_multiple_corrupted_torrents_no_panic() {
     let corrupted_torrents: Vec<Vec<u8>> = vec![
@@ -559,6 +577,7 @@ fn test_multiple_corrupted_torrents_no_panic() {
     }
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_multiple_corrupted_metalinks_no_panic() {
     let corrupted_metalinks: Vec<Vec<u8>> = vec![
@@ -629,6 +648,7 @@ fn test_very_long_uri() {
     let _ = result;
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_very_long_torrent_info() {
     // Create a torrent with very long announce URL
@@ -651,6 +671,7 @@ fn test_very_long_torrent_info() {
     let _ = result;
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_very_long_metalink_url() {
     let long_url = format!("http://example.com/{}", "a".repeat(10000));

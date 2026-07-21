@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
 use crate::segment::Segment;
+use crate::util::rwlock_ext::RwLockRecover;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DownloadStatus {
@@ -341,24 +341,74 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     "seed-ratio",
 ];
 
+/// Lock-free progress tracking for a download task.
+///
+/// Extracted from `RequestGroup` so that the hot-path download code can
+/// update progress via `Arc<AtomicProgress>` without acquiring the outer
+/// `RwLock<RequestGroup>`. All fields are atomic — no locking required.
+pub struct AtomicProgress {
+    completed_length: AtomicU64,
+    total_length: AtomicU64,
+    download_speed: AtomicU64,
+    upload_speed: AtomicU64,
+}
+
+impl AtomicProgress {
+    pub fn new() -> Self {
+        Self {
+            completed_length: AtomicU64::new(0),
+            total_length: AtomicU64::new(0),
+            download_speed: AtomicU64::new(0),
+            upload_speed: AtomicU64::new(0),
+        }
+    }
+
+    pub fn completed_length(&self) -> u64 {
+        self.completed_length.load(Ordering::Relaxed)
+    }
+
+    pub fn set_completed_length(&self, v: u64) {
+        self.completed_length.store(v, Ordering::Relaxed);
+    }
+
+    pub fn total_length(&self) -> u64 {
+        self.total_length.load(Ordering::Relaxed)
+    }
+
+    pub fn set_total_length(&self, v: u64) {
+        self.total_length.store(v, Ordering::Relaxed);
+    }
+
+    pub fn download_speed(&self) -> u64 {
+        self.download_speed.load(Ordering::Relaxed)
+    }
+
+    pub fn set_download_speed(&self, v: u64) {
+        self.download_speed.store(v, Ordering::Relaxed);
+    }
+
+    pub fn upload_speed(&self) -> u64 {
+        self.upload_speed.load(Ordering::Relaxed)
+    }
+
+    pub fn set_upload_speed(&self, v: u64) {
+        self.upload_speed.store(v, Ordering::Relaxed);
+    }
+}
+
 pub struct RequestGroup {
     gid: GroupId,
     uris: Vec<String>,
-    options: DownloadOptions,
-    status: Arc<RwLock<DownloadStatus>>,
-    segments: Arc<RwLock<Vec<Segment>>>,
-    total_length: u64,
-    completed_length: Arc<RwLock<u64>>,
-    download_speed: Arc<RwLock<u64>>,
-    upload_speed: Arc<RwLock<u64>>,
-    start_time: Arc<RwLock<Option<std::time::Instant>>>,
-    end_time: Arc<RwLock<Option<std::time::Instant>>>,
-    // New progress tracking fields (for session persistence)
-    pub completed_length_atomic: AtomicU64,
-    pub total_length_atomic: AtomicU64,
+    options: Arc<DownloadOptions>,
+    status: std::sync::RwLock<DownloadStatus>,
+    segments: std::sync::RwLock<Vec<Segment>>,
+    start_time: std::sync::RwLock<Option<std::time::Instant>>,
+    end_time: std::sync::RwLock<Option<std::time::Instant>>,
+    /// Lock-free progress counters shared via `Arc` so the hot-path download
+    /// code can update progress without acquiring the outer `RwLock`.
+    pub progress: Arc<AtomicProgress>,
     pub uploaded_length: AtomicU64,
-    pub download_speed_cached: AtomicU64,
-    pub bt_bitfield: RwLock<Option<Vec<u8>>>,
+    pub bt_bitfield: std::sync::RwLock<Option<Vec<u8>>>,
 
     // BT metadata fields (for session persistence enhancement)
     /// Number of pieces in the torrent (0 for non-BT downloads)
@@ -366,7 +416,6 @@ pub struct RequestGroup {
     /// Size of each piece in bytes (0 for non-BT downloads)
     pub bt_piece_length: AtomicU32,
     /// Info hash hex string for torrent identification (None for non-BT downloads)
-    /// Uses std::sync::RwLock instead of tokio::sync::RwLock for non-async access
     pub bt_info_hash_hex: std::sync::RwLock<Option<String>>,
 
     /// Handle to the download's `RateLimiter` so that runtime option updates
@@ -374,7 +423,7 @@ pub struct RequestGroup {
     /// `None` until the download engine wires up a `ThrottledWriter`.
     /// Uses its own `RwLock` (independent of the `RequestGroupMan` write lock)
     /// so that `set_rate_limiter` can take `&self`.
-    pub rate_limiter: RwLock<Option<RateLimiter>>,
+    pub rate_limiter: std::sync::RwLock<Option<RateLimiter>>,
 }
 
 impl RequestGroup {
@@ -384,21 +433,14 @@ impl RequestGroup {
         RequestGroup {
             gid,
             uris,
-            options,
-            status: Arc::new(RwLock::new(DownloadStatus::Waiting)),
-            segments: Arc::new(RwLock::new(Vec::new())),
-            total_length: 0,
-            completed_length: Arc::new(RwLock::new(0)),
-            download_speed: Arc::new(RwLock::new(0)),
-            upload_speed: Arc::new(RwLock::new(0)),
-            start_time: Arc::new(RwLock::new(None)),
-            end_time: Arc::new(RwLock::new(None)),
-            // Initialize new progress tracking fields
-            completed_length_atomic: AtomicU64::new(0),
-            total_length_atomic: AtomicU64::new(0),
+            options: Arc::new(options),
+            status: std::sync::RwLock::new(DownloadStatus::Waiting),
+            segments: std::sync::RwLock::new(Vec::new()),
+            start_time: std::sync::RwLock::new(None),
+            end_time: std::sync::RwLock::new(None),
+            progress: Arc::new(AtomicProgress::new()),
             uploaded_length: AtomicU64::new(0),
-            download_speed_cached: AtomicU64::new(0),
-            bt_bitfield: RwLock::new(None),
+            bt_bitfield: std::sync::RwLock::new(None),
 
             // Initialize BT metadata fields (default to 0/None for non-BT downloads)
             bt_num_pieces: AtomicU32::new(0),
@@ -407,13 +449,13 @@ impl RequestGroup {
 
             // Rate limiter is wired up later by the download engine via
             // `set_rate_limiter` once a `ThrottledWriter` is constructed.
-            rate_limiter: RwLock::new(None),
+            rate_limiter: std::sync::RwLock::new(None),
         }
     }
 
-    pub async fn start(&mut self) -> Result<()> {
-        let mut status = self.status.write().await;
-        let mut start_time = self.start_time.write().await;
+    pub fn start(&mut self) -> Result<()> {
+        let mut status = self.status.recover_mut();
+        let mut start_time = self.start_time.recover_mut();
 
         *status = DownloadStatus::Active;
         *start_time = Some(std::time::Instant::now());
@@ -422,8 +464,8 @@ impl RequestGroup {
         Ok(())
     }
 
-    pub async fn pause(&mut self) -> Result<()> {
-        let mut status = self.status.write().await;
+    pub fn pause(&mut self) -> Result<()> {
+        let mut status = self.status.recover_mut();
 
         if matches!(*status, DownloadStatus::Active) {
             *status = DownloadStatus::Paused;
@@ -433,9 +475,9 @@ impl RequestGroup {
         Ok(())
     }
 
-    pub async fn remove(&mut self) -> Result<()> {
-        let mut status = self.status.write().await;
-        let mut end_time = self.end_time.write().await;
+    pub fn remove(&mut self) -> Result<()> {
+        let mut status = self.status.recover_mut();
+        let mut end_time = self.end_time.recover_mut();
 
         *status = DownloadStatus::Removed;
         *end_time = Some(std::time::Instant::now());
@@ -444,23 +486,22 @@ impl RequestGroup {
         Ok(())
     }
 
-    pub async fn complete(&mut self) -> Result<()> {
-        let mut status = self.status.write().await;
-        let mut end_time = self.end_time.write().await;
-        let mut completed_length = self.completed_length.write().await;
+    pub fn complete(&mut self) -> Result<()> {
+        let mut status = self.status.recover_mut();
+        let mut end_time = self.end_time.recover_mut();
 
+        let total = self.progress.total_length();
         *status = DownloadStatus::Complete;
         *end_time = Some(std::time::Instant::now());
-        *completed_length = self.total_length;
-        self.completed_length_atomic.store(self.total_length, Ordering::Relaxed);
+        self.progress.set_completed_length(total);
 
         info!("Completing download task #{}", self.gid.value());
         Ok(())
     }
 
-    pub async fn error(&mut self, err: impl Into<String>) -> Result<()> {
-        let mut status = self.status.write().await;
-        let mut end_time = self.end_time.write().await;
+    pub fn error(&mut self, err: impl Into<String>) -> Result<()> {
+        let mut status = self.status.recover_mut();
+        let mut end_time = self.end_time.recover_mut();
 
         *status = DownloadStatus::Error(err.into());
         *end_time = Some(std::time::Instant::now());
@@ -469,8 +510,8 @@ impl RequestGroup {
         Ok(())
     }
 
-    pub async fn status(&self) -> DownloadStatus {
-        self.status.read().await.clone()
+    pub fn status(&self) -> DownloadStatus {
+        self.status.recover().clone()
     }
 
     /// Non-blocking check whether this group has been marked as `Removed`.
@@ -504,6 +545,12 @@ impl RequestGroup {
         &self.options
     }
 
+    /// Cheap clone of the options `Arc` — O(1) refcount bump instead of
+    /// deep-cloning all `Vec<String>` fields.
+    pub fn options_arc(&self) -> Arc<DownloadOptions> {
+        Arc::clone(&self.options)
+    }
+
     /// Store a handle to the download's `RateLimiter` so that runtime option
     /// updates (e.g. via `aria2.changeOption`) can dynamically adjust the rate.
     /// The `RateLimiter` is `Clone` and shares `Arc<RateLimiterInner>`, so both
@@ -511,8 +558,8 @@ impl RequestGroup {
     ///
     /// Takes `&self` because `rate_limiter` has its own `RwLock`, independent
     /// of the `RequestGroupMan` outer write lock.
-    pub async fn set_rate_limiter(&self, limiter: RateLimiter) {
-        *self.rate_limiter.write().await = Some(limiter);
+    pub fn set_rate_limiter(&self, limiter: RateLimiter) {
+        *self.rate_limiter.recover_mut() = Some(limiter);
     }
 
     /// Update a single runtime-changeable option by key (using aria2's
@@ -526,11 +573,15 @@ impl RequestGroup {
     /// lock. For `max-download-limit` / `max-upload-limit`, the stored
     /// `RateLimiter` (if any) is also updated so the change takes effect
     /// immediately on the live download.
-    pub async fn update_option(&mut self, key: &str, value: serde_json::Value) -> bool {
+    pub fn update_option(&mut self, key: &str, value: serde_json::Value) -> bool {
+        // Use Arc::make_mut for copy-on-write: if the Arc is uniquely held,
+        // this mutates in place (zero alloc); otherwise it clones the inner
+        // value first (rare — only when options_arc() was called before).
+        let opts = Arc::make_mut(&mut self.options);
         match key {
             "split" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.split = Some(v as u16);
+                    opts.split = Some(v as u16);
                     tracing::warn!(
                         new_split = v,
                         "split changed but will take effect on download restart/retry, \
@@ -541,29 +592,29 @@ impl RequestGroup {
             }
             "max-download-limit" => {
                 let rate = value.as_u64();
-                self.options.max_download_limit = rate;
-                if let Some(ref limiter) = *self.rate_limiter.read().await {
+                opts.max_download_limit = rate;
+                if let Some(ref limiter) = *self.rate_limiter.recover() {
                     limiter.set_download_rate(rate);
                 }
                 true
             }
             "max-upload-limit" => {
                 let rate = value.as_u64();
-                self.options.max_upload_limit = rate;
-                if let Some(ref limiter) = *self.rate_limiter.read().await {
+                opts.max_upload_limit = rate;
+                if let Some(ref limiter) = *self.rate_limiter.recover() {
                     limiter.set_upload_rate(rate);
                 }
                 true
             }
             "max-retries" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.max_retries = v as u32;
+                    opts.max_retries = v as u32;
                 }
                 true
             }
             "retry-wait" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.retry_wait = v;
+                    opts.retry_wait = v;
                 }
                 true
             }
@@ -572,13 +623,13 @@ impl RequestGroup {
                 // string (matching aria2's wire format).
                 match &value {
                     serde_json::Value::Array(arr) => {
-                        self.options.header = arr
+                        opts.header = arr
                             .iter()
                             .filter_map(|v| v.as_str().map(|s| s.to_string()))
                             .collect();
                     }
                     serde_json::Value::String(s) => {
-                        self.options.header = s
+                        opts.header = s
                             .split('\n')
                             .map(|l| l.trim().to_string())
                             .filter(|l| !l.is_empty())
@@ -589,52 +640,52 @@ impl RequestGroup {
                 true
             }
             "user-agent" => {
-                self.options.user_agent = value.as_str().map(|s| s.to_string());
+                opts.user_agent = value.as_str().map(|s| s.to_string());
                 true
             }
             "referer" => {
-                self.options.referer = value.as_str().map(|s| s.to_string());
+                opts.referer = value.as_str().map(|s| s.to_string());
                 true
             }
             "max-connection-per-server" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.max_connection_per_server = Some(v as u16);
+                    opts.max_connection_per_server = Some(v as u16);
                 }
                 true
             }
             "bt-max-upload-slots" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.bt_max_upload_slots = Some(v as u32);
+                    opts.bt_max_upload_slots = Some(v as u32);
                 }
                 true
             }
             "bt-snubbed-timeout" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.bt_snubbed_timeout = Some(v);
+                    opts.bt_snubbed_timeout = Some(v);
                 }
                 true
             }
             "bt-optimistic-unchoke-interval" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.bt_optimistic_unchoke_interval = Some(v);
+                    opts.bt_optimistic_unchoke_interval = Some(v);
                 }
                 true
             }
             "bt-endgame-threshold" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.bt_endgame_threshold = v as u32;
+                    opts.bt_endgame_threshold = v as u32;
                 }
                 true
             }
             "seed-time" => {
                 if let Some(v) = value.as_u64() {
-                    self.options.seed_time = Some(v);
+                    opts.seed_time = Some(v);
                 }
                 true
             }
             "seed-ratio" => {
                 if let Some(v) = value.as_f64() {
-                    self.options.seed_ratio = Some(v);
+                    opts.seed_ratio = Some(v);
                 }
                 true
             }
@@ -643,31 +694,29 @@ impl RequestGroup {
     }
 
     pub fn total_length(&self) -> u64 {
-        self.total_length
+        self.progress.total_length()
     }
 
-    pub async fn set_total_length(&mut self, length: u64) {
-        self.total_length = length;
+    pub fn set_total_length(&self, length: u64) {
+        self.progress.set_total_length(length);
         debug!("Setting total length: {} bytes", length);
     }
 
-    pub async fn completed_length(&self) -> u64 {
-        *self.completed_length.read().await
+    pub fn completed_length(&self) -> u64 {
+        self.progress.completed_length()
     }
 
-    pub async fn update_completed_length(&self, length: u64) {
-        let mut completed_length = self.completed_length.write().await;
-        *completed_length = length;
+    pub fn update_completed_length(&self, length: u64) {
+        self.progress.set_completed_length(length);
     }
 
-    pub async fn update_progress(&self, completed_length: u64) {
-        let mut cl = self.completed_length.write().await;
-        *cl = completed_length;
+    pub fn update_progress(&self, completed_length: u64) {
+        self.progress.set_completed_length(completed_length);
     }
 
-    pub async fn progress(&self) -> f64 {
-        let total = self.total_length;
-        let completed = *self.completed_length.read().await;
+    pub fn progress(&self) -> f64 {
+        let total = self.progress.total_length();
+        let completed = self.progress.completed_length();
 
         if total == 0 {
             0.0
@@ -676,41 +725,39 @@ impl RequestGroup {
         }
     }
 
-    pub async fn download_speed(&self) -> u64 {
-        *self.download_speed.read().await
+    pub fn download_speed(&self) -> u64 {
+        self.progress.download_speed()
     }
 
-    pub async fn upload_speed(&self) -> u64 {
-        *self.upload_speed.read().await
+    pub fn upload_speed(&self) -> u64 {
+        self.progress.upload_speed()
     }
 
-    pub async fn update_speed(&self, dl_speed: u64, ul_speed: u64) {
-        let mut ds = self.download_speed.write().await;
-        let mut us = self.upload_speed.write().await;
-        *ds = dl_speed;
-        *us = ul_speed;
+    pub fn update_speed(&self, dl_speed: u64, ul_speed: u64) {
+        self.progress.set_download_speed(dl_speed);
+        self.progress.set_upload_speed(ul_speed);
     }
 
-    pub async fn add_segment(&mut self, segment: Segment) {
-        let mut segments = self.segments.write().await;
+    pub fn add_segment(&mut self, segment: Segment) {
+        let mut segments = self.segments.recover_mut();
         segments.push(segment);
         debug!("Adding segment, current segments: {}", segments.len());
     }
 
-    pub async fn segments(&self) -> Vec<Segment> {
-        self.segments.read().await.clone()
+    pub fn segments(&self) -> Vec<Segment> {
+        self.segments.recover().clone()
     }
 
-    pub async fn elapsed_time(&self) -> Option<std::time::Duration> {
-        let start = *self.start_time.read().await;
+    pub fn elapsed_time(&self) -> Option<std::time::Duration> {
+        let start = *self.start_time.recover();
         start.map(|t| t.elapsed())
     }
 
-    pub async fn eta(&self) -> Option<std::time::Duration> {
-        let speed = *self.download_speed.read().await;
-        let remaining = self
-            .total_length
-            .saturating_sub(*self.completed_length.read().await);
+    pub fn eta(&self) -> Option<std::time::Duration> {
+        let speed = self.progress.download_speed();
+        let total = self.progress.total_length();
+        let completed = self.progress.completed_length();
+        let remaining = total.saturating_sub(completed);
 
         if speed == 0 || remaining == 0 {
             None
@@ -724,22 +771,22 @@ impl RequestGroup {
 
     /// Set completed length using atomic store (lock-free)
     pub fn set_completed_length(&self, val: u64) {
-        self.completed_length_atomic.store(val, Ordering::Relaxed);
+        self.progress.set_completed_length(val);
     }
 
     /// Get completed length using atomic load (lock-free)
     pub fn get_completed_length(&self) -> u64 {
-        self.completed_length_atomic.load(Ordering::Relaxed)
+        self.progress.completed_length()
     }
 
     /// Set total length using atomic store (lock-free)
     pub fn set_total_length_atomic(&self, val: u64) {
-        self.total_length_atomic.store(val, Ordering::Relaxed);
+        self.progress.set_total_length(val);
     }
 
     /// Get total length using atomic load (lock-free)
     pub fn get_total_length_atomic(&self) -> u64 {
-        self.total_length_atomic.load(Ordering::Relaxed)
+        self.progress.total_length()
     }
 
     /// Set uploaded length using atomic store (lock-free)
@@ -754,30 +801,39 @@ impl RequestGroup {
 
     /// Set download speed cache using atomic store (lock-free)
     pub fn set_download_speed_cached(&self, val: u64) {
-        self.download_speed_cached.store(val, Ordering::Relaxed);
+        self.progress.set_download_speed(val);
     }
 
     /// Get download speed from cache using atomic load (lock-free)
     pub fn get_download_speed_cached(&self) -> u64 {
-        self.download_speed_cached.load(Ordering::Relaxed)
+        self.progress.download_speed()
     }
 
-    /// Set BT bitfield (async, uses RwLock)
-    pub async fn set_bt_bitfield(&self, bf: Option<Vec<u8>>) {
-        *self.bt_bitfield.write().await = bf;
+    /// Set upload speed cache using atomic store (lock-free)
+    pub fn set_upload_speed_cached(&self, val: u64) {
+        self.progress.set_upload_speed(val);
     }
 
-    /// Get BT bitfield (async, uses RwLock)
-    pub async fn get_bt_bitfield(&self) -> Option<Vec<u8>> {
-        self.bt_bitfield.read().await.clone()
+    /// Get upload speed from cache using atomic load (lock-free)
+    pub fn get_upload_speed_cached(&self) -> u64 {
+        self.progress.upload_speed()
+    }
+
+    /// Set BT bitfield (sync, uses std::sync::RwLock)
+    pub fn set_bt_bitfield(&self, bf: Option<Vec<u8>>) {
+        *self.bt_bitfield.recover_mut() = bf;
+    }
+
+    /// Get BT bitfield (sync, uses std::sync::RwLock)
+    pub fn get_bt_bitfield(&self) -> Option<Vec<u8>> {
+        self.bt_bitfield.recover().clone()
     }
 
     /// Set resume offset for HTTP/FTP range request resumption
     pub fn set_resume_offset(&self, offset: u64) {
         // Store resume offset in completed_length so the download engine
         // knows where to resume from
-        self.completed_length_atomic
-            .store(offset, Ordering::Relaxed);
+        self.progress.set_completed_length(offset);
     }
 
     // BT metadata methods (for session persistence enhancement)
@@ -788,7 +844,7 @@ impl RequestGroup {
         self.bt_num_pieces.store(num_pieces, Ordering::Relaxed);
         self.bt_piece_length.store(piece_length, Ordering::Relaxed);
         // Use std::sync::RwLock for non-async access
-        *self.bt_info_hash_hex.write().unwrap() = Some(info_hash_hex);
+        *self.bt_info_hash_hex.recover_mut() = Some(info_hash_hex);
     }
 
     /// Get number of pieces (lock-free atomic read)
@@ -801,15 +857,9 @@ impl RequestGroup {
         self.bt_piece_length.load(Ordering::Relaxed)
     }
 
-    /// Get info hash hex string (async-compatible wrapper)
-    pub async fn get_bt_info_hash_hex_async(&self) -> Option<String> {
-        // std::sync::RwLock can be used in async context for short reads
-        self.bt_info_hash_hex.read().unwrap().clone()
-    }
-
     /// Get info hash hex string (blocking read for non-async contexts)
     pub fn get_bt_info_hash_hex(&self) -> Option<String> {
-        self.bt_info_hash_hex.read().unwrap().clone()
+        self.bt_info_hash_hex.recover().clone()
     }
 }
 
@@ -846,6 +896,11 @@ mod tests {
             group.get_download_speed_cached(),
             0,
             "download_speed_cached should default to 0"
+        );
+        assert_eq!(
+            group.get_upload_speed_cached(),
+            0,
+            "upload_speed_cached should default to 0"
         );
     }
 
@@ -911,8 +966,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_set_get_bt_bitfield() {
+    #[test]
+    fn test_set_get_bt_bitfield() {
         let group = RequestGroup::new(
             GroupId::new(4),
             vec!["magnet:?xt=urn:btih:abc123".to_string()],
@@ -920,13 +975,13 @@ mod tests {
         );
 
         // Default should be None
-        let bf = group.get_bt_bitfield().await;
+        let bf = group.get_bt_bitfield();
         assert!(bf.is_none(), "bt_bitfield should default to None");
 
         // Set and retrieve bitfield
         let test_bitfield = vec![0xFF, 0xF0, 0x0F];
-        group.set_bt_bitfield(Some(test_bitfield.clone())).await;
-        let retrieved = group.get_bt_bitfield().await;
+        group.set_bt_bitfield(Some(test_bitfield.clone()));
+        let retrieved = group.get_bt_bitfield();
         assert!(
             retrieved.is_some(),
             "bt_bitfield should be Some after setting"
@@ -938,16 +993,16 @@ mod tests {
         );
 
         // Set back to None
-        group.set_bt_bitfield(None).await;
-        let bf_none = group.get_bt_bitfield().await;
+        group.set_bt_bitfield(None);
+        let bf_none = group.get_bt_bitfield();
         assert!(
             bf_none.is_none(),
             "bt_bitfield should be None after clearing"
         );
 
         // Test with empty bitfield
-        group.set_bt_bitfield(Some(vec![])).await;
-        let empty_bf = group.get_bt_bitfield().await;
+        group.set_bt_bitfield(Some(vec![]));
+        let empty_bf = group.get_bt_bitfield();
         assert!(empty_bf.is_some(), "empty bitfield should still be Some");
         assert!(empty_bf.unwrap().is_empty(), "bitfield should be empty vec");
     }
@@ -980,11 +1035,11 @@ mod tests {
                 let _ul = g.get_uploaded_length();
                 let _ds = g.get_download_speed_cached();
 
-                // Occasionally write bitfield (async)
+                // Occasionally write bitfield (sync)
                 if i % 3 == 0 {
                     let bf = vec![i as u8; 8];
-                    g.set_bt_bitfield(Some(bf)).await;
-                    let _retrieved = g.get_bt_bitfield().await;
+                    g.set_bt_bitfield(Some(bf));
+                    let _retrieved = g.get_bt_bitfield();
                 }
 
                 // Small delay to increase chance of race conditions
@@ -1175,8 +1230,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_bt_info_hash_hex_async() {
+    #[test]
+    fn test_bt_info_hash_hex() {
         let group = RequestGroup::new(
             GroupId::new(11),
             vec!["magnet:?xt=urn:btih:test".to_string()],
@@ -1186,13 +1241,13 @@ mod tests {
         // Set via blocking method
         group.set_bt_metadata(10, 1024, "async_test_hash".to_string());
 
-        // Read via async method
-        let hash = group.get_bt_info_hash_hex_async().await;
+        // Read via sync method
+        let hash = group.get_bt_info_hash_hex();
         assert_eq!(hash, Some("async_test_hash".to_string()));
     }
 
-    #[tokio::test]
-    async fn test_update_option_new_runtime_changeable() {
+    #[test]
+    fn test_update_option_new_runtime_changeable() {
         let gid = GroupId::new(1);
         let uris = vec!["http://example.com/file".to_string()];
         let mut group = RequestGroup::new(gid, uris, DownloadOptions::default());
@@ -1201,7 +1256,6 @@ mod tests {
         assert!(
             group
                 .update_option("max-connection-per-server", serde_json::json!(4))
-                .await
         );
         assert_eq!(group.options().max_connection_per_server, Some(4));
 
@@ -1209,7 +1263,6 @@ mod tests {
         assert!(
             group
                 .update_option("bt-max-upload-slots", serde_json::json!(8))
-                .await
         );
         assert_eq!(group.options().bt_max_upload_slots, Some(8));
 
@@ -1217,7 +1270,6 @@ mod tests {
         assert!(
             group
                 .update_option("bt-snubbed-timeout", serde_json::json!(120))
-                .await
         );
         assert_eq!(group.options().bt_snubbed_timeout, Some(120));
 
@@ -1225,7 +1277,6 @@ mod tests {
         assert!(
             group
                 .update_option("bt-optimistic-unchoke-interval", serde_json::json!(45))
-                .await
         );
         assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
 
@@ -1233,7 +1284,6 @@ mod tests {
         assert!(
             group
                 .update_option("bt-endgame-threshold", serde_json::json!(50))
-                .await
         );
         assert_eq!(group.options().bt_endgame_threshold, 50);
 
@@ -1241,7 +1291,6 @@ mod tests {
         assert!(
             group
                 .update_option("seed-time", serde_json::json!(3600))
-                .await
         );
         assert_eq!(group.options().seed_time, Some(3600));
 
@@ -1249,7 +1298,6 @@ mod tests {
         assert!(
             group
                 .update_option("seed-ratio", serde_json::json!(2.0))
-                .await
         );
         assert_eq!(group.options().seed_ratio, Some(2.0));
 
@@ -1257,15 +1305,14 @@ mod tests {
         assert!(
             !group
                 .update_option("unknown-option", serde_json::json!(1))
-                .await
         );
     }
 
     /// Verify that `is_removed()` correctly reflects the group's Removed
     /// status, and that it is non-blocking (does not deadlock when the
     /// status lock is contended).
-    #[tokio::test]
-    async fn test_is_removed_reflects_status() {
+    #[test]
+    fn test_is_removed_reflects_status() {
         let mut group = RequestGroup::new(
             GroupId::new(1),
             vec!["http://example.com/file".to_string()],
@@ -1276,7 +1323,7 @@ mod tests {
         assert!(!group.is_removed(), "fresh group should not be removed");
 
         // Mark as Removed (as RequestGroupMan::remove_group does).
-        group.remove().await.unwrap();
+        group.remove().unwrap();
         assert!(
             group.is_removed(),
             "is_removed() must return true after group.remove()"
@@ -1286,18 +1333,18 @@ mod tests {
     /// `is_removed()` must be safe to call while a write lock on the status
     /// is held elsewhere. It uses `try_read` internally, so it should return
     /// `false` (not deadlock, not block) when the lock is contended by a writer.
-    #[tokio::test]
-    async fn test_is_removed_returns_false_when_write_locked() {
+    #[test]
+    fn test_is_removed_returns_false_when_write_locked() {
         let mut group = RequestGroup::new(
             GroupId::new(1),
             vec!["http://example.com/file".to_string()],
             DownloadOptions::default(),
         );
-        group.remove().await.unwrap();
+        group.remove().unwrap();
 
         // Hold a write lock on the inner status to simulate contention.
         // This blocks try_read() on the same lock.
-        let _guard = group.status.write().await;
+        let _guard = group.status.write().unwrap();
         // is_removed() uses try_read(), which fails when a write lock is held.
         // It must return false (not block, not panic).
         assert!(

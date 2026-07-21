@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use aria2_core::engine::bt_upload_session::{
     BtSeedingConfig, InMemoryPieceProvider, PieceDataProvider,

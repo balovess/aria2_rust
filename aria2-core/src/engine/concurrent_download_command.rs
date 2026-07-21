@@ -13,9 +13,10 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::file_allocation;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub struct ConcurrentDownloadCommand {
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
     client: reqwest::Client,
     output_path: std::path::PathBuf,
     started: bool,
@@ -93,7 +94,7 @@ impl ConcurrentDownloadCommand {
         );
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group: Arc::new(std::sync::RwLock::new(group)),
             client,
             output_path: path,
             started: false,
@@ -106,8 +107,8 @@ impl ConcurrentDownloadCommand {
         })
     }
 
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 }
 
@@ -115,7 +116,7 @@ impl ConcurrentDownloadCommand {
 impl Command for ConcurrentDownloadCommand {
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
@@ -201,7 +202,7 @@ impl Command for ConcurrentDownloadCommand {
             CachedDiskWriter::new(&self.output_path, expected_size, self.disk_cache_size_mb);
 
         let rate_limit = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.options().max_download_limit
         };
         let limiter = rate_limit.filter(|&r| r > 0).map(|r| {
@@ -210,8 +211,8 @@ impl Command for ConcurrentDownloadCommand {
         });
         // Register clone with RequestGroup for runtime rate updates
         if let Some(ref limiter) = limiter {
-            let g = self.group.read().await;
-            g.set_rate_limiter(limiter.clone()).await;
+            let g = self.group.recover();
+            g.set_rate_limiter(limiter.clone());
         }
 
         Self::download_concurrent_to_disk(
@@ -256,10 +257,12 @@ impl Command for ConcurrentDownloadCommand {
         self.completed_bytes = total_len;
 
         {
-            let mut g = self.group.write().await;
-            g.update_progress(self.completed_bytes).await;
-            g.update_speed(self.completed_bytes, 0).await;
-            g.complete().await?;
+            let g = self.group.recover();
+            g.update_progress(self.completed_bytes);
+            g.update_speed(self.completed_bytes, 0);
+            drop(g);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         info!(
@@ -351,7 +354,7 @@ impl ConcurrentDownloadCommand {
                             .write_at(offset, &data)
                             .await
                             .map_err(|e| format!("Disk write error seg{}: {}", seg_idx, e))?;
-                        manager.complete_segment(seg_idx, data);
+                        manager.complete_segment(seg_idx, data.len());
                         ctrl_file.mark_piece_done(seg_idx as usize);
                         ctrl_file.save().await.ok();
                     }
@@ -483,7 +486,7 @@ impl ConcurrentDownloadCommand {
                             }
                         }
 
-                        manager.complete_segment(0, bytes::Bytes::new());
+                        manager.complete_segment(0, 0);
                         return Ok(());
                     }
                 }

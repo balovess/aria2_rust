@@ -23,6 +23,7 @@ use crate::engine::udp_tracker_manager::UdpTrackerManager;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::extension::pex::PexHandler;
 use aria2_protocol::bittorrent::message::serializer;
 use aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker;
@@ -126,7 +127,7 @@ impl Default for EndgameState {
 impl Command for BtDownloadCommand {
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
@@ -309,9 +310,8 @@ impl BtDownloadCommand {
                 })?;
 
         {
-            let mut g = self.group.write().await;
-            g.set_total_length(meta.total_size()).await;
-            g.set_total_length_atomic(meta.total_size());
+            let g = self.group.recover();
+            g.set_total_length(meta.total_size());
         }
 
         let piece_length = meta.info.piece_length;
@@ -367,14 +367,14 @@ impl BtDownloadCommand {
 
         // BEP 0027 (Private Torrent): DHT must be disabled for private torrents
         // to prevent leaking the info_hash to the public DHT network.
-        let enable_dht = { self.group.read().await.options().enable_dht } && !self.is_private;
+        let enable_dht = { self.group.recover().options().enable_dht } && !self.is_private;
         if self.is_private {
             info!("[BT] Private torrent: DHT disabled (BEP 0027)");
         }
         if enable_dht && self.dht_engine.is_none() {
-            let dht_port = { self.group.read().await.options().dht_listen_port };
-            let dht_file_path = { self.group.read().await.options().dht_file_path.clone() };
-            let dht_entry_points = { self.group.read().await.options().dht_entry_point.clone() };
+            let dht_port = { self.group.recover().options().dht_listen_port };
+            let dht_file_path = { self.group.recover().options().dht_file_path.clone() };
+            let dht_entry_points = { self.group.recover().options().dht_entry_point.clone() };
 
             // Parse custom bootstrap nodes if provided
             let bootstrap_nodes: Vec<std::net::SocketAddr> =
@@ -455,7 +455,7 @@ impl BtDownloadCommand {
         // for private torrents because it would leak the info_hash to trackers
         // not explicitly listed in the torrent's announce list.
         let enable_public_trackers =
-            { self.group.read().await.options().enable_public_trackers } && !self.is_private;
+            { self.group.recover().options().enable_public_trackers } && !self.is_private;
         if self.is_private {
             info!("[BT] Private torrent: public trackers disabled (BEP 0027)");
         }
@@ -565,8 +565,8 @@ impl BtDownloadCommand {
         info_hash_raw: &[u8; 20],
         num_pieces: u32,
     ) -> Result<Vec<BtPeerConn>> {
-        let require_crypto = { self.group.read().await.options().bt_require_crypto };
-        let force_encrypt = { self.group.read().await.options().bt_force_encrypt };
+        let require_crypto = { self.group.recover().options().bt_require_crypto };
+        let force_encrypt = { self.group.recover().options().bt_force_encrypt };
 
         let conn_result = BtPeerInteraction::connect_to_peers(
             peer_addrs,
@@ -589,7 +589,7 @@ impl BtDownloadCommand {
         }
 
         {
-            let options = self.group.read().await.options().clone();
+            let options = self.group.recover().options_arc();
             let config = ChokingConfig {
                 max_upload_slots: options.bt_max_upload_slots.unwrap_or(4) as usize,
                 optimistic_unchoke_interval_secs: options
@@ -639,7 +639,7 @@ impl BtDownloadCommand {
     ) -> Result<()> {
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
         let rate_limit = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.options().max_download_limit
         };
         let mut writer: Box<dyn DiskWriter> = match rate_limit {
@@ -673,7 +673,7 @@ impl BtDownloadCommand {
 
         // G2: Set piece priority mode from config option (--bt-prioritize-piece)
         let prioritize_piece_mode = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.options().bt_prioritize_piece.clone()
         };
         match prioritize_piece_mode.as_str() {
@@ -897,11 +897,13 @@ impl BtDownloadCommand {
                         piece_picker.mark_completed(next_piece_idx as u32);
 
                         if let Some(ref layout) = self.multi_file_layout {
-                            // Phase 14 / I4: use coalesced writer to reduce syscalls
+                            // Phase 14 / I4: use coalesced writer to reduce syscalls.
+                            // Convert to Bytes for zero-copy slicing in the coalesced writer.
+                            let piece_bytes = bytes::Bytes::from(piece_data);
                             write_piece_to_multi_files_coalesced(
                                 layout,
                                 next_piece_idx as u32,
-                                &piece_data,
+                                &piece_bytes,
                                 layout.piece_length(),
                             )
                             .await?;
@@ -912,8 +914,8 @@ impl BtDownloadCommand {
                         // Sync bitfield to RequestGroup for session persistence
                         {
                             let bitfield = piece_picker.export_bitfield();
-                            let g = self.group.read().await;
-                            g.set_bt_bitfield(Some(bitfield)).await;
+                            let g = self.group.recover();
+                            g.set_bt_bitfield(Some(bitfield));
                         }
 
                         BtPeerInteraction::broadcast_have(
@@ -1030,11 +1032,13 @@ impl BtDownloadCommand {
                                 piece_manager.mark_piece_complete(next_piece_idx as u32);
                                 piece_picker.mark_completed(next_piece_idx as u32);
 
+                                let web_seed_len = web_seed_data.len() as u64;
                                 if let Some(ref layout) = self.multi_file_layout {
+                                    let web_seed_bytes = bytes::Bytes::from(web_seed_data);
                                     write_piece_to_multi_files_coalesced(
                                         layout,
                                         next_piece_idx as u32,
-                                        &web_seed_data,
+                                        &web_seed_bytes,
                                         layout.piece_length(),
                                     )
                                     .await?;
@@ -1045,11 +1049,11 @@ impl BtDownloadCommand {
                                 // Sync bitfield to RequestGroup for session persistence (Task 4)
                                 {
                                     let bitfield = piece_picker.export_bitfield();
-                                    let g = self.group.read().await;
-                                    g.set_bt_bitfield(Some(bitfield)).await;
+                                    let g = self.group.recover();
+                                    g.set_bt_bitfield(Some(bitfield));
                                 }
 
-                                self.completed_bytes += web_seed_data.len() as u64;
+                                self.completed_bytes += web_seed_len;
                                 piece_ok = true;
                             } else {
                                 tracing::warn!(
@@ -1082,16 +1086,14 @@ impl BtDownloadCommand {
             }
 
             {
-                let g = self.group.write().await;
-                g.update_progress(self.completed_bytes).await;
-                g.set_completed_length(self.completed_bytes);
+                self.progress.set_completed_length(self.completed_bytes);
 
                 let elapsed = last_speed_update.elapsed();
                 if elapsed.as_millis() >= 500 {
                     let delta = self.completed_bytes - last_completed;
                     let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
-                    g.update_speed(speed, 0).await;
-                    g.set_download_speed_cached(speed);
+                    self.progress.set_download_speed(speed);
+                    self.progress.set_upload_speed(0);
                     last_speed_update = Instant::now();
                     last_completed = self.completed_bytes;
                 }
@@ -1124,13 +1126,12 @@ impl BtDownloadCommand {
             }
         };
         {
-            let mut g = self.group.write().await;
-            g.update_progress(self.completed_bytes).await;
-            g.update_speed(final_speed, self.total_uploaded).await;
-            g.set_completed_length(self.completed_bytes);
-            g.set_download_speed_cached(final_speed);
-            g.set_uploaded_length(self.total_uploaded);
-            g.complete().await?;
+            self.progress.set_completed_length(self.completed_bytes);
+            self.progress.set_download_speed(final_speed);
+            self.progress.set_upload_speed(self.total_uploaded);
+            self.group.recover().set_uploaded_length(self.total_uploaded);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         info!(
@@ -1166,7 +1167,7 @@ impl BtDownloadCommand {
         if let Some(ref hm) = self.hook_manager {
             // 获取 gid（从 group 中提取）
             let gid = {
-                let g = self.group.read().await;
+                let g = self.group.recover();
                 g.gid()
             };
 

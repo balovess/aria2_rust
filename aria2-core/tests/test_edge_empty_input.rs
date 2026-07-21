@@ -4,9 +4,11 @@
 
 mod fixtures;
 
+#[cfg(feature = "bittorrent")]
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
+#[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::validation::protocol_detector::detect;
@@ -107,6 +109,7 @@ async fn test_whitespace_uri_download_command_execute_returns_error() {
 // Empty Torrent File Tests
 // =============================================================================
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_empty_torrent_file_detection() {
     let dir = tempfile::tempdir().unwrap();
@@ -120,6 +123,7 @@ fn test_empty_torrent_file_detection() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_empty_torrent_file_command_creation() {
     let empty_torrent: Vec<u8> = Vec::new();
@@ -135,6 +139,7 @@ fn test_empty_torrent_file_command_creation() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn test_empty_torrent_file_no_panic() {
     let empty_torrent: Vec<u8> = Vec::new();
@@ -165,6 +170,7 @@ fn test_empty_metalink_file_detection() {
     );
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_empty_metalink_file_command_creation() {
     let empty_metalink: Vec<u8> = Vec::new();
@@ -193,6 +199,7 @@ fn test_empty_meta4_file_detection() {
     );
 }
 
+#[cfg(feature = "metalink")]
 #[tokio::test]
 async fn test_empty_metalink_file_no_panic() {
     let empty_metalink: Vec<u8> = Vec::new();
@@ -334,6 +341,7 @@ fn test_multiple_empty_inputs_no_panic() {
     }
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_empty_torrent_variants_no_panic() {
     let empty_variants: Vec<Vec<u8>> = vec![
@@ -355,6 +363,7 @@ fn test_empty_torrent_variants_no_panic() {
     }
 }
 
+#[cfg(feature = "metalink")]
 #[test]
 fn test_empty_metalink_variants_no_panic() {
     let empty_variants: Vec<Vec<u8>> = vec![

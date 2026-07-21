@@ -1072,10 +1072,13 @@ mod tests {
     fn test_registry_by_category() {
         let reg = OptionRegistry::new();
         let general = reg.by_category(OptionCategory::General);
-        let bt = reg.by_category(OptionCategory::BitTorrent);
         let rpc = reg.by_category(OptionCategory::Rpc);
         assert!(!general.is_empty());
-        assert!(!bt.is_empty());
+        #[cfg(feature = "bittorrent")]
+        {
+            let bt = reg.by_category(OptionCategory::BitTorrent);
+            assert!(!bt.is_empty());
+        }
         assert!(!rpc.is_empty());
     }
 

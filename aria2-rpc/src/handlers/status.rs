@@ -4,6 +4,8 @@
 
 use std::sync::atomic::Ordering;
 
+use aria2_core::util::rwlock_ext::RwLockRecover;
+
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, GlobalStat, StatusInfo};
@@ -22,10 +24,10 @@ impl RpcEngine {
             let man = group_man.read().await;
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
-                let g = group_lock.read().await;
-                if g.status().await.is_active() {
+                let g = group_lock.recover();
+                if g.status().is_active() {
                     let gid_hex = gid.to_hex_string();
-                    result.push(Self::build_status_from_group(&g, &gid_hex).await);
+                    result.push(Self::build_status_from_group(&g, &gid_hex));
                 }
             }
             result
@@ -55,10 +57,10 @@ impl RpcEngine {
             let man = group_man.read().await;
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
-                let g = group_lock.read().await;
-                if g.status().await == DownloadStatus::Waiting {
+                let g = group_lock.recover();
+                if g.status() == DownloadStatus::Waiting {
                     let gid_hex = gid.to_hex_string();
-                    result.push(Self::build_status_from_group(&g, &gid_hex).await);
+                    result.push(Self::build_status_from_group(&g, &gid_hex));
                 }
             }
             result.into_iter().skip(offset).take(num).collect()
@@ -94,11 +96,11 @@ impl RpcEngine {
             let man = group_man.read().await;
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
-                let g = group_lock.read().await;
-                match g.status().await {
+                let g = group_lock.recover();
+                match g.status() {
                     DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed => {
                         let gid_hex = gid.to_hex_string();
-                        result.push(Self::build_status_from_group(&g, &gid_hex).await);
+                        result.push(Self::build_status_from_group(&g, &gid_hex));
                     }
                     _ => {}
                 }
@@ -133,10 +135,10 @@ impl RpcEngine {
                 let mut waiting_n = 0usize;
                 let mut stopped_n = 0usize;
                 for (_, group_lock) in man.all_groups() {
-                    let g = group_lock.read().await;
+                    let g = group_lock.recover();
                     dl += g.get_download_speed_cached();
                     ul += g.get_uploaded_length();
-                    match g.status().await {
+                    match g.status() {
                         DownloadStatus::Active => active_n += 1,
                         DownloadStatus::Waiting | DownloadStatus::Paused => waiting_n += 1,
                         DownloadStatus::Complete

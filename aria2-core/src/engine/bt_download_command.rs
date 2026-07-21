@@ -17,7 +17,8 @@ use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub use crate::engine::bt_message_handler::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, MAX_BLOCK_READ_MESSAGES, MAX_RETRIES,
@@ -31,7 +32,9 @@ pub(crate) const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
 pub struct BtDownloadCommand {
-    pub(crate) group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    pub(crate) group: Arc<std::sync::RwLock<RequestGroup>>,
+    /// Direct access to progress counters — avoids `RwLock` on the hot path.
+    pub(crate) progress: Arc<AtomicProgress>,
     pub(crate) output_path: std::path::PathBuf,
     pub(crate) started: bool,
     pub(crate) completed_bytes: u64,
@@ -241,8 +244,10 @@ impl BtDownloadCommand {
                 }
             };
 
+        let progress = group.progress.clone();
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group: Arc::new(std::sync::RwLock::new(group)),
+            progress,
             output_path: effective_output_path,
             started: false,
             completed_bytes: 0,
@@ -295,8 +300,8 @@ impl BtDownloadCommand {
         })
     }
 
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 
     pub fn on_peer_choke(&mut self, peer_idx: usize) {
@@ -388,7 +393,7 @@ impl BtDownloadCommand {
     pub async fn write_piece_to_multi_files_coalesced(
         layout: &MultiFileLayout,
         piece_idx: u32,
-        piece_data: &[u8],
+        piece_data: &bytes::Bytes,
         piece_length: u32,
     ) -> Result<()> {
         crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced(

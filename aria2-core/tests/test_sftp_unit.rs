@@ -1,3 +1,5 @@
+#![cfg(feature = "sftp")]
+
 use aria2_core::engine::command::Command;
 use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
 use aria2_core::error::{Aria2Error, FatalError};

@@ -36,7 +36,7 @@ impl Command for SaveSessionCommand {
         self.status = CommandStatus::Running;
         debug!("Starting session save to {}", self.path.display());
 
-        let groups = self.request_group_man.read().await.list_groups().await;
+        let groups = self.request_group_man.read().await.list_groups();
         session_serializer::save_to_file(&self.path, &groups).await?;
 
         self.status = CommandStatus::Completed;
@@ -74,7 +74,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
 
         let dir = std::env::temp_dir();
@@ -117,7 +116,6 @@ mod tests {
                 vec!["http://example.com/atomic.bin".into()],
                 DownloadOptions::default(),
             )
-            .await
             .unwrap();
 
         let dir = std::env::temp_dir();
