@@ -2,7 +2,7 @@
 //!
 //! Maps GID (download ID) to [`BtObject`], which bundles all shared state
 //! for a single BitTorrent download: `DownloadContext`, `PieceStorage`,
-//! `PeerStorage`, `BtAnnounce`, `BtRuntime`, and `BtProgressInfoFile`.
+//! `PeerStorage`, `BtAnnounce`, `BtRuntime`, and `BtProgressManager`.
 //!
 //! # Architecture Reference
 //!
@@ -19,6 +19,7 @@
 //! | `shared_ptr<PieceStorage>` | `Option<Arc<dyn PieceStorage>>` | Same shared-ownership semantics via trait object |
 //! | `shared_ptr<PeerStorage>` | `Option<Arc<dyn PeerStorage>>` | Same shared-ownership semantics via trait object |
 //! | `shared_ptr<BtAnnounce>` | `Option<Arc<BtAnnounce>>` | Same shared-ownership semantics |
+//! | `shared_ptr<BtProgressInfoFile>` | `Option<Arc<BtProgressManager>>` | Rust equivalent with modern async API |
 //! | `shared_ptr<LpdMessageReceiver>` | `Option<u64>` ID-based reference | Type not yet implemented |
 //! | `shared_ptr<UDPTrackerClient>` | `Option<u64>` ID-based reference | Type not yet implemented |
 //! | `getNull<T>()` for missing entries | `Option<T>` | Rust-idiomatic null handling |
@@ -33,6 +34,7 @@ use tracing::trace;
 use crate::download::DownloadContext;
 use crate::engine::bt_peer_blocklist::BtPeerBlocklist;
 use crate::engine::bt_peer_storage::PeerStorage;
+use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::bt_runtime::BtRuntime;
 use crate::engine::bt_tracker_comm::BtAnnounce;
 use crate::segment::piece_storage::PieceStorage;
@@ -44,17 +46,18 @@ use crate::segment::piece_storage::PieceStorage;
 /// Bundles all shared state for a single BitTorrent download.
 ///
 /// Each active BT download gets one `BtObject` entry in the [`BtRegistry`].
-/// The object holds both directly-owned shared references (`Arc<>`) for types
-/// that exist in Rust, and ID-based references (`Option<u64>`) for types
-/// not yet implemented.
+/// The object holds shared references (`Arc<>`) for all BT-related components.
 ///
-/// # ID-Based References
+/// # C++ Equivalence
 ///
-/// Fields like `bt_progress_info_file_id` store an ID that
-/// can be used to look up the actual object in a global registry. This avoids
-/// tight coupling to types that haven't been ported to Rust yet. Once those
-/// types are implemented, these fields can be migrated to direct `Arc<>`
-/// references.
+/// | Rust field | C++ field |
+/// |---|---|
+/// | `download_context` | `shared_ptr<DownloadContext>` |
+/// | `piece_storage` | `shared_ptr<PieceStorage>` |
+/// | `peer_storage` | `shared_ptr<PeerStorage>` |
+/// | `bt_announce` | `shared_ptr<BtAnnounce>` |
+/// | `bt_runtime` | `shared_ptr<BtRuntime>` |
+/// | `bt_progress_manager` | `shared_ptr<BtProgressInfoFile>` |
 pub struct BtObject {
     /// Shared download context (file entries, piece hashes, attributes).
     pub download_context: Option<Arc<DownloadContext>>,
@@ -74,9 +77,9 @@ pub struct BtObject {
     /// Shared BT runtime state for this download (connection pool, stats).
     pub bt_runtime: Option<Arc<BtRuntime>>,
 
-    /// ID-based reference to the BT progress info file for this download.
-    /// BtProgressInfoFile does not yet have a 1:1 Rust equivalent.
-    pub bt_progress_info_file_id: Option<u64>,
+    /// Shared BT progress manager for this download.
+    /// Equivalent to C++ `shared_ptr<BtProgressInfoFile>`.
+    pub bt_progress_manager: Option<Arc<BtProgressManager>>,
 }
 
 impl BtObject {
@@ -88,7 +91,7 @@ impl BtObject {
             peer_storage: None,
             bt_announce: None,
             bt_runtime: None,
-            bt_progress_info_file_id: None,
+            bt_progress_manager: None,
         }
     }
 
@@ -130,7 +133,7 @@ impl fmt::Debug for BtObject {
                 "bt_runtime",
                 &self.bt_runtime.as_ref().map(|_| "<BtRuntime>"),
             )
-            .field("bt_progress_info_file_id", &self.bt_progress_info_file_id)
+            .field("bt_progress_manager", &self.bt_progress_manager.as_ref().map(|_| "<BtProgressManager>"))
             .finish()
     }
 }
@@ -163,7 +166,7 @@ pub struct BtObjectBuilder {
     peer_storage: Option<Arc<dyn PeerStorage>>,
     bt_announce: Option<Arc<BtAnnounce>>,
     bt_runtime: Option<Arc<BtRuntime>>,
-    bt_progress_info_file_id: Option<u64>,
+    bt_progress_manager: Option<Arc<BtProgressManager>>,
 }
 
 impl BtObjectBuilder {
@@ -197,9 +200,9 @@ impl BtObjectBuilder {
         self
     }
 
-    /// Set the BT progress info file ID.
-    pub fn bt_progress_info_file_id(mut self, id: u64) -> Self {
-        self.bt_progress_info_file_id = Some(id);
+    /// Set the BT progress manager.
+    pub fn bt_progress_manager(mut self, mgr: Arc<BtProgressManager>) -> Self {
+        self.bt_progress_manager = Some(mgr);
         self
     }
 
@@ -211,7 +214,7 @@ impl BtObjectBuilder {
             peer_storage: self.peer_storage,
             bt_announce: self.bt_announce,
             bt_runtime: self.bt_runtime,
-            bt_progress_info_file_id: self.bt_progress_info_file_id,
+            bt_progress_manager: self.bt_progress_manager,
         }
     }
 }
@@ -710,14 +713,13 @@ mod tests {
             .download_context(ctx)
             .peer_storage(peer_storage)
             .bt_announce(bt_announce)
-            .bt_progress_info_file_id(40)
             .build();
 
         assert!(obj.download_context.is_some());
         assert!(obj.piece_storage.is_none());
         assert!(obj.peer_storage.is_some());
         assert!(obj.bt_announce.is_some());
-        assert_eq!(obj.bt_progress_info_file_id, Some(40));
+        assert!(obj.bt_progress_manager.is_none());
         assert!(obj.bt_runtime.is_none());
     }
 
@@ -733,7 +735,7 @@ mod tests {
         assert!(obj.peer_storage.is_none());
         assert!(obj.bt_announce.is_none());
         assert!(obj.bt_runtime.is_none());
-        assert!(obj.bt_progress_info_file_id.is_none());
+        assert!(obj.bt_progress_manager.is_none());
 
         let registry = BtRegistry::default();
         assert!(registry.is_empty());
@@ -813,7 +815,7 @@ mod tests {
         assert!(obj.peer_storage.is_none());
         assert!(obj.bt_announce.is_none());
         assert!(obj.bt_runtime.is_none());
-        assert!(obj.bt_progress_info_file_id.is_none());
+        assert!(obj.bt_progress_manager.is_none());
     }
 
     // -----------------------------------------------------------------------
