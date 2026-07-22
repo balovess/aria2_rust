@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::constants;
+use crate::download::DownloadContext;
 use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
     on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
@@ -51,14 +52,14 @@ pub struct BtDownloadCommand {
     pub choking_algo: Option<ChokingAlgorithm>,
     pub multi_file_layout: Option<MultiFileLayout>,
 
-    // P1/P2 集成字段（全部使用 Option 保持向后兼容）
-    /// BT进度持久化管理器
+    // P1/P2 integration fields (all use Option for backward compatibility)
+    /// BT progress persistence manager
     pub(crate) progress_manager: Option<BtProgressManager>,
-    /// 进度保存间隔（默认60秒）
+    /// Progress save interval (default 60 seconds)
     pub(crate) progress_save_interval: Duration,
-    /// LPD局域网peer发现管理器
+    /// LPD LAN peer discovery manager
     pub(crate) lpd_manager: Option<Arc<LpdManager>>,
-    /// 下载后处理钩子管理器
+    /// Post-download handler manager
     pub(crate) hook_manager: Option<Arc<HookManager>>,
 
     // PEX (Peer Exchange, BEP 11) integration fields
@@ -106,6 +107,12 @@ pub struct BtDownloadCommand {
     // announcement are disabled to enforce the privacy guarantees of the
     // torrent's `private` flag.
     pub(crate) is_private: bool,
+
+    // BtRegistry integration: the command registers itself into the engine's
+    // BtRegistry during execute() so that info-hash reverse lookup, peer
+    // blocklist, and cross-download coordination work end-to-end.
+    // Set via `set_bt_registry()` after construction by the engine or caller.
+    pub(crate) bt_registry: Option<Arc<std::sync::RwLock<super::bt_registry::BtRegistry>>>,
 }
 
 impl BtDownloadCommand {
@@ -150,6 +157,52 @@ impl BtDownloadCommand {
             meta.info.piece_length,
             meta.info_hash.as_hex(),
         );
+
+        // Create DownloadContext from torrent metadata and set TorrentAttribute.
+        // In C++ aria2, this is done by `bittorrent_helper::processRootDictionary()`
+        // which calls `ctx->setAttribute(CTX_ATTR_BT, torrent)` with all torrent
+        // metadata fields. We replicate this here.
+        {
+            use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+
+            let total_size = meta.total_size();
+            let piece_length = meta.info.piece_length;
+            let file_path_str = path.to_string_lossy().to_string();
+
+            // Create DownloadContext with piece length, total size, and output path
+            let mut ctx = DownloadContext::new(piece_length, total_size, file_path_str);
+
+            // Set piece hashes from torrent info dict (sha-1 hashes in hex format)
+            let piece_hashes_hex: Vec<String> = meta.info.pieces.iter()
+                .map(|hash_bytes| hex::encode(hash_bytes))
+                .collect();
+            ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
+
+            // Build TorrentAttribute from torrent metadata (C++ TorrentAttribute fields)
+            let bt_file_mode = if meta.is_single_file() {
+                BtFileMode::Single
+            } else {
+                BtFileMode::Multi
+            };
+            let torrent_attr = TorrentAttribute {
+                name: meta.info.name.clone(),
+                mode: bt_file_mode,
+                announce_list: meta.announce_list.clone(),
+                nodes: Vec::new(), // DHT nodes not parsed from TorrentMeta yet
+                info_hash: meta.info_hash.as_hex(),
+                metadata: Vec::new(), // Regular torrent has metadata on disk, not via ut_metadata
+                metadata_size: 0,
+                private_torrent: meta.is_private(),
+                creation_date: meta.creation_date.unwrap_or(0),
+                comment: meta.comment.clone().unwrap_or_default(),
+                created_by: meta.created_by.clone().unwrap_or_default(),
+                url_list: meta.web_seeds.clone(),
+            };
+
+            ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
+
+            group.set_download_context(std::sync::Arc::new(ctx));
+        }
 
         let seed_time = options.seed_time.and_then(|t| {
             if t == 0 {
@@ -263,7 +316,7 @@ impl BtDownloadCommand {
             choking_algo,
             multi_file_layout,
 
-            // P1/P2 集成字段默认值（全部为 None，保持向后兼容）
+            // P1/P2 integration field defaults (all None, backward compatible)
             progress_manager: None,
             progress_save_interval: Duration::from_secs(60),
             lpd_manager: None,
@@ -297,6 +350,9 @@ impl BtDownloadCommand {
 
             // BEP 0027 (Private Torrent) enforcement flag
             is_private,
+
+            // BtRegistry integration (set via set_bt_registry after construction)
+            bt_registry: None,
         })
     }
 
@@ -415,9 +471,9 @@ impl BtDownloadCommand {
         self.multi_file_layout.as_ref()
     }
 
-    // ==================== P1/P2 集成 API ====================
+    // ==================== P1/P2 Integration API ====================
 
-    /// 设置 BT 进度管理器
+    /// Set the BT progress manager
     ///
     /// Enable BT download progress persistence for resume support.
     ///
@@ -501,19 +557,38 @@ impl BtDownloadCommand {
         self.hook_manager = Some(manager);
     }
 
-    /// 获取进度管理器引用（用于测试和外部访问）
+    /// Get progress manager reference (for testing and external access)
     pub fn get_progress_manager(&self) -> Option<&BtProgressManager> {
         self.progress_manager.as_ref()
     }
 
-    /// 获取 LPD 管理器引用（用于测试和外部访问）
+    /// Get LPD manager reference (for testing and external access)
     pub fn get_lpd_manager(&self) -> Option<&Arc<LpdManager>> {
         self.lpd_manager.as_ref()
     }
 
-    /// 获取钩子管理器引用（用于测试和外部访问）
+    /// Get hook manager reference (for testing and external access)
     pub fn get_hook_manager(&self) -> Option<&Arc<HookManager>> {
         self.hook_manager.as_ref()
+    }
+
+    /// Set the engine's BtRegistry reference for self-registration.
+    ///
+    /// When set, the command registers its [`DownloadContext`] and [`BtRuntime`]
+    /// into the registry during [`execute()`], enabling info-hash reverse lookup,
+    /// peer blocklist checks, and cross-download BT coordination.
+    /// On download completion or failure, the entry is automatically removed.
+    ///
+    /// In C++ aria2, this registration is done by `BtSetup::setup()` which
+    /// calls `BtRegistry::put(gid, btObject)`. Here the command self-registers
+    /// for a cleaner architecture.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - The engine's `Arc<std::sync::RwLock<BtRegistry>>`
+    pub fn set_bt_registry(&mut self, registry: Arc<std::sync::RwLock<super::bt_registry::BtRegistry>>) {
+        info!("BtRegistry reference set for BT download self-registration");
+        self.bt_registry = Some(registry);
     }
 
     // ==================== PEX (BEP 11) Integration API ====================

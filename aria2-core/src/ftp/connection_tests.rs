@@ -1,11 +1,11 @@
-//! FTP 连接集成测试
+//! FTP connection integration tests
 //!
-//! 测试 FTP 客户端的核心功能：
-//! - 被动模式/主动模式连接
-//! - 二进制模式设置
-//! - 目录列表解析（Unix/Windows/MLSD 格式）
-//! - 断点续传 REST 命令
-//! - FTP 错误码处理
+//! Tests FTP client core functionality:
+//! - Passive/Active mode connections
+//! - Binary mode setting
+//! - Directory listing parsing (Unix/Windows/MLSD formats)
+//! - Resume download REST command
+//! - FTP error code handling
 #![allow(unused_imports)]
 
 use std::net::SocketAddr;
@@ -15,9 +15,9 @@ use tokio::time::{Duration, timeout};
 
 use crate::ftp::connection::{FtpClient, FtpMode, FtpResponse};
 
-/// 创建模拟 FTP 服务器并在指定端口上监听
+/// Create a mock FTP server listening on a specified port
 ///
-/// 返回服务器的 SocketAddr 和一个 server handle
+/// Returns the server's SocketAddr and a server handle
 async fn start_mock_ftp_server()
 -> std::result::Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -43,7 +43,7 @@ async fn start_mock_ftp_server()
 
                 let cmd = line.trim();
 
-                // 简单的命令响应
+                // Simple command responses
                 let response = if cmd.to_uppercase().starts_with("USER ") {
                     "331 Please specify password\r\n".to_string()
                 } else if cmd.to_uppercase().starts_with("PASS ") {
@@ -91,18 +91,18 @@ async fn start_mock_ftp_server()
         }
     });
 
-    // 等待服务器启动
+    // Wait for server to start
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     Ok((addr, handle))
 }
 
-/// 测试被动模式连接
+/// Test passive mode connection
 #[tokio::test]
 async fn test_passive_mode_connection() -> Result<(), Box<dyn std::error::Error>> {
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
 
-    // 测试连接和被动模式
+    // Test connection and passive mode
     let mut client = FtpClient::connect(
         server_addr.ip().to_string().as_str(),
         server_addr.port(),
@@ -110,32 +110,32 @@ async fn test_passive_mode_connection() -> Result<(), Box<dyn std::error::Error>
     )
     .await?;
 
-    // 测试登录
+    // Test login
     client.login("anonymous", "test@test.com").await?;
 
-    // 测试 PWD
+    // Test PWD
     let pwd = client.pwd().await?;
-    assert_eq!(pwd, "/", "PWD 应返回根目录");
+    assert_eq!(pwd, "/", "PWD should return root directory");
 
-    // 测试 CWD
+    // Test CWD
     client.cwd("/").await?;
 
-    // 测试二进制模式设置
+    // Test binary mode setting
     client.set_binary_mode(true).await?;
 
     client.quit().await?;
     server_handle.await?;
 
-    println!("\u{2705} 被动模式连接测试通过");
+    println!("\u{2705} Passive mode connection test passed");
     Ok(())
 }
 
-/// 测试主动模式连接
+/// Test active mode connection
 #[tokio::test]
 async fn test_active_mode_connection() -> Result<(), Box<dyn std::error::Error>> {
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
 
-    // 使用主动模式连接
+    // Connect using active mode
     let mut client = FtpClient::connect(
         server_addr.ip().to_string().as_str(),
         server_addr.port(),
@@ -143,23 +143,23 @@ async fn test_active_mode_connection() -> Result<(), Box<dyn std::error::Error>>
     )
     .await?;
 
-    // 测试登录
+    // Test login
     client.login("admin", "password123").await?;
 
-    // 验证客户端处于主动模式
-    assert_eq!(client.mode, FtpMode::Active, "客户端应该处于主动模式");
+    // Verify client is in active mode
+    assert_eq!(client.mode, FtpMode::Active, "Client should be in active mode");
 
-    // 测试二进制模式
+    // Test binary mode
     client.set_binary_mode(true).await?;
 
     client.quit().await?;
     server_handle.await?;
 
-    println!("\u{2705} 主动模式连接测试通过");
+    println!("\u{2705} Active mode connection test passed");
     Ok(())
 }
 
-/// 测试二进制/ASCII 模式切换
+/// Test binary/ASCII mode switching
 #[tokio::test]
 async fn test_binary_type_setting() -> Result<(), Box<dyn std::error::Error>> {
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
@@ -172,147 +172,147 @@ async fn test_binary_type_setting() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     client.login("user", "pass").await?;
 
-    // 初始状态应该是 ASCII 模式（默认）
-    assert!(!client.binary_mode, "初始状态应为 ASCII 模式");
+    // Initial state should be ASCII mode (default)
+    assert!(!client.binary_mode, "Initial state should be ASCII mode");
 
-    // 设置为二进制模式
+    // Set to binary mode
     client.set_binary_mode(true).await?;
-    assert!(client.binary_mode, "应该已切换到二进制模式");
+    assert!(client.binary_mode, "Should have switched to binary mode");
 
-    // 切换回 ASCII 模式
+    // Switch back to ASCII mode
     client.set_binary_mode(false).await?;
-    assert!(!client.binary_mode, "应该已切换回 ASCII 模式");
+    assert!(!client.binary_mode, "Should have switched back to ASCII mode");
 
-    // 再次设置为二进制
+    // Set to binary again
     client.set_binary_mode(true).await?;
-    assert!(client.binary_mode, "应该再次为二进制模式");
+    assert!(client.binary_mode, "Should be in binary mode again");
 
     client.quit().await?;
     server_handle.await?;
 
-    println!("\u{2705} 二进制模式设置测试通过");
+    println!("\u{2705} Binary mode setting test passed");
     Ok(())
 }
 
-/// 测试目录列表解析（多种格式）
+/// Test directory listing parsing (multiple formats)
 #[test]
 fn test_directory_listing_parse() {
-    println!("\n=== 目录列表解析测试 ===\n");
+    println!("\n=== Directory listing parsing test ===\n");
 
-    // 1. Unix 格式 - 普通文件
+    // 1. Unix format - regular file
     let unix_file = "-rw-r--r--  1 owner group     1024 Mar 15 2024 document.pdf";
     let file_info = FtpClient::parse_list_line(unix_file);
-    assert!(file_info.is_some(), "应该能解析 Unix 文件行");
+    assert!(file_info.is_some(), "Should be able to parse Unix file line");
     let info = file_info.unwrap();
     assert_eq!(info.name, "document.pdf");
     assert_eq!(info.size, 1024);
-    assert!(!info.is_dir, "文件不应该被识别为目录");
-    println!("✓ Unix 文件解析: {} ({} bytes)", info.name, info.size);
+    assert!(!info.is_dir, "File should not be identified as directory");
+    println!("Unix file parsed: {} ({} bytes)", info.name, info.size);
 
-    // 2. Unix 格式 - 目录
+    // 2. Unix format - directory
     let unix_dir = "drwxr-xr-x  2 owner staff   4096 Jan  1 00:00 my_folder";
     let dir_info = FtpClient::parse_list_line(unix_dir);
-    assert!(dir_info.is_some(), "应该能解析 Unix 目录行");
+    assert!(dir_info.is_some(), "Should be able to parse Unix directory line");
     let dir = dir_info.unwrap();
     assert_eq!(dir.name, "my_folder");
     assert_eq!(dir.size, 4096);
-    assert!(dir.is_dir, "目录应该被正确识别");
-    println!("✓ Unix 目录解析: {} [DIR]", dir.name);
+    assert!(dir.is_dir, "Directory should be correctly identified");
+    println!("Unix directory parsed: {} [DIR]", dir.name);
 
-    // 3. Unix 格式 - 符号链接
+    // 3. Unix format - symbolic link
     let unix_link = "lrwxrwxrwx  1 user staff      8 Feb 28 14:30 link.txt -> target.txt";
     let link_info = FtpClient::parse_list_line(unix_link);
-    assert!(link_info.is_some(), "应该能解析符号链接");
+    assert!(link_info.is_some(), "Should be able to parse symbolic link");
     let link = link_info.unwrap();
     assert_eq!(
         link.name, "link.txt",
-        "符号链接名应该是 'link.txt' 而不是目标"
+        "Symbolic link name should be 'link.txt' not the target"
     );
-    assert!(!link.is_dir, "符号链接本身不应是目录");
-    println!("✓ Unix 符号链接解析: {} -> (target stripped)", link.name);
+    assert!(!link.is_dir, "Symbolic link itself should not be a directory");
+    println!("Unix symbolic link parsed: {} -> (target stripped)", link.name);
 
-    // 4. Unix 格式 - 隐藏文件
+    // 4. Unix format - hidden file
     let unix_hidden = "-rw-------  1 user staff    512 Apr 10 09:15 .bashrc";
     let hidden_info = FtpClient::parse_list_line(unix_hidden);
-    assert!(hidden_info.is_some(), "应该能解析隐藏文件");
+    assert!(hidden_info.is_some(), "Should be able to parse hidden file");
     let hidden = hidden_info.unwrap();
     assert_eq!(hidden.name, ".bashrc");
     assert_eq!(hidden.size, 512);
-    println!("✓ Unix 隐藏文件解析: {}", hidden.name);
+    println!("Unix hidden file parsed: {}", hidden.name);
 
-    // 5. Unix 格式 - 特殊条目（应忽略）
+    // 5. Unix format - special entries (should be ignored)
     let dot = "drwxr-xr-x  2 user staff   4096 Jan  1 00:00 .";
     let dotdot = "drwxr-xr-x  2 user staff   4096 Jan  1 00:00 ..";
 
     assert!(
         FtpClient::parse_list_line(dot).is_none(),
-        "'.' 条目应该被忽略"
+        "'.' entry should be ignored"
     );
     assert!(
         FtpClient::parse_list_line(dotdot).is_none(),
-        "'..' 条目应该被忽略"
+        "'..' entry should be ignored"
     );
-    println!("✓ 特殊目录条目 (. 和 ..) 正确忽略");
+    println!("Special directory entries (. and ..) correctly ignored");
 
-    // 6. Windows/DOS 格式 - 文件
+    // 6. Windows/DOS format - file
     let win_file = "03-15-24  10:30PM       1024 report.docx";
     let win_file_info = FtpClient::parse_list_line(win_file);
-    assert!(win_file_info.is_some(), "应该能解析 Windows 文件行");
+    assert!(win_file_info.is_some(), "Should be able to parse Windows file line");
     let win_f = win_file_info.unwrap();
     assert_eq!(win_f.name, "report.docx");
     assert_eq!(win_f.size, 1024);
     assert!(!win_f.is_dir);
-    println!("✓ Windows 文件解析: {} ({} bytes)", win_f.name, win_f.size);
+    println!("Windows file parsed: {} ({} bytes)", win_f.name, win_f.size);
 
-    // 7. Windows/DOS 格式 - 目录
+    // 7. Windows/DOS format - directory
     let win_dir = "01-01-24  10:00AM       <DIR> Documents";
     let win_dir_info = FtpClient::parse_list_line(win_dir);
-    assert!(win_dir_info.is_some(), "应该能解析 Windows 目录行");
+    assert!(win_dir_info.is_some(), "Should be able to parse Windows directory line");
     let win_d = win_dir_info.unwrap();
     assert_eq!(win_d.name, "Documents");
-    assert!(win_d.is_dir, "Windows 目录应该被正确识别");
-    println!("✓ Windows 目录解析: {} [DIR]", win_d.name);
+    assert!(win_d.is_dir, "Windows directory should be correctly identified");
+    println!("Windows directory parsed: {} [DIR]", win_d.name);
 
-    // 8. MLSD 格式 - 文件
+    // 8. MLSD format - file
     let mlsd_file = "type=file;size=2048;modify=20240315143000;perm=r;unique=U1FE90; readme.txt";
     let mlsd_file_info = FtpClient::parse_list_line(mlsd_file);
-    assert!(mlsd_file_info.is_some(), "应该能解析 MLSD 文件行");
+    assert!(mlsd_file_info.is_some(), "Should be able to parse MLSD file line");
     let mlsd_f = mlsd_file_info.unwrap();
     assert_eq!(mlsd_f.name, "readme.txt");
     assert_eq!(mlsd_f.size, 2048);
     assert!(!mlsd_f.is_dir);
-    println!("✓ MLSD 文件解析: {} ({} bytes)", mlsd_f.name, mlsd_f.size);
+    println!("MLSD file parsed: {} ({} bytes)", mlsd_f.name, mlsd_f.size);
 
-    // 9. MLSD 格式 - 目录
+    // 9. MLSD format - directory
     let mlsd_dir = "type=dir;size=4096;modify=20240101000000;perm=elcmf;unique=U1FE91; uploads";
     let mlsd_dir_info = FtpClient::parse_list_line(mlsd_dir);
-    assert!(mlsd_dir_info.is_some(), "应该能解析 MLSD 目录行");
+    assert!(mlsd_dir_info.is_some(), "Should be able to parse MLSD directory line");
     let mlsd_d = mlsd_dir_info.unwrap();
     assert_eq!(mlsd_d.name, "uploads");
-    assert!(mlsd_d.is_dir, "MLSD 目录应该被正确识别");
-    println!("✓ MLSD 目录解析: {} [DIR]", mlsd_d.name);
+    assert!(mlsd_d.is_dir, "MLSD directory should be correctly identified");
+    println!("MLSD directory parsed: {} [DIR]", mlsd_d.name);
 
-    // 10. 文件名包含空格
+    // 10. Filename with spaces
     let space_name = "-rw-r--r--  1 user staff   5678 Apr 20 11:00 my document with spaces.txt";
     let space_info = FtpClient::parse_list_line(space_name);
-    assert!(space_info.is_some(), "应该能处理带空格的文件名");
+    assert!(space_info.is_some(), "Should be able to handle filename with spaces");
     let space_f = space_info.unwrap();
     assert_eq!(space_f.name, "my document with spaces.txt");
     assert_eq!(space_f.size, 5678);
-    println!("✓ 带空格文件名解析: '{}'", space_f.name);
+    println!("Filename with spaces parsed: '{}'", space_f.name);
 
-    // 11. 无法识别的格式
+    // 11. Unrecognized format
     let invalid = "this is not a valid ftp listing line";
     assert!(
         FtpClient::parse_list_line(invalid).is_none(),
-        "无法识别的格式应返回 None"
+        "Unrecognized format should return None"
     );
-    println!("✓ 无效格式正确返回 None");
+    println!("Invalid format correctly returns None");
 
-    println!("\n=== 所有目录列表解析测试通过 \u{2705} ===\n");
+    println!("\n=== All directory listing parsing tests passed \u{2705} ===\n");
 }
 
-/// 测试断点续传 REST 命令
+/// Test resume download REST command
 #[tokio::test]
 async fn test_resume_download_rest_command() -> Result<(), Box<dyn std::error::Error>> {
     use tracing::debug;
@@ -328,72 +328,72 @@ async fn test_resume_download_rest_command() -> Result<(), Box<dyn std::error::E
     client.login("user", "pass").await?;
     client.set_binary_mode(true).await?;
 
-    // 测试从特定偏移量下载（即使可能因为数据连接问题而失败）
+    // Test downloading from a specific offset (even though it may fail due to data connection issues)
     let result = client.download_file("large_file.bin", Some(1024)).await;
 
-    // 结果可能是错误（因为数据连接），但关键是 REST 命令已被发送
+    // Result may be an error (due to data connection), but the key is that the REST command was sent
     match result {
         Err(e) => {
-            debug!("预期的下载错误（REST 已发送）: {}", e);
+            debug!("Expected download error (REST was sent): {}", e);
         }
         Ok(_) => {
-            // 如果成功，那更好
+            // If successful, even better
         }
     }
 
     client.quit().await?;
     server_handle.await?;
 
-    println!("\u{2705} 断点续传 REST 命令测试通过");
+    println!("\u{2705} Resume download REST command test passed");
     Ok(())
 }
 
-/// 测试 FTP 错误码处理
+/// Test FTP error code handling
 #[tokio::test]
 async fn test_ftp_error_code_handling() -> Result<(), Box<dyn std::error::Error>> {
     use crate::error::{Aria2Error, RecoverableError};
 
-    println!("\n=== FTP 错误码处理测试 ===\n");
+    println!("\n=== FTP error code handling test ===\n");
 
-    // 测试 425 错误（无法打开数据连接）
-    println!("测试 425 错误...");
+    // Test 425 error (cannot open data connection)
+    println!("Testing 425 error...");
     let resp_425 = FtpResponse {
         code: 425,
         message: "Can't open data connection".to_string(),
     };
     assert!(!resp_425.is_success());
     assert!(!resp_425.is_positive_completion());
-    println!("✓ 425 响应正确识别为错误");
+    println!("425 response correctly identified as error");
 
-    // 测试 426 错误（连接关闭，传输中止）
-    println!("测试 426 错误...");
+    // Test 426 error (connection closed, transfer aborted)
+    println!("Testing 426 error...");
     let resp_426 = FtpResponse {
         code: 426,
         message: "Connection closed; transfer aborted".to_string(),
     };
     assert!(!resp_426.is_success());
-    println!("✓ 426 响应正确识别为错误");
+    println!("426 response correctly identified as error");
 
-    // 测试 550 错误（文件不可用）
-    println!("测试 550 错误...");
+    // Test 550 error (file unavailable)
+    println!("Testing 550 error...");
     let resp_550 = FtpResponse {
         code: 550,
         message: "File not found".to_string(),
     };
     assert!(!resp_550.is_success());
-    // 550 应该映射为 RecoverableError::ServerError
+    // 550 should map to RecoverableError::ServerError
     let error_550 = Aria2Error::Recoverable(RecoverableError::ServerError { code: 550 });
     match error_550 {
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) => {
             assert_eq!(code, 550);
-            println!("✓ 550 正确映射为 RecoverableError::ServerError {{ code: 550 }}");
+            println!("550 correctly mapped to RecoverableError::ServerError {{ code: 550 }}");
         }
-        _ => panic!("550 应该映射为 ServerError"),
+        _ => panic!("550 should map to ServerError"),
     }
-    println!("✓ 550 错误处理正确");
+    println!("550 error handling correct");
 
-    // 测试 530 错误（未登录）
-    println!("测试 530 错误...");
+    // Test 530 error (not logged in)
+    println!("Testing 530 error...");
     let resp_530 = FtpResponse {
         code: 530,
         message: "Please login with USER and PASS".to_string(),
@@ -403,22 +403,22 @@ async fn test_ftp_error_code_handling() -> Result<(), Box<dyn std::error::Error>
     match error_530 {
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) => {
             assert_eq!(code, 530);
-            println!("✓ 530 正确映射为 RecoverableError::ServerError {{ code: 530 }}");
+            println!("530 correctly mapped to RecoverableError::ServerError {{ code: 530 }}");
         }
-        _ => panic!("530 应该映射为 ServerError"),
+        _ => panic!("530 should map to ServerError"),
     }
-    println!("✓ 530 未登录错误处理正确");
+    println!("530 not-logged-in error handling correct");
 
-    // 测试超时错误的构造
-    println!("\n测试超时错误...");
+    // Test timeout error construction
+    println!("\nTesting timeout error...");
     let timeout_error = Aria2Error::Recoverable(RecoverableError::Timeout);
     match timeout_error {
         Aria2Error::Recoverable(RecoverableError::Timeout) => {
-            println!("✓ 超时错误正确创建");
+            println!("Timeout error correctly created");
         }
-        _ => panic!("应该是 Timeout 错误"),
+        _ => panic!("Should be a Timeout error"),
     }
 
-    println!("\n=== 所有 FTP 错误码处理测试通过 \u{2705} ===\n");
+    println!("\n=== All FTP error code handling tests passed \u{2705} ===\n");
     Ok(())
 }

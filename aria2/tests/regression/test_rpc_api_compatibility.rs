@@ -129,9 +129,9 @@ async fn regression_remove_returns_gid_array() {
     let remove_resp = engine.handle_request(&remove_req).await;
 
     assert_success(&remove_resp);
-    let result: Vec<String> = serde_json::from_value(remove_resp.result.unwrap()).unwrap();
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0], gid);
+    // C++ aria2 returns the GID string directly (not an array)
+    let result: String = serde_json::from_value(remove_resp.result.unwrap()).unwrap();
+    assert_eq!(result, gid, "aria2.remove should return the GID (C++ aria2 behavior)");
 }
 
 /// Test: aria2.remove with nonexistent GID returns error.
@@ -144,7 +144,7 @@ async fn regression_remove_nonexistent_returns_error() {
     assert_error_code(&resp, -32601); // MethodNotFound (GID not found)
 }
 
-/// Test: aria2.forceRemove returns "OK".
+/// Test: aria2.forceRemove returns the GID (matching C++ aria2).
 #[tokio::test]
 async fn regression_force_remove_returns_ok() {
     let engine = RpcEngine::new();
@@ -161,8 +161,9 @@ async fn regression_force_remove_returns_ok() {
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
+    // C++ aria2 returns the GID string (not "OK") — see RpcMethodImpl.cc:removeDownload
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK");
+    assert_eq!(result, gid, "aria2.forceRemove should return the GID (C++ aria2 behavior)");
 }
 
 /// Test: aria2.pause changes status to Paused.
@@ -205,8 +206,9 @@ async fn regression_force_pause_returns_ok() {
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
+    // C++ aria2 returns the GID string (not "OK") — see RpcMethodImpl.cc:pauseDownload
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK");
+    assert_eq!(result, gid, "aria2.forcePause should return the GID (C++ aria2 behavior)");
 }
 
 /// Test: aria2.unpause changes status back to Active.

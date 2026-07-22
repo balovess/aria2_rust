@@ -319,131 +319,157 @@ impl RpcEngine {
             return auth_err.into_response(req.id.clone());
         }
 
-        let mut resp = match req.method.as_str() {
+        // Strip the "token:xxx" prefix from params[0] so method handlers
+        // never see it — matching C++ aria2's authorize() behaviour which
+        // removes the token from the params array before dispatching.
+        let stripped_req;
+        let dispatch_req = if let Some(arr) = req.params.as_array() {
+            if arr
+                .first()
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| s.starts_with("token:"))
+            {
+                let mut new_params = arr.clone();
+                new_params.remove(0);
+                stripped_req = JsonRpcRequest {
+                    version: req.version.clone(),
+                    method: req.method.clone(),
+                    params: serde_json::Value::Array(new_params),
+                    id: req.id.clone(),
+                };
+                &stripped_req
+            } else {
+                req
+            }
+        } else {
+            req
+        };
+
+        let mut resp = match dispatch_req.method.as_str() {
             "aria2.addUri" => self
-                .handle_add_uri(req)
+                .handle_add_uri(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.addTorrent" => self
-                .handle_add_torrent(req)
+                .handle_add_torrent(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.addMetalink" => self
-                .handle_add_metalink(req)
+                .handle_add_metalink(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.remove" => self
-                .handle_remove(req)
+                .handle_remove(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.pause" => self
-                .handle_pause(req)
+                .handle_pause(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.forcePause" => self
-                .handle_force_pause(req)
+                .handle_force_pause(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.unpause" | "aria2.forceUnpause" => self
-                .handle_unpause(req)
+                .handle_unpause(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellStatus" => self
-                .handle_tell_status(req)
+                .handle_tell_status(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellActive" => self
-                .handle_tell_active(req)
+                .handle_tell_active(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellWaiting" => self
-                .handle_tell_waiting(req)
+                .handle_tell_waiting(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellStopped" => self
-                .handle_tell_stopped(req)
+                .handle_tell_stopped(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getGlobalStat" => self.handle_global_stat(req).await,
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.getGlobalStat" => self.handle_global_stat(dispatch_req).await,
             "aria2.getUris" => self
-                .handle_get_uris(req)
+                .handle_get_uris(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getFiles" => self
-                .handle_get_files(req)
+                .handle_get_files(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getServers" => self
-                .handle_get_servers(req)
+                .handle_get_servers(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.purgeDownloadResult" => self
-                .handle_purge_download_result(req)
+                .handle_purge_download_result(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.removeDownloadResult" => self
-                .handle_remove_download_result(req)
+                .handle_remove_download_result(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getGlobalOption" => self.handle_get_global_option(req).await,
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.getGlobalOption" => self.handle_get_global_option(dispatch_req).await,
             "aria2.changeGlobalOption" => self
-                .handle_change_global_option(req)
+                .handle_change_global_option(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getOption" => self
-                .handle_get_option(req)
+                .handle_get_option(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.changeOption" => self
-                .handle_change_option(req)
+                .handle_change_option(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getPeers" => self
-                .handle_get_peers(req)
+                .handle_get_peers(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.pauseAll" => self.handle_pause_all(req).await,
-            "aria2.forcePauseAll" => self.handle_force_pause_all(req).await,
-            "aria2.unpauseAll" => self.handle_unpause_all(req).await,
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.pauseAll" => self.handle_pause_all(dispatch_req).await,
+            "aria2.forcePauseAll" => self.handle_force_pause_all(dispatch_req).await,
+            "aria2.unpauseAll" => self.handle_unpause_all(dispatch_req).await,
             "aria2.changeUri" => self
-                .handle_change_uri(req)
+                .handle_change_uri(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.saveSession" => self
-                .handle_save_session(req)
+                .handle_save_session(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.changePosition" => self
-                .handle_change_position(req)
+                .handle_change_position(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.forceRemove" => self
-                .handle_force_remove(req)
+                .handle_force_remove(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.shutdown" => self
-                .handle_shutdown(req)
+                .handle_shutdown(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.forceShutdown" => self
-                .handle_force_shutdown(req)
+                .handle_force_shutdown(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getVersion" => self.handle_version(req),
-            "aria2.getSessionInfo" => self.handle_session_info(req),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.getVersion" => self.handle_version(dispatch_req),
+            "aria2.getSessionInfo" => self.handle_session_info(dispatch_req),
             "system.multicall" => self
-                .handle_multicall(req)
+                .handle_multicall(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "system.listMethods" => self
-                .handle_list_methods(req)
+                .handle_list_methods(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "system.listNotifications" => self
-                .handle_list_notifications(req)
+                .handle_list_notifications(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", dispatch_req.method)),
         };
         // Apply aria2 wire format: convert all numbers to strings and booleans to
         // "true"/"false" strings, matching the original aria2 JSON-RPC response format.

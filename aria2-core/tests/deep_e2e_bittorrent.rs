@@ -75,6 +75,9 @@ async fn bt_progress_save_load_roundtrip() {
         piece_length: 256,
         total_size: 1024,
         num_pieces: 4,
+        upload_length: 512,
+        in_flight_pieces: vec![],
+        is_torrent: true,
         save_time: std::time::SystemTime::now(),
         version: 1,
     };
@@ -123,17 +126,16 @@ async fn bt_progress_save_load_roundtrip() {
         ratio
     );
 
-    // Verify peers were persisted
-    assert_eq!(loaded.peers.len(), 2, "Should have 2 peers after roundtrip");
+    // C++ binary format does NOT persist the peer list — peers are populated
+    // from PeerStorage after loading, not from the .aria2 file.
+    assert_eq!(loaded.peers.len(), 0, "Peers are NOT stored in binary format");
 
-    // Verify download statistics
-    assert_eq!(
-        loaded.stats.downloaded_bytes, 512,
-        "Downloaded bytes must match"
-    );
+    // C++ binary format stores uploadLength but NOT downloaded_bytes separately.
+    // downloaded_bytes is derived from the bitfield, not persisted.
+    // uploaded_bytes is restored from the saved uploadLength field.
     assert_eq!(
         loaded.stats.uploaded_bytes, 512,
-        "Uploaded bytes must match"
+        "Uploaded bytes must match (restored from uploadLength)"
     );
 
     eprintln!("[TEST1] Progress save/load roundtrip PASSED");

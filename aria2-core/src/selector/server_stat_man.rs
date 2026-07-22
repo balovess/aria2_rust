@@ -37,8 +37,15 @@ pub struct ServerStatFile {
     pub servers: Vec<ServerStatSnapshot>,
 }
 
+/// Composite key for server statistics: (hostname, protocol).
+///
+/// In C++ aria2, `ServerStatMan::find()` takes `(hostname, protocol)` as a
+/// composite key. This Rust version uses the same approach for compatibility.
+/// When protocol is empty, the entry is treated as protocol-agnostic.
+type StatKey = (String, String);
+
 pub struct ServerStatMan {
-    stats: RwLock<HashMap<String, Arc<ServerStat>>>,
+    stats: RwLock<HashMap<StatKey, Arc<ServerStat>>>,
 }
 
 impl ServerStatMan {
@@ -48,24 +55,68 @@ impl ServerStatMan {
         }
     }
 
+    /// Gets or creates a ServerStat for the given hostname (protocol-agnostic).
+    ///
+    /// This is the backward-compatible method. For protocol-aware lookups,
+    /// use [`ServerStatMan::get_or_create_with_protocol`].
     pub fn get_or_create(&self, host: &str) -> Arc<ServerStat> {
+        self.get_or_create_with_protocol(host, "")
+    }
+
+    /// Gets or creates a ServerStat for the given hostname and protocol.
+    ///
+    /// This matches the C++ `ServerStatMan::find(host, protocol)` semantics.
+    /// Each `(host, protocol)` pair has its own separate ServerStat entry,
+    /// so "example.com:http" and "example.com:ftp" are distinct entries.
+    pub fn get_or_create_with_protocol(&self, host: &str, protocol: &str) -> Arc<ServerStat> {
+        let key = (host.to_string(), protocol.to_string());
         let mut map = self.stats.recover_mut();
-        if let Some(stat) = map.get(host) {
+        if let Some(stat) = map.get(&key) {
             Arc::clone(stat)
         } else {
-            let stat = Arc::new(ServerStat::new(host));
-            map.insert(host.to_string(), Arc::clone(&stat));
+            let stat = Arc::new(ServerStat::new_with_protocol(host, protocol));
+            map.insert(key, Arc::clone(&stat));
             stat
         }
     }
 
+    /// Finds a ServerStat by hostname only (protocol-agnostic).
+    ///
+    /// Returns the entry with an empty protocol if it exists.
+    /// For protocol-aware lookups, use [`ServerStatMan::find_stat_by_protocol`].
     pub fn find_stat(&self, host: &str) -> Option<Arc<ServerStat>> {
+        self.find_stat_by_protocol(host, "")
+    }
+
+    /// Finds a ServerStat by hostname and protocol.
+    ///
+    /// This matches the C++ `ServerStatMan::find(hostname, protocol)` semantics.
+    /// Returns `None` if no entry exists for the given `(host, protocol)` pair.
+    pub fn find_stat_by_protocol(&self, host: &str, protocol: &str) -> Option<Arc<ServerStat>> {
+        let key = (host.to_string(), protocol.to_string());
         let map = self.stats.recover();
-        map.get(host).cloned()
+        map.get(&key).cloned()
+    }
+
+    /// Finds any ServerStat for the given hostname, regardless of protocol.
+    ///
+    /// This is useful when you need a stat entry for a host but don't care
+    /// about the protocol. Returns the first match found.
+    pub fn find_stat_by_host(&self, host: &str) -> Option<Arc<ServerStat>> {
+        let map = self.stats.recover();
+        map.iter()
+            .find(|((h, _), _)| h == host)
+            .map(|(_, v)| Arc::clone(v))
     }
 
     pub fn update(&self, host: &str, dl_speed: u64, is_multi: bool) {
         let stat = self.get_or_create(host);
+        stat.update_speed(dl_speed, is_multi);
+    }
+
+    /// Updates server stat for a specific (host, protocol) pair.
+    pub fn update_with_protocol(&self, host: &str, protocol: &str, dl_speed: u64, is_multi: bool) {
+        let stat = self.get_or_create_with_protocol(host, protocol);
         stat.update_speed(dl_speed, is_multi);
     }
 
@@ -76,7 +127,15 @@ impl ServerStatMan {
 
     pub fn remove(&self, host: &str) {
         let mut map = self.stats.recover_mut();
-        map.remove(host);
+        // Remove all entries for this host (all protocols)
+        map.retain(|(h, _), _| h != host);
+    }
+
+    /// Remove a specific (host, protocol) entry.
+    pub fn remove_by_protocol(&self, host: &str, protocol: &str) {
+        let key = (host.to_string(), protocol.to_string());
+        let mut map = self.stats.recover_mut();
+        map.remove(&key);
     }
 
     pub fn count(&self) -> usize {
@@ -86,21 +145,33 @@ impl ServerStatMan {
 
     pub fn hosts(&self) -> Vec<String> {
         let map = self.stats.recover();
-        map.keys().cloned().collect()
+        let mut hosts: Vec<String> = map.keys().map(|(h, _)| h.clone()).collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
     }
 
-    /// Mark a host as failed, updating error tracking fields.
+    /// Mark a host as failed (protocol-agnostic), updating error tracking fields.
+    ///
+    /// Looks up the entry with empty protocol. For protocol-aware failure marking,
+    /// use [`ServerStatMan::mark_failure_with_protocol`].
+    pub fn mark_failure(&self, host: &str, error_code: u16) {
+        self.mark_failure_with_protocol(host, "", error_code);
+    }
+
+    /// Mark a (host, protocol) entry as failed, updating error tracking fields.
     ///
     /// Clones the existing ServerStat, applies failure info via set_failure_info,
     /// and replaces the entry in the map so all future Arc holders see the update.
-    pub fn mark_failure(&self, host: &str, error_code: u16) {
+    pub fn mark_failure_with_protocol(&self, host: &str, protocol: &str, error_code: u16) {
+        let key = (host.to_string(), protocol.to_string());
         let mut map = self.stats.recover_mut();
-        if let Some(stat_arc) = map.get(host) {
+        if let Some(stat_arc) = map.get(&key) {
             // Dereference Arc to get inner ServerStat, then clone the inner value
             let inner: &ServerStat = stat_arc;
             let mut updated = inner.clone();
             updated.set_failure_info(error_code);
-            map.insert(host.to_string(), Arc::new(updated));
+            map.insert(key, Arc::new(updated));
         }
     }
 
@@ -202,7 +273,8 @@ impl ServerStatMan {
 
         for snapshot in file_content.servers {
             let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
-            map.insert(snapshot.host, stat);
+            let key = (snapshot.host.clone(), snapshot.protocol.clone());
+            map.insert(key, stat);
         }
 
         Ok(count)
@@ -276,7 +348,8 @@ impl ServerStatMan {
         let mut map = self.stats.recover_mut();
         for snapshot in file_content.servers {
             let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
-            map.insert(snapshot.host, stat);
+            let key = (snapshot.host.clone(), snapshot.protocol.clone());
+            map.insert(key, stat);
         }
 
         Ok(count)

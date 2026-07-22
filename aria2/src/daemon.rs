@@ -179,9 +179,10 @@ impl Daemonizer {
             return Err(DaemonError::ForkFailed("First fork failed".into()));
         }
         if pid > 0 {
-            // Parent process exits
-            info!("First fork successful, parent exiting (child PID: {})", pid);
-            std::process::exit(0);
+            // Parent process exits using _exit() to avoid flushing stdio
+            // buffers and running atexit handlers in the forked process,
+            // which is undefined behavior per POSIX.
+            unsafe { libc::_exit(0) };
         }
 
         // Step 2: Create new session
@@ -196,12 +197,9 @@ impl Daemonizer {
             return Err(DaemonError::ForkFailed("Second fork failed".into()));
         }
         if pid > 0 {
-            // Session leader exits
-            info!(
-                "Second fork successful, session leader exiting (grandchild PID: {})",
-                pid
-            );
-            std::process::exit(0);
+            // Session leader exits using _exit() to avoid flushing stdio
+            // buffers and running atexit handlers in the forked process.
+            unsafe { libc::_exit(0) };
         }
 
         // Step 4: Grandchild process continues as daemon

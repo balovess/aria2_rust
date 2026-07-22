@@ -8,6 +8,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use super::command::{Command, ProgressUpdate};
+use super::bt_registry::BtRegistry;
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -60,6 +61,12 @@ pub struct DownloadEngine {
     /// When true, the engine stays alive even with no pending/running commands
     /// (used for RPC listen mode). The loop only exits on shutdown signal.
     keep_alive: bool,
+    /// BitTorrent registry — maps GID to BtObject (DownloadContext, BtRuntime,
+    /// etc.). In C++ aria2, this is a global singleton in DownloadEngine.
+    /// Here it is owned by the engine and accessible via `bt_registry()`.
+    /// Used for info-hash reverse lookup, peer blocklist, and BT component
+    /// coordination across all active downloads.
+    bt_registry: Arc<std::sync::RwLock<BtRegistry>>,
 }
 
 impl DownloadEngine {
@@ -91,6 +98,7 @@ impl DownloadEngine {
             )),
             dns_cache: Arc::new(Mutex::new(DnsCache::new())),
             keep_alive: false,
+            bt_registry: Arc::new(std::sync::RwLock::new(BtRegistry::new())),
         };
 
         info!(
@@ -236,6 +244,16 @@ impl DownloadEngine {
     /// Get a reference to the DNS cache for dependency injection.
     pub fn dns_cache(&self) -> &Arc<Mutex<DnsCache>> {
         &self.dns_cache
+    }
+
+    /// Get a reference to the BitTorrent registry.
+    ///
+    /// The registry maps GID to [`BtObject`](super::bt_registry::BtObject) and
+    /// supports info-hash reverse lookup, peer blocklist, and BT component
+    /// coordination across all active downloads. In C++ aria2, this is a global
+    /// singleton owned by `DownloadEngine`.
+    pub fn bt_registry(&self) -> &Arc<std::sync::RwLock<BtRegistry>> {
+        &self.bt_registry
     }
 
     /// Enable/disable keep-alive mode. When true, the engine stays alive even
@@ -876,6 +894,90 @@ mod tests {
             final_speed < u64::MAX / 2,
             "EMA-smoothed speed should be finite, got {}",
             final_speed
+        );
+    }
+
+    // ==================== BtRegistry accessor tests ====================
+
+    /// Verify that the engine creates a BtRegistry and the accessor returns it.
+    #[test]
+    fn test_bt_registry_accessor_returns_valid_registry() {
+        let engine = DownloadEngine::new(100);
+        let registry = engine.bt_registry();
+        let reg = registry.read().unwrap();
+        assert!(reg.is_empty(), "new engine should have empty BtRegistry");
+        assert_eq!(reg.tcp_port(), 0);
+        assert_eq!(reg.udp_port(), 0);
+    }
+
+    /// Verify that multiple Arc clones of the BtRegistry share the same
+    /// underlying data, so changes made through one clone are visible
+    /// through the other.
+    #[test]
+    fn test_bt_registry_arc_shared_ownership() {
+        let engine = DownloadEngine::new(100);
+        let registry_arc = engine.bt_registry().clone();
+
+        // Insert via the cloned Arc
+        {
+            let mut reg = registry_arc.write().unwrap();
+            reg.set_tcp_port(6881);
+            let obj = super::super::bt_registry::BtObject::new();
+            reg.put(42, obj);
+        }
+
+        // Verify visibility through the engine's accessor
+        let reg = engine.bt_registry().read().unwrap();
+        assert_eq!(reg.tcp_port(), 6881);
+        assert!(reg.get(42).is_some());
+    }
+
+    /// Verify BtRegistry info-hash lookup works end-to-end when a
+    /// DownloadContext with TorrentAttribute is registered.
+    #[test]
+    fn test_bt_registry_info_hash_lookup_via_engine() {
+        use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+
+        let engine = DownloadEngine::new(100);
+        let info_hash = "abcdef0123456789abcdef0123456789abcdef01";
+
+        // Create a DownloadContext with TorrentAttribute
+        let mut ctx = crate::download::DownloadContext::new(1024, 4096, "/tmp/test.bin".to_string());
+        let ta = TorrentAttribute {
+            name: "test_torrent".to_string(),
+            mode: BtFileMode::Single,
+            announce_list: vec![],
+            nodes: vec![],
+            info_hash: info_hash.to_string(),
+            metadata: vec![],
+            metadata_size: 0,
+            private_torrent: false,
+            creation_date: 0,
+            comment: String::new(),
+            created_by: String::new(),
+            url_list: vec![],
+        };
+        ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(ta));
+        let ctx = Arc::new(ctx);
+
+        // Register into BtRegistry
+        let obj = super::super::bt_registry::BtObject::builder()
+            .download_context(Arc::clone(&ctx))
+            .build();
+        {
+            let mut reg = engine.bt_registry().write().unwrap();
+            reg.put(123, obj);
+        }
+
+        // Lookup by info_hash should find the context
+        let reg = engine.bt_registry().read().unwrap();
+        let found = reg.get_download_context_by_info_hash(info_hash);
+        assert!(found.is_some(), "info-hash lookup should find registered context");
+
+        // Wrong hash should not find it
+        assert!(
+            reg.get_download_context_by_info_hash("wrong_hash").is_none(),
+            "wrong hash should not match"
         );
     }
 }

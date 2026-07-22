@@ -7,24 +7,24 @@ use super::session_serializer::{self, SessionEntry};
 use crate::request::request_group::RequestGroup;
 use crate::util::rwlock_ext::RwLockRecover;
 
-/// 活跃会话管理器 - 负责会话的加载、保存和自动保存
+/// Active session manager - responsible for session loading, saving, and auto-save
 pub struct ActiveSessionManager {
-    /// 会话文件路径
+    /// Session file path
     pub session_path: PathBuf,
-    /// 自动保存间隔
+    /// Auto-save interval
     pub auto_save_interval: Duration,
-    /// 脏标记 - 标记是否有未保存的更改
+    /// Dirty flag - indicates whether there are unsaved changes
     dirty_flag: AtomicBool,
 }
 
 impl ActiveSessionManager {
-    /// 创建新的活跃会话管理器
+    /// Create a new active session manager
     ///
-    /// # 参数
-    /// - `session_path`: 会话文件保存路径
-    /// - `auto_save_interval`: 自动保存的时间间隔
+    /// # Arguments
+    /// - `session_path`: Path where the session file is saved
+    /// - `auto_save_interval`: Time interval for auto-save
     ///
-    /// # 示例
+    /// # Example
     /// ```ignore
     /// let manager = ActiveSessionManager::new(
     ///     PathBuf::from("/tmp/session.txt"),
@@ -45,13 +45,13 @@ impl ActiveSessionManager {
         }
     }
 
-    /// 从文件加载会话数据
+    /// Load session data from file
     ///
-    /// 如果文件不存在，返回空的 Vec（不视为错误）
+    /// If the file does not exist, returns an empty Vec (not treated as an error)
     ///
-    /// # 返回值
-    /// - `Ok(Vec<SessionEntry>)`: 成功加载的会话条目列表
-    /// - `Err(String)`: 加载失败时的错误信息
+    /// # Returns
+    /// - `Ok(Vec<SessionEntry>)`: Successfully loaded session entry list
+    /// - `Err(String)`: Error message when loading fails
     pub async fn load_session(&self) -> Result<Vec<SessionEntry>, String> {
         if !self.session_path.exists() {
             tracing::debug!(
@@ -78,22 +78,23 @@ impl ActiveSessionManager {
         }
     }
 
-    /// 保存所有下载组的状态到会话文件
+    /// Save all download group states to the session file
     ///
-    /// 使用原子写入策略：先写入临时文件 (.sess.tmp)，然后重命名为目标文件。
-    /// 这确保在写入过程中如果发生崩溃，不会损坏原有的会话文件。
+    /// Uses atomic write strategy: writes to a temporary file (.sess.tmp) first,
+    /// then renames to the target file. This ensures that if a crash occurs during
+    /// writing, the original session file will not be corrupted.
     ///
-    /// # 参数
-    /// - `groups`: 需要保存状态的下载组列表
+    /// # Arguments
+    /// - `groups`: List of download groups whose states need to be saved
     ///
-    /// # 返回值
-    /// - `Ok(usize)`: 成功保存的条目数量
-    /// - `Err(String)`: 保存失败时的错误信息
+    /// # Returns
+    /// - `Ok(usize)`: Number of entries successfully saved
+    /// - `Err(String)`: Error message when saving fails
     pub async fn save_session(
         &self,
         groups: &[Arc<std::sync::RwLock<RequestGroup>>],
     ) -> Result<usize, String> {
-        // 序列化所有组为 SessionEntry 列表
+        // Serialize all groups into a SessionEntry list
         let mut entries = Vec::new();
         for group_lock in groups {
             let group = group_lock.recover();
@@ -107,7 +108,7 @@ impl ActiveSessionManager {
             return Ok(0);
         }
 
-        // 使用原子写入策略保存到文件
+        // Save to file using atomic write strategy
         match session_serializer::save_to_file_with_entries(&self.session_path, &entries).await {
             Ok(_) => {
                 tracing::info!(
@@ -125,30 +126,31 @@ impl ActiveSessionManager {
         }
     }
 
-    /// 标记会话为脏状态（有未保存的更改）
+    /// Mark the session as dirty (has unsaved changes)
     pub fn mark_dirty(&self) {
         self.dirty_flag.store(true, Ordering::Relaxed);
         tracing::debug!("Marking session as dirty");
     }
 
-    /// 检查会话是否有未保存的更改
+    /// Check whether the session has unsaved changes
     pub fn is_dirty(&self) -> bool {
         self.dirty_flag.load(Ordering::Relaxed)
     }
 
-    /// 启动自动保存后台任务
+    /// Start the auto-save background task
     ///
-    /// 在后台循环中定期检查脏标记，如果有未保存的更改则自动保存。
-    /// 该方法会在后台启动一个 Tokio 任务，不会阻塞当前线程。
+    /// Periodically checks the dirty flag in a background loop, and automatically
+    /// saves if there are unsaved changes. This method spawns a Tokio task in
+    /// the background and does not block the current thread.
     ///
-    /// # 参数
-    /// - `self`: 必须通过 Arc 包装，以便在后台任务中共享
-    /// - `groups`: 所有活动下载组的共享引用
+    /// # Arguments
+    /// - `self`: Must be wrapped in Arc to be shared in the background task
+    /// - `groups`: Shared reference to all active download groups
     ///
-    /// # 注意事项
-    /// - 此方法会启动一个无限循环的后台任务
-    /// - 只有当 dirty flag 为 true 时才会执行保存操作
-    /// - 保存成功后会清除 dirty flag
+    /// # Notes
+    /// - This method starts an infinite-loop background task
+    /// - Save operations are only performed when the dirty flag is true
+    /// - The dirty flag is cleared after a successful save
     pub fn start_auto_save(self: &Arc<Self>, groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>>) {
         let mgr = Arc::clone(self);
 
@@ -163,7 +165,7 @@ impl ActiveSessionManager {
             loop {
                 interval.tick().await;
 
-                // 如果没有更改，跳过本次保存
+                // If no changes, skip this save cycle
                 if !mgr.is_dirty() {
                     tracing::debug!("Auto-save check: no changes, skipping");
                     continue;
@@ -171,17 +173,17 @@ impl ActiveSessionManager {
 
                 tracing::debug!("Auto-save check: changes detected, starting save");
 
-                // 获取所有组的读锁
+                // Acquire read lock on all groups
                 let groups_read = groups.read().await;
                 match mgr.save_session(&groups_read).await {
                     Ok(n) => {
                         tracing::debug!("Auto-save succeeded: saved {} entries", n);
-                        // 保存成功后清除脏标记
+                        // Clear dirty flag after successful save
                         mgr.dirty_flag.store(false, Ordering::Relaxed);
                     }
                     Err(e) => {
                         tracing::warn!("Auto-save failed: {} (keeping dirty flag for retry)", e);
-                        // 保存失败时保留脏标记，下次继续尝试
+                        // Keep dirty flag on failure, retry next cycle
                     }
                 }
             }
@@ -195,43 +197,43 @@ mod tests {
     use crate::request::request_group::{DownloadOptions, GroupId};
     use tempfile::TempDir;
 
-    /// 测试 1: 验证 new() 正确创建管理器
+    /// Test 1: Verify new() correctly creates the manager
     #[test]
     fn test_new_manager() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("session.txt");
         let interval = Duration::from_secs(60);
 
         let manager = ActiveSessionManager::new(session_path.clone(), interval);
 
-        assert_eq!(manager.session_path, session_path, "路径应正确设置");
-        assert_eq!(manager.auto_save_interval, interval, "间隔应正确设置");
-        assert!(!manager.is_dirty(), "新创建的管理器不应是脏状态");
+        assert_eq!(manager.session_path, session_path, "Path should be set correctly");
+        assert_eq!(manager.auto_save_interval, interval, "Interval should be set correctly");
+        assert!(!manager.is_dirty(), "Newly created manager should not be dirty");
     }
 
-    /// 测试 2: 文件不存在时返回空列表
+    /// Test 2: Return empty list when file does not exist
     #[tokio::test]
     async fn test_load_nonexistent_file_returns_empty() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let nonexistent_path = temp_dir.path().join("nonexistent_session.txt");
 
         let manager = ActiveSessionManager::new(nonexistent_path, Duration::from_secs(60));
         let result = manager.load_session().await;
 
-        assert!(result.is_ok(), "文件不存在不应返回错误");
+        assert!(result.is_ok(), "Non-existent file should not return error");
         let entries = result.unwrap();
-        assert!(entries.is_empty(), "文件不存在时应返回空列表");
+        assert!(entries.is_empty(), "Non-existent file should return empty list");
     }
 
-    /// 测试 3: 保存和加载往返测试
+    /// Test 3: Save and load roundtrip test
     #[tokio::test]
     async fn test_load_save_roundtrip() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("roundtrip_session.txt");
 
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
-        // 创建测试用的 RequestGroup
+        // Create test RequestGroups
         let gid1 = GroupId::new(0xd270c8a2);
         let options1 = DownloadOptions {
             dir: Some("/downloads".to_string()),
@@ -256,91 +258,91 @@ mod tests {
 
         let groups = vec![group1, group2];
 
-        // 保存会话
+        // Save session
         let save_result = manager.save_session(&groups).await;
-        assert!(save_result.is_ok(), "保存应成功");
+        assert!(save_result.is_ok(), "Save should succeed");
         let saved_count = save_result.unwrap();
-        assert!(saved_count > 0, "应保存至少 1 个条目");
+        assert!(saved_count > 0, "Should save at least 1 entry");
 
-        // 加载会话并验证
+        // Load session and verify
         let load_result = manager.load_session().await;
-        assert!(load_result.is_ok(), "加载应成功");
+        assert!(load_result.is_ok(), "Load should succeed");
         let entries = load_result.unwrap();
 
-        assert_eq!(entries.len(), saved_count, "加载的条目数应与保存的一致");
+        assert_eq!(entries.len(), saved_count, "Loaded entry count should match saved count");
 
-        // 验证数据完整性
+        // Verify data integrity
         assert!(
             entries
                 .iter()
                 .any(|e| e.uris.contains(&"http://example.com/file1.zip".to_string())),
-            "应包含第一个 URI"
+            "Should contain the first URI"
         );
         assert!(
             entries
                 .iter()
                 .any(|e| e.uris.contains(&"http://mirror.com/file2.iso".to_string())),
-            "应包含第二个 URI"
+            "Should contain the second URI"
         );
     }
 
-    /// 测试 4: mark_dirty 和 is_dirty 功能验证
+    /// Test 4: mark_dirty and is_dirty functionality verification
     #[test]
     fn test_mark_dirty_and_check() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("dirty_test.txt");
 
         let manager = ActiveSessionManager::new(session_path, Duration::from_secs(30));
 
-        // 初始状态应为干净
-        assert!(!manager.is_dirty(), "初始状态应是干净的");
+        // Initial state should be clean
+        assert!(!manager.is_dirty(), "Initial state should be clean");
 
-        // 标记为脏
+        // Mark as dirty
         manager.mark_dirty();
-        assert!(manager.is_dirty(), "mark_dirty 后应为脏状态");
+        assert!(manager.is_dirty(), "Should be dirty after mark_dirty");
 
-        // 再次标记（幂等性）
+        // Mark again (idempotent)
         manager.mark_dirty();
-        assert!(manager.is_dirty(), "重复 mark_dirty 应保持脏状态");
+        assert!(manager.is_dirty(), "Repeated mark_dirty should keep dirty state");
     }
 
-    /// 测试 5: 自动保存在干净状态下跳过保存
+    /// Test 5: Auto-save skips saving when clean
     ///
-    /// 此测试通过短间隔验证：当 dirty=false 时，不会触发实际的保存操作
+    /// This test uses a short interval to verify: when dirty=false, no actual save operation is triggered
     #[tokio::test]
     async fn test_auto_save_skips_when_clean() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("auto_skip_test.txt");
 
         let manager = Arc::new(ActiveSessionManager::new(
             session_path.clone(),
-            Duration::from_millis(50), // 短间隔以加速测试
+            Duration::from_millis(50), // Short interval to speed up test
         ));
 
         let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> = Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
-        // 启动自动保存（此时 dirty=false）
+        // Start auto-save (dirty=false at this point)
         manager.start_auto_save(Arc::clone(&groups));
 
-        // 等待几个 tick 周期
+        // Wait for a few tick cycles
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // 验证文件未被创建（因为没有脏标记）
-        assert!(!session_path.exists(), "dirty=false 时不应创建会话文件");
+        // Verify file was not created (because no dirty flag)
+        assert!(!session_path.exists(), "Should not create session file when dirty=false");
     }
 
-    /// 测试 6: 保存后文件应存在于指定路径
+    /// Test 6: File should exist at specified path after saving
     #[tokio::test]
     async fn test_save_creates_file() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("file_creation_test.txt");
 
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
-        // 验证初始状态文件不存在
-        assert!(!session_path.exists(), "保存前文件不应存在");
+        // Verify file does not exist initially
+        assert!(!session_path.exists(), "File should not exist before saving");
 
-        // 创建测试组
+        // Create test group
         let gid = GroupId::new(12345);
         let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
@@ -348,33 +350,33 @@ mod tests {
             DownloadOptions::default(),
         )));
 
-        // 执行保存
+        // Execute save
         let result = manager.save_session(&[group]).await;
-        assert!(result.is_ok(), "保存应成功");
+        assert!(result.is_ok(), "Save should succeed");
 
-        // 验证文件已创建
-        assert!(session_path.exists(), "保存后文件应存在于指定路径");
+        // Verify file was created
+        assert!(session_path.exists(), "File should exist at specified path after saving");
 
-        // 验证文件内容非空
+        // Verify file content is not empty
         let content = tokio::fs::read_to_string(&session_path)
             .await
-            .expect("读取文件失败");
-        assert!(!content.is_empty(), "文件内容不应为空");
+            .expect("Failed to read file");
+        assert!(!content.is_empty(), "File content should not be empty");
         assert!(
             content.contains("http://test.com/file.bin"),
-            "文件应包含保存的 URI"
+            "File should contain the saved URI"
         );
     }
 
-    /// 测试 7: 多次保存覆盖旧文件
+    /// Test 7: Multiple saves overwrite old file
     #[tokio::test]
     async fn test_multiple_saves_overwrite() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("overwrite_test.txt");
 
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
-        // 第一次保存
+        // First save
         let gid1 = GroupId::new(1);
         let group1 = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid1,
@@ -384,7 +386,7 @@ mod tests {
         let result1 = manager.save_session(&[group1]).await;
         assert!(result1.is_ok());
 
-        // 第二次保存不同的内容
+        // Second save with different content
         let gid2 = GroupId::new(2);
         let group2 = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid2,
@@ -394,59 +396,59 @@ mod tests {
         let result2 = manager.save_session(&[group2]).await;
         assert!(result2.is_ok());
 
-        // 加载并验证只包含第二次的内容
-        let entries = manager.load_session().await.expect("加载失败");
-        assert_eq!(entries.len(), 1, "应只有 1 个条目（最新的）");
+        // Load and verify only the second save's content is present
+        let entries = manager.load_session().await.expect("Failed to load");
+        assert_eq!(entries.len(), 1, "Should have only 1 entry (the latest)");
         assert!(
             entries[0]
                 .uris
                 .contains(&"http://second.com/b.txt".to_string()),
-            "应包含最新保存的 URI"
+            "Should contain the latest saved URI"
         );
         assert!(
             !entries[0]
                 .uris
                 .contains(&"http://first.com/a.txt".to_string()),
-            "不应包含旧的 URI"
+            "Should not contain the old URI"
         );
     }
 
-    /// 测试 8: 空组列表保存后文件不存在或为空
+    /// Test 8: File does not exist or is empty after saving empty group list
     #[tokio::test]
     async fn test_save_empty_groups() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("empty_groups_test.txt");
 
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
-        // 保存空列表
+        // Save empty list
         let empty_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = vec![];
         let result = manager.save_session(&empty_groups).await;
 
-        assert!(result.is_ok(), "保存空列表应成功");
-        assert_eq!(result.unwrap(), 0, "应返回 0 个条目");
+        assert!(result.is_ok(), "Saving empty list should succeed");
+        assert_eq!(result.unwrap(), 0, "Should return 0 entries");
 
-        // 文件可能不存在或为空（取决于实现）
+        // File may not exist or may be empty (depending on implementation)
         if session_path.exists() {
             let content = tokio::fs::read_to_string(&session_path)
                 .await
-                .expect("读取文件失败");
-            assert!(content.is_empty(), "空组列表应产生空文件");
+                .expect("Failed to read file");
+            assert!(content.is_empty(), "Empty group list should produce empty file");
         }
     }
 
-    /// 测试 9: 自动保存触发时的完整流程
+    /// Test 9: Full flow when auto-save is triggered
     #[tokio::test]
     async fn test_auto_save_triggers_on_dirty() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("auto_trigger_test.txt");
 
         let manager = Arc::new(ActiveSessionManager::new(
             session_path.clone(),
-            Duration::from_millis(50), // 短间隔
+            Duration::from_millis(50), // Short interval
         ));
 
-        // 创建测试组
+        // Create test group
         let gid = GroupId::new(99999);
         let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
@@ -457,36 +459,36 @@ mod tests {
         let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> =
             Arc::new(tokio::sync::RwLock::new(vec![group]));
 
-        // 启动自动保存
+        // Start auto-save
         manager.start_auto_save(Arc::clone(&groups));
 
-        // 标记为脏
+        // Mark as dirty
         manager.mark_dirty();
 
-        // 等待足够的时间让自动保存执行
+        // Wait long enough for auto-save to execute
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // 验证文件已被创建（因为 dirty=true 触发了保存）
-        // 注意：由于异步任务的时序，这里可能需要更长的等待时间
-        // 我们给予合理的等待时间
+        // Verify file has been created (because dirty=true triggered save)
+        // Note: Due to async task timing, a longer wait may be needed
+        // We allow a reasonable wait time
         if session_path.exists() {
             let content = tokio::fs::read_to_string(&session_path)
                 .await
-                .expect("读取文件失败");
+                .expect("Failed to read file");
             assert!(
                 content.contains("http://auto-save-test.com/data.bin") || content.is_empty(),
-                "文件应包含保存的数据或为空（取决于时序）"
+                "File should contain saved data or be empty (depending on timing)"
             );
         }
-        // 即使文件尚未创建也是可接受的（取决于异步调度）
+        // It is also acceptable if the file has not been created yet (depends on async scheduling)
     }
 
-    /// 测试 10: 不同 auto_save_interval 的配置
+    /// Test 10: Different auto_save_interval configurations
     #[test]
     fn test_different_intervals() {
-        let temp_dir = TempDir::new().expect("创建临时目录失败");
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
 
-        // 测试各种间隔配置
+        // Test various interval configurations
         let intervals = [
             Duration::from_secs(1),
             Duration::from_secs(30),
@@ -500,7 +502,7 @@ mod tests {
             let manager = ActiveSessionManager::new(path, *interval);
             assert_eq!(
                 manager.auto_save_interval, *interval,
-                "间隔 {} 应正确设置",
+                "Interval {} should be set correctly",
                 i
             );
         }

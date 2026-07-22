@@ -176,9 +176,9 @@ async fn test_force_pause() {
     let force_pause_resp = engine.handle_request(&force_pause_req).await;
     assert!(force_pause_resp.is_success(), "forcePause should succeed");
 
-    // Verify the result is "OK"
+    // C++ aria2 returns the GID string (not "OK") — see RpcMethodImpl.cc:pauseDownload
     let result: String = serde_json::from_value(force_pause_resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK", "forcePause should return 'OK'");
+    assert_eq!(result, gid, "forcePause should return the GID (C++ aria2 behavior)");
 
     // Verify the task status is Paused
     let status_req = JsonRpcRequest {

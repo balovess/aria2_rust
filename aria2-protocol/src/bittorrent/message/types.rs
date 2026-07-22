@@ -20,6 +20,9 @@ pub enum MessageType {
     Reject = 13,
     HaveAll = 14,
     HaveNone = 15,
+    /// BEP 10: Extension Protocol. ID = 20.
+    /// Used for ut_metadata, ut_pex, and other extensions.
+    Extended = 20,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -41,7 +44,8 @@ impl TryFrom<u8> for MessageType {
             13 => Ok(MessageType::Reject),
             14 => Ok(MessageType::HaveAll),
             15 => Ok(MessageType::HaveNone),
-            n => Err(format!("无效的消息ID: {}", n)),
+            20 => Ok(MessageType::Extended),
+            n => Err(format!("Invalid message ID: {}", n)),
         }
     }
 }
@@ -115,6 +119,19 @@ pub enum BtMessage {
     },
     HaveAll,
     HaveNone,
+    /// BEP 10: Extension Protocol message (ID=20).
+    ///
+    /// The first byte of the payload is the extended message ID (0 = handshake,
+    /// 1+ = application-specific, negotiated via the extension handshake).
+    /// The remaining bytes are the bencoded payload.
+    ///
+    /// This enables ut_metadata (BEP 9), ut_pex (BEP 11), and other extensions.
+    Extended {
+        /// Extended message ID: 0 for handshake, 1+ for negotiated extensions.
+        ext_id: u8,
+        /// Bencoded payload data.
+        payload: Vec<u8>,
+    },
 }
 
 impl BtMessage {
@@ -136,6 +153,7 @@ impl BtMessage {
             BtMessage::Suggest { .. } => Some(12),
             BtMessage::HaveAll => Some(14),
             BtMessage::HaveNone => Some(15),
+            BtMessage::Extended { .. } => Some(20),
         }
     }
 
@@ -155,6 +173,7 @@ impl BtMessage {
             BtMessage::Reject { .. } => Some(13),
             BtMessage::Suggest { .. } => Some(5),
             BtMessage::HaveAll | BtMessage::HaveNone => Some(1),
+            BtMessage::Extended { payload, .. } => Some(2 + payload.len()),
         }
     }
 }

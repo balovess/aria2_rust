@@ -1,7 +1,7 @@
-//! 流式数据解码器框架
+//! Stream data decoder framework
 //!
-//! 提供可组合的流式数据过滤器，支持 GZip、Chunked、BZip2 等编码格式的解码。
-//! 通过 `process_filters` 可以将多个过滤器串联使用，实现复杂的数据处理流水线。
+//! Provides composable stream data filters, supporting decoding of GZip, Chunked, BZip2 and other encoding formats.
+//! Multiple filters can be chained via `process_filters` to implement complex data processing pipelines.
 
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_writer::SeekableDiskWriter;
@@ -9,46 +9,46 @@ use bzip2_rs::DecoderReader as BzDecoder;
 use flate2::read::GzDecoder;
 use std::io::{Cursor, Read};
 
-/// 流式过滤器 trait
+/// Stream filter trait
 ///
-/// 定义了流式数据处理器的接口，所有具体的过滤器实现都需要实现此 trait。
-/// 过滤器支持增量式数据处理，可以在多次调用中逐步消费输入数据。
+/// Defines the interface for stream data processors. All concrete filter implementations must implement this trait.
+/// Filters support incremental data processing and can consume input data progressively across multiple calls.
 pub trait StreamFilter: Send + Sync + std::fmt::Debug {
-    /// 处理输入数据并返回过滤后的结果
+    /// Process input data and return filtered result
     ///
     /// # Arguments
     ///
-    /// * `input` - 输入数据的字节切片
+    /// * `input` - Input data byte slice
     ///
     /// # Returns
     ///
-    /// 过滤后的数据，或错误信息
+    /// Filtered data, or error message
     fn filter(&mut self, input: &[u8]) -> Result<Vec<u8>>;
 
-    /// 刷新内部缓冲区并返回剩余数据
+    /// Flush internal buffer and return remaining data
     ///
-    /// 在输入结束后调用此方法以确保所有缓冲的数据都被输出。
+    /// Call this method after input ends to ensure all buffered data is output.
     ///
     /// # Returns
     ///
-    /// 缓冲区中的剩余数据，或错误信息
+    /// Remaining data in the buffer, or error message
     fn flush(&mut self) -> Result<Vec<u8>>;
 
-    /// 返回过滤器的名称（用于调试和日志）
+    /// Return the filter name (for debugging and logging)
     fn name(&self) -> &'static str;
 
-    /// 检查是否需要更多输入才能继续处理
+    /// Check if more input is needed to continue processing
     ///
-    /// 当返回 `false` 时，表示过滤器已经完成工作，不需要更多输入。
+    /// When returning `false`, the filter has completed its work and needs no more input.
     fn needs_more_input(&self) -> bool;
 }
 
-// ==================== GZip 解码器 ====================
+// ==================== GZip Decoder ====================
 
-/// GZip 格式解压器
+/// GZip format decompressor
 ///
-/// 使用 flate2 库实现的 GZip (RFC 1952) 数据解压器。
-/// 支持流式解压，可以分块处理大型压缩文件。
+/// GZip (RFC 1952) data decompressor implemented using the flate2 library.
+/// Supports streaming decompression, can process large compressed files in chunks.
 ///
 /// # Examples
 ///
@@ -56,23 +56,23 @@ pub trait StreamFilter: Send + Sync + std::fmt::Debug {
 /// use aria2_core::http::stream_filter::{GZipDecoder, StreamFilter};
 ///
 /// let mut decoder = GZipDecoder::new();
-/// let compressed_data = /* 压缩的 GZip 数据 */;
+/// let compressed_data = /* compressed GZip data */;
 /// let decompressed = decoder.filter(compressed_data)?;
 /// ```
 #[derive(Debug)]
 pub struct GZipDecoder {
-    /// 内部 GzDecoder 实例
+    /// Internal GzDecoder instance
     inner: Option<GzDecoder<Cursor<Vec<u8>>>>,
-    /// 是否已完成解压
+    /// Whether decompression is complete
     finished: bool,
 }
 
 impl GZipDecoder {
-    /// 创建新的 GZip 解码器实例
+    /// Create a new GZip decoder instance
     ///
     /// # Returns
     ///
-    /// 新的 GZipDecoder 实例
+    /// A new GZipDecoder instance
     pub fn new() -> Self {
         GZipDecoder {
             inner: None,
@@ -88,32 +88,32 @@ impl Default for GZipDecoder {
 }
 
 impl StreamFilter for GZipDecoder {
-    /// 处理 GZip 压缩数据
+    /// Process GZip compressed data
     ///
-    /// 首次调用时会检测 GZip magic number (0x1f 0x8b)，验证数据格式有效性。
-    /// 后续调用会将数据追加到内部缓冲区并进行解压。
+    /// On first call, detects GZip magic number (0x1f 0x8b) to validate data format.
+    /// Subsequent calls append data to the internal buffer and decompress.
     ///
     /// # Arguments
     ///
-    /// * `input` - GZip 压缩的字节数据
+    /// * `input` - GZip compressed byte data
     ///
     /// # Returns
     ///
-    /// 解压后的原始数据，或错误信息
+    /// Decompressed raw data, or error message
     ///
     /// # Errors
     ///
-    /// - 如果输入数据不是有效的 GZip 格式（缺少 magic number）
-    /// - 如果解压过程中发生 I/O 错误
+    /// - If input data is not valid GZip format (missing magic number)
+    /// - If an I/O error occurs during decompression
     fn filter(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        // 检查是否已经完成
+        // Check if already finished
         if self.finished && self.inner.is_none() {
             return Err(Aria2Error::Parse(
                 "GZip decoder already finished".to_string(),
             ));
         }
 
-        // 验证 GZip magic number (首次调用时)
+        // Validate GZip magic number (on first call)
         if self.inner.is_none() {
             if input.len() < 2 {
                 return Err(Aria2Error::Parse(
@@ -126,13 +126,13 @@ impl StreamFilter for GZipDecoder {
                 return Err(Aria2Error::Parse("Invalid GZip magic number".to_string()));
             }
 
-            // 初始化解码器
+            // Initialize decoder
             let cursor = Cursor::new(input.to_vec());
             self.inner = Some(GzDecoder::new(cursor));
         } else {
-            // 将新数据追加到已有的缓冲区
-            // 注意：由于 GzDecoder 的限制，这里采用重新创建的方式
-            // 实际应用中可能需要更复杂的缓冲管理
+            // Append new data to existing buffer
+            // Note: Due to GzDecoder limitations, we recreate the decoder here
+            // Production use may require more sophisticated buffer management
             return Err(Aria2Error::Parse(
                 "GZip incremental decoding not fully supported in this implementation".to_string(),
             ));
@@ -145,7 +145,7 @@ impl StreamFilter for GZipDecoder {
             match decoder.read_to_end(&mut output) {
                 Ok(_) => {
                     self.finished = true;
-                    self.inner = None; // 释放解码器资源
+                    self.inner = None; // Release decoder resources
                     Ok(output)
                 }
                 Err(e) => Err(Aria2Error::Io(e.to_string())),
@@ -157,19 +157,19 @@ impl StreamFilter for GZipDecoder {
         }
     }
 
-    /// 刷新 GZip 解码器缓冲区
+    /// Flush GZip decoder buffer
     ///
-    /// 返回内部剩余的已解压数据。对于一次性解压的场景，
-    /// 此方法通常返回空向量（因为所有数据已在 filter() 中输出）。
+    /// Returns remaining decompressed data internally. For one-shot decompression,
+    /// this method typically returns an empty vector (since all data was output in filter()).
     ///
     /// # Returns
     ///
-    /// 缓冲区中的剩余数据
+    /// Remaining data in the buffer
     fn flush(&mut self) -> Result<Vec<u8>> {
         if self.finished {
             Ok(Vec::new())
         } else if self.inner.is_some() {
-            // 尝试完成解压
+            // Attempt to complete decompression
             let mut output = Vec::new();
             if let Some(ref mut decoder) = self.inner {
                 let _ = decoder.read_to_end(&mut output);
@@ -181,40 +181,40 @@ impl StreamFilter for GZipDecoder {
         }
     }
 
-    /// 返回 "gzip"
+    /// Returns "gzip"
     fn name(&self) -> &'static str {
         "gzip"
     }
 
-    /// 检查是否需要更多输入
+    /// Check if more input is needed
     ///
-    /// 当 finished=true 且 inner=None 时返回 false，表示解压完成
+    /// Returns false when finished=true and inner=None, indicating decompression is complete
     fn needs_more_input(&self) -> bool {
         !(self.finished && self.inner.is_none())
     }
 }
 
-// ==================== Chunked 解码器 ====================
+// ==================== Chunked Decoder ====================
 
-/// Chunked Transfer-Encoding 状态枚举
+/// Chunked Transfer-Encoding state enum
 #[derive(Debug, Clone, PartialEq)]
 enum ChunkState {
-    /// 正在读取 chunk size 行
+    /// Reading chunk size line
     ReadingSize,
-    /// 正在读取 chunk 数据
+    /// Reading chunk data
     ReadingData { remaining: usize },
-    /// 读取数据后的 \r\n（chunk 数据结束标记）
+    /// Reading \r\n after data (chunk data end marker)
     ReadingDataEnd,
-    /// chunked 编码结束（遇到 size=0 的终止块）
+    /// Chunked encoding complete (encountered size=0 terminator chunk)
     Complete,
-    /// 发生错误
+    /// Error occurred
     Error(String),
 }
 
-/// HTTP Chunked Transfer-Encoding 解码器
+/// HTTP Chunked Transfer-Encoding decoder
 ///
-/// 实现 RFC 7230 Section 4.1 规范的 chunked 编码解码。
-/// 支持 chunk extensions（会忽略未知的扩展）。
+/// Implements chunked encoding decoding per RFC 7230 Section 4.1.
+/// Supports chunk extensions (unknown extensions are ignored).
 ///
 /// # Format
 ///
@@ -242,22 +242,22 @@ enum ChunkState {
 /// ```
 #[derive(Debug)]
 pub struct ChunkedDecoder {
-    /// 当前解析状态
+    /// Current parsing state
     state: ChunkState,
-    /// 已收集的 size 行数据
+    /// Collected size line data
     size_buffer: Vec<u8>,
-    /// 当前 chunk 的剩余字节数
+    /// Remaining bytes in current chunk
     current_chunk_remaining: usize,
-    /// 解码后的输出缓冲区
+    /// Decoded output buffer
     output_buffer: Vec<u8>,
 }
 
 impl ChunkedDecoder {
-    /// 创建新的 Chunked 解码器实例
+    /// Create a new Chunked decoder instance
     ///
     /// # Returns
     ///
-    /// 新的 ChunkedDecoder 实例
+    /// A new ChunkedDecoder instance
     pub fn new() -> Self {
         ChunkedDecoder {
             state: ChunkState::ReadingSize,
@@ -275,32 +275,32 @@ impl Default for ChunkedDecoder {
 }
 
 impl StreamFilter for ChunkedDecoder {
-    /// 解析 chunked 编码数据
+    /// Parse chunked encoded data
     ///
-    /// 按照 RFC 7230 Section 4.1 规范解析 chunked 格式：
-    /// - ReadingSize: 读取直到 \r\n，然后解析十六进制 size
-    /// - ReadingData: 读取指定大小的数据，完成后回到 ReadingSize
-    /// - 遇到 size=0 时进入 Complete 状态
+    /// Parses chunked format per RFC 7230 Section 4.1:
+    /// - ReadingSize: Read until \r\n, then parse hex size
+    /// - ReadingData: Read specified amount of data, then return to ReadingSize
+    /// - Enter Complete state when size=0 is encountered
     ///
     /// # Arguments
     ///
-    /// * `input` - chunked 编码的字节数据
+    /// * `input` - Chunked encoded byte data
     ///
     /// # Returns
     ///
-    /// 解码后的原始数据（去除 chunked 包装），或错误信息
+    /// Decoded raw data (with chunked framing removed), or error message
     ///
     /// # Errors
     ///
-    /// - 如果 chunk size 格式无效（非十六进制）
-    /// - 如果在 Error 状态下尝试继续处理
+    /// - If chunk size format is invalid (non-hex)
+    /// - If attempting to continue processing in Error state
     fn filter(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        // 如果已经在错误状态，直接返回错误
+        // If already in error state, return error immediately
         if let ChunkState::Error(ref msg) = self.state {
             return Err(Aria2Error::Parse(msg.clone()));
         }
 
-        // 如果已经完成，返回空结果
+        // If already complete, return empty result
         if matches!(self.state, ChunkState::Complete) {
             return Ok(Vec::new());
         }
@@ -310,30 +310,30 @@ impl StreamFilter for ChunkedDecoder {
         while pos < input.len() {
             match &self.state {
                 ChunkState::ReadingSize => {
-                    // 收集字符直到遇到 \r\n
+                    // Collect characters until \r\n is encountered
                     let byte = input[pos];
                     if byte == b'\r' {
-                        // 跳过 \r
+                        // Skip \r
                         pos += 1;
-                        // 检查下一个字节是否是 \n
+                        // Check if next byte is \n
                         if pos < input.len() && input[pos] == b'\n' {
-                            pos += 1; // 跳过 \n
+                            pos += 1; // Skip \n
 
-                            // 解析 size 行
+                            // Parse size line
                             let size_str = String::from_utf8_lossy(&self.size_buffer).to_string();
                             let size_str_trimmed = size_str.trim();
 
-                            // 分离 size 和可能的 extensions
+                            // Separate size and possible extensions
                             let size_part = if let Some(semi_pos) = size_str_trimmed.find(';') {
                                 &size_str_trimmed[..semi_pos]
                             } else {
                                 size_str_trimmed
                             };
 
-                            // 解析十六进制大小
+                            // Parse hex size
                             match usize::from_str_radix(size_part.trim(), 16) {
                                 Ok(0) => {
-                                    // 终止块
+                                    // Terminator chunk
                                     self.state = ChunkState::Complete;
                                     self.size_buffer.clear();
                                     let result = std::mem::take(&mut self.output_buffer);
@@ -356,23 +356,23 @@ impl StreamFilter for ChunkedDecoder {
                                 }
                             }
                         }
-                        // 如果不是 \n，继续等待（pos 已经增加了）
+                        // If not \n, continue waiting (pos has already been incremented)
                     } else if byte == b'\n' {
-                        // 单独的 \n，也当作行结束符处理
+                        // Standalone \n, also treat as line terminator
                         pos += 1;
 
-                        // 解析 size 行
+                        // Parse size line
                         let size_str = String::from_utf8_lossy(&self.size_buffer).to_string();
                         let size_str_trimmed = size_str.trim();
 
-                        // 分离 size 和可能的 extensions
+                        // Separate size and possible extensions
                         let size_part = if let Some(semi_pos) = size_str_trimmed.find(';') {
                             &size_str_trimmed[..semi_pos]
                         } else {
                             size_str_trimmed
                         };
 
-                        // 解析十六进制大小
+                        // Parse hex size
                         match usize::from_str_radix(size_part.trim(), 16) {
                             Ok(0) => {
                                 self.state = ChunkState::Complete;
@@ -395,7 +395,7 @@ impl StreamFilter for ChunkedDecoder {
                             }
                         }
                     } else {
-                        // 收集 size 字符
+                        // Collect size character
                         self.size_buffer.push(byte);
                         pos += 1;
                     }
@@ -405,23 +405,23 @@ impl StreamFilter for ChunkedDecoder {
                     let remaining_bytes = *remaining;
                     let available = input.len() - pos;
 
-                    // 计算本次要复制的字节数
+                    // Calculate bytes to copy this time
                     let to_copy = std::cmp::min(remaining_bytes, available);
 
-                    // 复制数据到输出缓冲区
+                    // Copy data to output buffer
                     self.output_buffer
                         .extend_from_slice(&input[pos..pos + to_copy]);
                     pos += to_copy;
 
-                    // 更新剩余计数
+                    // Update remaining count
                     let new_remaining = remaining_bytes - to_copy;
 
                     if new_remaining == 0 {
-                        // 当前 chunk 的数据已读完，期望下一个 \r\n
+                        // Current chunk data fully read, expect next \r\n
                         self.state = ChunkState::ReadingDataEnd;
                         self.current_chunk_remaining = 0;
                     } else {
-                        // 更新状态中的剩余计数
+                        // Update remaining count in state
                         self.state = ChunkState::ReadingData {
                             remaining: new_remaining,
                         };
@@ -430,21 +430,21 @@ impl StreamFilter for ChunkedDecoder {
                 }
 
                 ChunkState::ReadingDataEnd => {
-                    // 跳过 chunk 数据后的 \r\n
+                    // Skip \r\n after chunk data
                     let byte = input[pos];
                     if byte == b'\r' || byte == b'\n' {
-                        pos += 1; // 跳过 \r 或 \n
-                    // 继续保持在 ReadingDataEnd 状态
+                        pos += 1; // Skip \r or \n
+                    // Continue in ReadingDataEnd state
                     } else {
-                        // 遇到非换行字符，说明 \r\n 已经过完
-                        // 转到 ReadingSize 来处理这个字符
+                        // Non-newline character encountered, \r\n has been consumed
+                        // Switch to ReadingSize to process this character
                         self.state = ChunkState::ReadingSize;
-                        // 不增加 pos，让下次循环处理这个字符
+                        // Don't increment pos, let next loop iteration handle this character
                     }
                 }
 
                 ChunkState::Complete => {
-                    // 已经完成，忽略后续数据
+                    // Already complete, ignore subsequent data
                     break;
                 }
 
@@ -454,36 +454,36 @@ impl StreamFilter for ChunkedDecoder {
             }
         }
 
-        // 返回当前累积的所有输出数据
+        // Return all accumulated output data
         let result = std::mem::take(&mut self.output_buffer);
         Ok(result)
     }
 
-    /// 刷新 Chunked 解码器缓冲区
+    /// Flush Chunked decoder buffer
     ///
-    /// 返回缓冲区中剩余的已解码数据。
-    /// 如果解码过程不完整（仍在读取 chunk），返回错误。
+    /// Returns remaining decoded data in the buffer.
+    /// If decoding is incomplete (still reading chunks), returns an error.
     ///
     /// # Returns
     ///
-    /// 缓冲区中的剩余数据，或错误信息（如果解码不完整）
+    /// Remaining data in the buffer, or error message (if decoding is incomplete)
     fn flush(&mut self) -> Result<Vec<u8>> {
         match &self.state {
             ChunkState::Complete => {
-                // 完成状态，返回空
+                // Complete state, return empty
                 Ok(Vec::new())
             }
             ChunkState::ReadingSize
             | ChunkState::ReadingData { .. }
             | ChunkState::ReadingDataEnd => {
-                // 不完整的状态，可能有数据丢失
+                // Incomplete state, data may be lost
                 let remaining = std::mem::take(&mut self.output_buffer);
                 if remaining.is_empty() {
                     Err(Aria2Error::Parse(
                         "Incomplete chunked encoding data".to_string(),
                     ))
                 } else {
-                    // 返回已有数据，但标记为警告
+                    // Return existing data, but mark as warning
                     Ok(remaining)
                 }
             }
@@ -491,25 +491,25 @@ impl StreamFilter for ChunkedDecoder {
         }
     }
 
-    /// 返回 "chunked"
+    /// Returns "chunked"
     fn name(&self) -> &'static str {
         "chunked"
     }
 
-    /// 检查是否需要更多输入
+    /// Check if more input is needed
     ///
-    /// 只有在 Complete 或 Error 状态时才返回 false
+    /// Only returns false when in Complete or Error state
     fn needs_more_input(&self) -> bool {
         !matches!(self.state, ChunkState::Complete | ChunkState::Error(_))
     }
 }
 
-// ==================== BZip2 解码器 ====================
+// ==================== BZip2 Decoder ====================
 
-/// BZip2 格式解压器
+/// BZip2 format decompressor
 ///
-/// 使用 bzip2 库实现的 BZip2 数据解压器。
-/// 类似于 GZipDecoder，但使用 bzip2 压缩算法。
+/// BZip2 data decompressor implemented using the bzip2 library.
+/// Similar to GZipDecoder, but uses the bzip2 compression algorithm.
 ///
 /// # Examples
 ///
@@ -517,7 +517,7 @@ impl StreamFilter for ChunkedDecoder {
 /// use aria2_core::http::stream_filter::{BZip2Decoder, StreamFilter};
 ///
 /// let mut decoder = BZip2Decoder::new();
-/// let compressed_data = /* BZip2 压缩数据 */;
+/// let compressed_data = /* BZip2 compressed data */;
 /// let decompressed = decoder.filter(compressed_data)?;
 /// ```
 pub struct BZip2Decoder {
@@ -534,11 +534,11 @@ impl std::fmt::Debug for BZip2Decoder {
 }
 
 impl BZip2Decoder {
-    /// 创建新的 BZip2 解码器实例
+    /// Create a new BZip2 decoder instance
     ///
     /// # Returns
     ///
-    /// 新的 BZip2Decoder 实例
+    /// A new BZip2Decoder instance
     pub fn new() -> Self {
         BZip2Decoder {
             inner: None,
@@ -554,38 +554,38 @@ impl Default for BZip2Decoder {
 }
 
 impl StreamFilter for BZip2Decoder {
-    /// 处理 BZip2 压缩数据
+    /// Process BZip2 compressed data
     ///
-    /// 首次调用时初始化解码器并执行解压操作。
+    /// On first call, initializes the decoder and performs decompression.
     ///
     /// # Arguments
     ///
-    /// * `input` - BZip2 压缩的字节数据
+    /// * `input` - BZip2 compressed byte data
     ///
     /// # Returns
     ///
-    /// 解压后的原始数据，或错误信息
+    /// Decompressed raw data, or error message
     ///
     /// # Errors
     ///
-    /// - 如果输入数据不是有效的 BZip2 格式
-    /// - 如果解压过程中发生 I/O 错误
+    /// - If input data is not valid BZip2 format
+    /// - If an I/O error occurs during decompression
     fn filter(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        // 检查是否已经完成
+        // Check if already finished
         if self.finished && self.inner.is_none() {
             return Err(Aria2Error::Parse(
                 "BZip2 decoder already finished".to_string(),
             ));
         }
 
-        // 验证最小长度
+        // Validate minimum length
         if input.len() < 10 {
             return Err(Aria2Error::Parse(
                 "Input too short for BZip2 header".to_string(),
             ));
         }
 
-        // 初始化解码器
+        // Initialize decoder
         if self.inner.is_none() {
             let cursor = Cursor::new(input.to_vec());
             self.inner = Some(BzDecoder::new(cursor));
@@ -595,7 +595,7 @@ impl StreamFilter for BZip2Decoder {
             ));
         }
 
-        // 执行解压
+        // Execute decompression
         if let Some(ref mut decoder) = self.inner {
             let mut output = Vec::new();
             match decoder.read_to_end(&mut output) {
@@ -612,11 +612,11 @@ impl StreamFilter for BZip2Decoder {
         }
     }
 
-    /// 刷新 BZip2 解码器缓冲区
+    /// Flush BZip2 decoder buffer
     ///
     /// # Returns
     ///
-    /// 缓冲区中的剩余数据
+    /// Remaining data in the buffer
     fn flush(&mut self) -> Result<Vec<u8>> {
         if self.finished {
             Ok(Vec::new())
@@ -632,12 +632,12 @@ impl StreamFilter for BZip2Decoder {
         }
     }
 
-    /// 返回 "bzip2"
+    /// Returns "bzip2"
     fn name(&self) -> &'static str {
         "bzip2"
     }
 
-    /// 检查是否需要更多输入
+    /// Check if more input is needed
     fn needs_more_input(&self) -> bool {
         !(self.finished && self.inner.is_none())
     }
@@ -676,64 +676,64 @@ pub fn flush_filters(filters: &mut [Box<dyn StreamFilter>]) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-// ==================== AutoFilterSelector 自动选择器 ====================
+// ==================== AutoFilterSelector ====================
 
-/// HTTP 内容编码自动选择器
+/// HTTP content encoding auto-selector
 ///
-/// 根据 HTTP headers 自动选择合适的解码过滤器列表。
-/// 遵循 RFC 7230 Section 3.3.1 规范：Transfer-Encoding 优先于 Content-Encoding。
+/// Automatically selects appropriate decoder filter list based on HTTP headers.
+/// Follows RFC 7230 Section 3.3.1: Transfer-Encoding takes priority over Content-Encoding.
 ///
 /// # Priority Rules
 ///
-/// 1. **Transfer-Encoding: chunked** → 添加 `ChunkedDecoder`
-/// 2. **Content-Encoding: gzip | x-gzip** → 添加 `GZipDecoder`
-/// 3. **Content-Encoding: deflate** → 添加 `ZlibDecoder`（未来支持）
-/// 4. **Content-Encoding: bzip2 | x-bzip2** → 添加 `BZip2Decoder`
+/// 1. **Transfer-Encoding: chunked** -> Add `ChunkedDecoder`
+/// 2. **Content-Encoding: gzip | x-gzip** -> Add `GZipDecoder`
+/// 3. **Content-Encoding: deflate** -> Add `ZlibDecoder` (future support)
+/// 4. **Content-Encoding: bzip2 | x-bzip2** -> Add `BZip2Decoder`
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// use aria2_core::http::stream_filter::AutoFilterSelector;
 ///
-/// // 根据 Content-Encoding: gzip 自动选择 GZip 解码器
+/// // Auto-select GZip decoder based on Content-Encoding: gzip
 /// let filters = AutoFilterSelector::select_filters(Some("gzip"), None);
 /// assert_eq!(filters.len(), 1);
 ///
-/// // Transfer-Encoding 优先
+/// // Transfer-Encoding takes priority
 /// let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
-/// assert_eq!(filters.len(), 1); // 只有 chunked
+/// assert_eq!(filters.len(), 1); // Only chunked
 /// ```
 pub struct AutoFilterSelector;
 
 impl AutoFilterSelector {
-    /// 根据 HTTP headers 创建合适的过滤器列表
+    /// Create appropriate filter list based on HTTP headers
     ///
-    /// 自动分析 Content-Encoding 和 Transfer-Encoding headers，
-    /// 构建相应的解码过滤器。
+    /// Automatically analyzes Content-Encoding and Transfer-Encoding headers,
+    /// constructing corresponding decoder filters.
     ///
     /// # Arguments
     ///
-    /// * `content_encoding` - Content-Encoding header 的值（可选）
-    /// * `transfer_encoding` - Transfer-Encoding header 的值（可选）
+    /// * `content_encoding` - Value of Content-Encoding header (optional)
+    /// * `transfer_encoding` - Value of Transfer-Encoding header (optional)
     ///
     /// # Returns
     ///
-    /// 配置好的过滤器列表
+    /// Configured filter list
     ///
     /// # RFC Compliance
     ///
-    /// 遵循 RFC 7230 Section 3.3.1:
-    /// - Transfer-Encoding 优先级高于 Content-Encoding
-    /// - 多个编码值按顺序处理（逗号分隔）
+    /// Follows RFC 7230 Section 3.3.1:
+    /// - Transfer-Encoding has higher priority than Content-Encoding
+    /// - Multiple encoding values are processed in order (comma-separated)
     pub fn select_filters(
         content_encoding: Option<&str>,
         transfer_encoding: Option<&str>,
     ) -> Vec<Box<dyn StreamFilter>> {
         let mut filters: Vec<Box<dyn StreamFilter>> = Vec::new();
 
-        // Transfer-Encoding 优先于 Content-Encoding (RFC 7230)
+        // Transfer-Encoding takes priority over Content-Encoding (RFC 7230)
         if let Some(te) = transfer_encoding {
-            // 解析多个值（逗号分隔）
+            // Parse multiple values (comma-separated)
             for encoding in te.split(',') {
                 let encoding = encoding.trim().to_lowercase();
                 match encoding.as_str() {
@@ -744,21 +744,21 @@ impl AutoFilterSelector {
                         filters.push(Box::new(GZipDecoder::new()));
                     }
                     "deflate" => {
-                        // TODO: 未来支持 ZlibDecoder
+                        // TODO: Future support for ZlibDecoder
                         tracing::warn!("Deflate encoding not yet implemented");
                     }
                     "bzip2" | "x-bzip2" => {
                         filters.push(Box::new(BZip2Decoder::new()));
                     }
                     _ => {
-                        // Identity / none encoding → passthrough (no decoder needed)
+                        // Identity / none encoding -> passthrough (no decoder needed)
                         if encoding.eq_ignore_ascii_case("identity")
                             || encoding.eq_ignore_ascii_case("none")
                         {
                             continue;
                         }
 
-                        // LZMA / x-lzma → log warning, return identity (not yet supported)
+                        // LZMA / x-lzma -> log warning, return identity (not yet supported)
                         if encoding.contains("lzma") {
                             tracing::warn!(
                                 "LZMA encoding not yet supported, returning passthrough"
@@ -766,7 +766,7 @@ impl AutoFilterSelector {
                             continue;
                         }
 
-                        // Brotli (br) → placeholder for future support
+                        // Brotli (br) -> placeholder for future support
                         if encoding.eq_ignore_ascii_case("br") {
                             tracing::debug!("Brotli encoding detected but not yet implemented");
                             continue;
@@ -777,7 +777,7 @@ impl AutoFilterSelector {
                 }
             }
         } else if let Some(ce) = content_encoding {
-            // 仅在没有 Transfer-Encoding 时处理 Content-Encoding
+            // Only process Content-Encoding when Transfer-Encoding is absent
             for encoding in ce.split(',') {
                 let encoding = encoding.trim().to_lowercase();
                 match encoding.as_str() {
@@ -785,24 +785,24 @@ impl AutoFilterSelector {
                         filters.push(Box::new(GZipDecoder::new()));
                     }
                     "deflate" => {
-                        // TODO: 未来支持 ZlibDecoder
+                        // TODO: Future support for ZlibDecoder
                         tracing::warn!("Deflate encoding not yet implemented");
                     }
                     "bzip2" | "x-bzip2" => {
                         filters.push(Box::new(BZip2Decoder::new()));
                     }
                     "identity" | "" => {
-                        // identity 表示无编码，忽略
+                        // identity means no encoding, ignore
                     }
                     _ => {
-                        // Identity / none encoding → passthrough (no decoder needed)
+                        // Identity / none encoding -> passthrough (no decoder needed)
                         if encoding.eq_ignore_ascii_case("identity")
                             || encoding.eq_ignore_ascii_case("none")
                         {
                             continue;
                         }
 
-                        // LZMA / x-lzma → log warning, return identity (not yet supported)
+                        // LZMA / x-lzma -> log warning, return identity (not yet supported)
                         if encoding.contains("lzma") {
                             tracing::warn!(
                                 "LZMA encoding not yet supported, returning passthrough"
@@ -810,7 +810,7 @@ impl AutoFilterSelector {
                             continue;
                         }
 
-                        // Brotli (br) → placeholder for future support
+                        // Brotli (br) -> placeholder for future support
                         if encoding.eq_ignore_ascii_case("br") {
                             tracing::debug!("Brotli encoding detected but not yet implemented");
                             continue;

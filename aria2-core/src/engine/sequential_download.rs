@@ -8,6 +8,7 @@ use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{
     CachedDiskWriter, DefaultDiskWriter, DiskWriter, SeekableDiskWriter,
 };
@@ -56,14 +57,18 @@ impl SequentialDownloader {
     /// Non-blocking cancellation check.
     ///
     /// Returns `Err` when the underlying RequestGroup has been marked
-    /// `Removed` (by `aria2.remove` / `aria2.forceRemove`). Uses `try_read`
-    /// on the outer group lock so it is safe to call from the hot download
-    /// loop; a contended lock is treated as "not cancelled" and the caller
-    /// will re-check on the next iteration.
+    /// `Removed` (by `aria2.remove` / `aria2.forceRemove`) or `Paused`
+    /// (by `aria2.pause` / `aria2.forcePause`). Uses `try_read` on the
+    /// outer group lock so it is safe to call from the hot download loop;
+    /// a contended lock is treated as "not cancelled" and the caller will
+    /// re-check on the next iteration.
     fn check_cancelled(&self) -> Result<()> {
         match self.group.try_read() {
             Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
                 "Download cancelled by user".into(),
+            )),
+            Ok(g) if g.is_paused_flag() => Err(Aria2Error::DownloadFailed(
+                "Download paused".into(),
             )),
             _ => Ok(()),
         }
@@ -185,12 +190,51 @@ impl SequentialDownloader {
         let mut completed_bytes = start_offset;
         let write_piece = constants::RATE_LIMITER_CHUNK_SIZE;
 
+        // ADR-0001: Create control file for sequential downloads too.
+        // Even without piece-level tracking, the control file's
+        // completed_length is the authoritative source for resume detection,
+        // immune to the preallocation pitfall.
+        let ctrl_path = ControlFile::control_path_for(&self.output_path);
+        let mut ctrl_file = if actual_total > 0 {
+            match ControlFile::open_or_create(&ctrl_path, actual_total, 1).await {
+                Ok(mut cf) => {
+                    if start_offset > 0 {
+                        cf.update_completed_length(start_offset);
+                    }
+                    if let Err(e) = cf.save().await {
+                        tracing::warn!("Sequential: control file save failed: {}", e);
+                    }
+                    Some(cf)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Sequential: control file creation failed {}: {}",
+                        ctrl_path.display(), e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut ctrl_bytes_since_save: u64 = 0;
+        let ctrl_save_interval = (actual_total / 10).max(1024 * 1024); // save every ~10% or 1MB
+
         while let Some(chunk) = stream.next().await {
             // Check whether the task was removed between chunks. This is the
             // primary cancellation signal: `aria2.remove` /
             // `aria2.forceRemove` sets the RequestGroup status to `Removed`,
             // which `is_removed()` observes without blocking.
-            self.check_cancelled()?;
+            if let Err(e) = self.check_cancelled() {
+                // ADR-0001: Save control file before exiting on pause/remove.
+                if let Some(ref mut cf) = ctrl_file {
+                    cf.update_completed_length(completed_bytes);
+                    if let Err(save_err) = cf.save().await {
+                        tracing::warn!("Sequential: control file save on pause/remove failed: {}", save_err);
+                    }
+                }
+                return Err(e);
+            }
 
             let data: bytes::Bytes = chunk.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -205,6 +249,18 @@ impl SequentialDownloader {
                 writer.write(piece).await?;
                 completed_bytes += piece.len() as u64;
                 offset = end;
+
+                // ADR-0001: Periodically update control file with progress.
+                ctrl_bytes_since_save += piece.len() as u64;
+                if ctrl_bytes_since_save >= ctrl_save_interval {
+                    if let Some(ref mut cf) = ctrl_file {
+                        cf.update_completed_length(completed_bytes);
+                        if let Err(e) = cf.save().await {
+                            tracing::warn!("Sequential: control file save failed: {}", e);
+                        }
+                    }
+                    ctrl_bytes_since_save = 0;
+                }
 
                 self.progress_updater
                     .update_progress(
@@ -241,6 +297,13 @@ impl SequentialDownloader {
             self.output_path.display(),
             completed_bytes
         );
+        // ADR-0001: Delete control file on successful completion.
+        drop(ctrl_file);
+        if ctrl_path.exists() {
+            if let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
+                tracing::debug!("Failed to delete control file on completion: {}", e);
+            }
+        }
         self.cookie_helper.save_cookies_if_configured();
         Ok(())
     }

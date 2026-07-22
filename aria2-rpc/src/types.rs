@@ -3,10 +3,133 @@
 //! Contains all data structures used in RPC request/response payloads,
 //! including download status, file info, server info, and session info.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Serialize a `u64` as a **string** matching original C++ aria2 wire format.
+/// All numeric fields in RPC responses are strings (e.g. `"totalLength": "104857600"`).
+fn serialize_u64_as_string<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
+/// Serialize an `Option<u64>` as a string or skip if None.
+fn serialize_opt_u64_as_string<S: Serializer>(
+    v: &Option<u64>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(n) => s.serialize_str(&n.to_string()),
+        None => s.serialize_none(),
+    }
+}
+
+/// Serialize an `Option<u32>` as a string or skip if None.
+fn serialize_opt_u32_as_string<S: Serializer>(
+    v: &Option<u32>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(n) => s.serialize_str(&n.to_string()),
+        None => s.serialize_none(),
+    }
+}
+
+/// Serialize an `Option<u16>` as a string or skip if None.
+fn serialize_opt_u16_as_string<S: Serializer>(
+    v: &Option<u16>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(n) => s.serialize_str(&n.to_string()),
+        None => s.serialize_none(),
+    }
+}
+
+/// Serialize a `usize` as a string (for GlobalStat counts).
+fn serialize_usize_as_string<S: Serializer>(v: &usize, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
+/// Serialize a `u16` as a string (for PeerInfo.port, etc.).
+fn serialize_u16_as_string<S: Serializer>(v: &u16, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
+/// Deserialize a `u16` from a string or number.
+fn deserialize_u16_from_string_or_num<'de, D: Deserializer<'de>>(d: D) -> Result<u16, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        Str(String),
+        Num(u16),
+    }
+    match StringOrNum::deserialize(d)? {
+        StringOrNum::Str(s) => s.parse::<u16>().map_err(Error::custom),
+        StringOrNum::Num(n) => Ok(n),
+    }
+}
+
+/// Serialize a `bool` as "true"/"false" string matching original aria2c
+/// wire format (e.g. `"selected": "true"`).
+fn serialize_bool_as_aria2_string<S: Serializer>(v: &bool, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(if *v { "true" } else { "false" })
+}
+
+/// Deserialize a "true"/"false" string or bool into a Rust bool.
+fn deserialize_bool_from_aria2_string<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrString {
+        Bool(bool),
+        Str(String),
+    }
+    match BoolOrString::deserialize(d)? {
+        BoolOrString::Bool(b) => Ok(b),
+        BoolOrString::Str(s) => match s.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(Error::custom(format!("invalid bool string: {}", s))),
+        },
+    }
+}
+
+/// Deserialize a string-encoded u64 (from aria2 wire format) or a raw number.
+fn deserialize_u64_from_string_or_num<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        Str(String),
+        Num(u64),
+    }
+    match StringOrNum::deserialize(d)? {
+        StringOrNum::Str(s) => s.parse::<u64>().map_err(Error::custom),
+        StringOrNum::Num(n) => Ok(n),
+    }
+}
+
+/// Deserialize an Option<String-encoded u64> or raw number.
+fn deserialize_opt_u64_from_string_or_num<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<u64>, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        Str(String),
+        Num(u64),
+        Null,
+    }
+    match StringOrNum::deserialize(d)? {
+        StringOrNum::Str(s) => s.parse::<u64>().map(Some).map_err(Error::custom),
+        StringOrNum::Num(n) => Ok(Some(n)),
+        StringOrNum::Null => Ok(None),
+    }
+}
 
 // Re-export DownloadStatus from aria2-core as the canonical definition
 pub use aria2_core::DownloadStatus;
@@ -72,62 +195,109 @@ pub struct BittorrentMetaInfo {
 #[serde(rename_all = "camelCase")]
 pub struct StatusInfo {
     pub gid: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u64_as_string",
+        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub total_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u64_as_string",
+        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub completed_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u64_as_string",
+        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upload_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u64_as_string",
+        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub download_speed: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u64_as_string",
+        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upload_speed: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u16_as_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub connections: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub status: DownloadStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<FileInfo>>,
     /// BitTorrent metadata (matches original nested `bittorrent` object)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bittorrent: Option<BittorrentInfo>,
     /// Following GID (single string, matches original aria2 behavior)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub following: Option<String>,
     /// Whether this download is seeding (BitTorrent only)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeder: Option<String>,
     /// Hex-encoded piece bitfield (BitTorrent only)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitfield: Option<String>,
     /// Piece length in bytes (BitTorrent only)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u64_as_string",
+        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub piece_length: Option<u64>,
     /// Number of pieces (BitTorrent only)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u32_as_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub num_pieces: Option<u32>,
     /// List of GIDs that follow (chained downloads)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followed_by: Option<Vec<String>>,
     /// Parent GID this download belongs to (chained downloads)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub belongs_to: Option<String>,
     /// BitTorrent info hash (hex string)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub info_hash: Option<String>,
     /// Number of seeders (BitTorrent only)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u32_as_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub num_seeders: Option<u32>,
     /// Verified bytes length (when --check-integrity is active)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_u64_as_string",
+        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub verified_length: Option<u64>,
     /// Whether integrity verification is pending ("true"/"false" string)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_integrity_pending: Option<String>,
 }
 
@@ -278,14 +448,24 @@ impl StatusInfo {
 /// File information for a download entry.
 ///
 /// Returned by `aria2.getFiles`. Contains file path, size, progress,
-/// selection state, and associated URIs.
+/// selection state, and associated URIs. All numeric fields are serialized
+/// as strings matching original aria2c wire format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileInfo {
+    #[serde(serialize_with = "serialize_usize_as_string")]
     pub index: usize,
     pub path: String,
+    #[serde(serialize_with = "serialize_u64_as_string", deserialize_with = "deserialize_u64_from_string_or_num")]
     pub length: u64,
+    #[serde(serialize_with = "serialize_u64_as_string", deserialize_with = "deserialize_u64_from_string_or_num")]
     pub completed_length: u64,
+    /// Whether this file is selected for download.
+    /// Original aria2c serializes as "true"/"false" string.
+    #[serde(
+        serialize_with = "serialize_bool_as_aria2_string",
+        deserialize_with = "deserialize_bool_from_aria2_string"
+    )]
     pub selected: bool,
     pub uris: Vec<UriEntry>,
 }
@@ -374,10 +554,12 @@ pub type UriInfo = UriEntry;
 /// Server connection information for a specific file index.
 ///
 /// Returned by `aria2.getServers`, grouped by file index.
+/// All numeric fields are serialized as strings matching original aria2c.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfoIndex {
-    /// File index (0-based)
+    /// File index (1-based, serialized as string matching original aria2c)
+    #[serde(serialize_with = "serialize_usize_as_string")]
     pub index: usize,
     /// List of active server connections for this file
     pub servers: Vec<ServerInfo>,
@@ -386,6 +568,7 @@ pub struct ServerInfoIndex {
 /// Individual server connection details.
 ///
 /// Contains URI, current active URI (after redirects), and download speed.
+/// All numeric fields are serialized as strings matching original aria2c.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
@@ -393,7 +576,11 @@ pub struct ServerInfo {
     pub uri: String,
     /// Current active URI (may differ from original after redirects)
     pub current_uri: String,
-    /// Current download speed from this server (bytes/sec)
+    /// Current download speed from this server (bytes/sec, serialized as string)
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string_or_num"
+    )]
     pub download_speed: u64,
 }
 
@@ -425,18 +612,45 @@ impl ServerInfo {
 ///
 /// Returned by `aria2.getPeers`. Contains peer connection state and
 /// transfer speeds. Matches original aria2 peer entry fields.
+/// All numeric fields and boolean fields are serialized as strings
+/// matching original aria2c wire format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerInfo {
     pub peer_id: String,
     pub ip: String,
+    /// Peer port (serialized as string matching original util::uitos)
+    #[serde(
+        serialize_with = "serialize_u16_as_string",
+        deserialize_with = "deserialize_u16_from_string_or_num"
+    )]
     pub port: u16,
     /// Bitfield hex string (matches original util::toHex)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitfield: Option<String>,
+    /// Whether we are choking this peer (serialized as "true"/"false")
+    #[serde(
+        serialize_with = "serialize_bool_as_aria2_string",
+        deserialize_with = "deserialize_bool_from_aria2_string"
+    )]
     pub am_choking: bool,
+    /// Whether the peer is choking us (serialized as "true"/"false")
+    #[serde(
+        serialize_with = "serialize_bool_as_aria2_string",
+        deserialize_with = "deserialize_bool_from_aria2_string"
+    )]
     pub peer_choking: bool,
+    /// Download speed (serialized as string matching original util::itos)
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string_or_num"
+    )]
     pub download_speed: u64,
+    /// Upload speed (serialized as string matching original util::itos)
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string_or_num"
+    )]
     pub upload_speed: u64,
     /// Seeder status as "true"/"false" string (matches original VLB_TRUE/VLB_FALSE)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,14 +676,16 @@ pub struct GlobalStat {
 }
 
 impl GlobalStat {
+    /// Serialize as JSON matching original aria2 wire format where all
+    /// numeric values are strings (e.g. `"downloadSpeed": "0"`, `"numActive": "1"`).
     pub fn to_json_value(&self) -> serde_json::Value {
         serde_json::json!({
-            "downloadSpeed": self.download_speed,
-            "uploadSpeed": self.upload_speed,
-            "numActive": self.num_active,
-            "numWaiting": self.num_waiting,
-            "numStopped": self.num_stopped,
-            "numStoppedTotal": self.num_stopped_total
+            "downloadSpeed": self.download_speed.to_string(),
+            "uploadSpeed": self.upload_speed.to_string(),
+            "numActive": self.num_active.to_string(),
+            "numWaiting": self.num_waiting.to_string(),
+            "numStopped": self.num_stopped.to_string(),
+            "numStoppedTotal": self.num_stopped_total.to_string()
         })
     }
 }
@@ -966,12 +1182,14 @@ mod tests {
         let json = serde_json::to_value(&peer).unwrap();
         assert_eq!(json["peerId"], "peer-abc123");
         assert_eq!(json["ip"], "192.168.1.100");
-        assert_eq!(json["port"], 6881);
+        // port, downloadSpeed, uploadSpeed, amChoking, peerChoking are all
+        // serialized as strings matching original aria2c wire format
+        assert_eq!(json["port"], "6881");
         assert_eq!(json["bitfield"], "ff00ff00");
-        assert_eq!(json["amChoking"], false);
-        assert_eq!(json["peerChoking"], true);
-        assert_eq!(json["downloadSpeed"], 1048576);
-        assert_eq!(json["uploadSpeed"], 512000);
+        assert_eq!(json["amChoking"], "false");
+        assert_eq!(json["peerChoking"], "true");
+        assert_eq!(json["downloadSpeed"], "1048576");
+        assert_eq!(json["uploadSpeed"], "512000");
         assert_eq!(json["seeder"], "true");
 
         let roundtrip: PeerInfo = serde_json::from_value(json).unwrap();
@@ -1302,5 +1520,130 @@ mod tests {
             Some("single"),
             "mode should be 'single'"
         );
+    }
+
+    // =====================================================================
+    // Wire format string serialization tests (matching original C++ aria2)
+    // =====================================================================
+
+    /// Original C++ aria2 returns all numeric fields as **strings** in JSON:
+    /// `"totalLength": "104857600"` not `"totalLength": 104857600`.
+    /// This test verifies our custom serializers produce the correct wire format.
+    #[test]
+    fn test_status_info_numeric_fields_are_strings() {
+        let info = StatusInfo::new("wire-format-test")
+            .with_status(DownloadStatus::Active)
+            .with_total_length(104857600)
+            .with_completed_length(52428800)
+            .with_upload_length(0)
+            .with_download_speed(1024000)
+            .with_upload_speed(0)
+            .with_connections(5);
+
+        let json = serde_json::to_value(&info).unwrap();
+
+        // All numeric fields must be strings in wire format
+        assert_eq!(
+            json["totalLength"].as_str(),
+            Some("104857600"),
+            "totalLength must be a string: got {:?}",
+            json["totalLength"]
+        );
+        assert_eq!(
+            json["completedLength"].as_str(),
+            Some("52428800"),
+            "completedLength must be a string: got {:?}",
+            json["completedLength"]
+        );
+        assert_eq!(
+            json["uploadLength"].as_str(),
+            Some("0"),
+            "uploadLength must be a string: got {:?}",
+            json["uploadLength"]
+        );
+        assert_eq!(
+            json["downloadSpeed"].as_str(),
+            Some("1024000"),
+            "downloadSpeed must be a string: got {:?}",
+            json["downloadSpeed"]
+        );
+        assert_eq!(
+            json["uploadSpeed"].as_str(),
+            Some("0"),
+            "uploadSpeed must be a string: got {:?}",
+            json["uploadSpeed"]
+        );
+        assert_eq!(
+            json["connections"].as_str(),
+            Some("5"),
+            "connections must be a string: got {:?}",
+            json["connections"]
+        );
+    }
+
+    /// Verify GlobalStat returns string values (matching original aria2 format).
+    #[test]
+    fn test_global_stat_numeric_fields_are_strings() {
+        let stat = GlobalStat {
+            download_speed: 1024000,
+            upload_speed: 51200,
+            num_active: 2,
+            num_waiting: 3,
+            num_stopped: 1,
+            num_stopped_total: 1,
+        };
+        let json = stat.to_json_value();
+        assert_eq!(json["downloadSpeed"].as_str(), Some("1024000"));
+        assert_eq!(json["uploadSpeed"].as_str(), Some("51200"));
+        assert_eq!(json["numActive"].as_str(), Some("2"));
+        assert_eq!(json["numWaiting"].as_str(), Some("3"));
+        assert_eq!(json["numStopped"].as_str(), Some("1"));
+        assert_eq!(json["numStoppedTotal"].as_str(), Some("1"));
+    }
+
+    /// Verify FileInfo numeric fields are strings in wire format.
+    #[test]
+    fn test_file_info_numeric_fields_are_strings() {
+        let fi = FileInfo::new("/downloads/file.iso", 104857600)
+            .with_completed(52428800)
+            .with_index(1);
+        let json = serde_json::to_value(&fi).unwrap();
+        assert_eq!(
+            json["index"].as_str(),
+            Some("1"),
+            "index must be a string: got {:?}",
+            json["index"]
+        );
+        assert_eq!(
+            json["length"].as_str(),
+            Some("104857600"),
+            "length must be a string: got {:?}",
+            json["length"]
+        );
+        assert_eq!(
+            json["completedLength"].as_str(),
+            Some("52428800"),
+            "completedLength must be a string: got {:?}",
+            json["completedLength"]
+        );
+    }
+
+    /// Verify round-trip deserialization: string → u64 and number → u64 both work.
+    #[test]
+    fn test_status_info_deserialization_roundtrip() {
+        // Serialize a StatusInfo with numeric fields
+        let info = StatusInfo::new("test")
+            .with_total_length(104857600)
+            .with_completed_length(0);
+
+        let json = serde_json::to_value(&info).unwrap();
+        // Verify totalLength is a string
+        assert_eq!(json["totalLength"].as_str(), Some("104857600"));
+
+        // Parse back the serialized JSON — should succeed since it was
+        // produced by our own serializer
+        let roundtrip: StatusInfo = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(roundtrip.total_length, Some(104857600));
+        assert_eq!(roundtrip.completed_length, Some(0));
     }
 }

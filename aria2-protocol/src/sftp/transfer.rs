@@ -362,7 +362,6 @@ impl<'a> SftpTransfer<'a> {
         }
 
         // Step 5: Main transfer loop
-        let _buf = vec![0u8; options.buffer_size];
         let mut transferred = start_offset;
         let start_time = std::time::Instant::now();
         let mut last_report = start_offset;

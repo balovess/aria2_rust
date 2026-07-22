@@ -40,6 +40,7 @@ pub const DEFAULT_RETRY_WAIT_SECS: u64 = 1;
 pub const RETRYABLE_HTTP_CODES: [u16; 6] = [408, 429, 500, 502, 503, 504];
 
 // BitTorrent defaults
+// See also: aria2_original/src/BtConstants.h and aria2-next/src/BtConstants.h
 pub const BT_BLOCK_SIZE: usize = 16384;
 pub const BT_MAX_RETRIES: u32 = 3;
 pub const BT_BLOCK_REQUEST_TIMEOUT_SECS: u64 = 3;
@@ -57,6 +58,29 @@ pub const BT_PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
 pub const BT_HANDSHAKE_RESPONSE_SIZE: usize = 68;
 pub const BT_RECEIVE_BUFFER_SIZE: usize = 4096;
 pub const BT_RETRY_DELAY_MS: u64 = 100;
+
+// BtConstants.h — Core BitTorrent protocol constants
+pub const BT_INFO_HASH_LENGTH: usize = 20;
+pub const BT_PIECE_HASH_LENGTH: usize = 20;
+pub const BT_PEER_ID_LENGTH: usize = 20;
+/// Maximum block size that a peer may request (64 KiB).
+/// Matches C++ `MAX_BLOCK_LENGTH = 64_k`.
+pub const BT_MAX_BLOCK_LENGTH: usize = 65536;
+/// Default number of outstanding piece requests per peer.
+/// Matches C++ `DEFAULT_MAX_OUTSTANDING_REQUEST = 6`.
+pub const BT_DEFAULT_MAX_OUTSTANDING_REQUEST: usize = 6;
+/// Upper bound for the number of outstanding requests per peer.
+/// Matches C++ `UB_MAX_OUTSTANDING_REQUEST = 256`.
+pub const BT_UB_MAX_OUTSTANDING_REQUEST: usize = 256;
+/// Size of each metadata piece for ut_metadata extension (16 KiB).
+/// Matches C++ `METADATA_PIECE_SIZE = 16_k`.
+pub const BT_METADATA_PIECE_SIZE: usize = 16384;
+/// Compact peer format length for IPv4 (6 bytes: 4 IP + 2 port).
+/// Matches C++ `COMPACT_LEN_IPV4 = 6`.
+pub const BT_COMPACT_LEN_IPV4: usize = 6;
+/// Compact peer format length for IPv6 (18 bytes: 16 IP + 2 port).
+/// Matches C++ `COMPACT_LEN_IPV6 = 18`.
+pub const BT_COMPACT_LEN_IPV6: usize = 18;
 
 // Segment/Download defaults
 pub const DEFAULT_FILE_ALLOCATION: &str = "falloc";

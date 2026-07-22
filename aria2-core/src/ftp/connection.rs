@@ -1,6 +1,7 @@
-//! FTP 协议客户端实现
+//! FTP protocol client implementation
 //!
-//! 提供异步 FTP 客户端，支持被动/主动模式、二进制传输、目录列表解析等功能。
+//! Provides an async FTP client supporting passive/active mode, binary transfer,
+//! directory listing parsing, and more.
 
 use crate::error::{Aria2Error, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -8,67 +9,67 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
-/// FTP 数据连接模式
+/// FTP data connection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FtpMode {
-    /// 被动模式（客户端连接服务器数据端口）
+    /// Passive mode (client connects to server data port)
     #[default]
     Passive,
-    /// 主动模式（服务器连接客户端数据端口）
+    /// Active mode (server connects to client data port)
     Active,
 }
 
-/// FTP 响应结构体
+/// FTP response struct
 #[derive(Debug, Clone)]
 pub struct FtpResponse {
-    /// FTP 响应码（3位数字）
+    /// FTP response code (3-digit number)
     pub code: u16,
-    /// 响应消息文本
+    /// Response message text
     pub message: String,
 }
 
 impl FtpResponse {
-    /// 检查是否为成功响应（1xx-3xx）
+    /// Check if this is a success response (1xx-3xx)
     pub fn is_success(&self) -> bool {
         (100..400).contains(&self.code)
     }
 
-    /// 检查是否为中间响应（1xx）
+    /// Check if this is an intermediate response (1xx)
     pub fn is_intermediate(&self) -> bool {
         (100..200).contains(&self.code)
     }
 
-    /// 检查是否为正向完成响应（2xx）
+    /// Check if this is a positive completion response (2xx)
     pub fn is_positive_completion(&self) -> bool {
         (200..300).contains(&self.code)
     }
 
-    /// 检查是否为正向预备响应（1xx）
+    /// Check if this is a positive preliminary response (1xx)
     pub fn is_positive_preliminary(&self) -> bool {
         (100..200).contains(&self.code)
     }
 }
 
-/// FTP 文件信息结构体
+/// FTP file info struct
 #[derive(Debug, Clone)]
 pub struct FtpFileInfo {
-    /// 文件或目录名称
+    /// File or directory name
     pub name: String,
-    /// 文件大小（字节），目录时为 0
+    /// File size in bytes (0 for directories)
     pub size: u64,
-    /// 是否为目录
+    /// Whether this is a directory
     pub is_dir: bool,
 }
 
-/// FTP 客户端
+/// FTP client
 ///
-/// 异步 FTP 协议实现，支持：
-/// - 被动模式优先，主动模式 fallback
-/// - 二进制/ASCII 传输模式切换
-/// - 断点续传（REST 命令）
-/// - 目录列表解析（Unix/Windows 格式）
+/// Async FTP protocol implementation, supporting:
+/// - Passive mode priority, with active mode fallback
+/// - Binary/ASCII transfer mode switching
+/// - Resume transfer (REST command)
+/// - Directory listing parsing (Unix/Windows format)
 ///
-/// # 示例
+/// # Examples
 ///
 /// ```rust,no_run
 /// use aria2_core::ftp::connection::{FtpClient, FtpMode};
@@ -89,44 +90,44 @@ pub struct FtpFileInfo {
 /// }
 /// ```
 pub struct FtpClient {
-    /// 控制连接流（带缓冲）
+    /// Control connection stream (buffered)
     pub(crate) control_stream: BufReader<TcpStream>,
-    /// 数据连接模式
+    /// Data connection mode
     pub(crate) mode: FtpMode,
-    /// 当前二进制模式状态
+    /// Current binary mode state
     pub(crate) binary_mode: bool,
-    /// 服务器主机地址
+    /// Server host address
     pub(crate) host: String,
-    /// 服务器端口
+    /// Server port
     #[allow(dead_code)] // Port field retained for FTP connection configuration
     pub(crate) port: u16,
-    /// 连接超时时间
+    /// Connection timeout
     pub(crate) connect_timeout: Duration,
-    /// 读取超时时间
+    /// Read timeout
     pub(crate) read_timeout: Duration,
 }
 
 impl FtpClient {
-    /// 默认连接超时：30 秒
+    /// Default connection timeout: 30 seconds
     const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-    /// 默认读取超时：30 秒
+    /// Default read timeout: 30 seconds
     const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// 连接到 FTP 服务器
+    /// Connect to an FTP server
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `host`: FTP 服务器地址（域名或 IP）
-    /// - `port`: FTP 服务器端口（通常为 21）
-    /// - `mode`: 数据连接模式（被动或主动）
+    /// - `host`: FTP server address (domain name or IP)
+    /// - `port`: FTP server port (typically 21)
+    /// - `mode`: Data connection mode (passive or active)
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 连接超时
-    /// - 网络错误
-    /// - 服务器拒绝连接
+    /// - Connection timeout
+    /// - Network error
+    /// - Server refused connection
     pub async fn connect(host: &str, port: u16, mode: FtpMode) -> Result<Self> {
-        info!("FTP 连接中: {}:{}", host, port);
+        info!("FTP connecting: {}:{}", host, port);
 
         let stream = timeout(
             Self::DEFAULT_CONNECT_TIMEOUT,
@@ -134,7 +135,7 @@ impl FtpClient {
         )
         .await
         .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
-        .map_err(|e| Aria2Error::Network(format!("FTP 连接失败: {}", e)))?;
+        .map_err(|e| Aria2Error::Network(format!("FTP connection failed: {}", e)))?;
 
         let mut client = Self {
             control_stream: BufReader::new(stream),
@@ -146,48 +147,48 @@ impl FtpClient {
             read_timeout: Self::DEFAULT_READ_TIMEOUT,
         };
 
-        // 读取欢迎消息
+        // Read welcome message
         let welcome = client.read_response().await?;
         if !welcome.is_positive_completion() && !welcome.is_positive_preliminary() {
             return Err(Aria2Error::DownloadFailed(format!(
-                "FTP 服务器拒绝连接: {} {}",
+                "FTP server refused connection: {} {}",
                 welcome.code, welcome.message
             )));
         }
 
-        debug!("FTP 连接成功: {}", welcome.message.trim());
+        debug!("FTP connected successfully: {}", welcome.message.trim());
         Ok(client)
     }
 
-    /// 登录到 FTP 服务器
+    /// Log in to the FTP server
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `username`: 用户名（匿名登录使用 "anonymous"）
-    /// - `password`: 密码（匿名登录使用邮箱）
+    /// - `username`: Username (use "anonymous" for anonymous login)
+    /// - `password`: Password (use email for anonymous login)
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 530 未登录（认证失败）
+    /// - 530 Not logged in (authentication failed)
     pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
-        debug!("发送 USER 命令: {}", username);
+        debug!("Sending USER command: {}", username);
         self.send_command(&format!("USER {}", username)).await?;
         let resp = self.read_response().await?;
 
         match resp.code {
             230 => {
-                // 无需密码，直接登录成功
-                info!("FTP 登录成功 (无需密码)");
+                // No password required, login successful
+                info!("FTP login successful (no password required)");
                 Ok(())
             }
             331 | 332 => {
-                // 需要密码
-                debug!("需要密码认证，发送 PASS 命令");
+                // Password required
+                debug!("Password authentication required, sending PASS command");
                 self.send_command(&format!("PASS {}", password)).await?;
                 let pass_resp = self.read_response().await?;
 
                 if pass_resp.code == 230 || pass_resp.code == 202 {
-                    info!("FTP 登录成功");
+                    info!("FTP login successful");
                     Ok(())
                 } else if pass_resp.code == 530 {
                     Err(Aria2Error::Recoverable(
@@ -195,7 +196,7 @@ impl FtpClient {
                     ))
                 } else {
                     Err(Aria2Error::DownloadFailed(format!(
-                        "FTP 登录失败: {} {}",
+                        "FTP login failed: {} {}",
                         pass_resp.code, pass_resp.message
                     )))
                 }
@@ -205,11 +206,11 @@ impl FtpClient {
             )),
             _ => {
                 if resp.is_positive_completion() {
-                    info!("FTP 登录成功");
+                    info!("FTP login successful");
                     Ok(())
                 } else {
                     Err(Aria2Error::DownloadFailed(format!(
-                        "FTP 登录失败: {} {}",
+                        "FTP login failed: {} {}",
                         resp.code, resp.message
                     )))
                 }
@@ -217,78 +218,79 @@ impl FtpClient {
         }
     }
 
-    /// 设置传输模式（二进制/ASCII）
+    /// Set transfer mode (binary/ASCII)
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `enabled`: true 为二进制模式（TYPE I），false 为 ASCII 模式（TYPE A）
+    /// - `enabled`: true for binary mode (TYPE I), false for ASCII mode (TYPE A)
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 504 不支持的传输模式
+    /// - 504 Unsupported transfer mode
     pub async fn set_binary_mode(&mut self, enabled: bool) -> Result<()> {
         let type_cmd = if enabled { "TYPE I" } else { "TYPE A" };
-        debug!("设置传输类型: {}", type_cmd);
+        debug!("Setting transfer type: {}", type_cmd);
         self.send_command(type_cmd).await?;
         let resp = self.read_response().await?;
 
         if resp.is_positive_completion() {
             self.binary_mode = enabled;
             debug!(
-                "传输模式设置为: {}",
+                "Transfer mode set to: {}",
                 if enabled { "Binary" } else { "ASCII" }
             );
             Ok(())
         } else if resp.code == 504 {
             Err(Aria2Error::DownloadFailed(format!(
-                "不支持的传输模式: {}",
+                "Unsupported transfer mode: {}",
                 resp.message
             )))
         } else {
             Err(Aria2Error::DownloadFailed(format!(
-                "TYPE 命令失败: {} {}",
+                "TYPE command failed: {} {}",
                 resp.code, resp.message
             )))
         }
     }
 
-    /// 进入被动模式并建立数据连接
+    /// Enter passive mode and establish data connection
     ///
-    /// 优先尝试 EPSV（扩展被动模式），如果服务器不支持则回退到 PASV。
+    /// Tries EPSV (Extended Passive Mode) first, falls back to PASV if the
+    /// server does not support it.
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回数据连接的 TcpStream
+    /// Returns the data connection TcpStream
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 425 无法打开数据连接
-    /// - 超时错误
+    /// - 425 Cannot open data connection
+    /// - Timeout error
     pub async fn passive_mode(&mut self) -> Result<TcpStream> {
-        debug!("请求被动模式数据连接");
+        debug!("Requesting passive mode data connection");
 
-        // 先尝试 EPSV
+        // Try EPSV first
         self.send_command("EPSV").await?;
         let resp = self.read_response().await?;
 
         if resp.code == 229 {
-            // 解析 EPSV 响应: Entering Extended Passive Mode (|||port|)
+            // Parse EPSV response: Entering Extended Passive Mode (|||port|)
             if let Some(port) = Self::parse_epsv_response(&resp.message) {
-                debug!("EPSV 数据通道端口: {}", port);
+                debug!("EPSV data channel port: {}", port);
                 let data_stream = timeout(
                     self.connect_timeout,
                     TcpStream::connect((self.host.as_str(), port)),
                 )
                 .await
                 .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
-                .map_err(|e| Aria2Error::Network(format!("EPSV 数据连接失败: {}", e)))?;
+                .map_err(|e| Aria2Error::Network(format!("EPSV data connection failed: {}", e)))?;
 
                 return Ok(data_stream);
             }
         }
 
-        // 回退到 PASV
-        warn!("EPSV 不可用，回退到 PASV 模式");
+        // Fall back to PASV
+        warn!("EPSV unavailable, falling back to PASV mode");
         self.send_command("PASV").await?;
         let pasv_resp = self.read_response().await?;
 
@@ -298,79 +300,80 @@ impl FtpClient {
             ));
         }
 
-        // 解析 PASV 响应
+        // Parse PASV response
         let (data_host, data_port) = Self::parse_pasv_response(&pasv_resp.message)?;
-        debug!("PASV 数据通道: {}:{}", data_host, data_port);
+        debug!("PASV data channel: {}:{}", data_host, data_port);
         let data_stream = timeout(
             self.connect_timeout,
             TcpStream::connect((data_host.as_str(), data_port)),
         )
         .await
         .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
-        .map_err(|e| Aria2Error::Network(format!("PASV 数据连接失败: {}", e)))?;
+        .map_err(|e| Aria2Error::Network(format!("PASV data connection failed: {}", e)))?;
         Ok(data_stream)
     }
 
-    /// 进入主动模式并建立数据连接
+    /// Enter active mode and establish data connection
     ///
-    /// 发送 PORT 或 EPRT 命令告知服务器客户端的数据端口，
-    /// 然后在本地监听该端口等待服务器连接。
+    /// Sends a PORT or EPRT command to inform the server of the client's data port,
+    /// then listens on that port for the server to connect.
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回已接受的数据连接 TcpStream
+    /// Returns the accepted data connection TcpStream
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 425 无法打开数据连接
-    /// - 500/501/502 命令语法错误
+    /// - 425 Cannot open data connection
+    /// - 500/501/502 Command syntax error
     pub async fn active_mode(&mut self) -> Result<TcpStream> {
-        debug!("请求主动模式数据连接");
+        debug!("Requesting active mode data connection");
 
-        // 获取本地地址
+        // Get local address
         let local_addr = self
             .control_stream
             .get_ref()
             .local_addr()
-            .map_err(|e| Aria2Error::Network(format!("获取本地地址失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Network(format!("Failed to get local address: {}", e)))?;
 
-        // 在端口 0 上监听（系统自动分配可用端口）
+        // Listen on port 0 (system auto-assigns an available port)
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
             .await
-            .map_err(|e| Aria2Error::Network(format!("绑定数据端口失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Network(format!("Failed to bind data port: {}", e)))?;
         let data_port = listener
             .local_addr()
-            .map_err(|e| Aria2Error::Network(format!("获取监听端口失败: {}", e)))?
+            .map_err(|e| Aria2Error::Network(format!("Failed to get listen port: {}", e)))?
             .port();
 
         let local_ip = local_addr.ip();
 
-        // 尝试 EPRT（扩展主动模式）
+        // Try EPRT (extended active mode)
         let eprt_cmd = format!("EPRT |1|{}|{}|", local_ip, data_port);
-        debug!("发送 EPRT 命令: {}", eprt_cmd);
+        debug!("Sending EPRT command: {}", eprt_cmd);
         self.send_command(&eprt_cmd).await?;
         let resp = self.read_response().await?;
 
         if resp.code != 200 && resp.code != 500 && resp.code != 501 && resp.code != 502 {
             return Err(Aria2Error::DownloadFailed(format!(
-                "EPRT 命令失败: {} {}",
+                "EPRT command failed: {} {}",
                 resp.code, resp.message
             )));
         }
 
-        // 如果 EPRT 失败，尝试 PORT 命令
+        // If EPRT failed, try PORT command
         if !resp.is_positive_completion() {
-            warn!("EPRT 不可用，回退到 PORT 模式");
+            warn!("EPRT unavailable, falling back to PORT mode");
 
-            // 将 IP 地址转换为 PORT 命令格式 (h1,h2,h3,h4,p1,p2)
-            // 只支持 IPv4（PORT 命令不支持 IPv6）
+            // Convert IP address to PORT command format (h1,h2,h3,h4,p1,p2)
+            // Only supports IPv4 (PORT command does not support IPv6)
 
             let ipv4_addr = match local_ip {
                 std::net::IpAddr::V4(v4) => v4,
                 std::net::IpAddr::V6(_) => {
-                    // IPv6 不支持 PORT 命令，返回错误
+                    // IPv6 does not support PORT command, return error
                     return Err(Aria2Error::DownloadFailed(
-                        "IPv6 不支持主动模式 PORT 命令，请使用被动模式".to_string(),
+                        "IPv6 does not support active mode PORT command, please use passive mode"
+                            .to_string(),
                     ));
                 }
             };
@@ -382,7 +385,7 @@ impl FtpClient {
                 ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], p1, p2
             );
 
-            debug!("发送 PORT 命令: {}", port_cmd);
+            debug!("Sending PORT command: {}", port_cmd);
             self.send_command(&port_cmd).await?;
             let port_resp = self.read_response().await?;
 
@@ -393,46 +396,46 @@ impl FtpClient {
             }
         }
 
-        // 等待服务器连接（带超时）
-        debug!("等待服务器连接到数据端口: {}", data_port);
+        // Wait for server connection (with timeout)
+        debug!("Waiting for server to connect to data port: {}", data_port);
         let (data_stream, _addr) = timeout(self.connect_timeout, listener.accept())
             .await
             .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
-            .map_err(|e| Aria2Error::Network(format!("接受数据连接失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Network(format!("Failed to accept data connection: {}", e)))?;
 
-        debug!("主动模式数据连接建立成功");
+        debug!("Active mode data connection established successfully");
         Ok(data_stream)
     }
 
-    /// 列出目录内容
+    /// List directory contents
     ///
-    /// 支持两种格式：
-    /// - MLSD（机器可读列表，如果服务器支持）
-    /// - LIST（传统 Unix/Windows 格式）
+    /// Supports two formats:
+    /// - MLSD (machine-readable listing, if the server supports it)
+    /// - LIST (traditional Unix/Windows format)
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `path`: 要列出的目录路径
+    /// - `path`: Directory path to list
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回文件信息向量
+    /// Returns a vector of file info
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 550 目录不存在或不可访问
-    /// - 425/426 数据连接错误
+    /// - 550 Directory does not exist or is not accessible
+    /// - 425/426 Data connection error
     pub async fn list_directory(&mut self, path: &str) -> Result<Vec<FtpFileInfo>> {
-        debug!("列出目录: {}", path);
+        debug!("Listing directory: {}", path);
 
-        // 根据当前模式建立数据连接
+        // Establish data connection based on current mode
         let mut data_stream = match self.mode {
             FtpMode::Passive => {
-                // 被动模式优先，失败后 fallback 到主动模式
+                // Passive mode first, fallback to active mode on failure
                 match self.passive_mode().await {
                     Ok(stream) => stream,
                     Err(e) => {
-                        warn!("被动模式失败，尝试主动模式: {}", e);
+                        warn!("Passive mode failed, trying active mode: {}", e);
                         self.active_mode().await?
                     }
                 }
@@ -440,14 +443,14 @@ impl FtpClient {
             FtpMode::Active => self.active_mode().await?,
         };
 
-        // 先尝试 MLSD（机器可读格式）
+        // Try MLSD first (machine-readable format)
         self.send_command(&format!("MLSD {}", path)).await?;
         let resp = self.read_response().await?;
 
         let use_mlsd = resp.is_positive_preliminary();
 
         if !use_mlsd {
-            // MLSD 不可用，使用 LIST
+            // MLSD unavailable, use LIST
             self.send_command(&format!("LIST {}", path)).await?;
             let list_resp = self.read_response().await?;
 
@@ -458,25 +461,25 @@ impl FtpClient {
                     ));
                 }
                 return Err(Aria2Error::DownloadFailed(format!(
-                    "LIST 命令失败: {} {}",
+                    "LIST command failed: {} {}",
                     list_resp.code, list_resp.message
                 )));
             }
         }
 
-        // 读取数据流
+        // Read data stream
         let mut buffer = String::new();
         use tokio::io::AsyncReadExt;
         let bytes_read = timeout(self.read_timeout, data_stream.read_to_string(&mut buffer))
             .await
             .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
-            .map_err(|e| Aria2Error::Io(format!("读取目录列表失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Io(format!("Failed to read directory listing: {}", e)))?;
 
-        drop(data_stream); // 关闭数据连接
+        drop(data_stream); // Close data connection
 
-        debug!("读取到 {} 字节的目录列表", bytes_read);
+        debug!("Read {} bytes of directory listing", bytes_read);
 
-        // 读取最终响应
+        // Read final response
         let final_resp = self.read_response().await?;
         if final_resp.code == 426 {
             return Err(Aria2Error::Recoverable(
@@ -484,12 +487,12 @@ impl FtpClient {
             ));
         } else if !final_resp.is_positive_completion() {
             return Err(Aria2Error::DownloadFailed(format!(
-                "目录列表传输完成但返回错误: {} {}",
+                "Directory listing transfer completed but returned error: {} {}",
                 final_resp.code, final_resp.message
             )));
         }
 
-        // 解析目录列表
+        // Parse directory listing
         let files: Vec<FtpFileInfo> = buffer
             .lines()
             .filter_map(|line| {
@@ -501,63 +504,63 @@ impl FtpClient {
             })
             .collect();
 
-        debug!("解析到 {} 个文件/目录条目", files.len());
+        debug!("Parsed {} file/directory entries", files.len());
         Ok(files)
     }
 
-    /// 下载文件
+    /// Download a file
     ///
-    /// 支持断点续传，通过 REST 命令指定偏移量。
+    /// Supports resume transfer by specifying an offset via the REST command.
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `remote_path`: 远程文件路径
-    /// - `offset`: 可选的起始偏移量（用于断点续传）
+    /// - `remote_path`: Remote file path
+    /// - `offset`: Optional starting offset (for resume transfer)
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回数据连接的 TcpStream，用于读取文件内容
+    /// Returns the data connection TcpStream for reading file contents
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 550 文件不存在
-    /// - 425/426 数据连接错误
+    /// - 550 File not found
+    /// - 425/426 Data connection error
     pub async fn download_file(
         &mut self,
         remote_path: &str,
         offset: Option<u64>,
     ) -> Result<TcpStream> {
-        debug!("准备下载文件: {} (offset: {:?})", remote_path, offset);
+        debug!("Preparing to download file: {} (offset: {:?})", remote_path, offset);
 
-        // 如果有偏移量，先发送 REST 命令
+        // If there is an offset, send REST command first
         if let Some(off) = offset
             && off > 0
         {
-            debug!("设置恢复偏移: {}", off);
+            debug!("Setting resume offset: {}", off);
             self.send_command(&format!("REST {}", off)).await?;
             let rest_resp = self.read_response().await?;
 
             if rest_resp.code != 350 {
                 return Err(Aria2Error::DownloadFailed(format!(
-                    "REST 命令失败（服务器可能不支持断点续传）: {} {}",
+                    "REST command failed (server may not support resume transfer): {} {}",
                     rest_resp.code, rest_resp.message
                 )));
             }
         }
 
-        // 建立数据连接
+        // Establish data connection
         let _data_stream = match self.mode {
             FtpMode::Passive => match self.passive_mode().await {
                 Ok(stream) => stream,
                 Err(e) => {
-                    warn!("被动模式失败，尝试主动模式: {}", e);
+                    warn!("Passive mode failed, trying active mode: {}", e);
                     self.active_mode().await?
                 }
             },
             FtpMode::Active => self.active_mode().await?,
         };
 
-        // 发送 RETR 命令
+        // Send RETR command
         self.send_command(&format!("RETR {}", remote_path)).await?;
         let retr_resp = self.read_response().await?;
 
@@ -568,31 +571,31 @@ impl FtpClient {
                 ));
             }
             return Err(Aria2Error::DownloadFailed(format!(
-                "RETR 命令失败: {} {}",
+                "RETR command failed: {} {}",
                 retr_resp.code, retr_resp.message
             )));
         }
 
-        // 注意：实际的数据流需要在调用方管理
-        // 这里我们返回一个占位符，真实场景中应该返回数据连接
-        // 由于 Rust 的所有权规则，我们需要重新设计这部分
-        // 为了简化，这里创建一个新的连接说明
+        // Note: the actual data stream needs to be managed by the caller
+        // Here we return a placeholder; in a real scenario the data connection should be returned
+        // Due to Rust's ownership rules, we need to redesign this part
+        // For simplicity, create a new connection description here
         Err(Aria2Error::DownloadFailed(
-            "download_file 需要在数据连接建立后返回流，请使用更高级的 API".to_string(),
+            "download_file needs to return the stream after data connection is established, please use a higher-level API".to_string(),
         ))
     }
 
-    /// 更改工作目录
+    /// Change working directory
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `path`: 目标目录路径
+    /// - `path`: Target directory path
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 550 目录不存在或无权限
+    /// - 550 Directory does not exist or no permission
     pub async fn cwd(&mut self, path: &str) -> Result<()> {
-        debug!("更改工作目录: {}", path);
+        debug!("Changing working directory: {}", path);
         self.send_command(&format!("CWD {}", path)).await?;
         let resp = self.read_response().await?;
 
@@ -604,71 +607,71 @@ impl FtpClient {
             ))
         } else {
             Err(Aria2Error::DownloadFailed(format!(
-                "CWD 命令失败: {} {}",
+                "CWD command failed: {} {}",
                 resp.code, resp.message
             )))
         }
     }
 
-    /// 获取当前工作目录
+    /// Get current working directory
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回当前目录路径字符串
+    /// Returns the current directory path string
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 500/501/502 命令执行错误
+    /// - 500/501/502 Command execution error
     pub async fn pwd(&mut self) -> Result<String> {
-        debug!("查询当前工作目录");
+        debug!("Querying current working directory");
         self.send_command("PWD").await?;
         let resp = self.read_response().await?;
 
         if resp.code == 257 {
-            // PWD 响应格式: "/path/to/dir" 是当前目录
-            // 通常格式为: 257 "/path" is current directory
+            // PWD response format: "/path/to/dir" is current directory
+            // Typical format: 257 "/path" is current directory
             let msg = resp.message.trim();
-            // 提取引号内的路径
+            // Extract path within quotes
             if let Some(start) = msg.find('"')
                 && let Some(end) = msg.rfind('"')
                 && end > start
             {
                 let dir = &msg[start + 1..end];
-                debug!("当前目录: {}", dir);
+                debug!("Current directory: {}", dir);
                 return Ok(dir.to_string());
             }
             Ok(msg.to_string())
         } else {
             Err(Aria2Error::DownloadFailed(format!(
-                "PWD 命令失败: {} {}",
+                "PWD command failed: {} {}",
                 resp.code, resp.message
             )))
         }
     }
 
-    /// 中止正在进行的传输
+    /// Abort an in-progress transfer
     ///
-    /// 发送 ABOR 命令，中断当前的数据传输操作。
-    /// 注意：ABOR 的行为在不同服务器上可能不同。
+    /// Sends the ABOR command to interrupt the current data transfer operation.
+    /// Note: ABOR behavior may vary across different servers.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - 网络错误（如果控制连接已断开）
+    /// - Network error (if control connection is already closed)
     pub async fn abort(&mut self) -> Result<()> {
-        debug!("发送 ABOR 命令中止传输");
+        debug!("Sending ABOR command to abort transfer");
 
-        // ABOR 命令比较特殊，需要特殊处理
-        // 某些实现需要先发送 Telnet IP (Interrupt Process) + SYNCH
-        // 这里简化处理，直接发送命令
+        // The ABOR command is special and requires special handling
+        // Some implementations require sending Telnet IP (Interrupt Process) + SYNCH first
+        // Simplified here: just send the command directly
         self.send_command("ABOR").await?;
 
-        // 读取响应（可能有多个响应：426 + 226 或 225 + 226 等）
+        // Read response (there may be multiple responses: 426 + 226 or 225 + 226, etc.)
         match self.read_response().await {
             Ok(resp) => {
-                debug!("ABOR 响应: {} {}", resp.code, resp.message);
+                debug!("ABOR response: {} {}", resp.code, resp.message);
 
-                // 可能还有第二个响应
-                // 尝试读取但不强制要求
+                // There may be a second response
+                // Try to read it but do not require it
                 let mut buf = String::new();
                 match timeout(
                     Duration::from_secs(2),
@@ -677,7 +680,7 @@ impl FtpClient {
                 .await
                 {
                     Ok(Ok(n)) if n > 0 => {
-                        debug!("ABOR 第二个响应: {}", buf.trim());
+                        debug!("ABOR second response: {}", buf.trim());
                     }
                     _ => {}
                 }
@@ -685,67 +688,67 @@ impl FtpClient {
                 Ok(())
             }
             Err(e) => {
-                // ABOR 后连接可能处于不一致状态，这是预期的
-                warn!("ABOR 命令后连接状态异常（可能是正常的）: {}", e);
+                // Connection may be in an inconsistent state after ABOR, this is expected
+                warn!("Connection state abnormal after ABOR command (may be normal): {}", e);
                 Ok(())
             }
         }
     }
 
-    /// 断开 FTP 连接
+    /// Disconnect from the FTP server
     ///
-    /// 发送 QUIT 命令并优雅地关闭控制连接。
+    /// Sends the QUIT command and gracefully closes the control connection.
     pub async fn quit(mut self) -> Result<()> {
-        debug!("发送 QUIT 命令");
+        debug!("Sending QUIT command");
 
         if let Err(e) = self.send_command("QUIT").await {
-            warn!("发送 QUIT 命令失败（连接可能已关闭）: {}", e);
+            warn!("Failed to send QUIT command (connection may already be closed): {}", e);
             return Ok(());
         }
 
         match self.read_response().await {
             Ok(resp) => {
-                info!("FTP 断开连接: {}", resp.message.trim());
+                info!("FTP disconnected: {}", resp.message.trim());
                 Ok(())
             }
             Err(e) => {
-                warn!("读取 QUIT 响应失败: {}", e);
+                warn!("Failed to read QUIT response: {}", e);
                 Ok(())
             }
         }
     }
 
-    // ==================== 内部辅助方法 ====================
+    // ==================== Internal helper methods ====================
 
-    /// 发送 FTP 命令
+    /// Send an FTP command
     ///
-    /// 将命令以 \r\n 结尾写入控制连接。
+    /// Writes the command with \r\n line ending to the control connection.
     async fn send_command(&mut self, cmd: &str) -> Result<()> {
-        debug!("FTP 命令: {}", cmd.trim());
+        debug!("FTP command: {}", cmd.trim());
 
         self.control_stream
             .write_all(cmd.as_bytes())
             .await
-            .map_err(|e| Aria2Error::Network(format!("发送 FTP 命令失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Network(format!("Failed to send FTP command: {}", e)))?;
 
         self.control_stream
             .write_all(b"\r\n")
             .await
-            .map_err(|e| Aria2Error::Network(format!("发送换行符失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Network(format!("Failed to send newline: {}", e)))?;
 
         self.control_stream
             .flush()
             .await
-            .map_err(|e| Aria2Error::Network(format!("刷新缓冲区失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Network(format!("Failed to flush buffer: {}", e)))?;
 
         Ok(())
     }
 
-    /// 读取 FTP 响应
+    /// Read an FTP response
     ///
-    /// 处理多行响应，支持标准 FTP 响应格式：
-    /// - 单行: `NNN text`
-    /// - 多行: `NNN-text\n...\nNNN text`
+    /// Handles multi-line responses, supports standard FTP response format:
+    /// - Single line: `NNN text`
+    /// - Multi-line: `NNN-text\n...\nNNN text`
     async fn read_response(&mut self) -> Result<FtpResponse> {
         let mut line = String::new();
         let mut code: Option<u16> = None;
@@ -758,10 +761,10 @@ impl FtpClient {
             let bytes_read = timeout(self.read_timeout, self.control_stream.read_line(&mut line))
                 .await
                 .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
-                .map_err(|e| Aria2Error::Network(format!("读取 FTP 响应失败: {}", e)))?;
+                .map_err(|e| Aria2Error::Network(format!("Failed to read FTP response: {}", e)))?;
 
             if bytes_read == 0 {
-                break; // 连接关闭
+                break; // Connection closed
             }
 
             let trimmed = line.trim_end();
@@ -769,38 +772,38 @@ impl FtpClient {
                 continue;
             }
 
-            // 解析 3 位响应码
+            // Parse 3-digit response code
             let response_code: u16 = trimmed[..3].parse().unwrap_or(0);
 
             if code.is_none() {
                 code = Some(response_code);
             }
 
-            // 判断分隔符
+            // Determine separator
             let separator = trimmed.as_bytes()[3];
 
             if separator == b'-' && !is_multiline {
-                // 多行响应开始
+                // Multi-line response start
                 is_multiline = true;
                 message.push_str(&trimmed[4..]);
                 message.push('\n');
             } else if separator == b' ' {
-                // 单行响应或多行结束
+                // Single-line response or multi-line end
                 message.push_str(&trimmed[4..]);
                 break;
             } else if is_multiline && trimmed.starts_with(&format!("{:3} ", code.unwrap_or(0))) {
-                // 多行响应结束标记
+                // Multi-line response end marker
                 message.push_str(&trimmed[4..]);
                 break;
             } else if is_multiline {
-                // 多行中间行
+                // Multi-line middle line
                 message.push_str(&trimmed[4..]);
                 message.push('\n');
             }
         }
 
         let code_val = code.unwrap_or(0);
-        debug!("FTP 响应: {} {}", code_val, message.trim());
+        debug!("FTP response: {} {}", code_val, message.trim());
 
         Ok(FtpResponse {
             code: code_val,
@@ -808,32 +811,32 @@ impl FtpClient {
         })
     }
 
-    /// 解析 PASV 响应，提取 IP 地址和端口
+    /// Parse PASV response, extract IP address and port
     ///
-    /// PASV 响应格式: `227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)`
+    /// PASV response format: `227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)`
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `text`: PASV 响应的消息部分
+    /// - `text`: Message portion of the PASV response
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回 `(host, port)` 元组
+    /// Returns a `(host, port)` tuple
     fn parse_pasv_response(text: &str) -> Result<(String, u16)> {
         let start = text
             .find('(')
-            .ok_or_else(|| Aria2Error::Parse("PASV 响应缺少左括号".to_string()))?;
+            .ok_or_else(|| Aria2Error::Parse("PASV response missing opening parenthesis".to_string()))?;
 
         let end = text
             .find(')')
-            .ok_or_else(|| Aria2Error::Parse("PASV 响应缺少右括号".to_string()))?;
+            .ok_or_else(|| Aria2Error::Parse("PASV response missing closing parenthesis".to_string()))?;
 
         let inner = &text[start + 1..end];
         let parts: Vec<&str> = inner.split(',').collect();
 
         if parts.len() != 6 {
             return Err(Aria2Error::Parse(format!(
-                "PASV 响应格式错误: 期望 6 个部分，得到 {} 个",
+                "PASV response format error: expected 6 parts, got {}",
                 parts.len()
             )));
         }
@@ -841,27 +844,27 @@ impl FtpClient {
         let h1: u8 = parts[0]
             .trim()
             .parse()
-            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h1".to_string()))?;
+            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h1".to_string()))?;
         let h2: u8 = parts[1]
             .trim()
             .parse()
-            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h2".to_string()))?;
+            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h2".to_string()))?;
         let h3: u8 = parts[2]
             .trim()
             .parse()
-            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h3".to_string()))?;
+            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h3".to_string()))?;
         let h4: u8 = parts[3]
             .trim()
             .parse()
-            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的 IP 字节 h4".to_string()))?;
+            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h4".to_string()))?;
         let p1: u16 = parts[4]
             .trim()
             .parse()
-            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的端口字节 p1".to_string()))?;
+            .map_err(|_| Aria2Error::Parse("PASV response: invalid port byte p1".to_string()))?;
         let p2: u16 = parts[5]
             .trim()
             .parse()
-            .map_err(|_| Aria2Error::Parse("PASV 响应: 无效的端口字节 p2".to_string()))?;
+            .map_err(|_| Aria2Error::Parse("PASV response: invalid port byte p2".to_string()))?;
 
         let host = format!("{}.{}.{}.{}", h1, h2, h3, h4);
         let port = p1 * 256 + p2;
@@ -869,17 +872,17 @@ impl FtpClient {
         Ok((host, port))
     }
 
-    /// 解析 EPSV 响应，提取端口号
+    /// Parse EPSV response, extract port number
     ///
-    /// EPSV 响应格式: `229 Entering Extended Passive Mode (|||port|)`
+    /// EPSV response format: `229 Entering Extended Passive Mode (|||port|)`
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `text`: EPSV 响应的消息部分
+    /// - `text`: Message portion of the EPSV response
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回端口号，如果解析失败返回 None
+    /// Returns the port number, or None if parsing fails
     fn parse_epsv_response(text: &str) -> Option<u16> {
         let start = text.rfind('|')?;
         let prev_pipe = text[..start].rfind('|')?;
@@ -887,35 +890,35 @@ impl FtpClient {
         port_str.parse::<u16>().ok()
     }
 
-    /// 解析 LIST 输出的单行
+    /// Parse a single line of LIST output
     ///
-    /// 支持 Unix 格式 (`-rw-r--r--  1 user group   size date  name`) 和
-    /// Windows 格式 (`date       size  name` 或 `dir`）。
+    /// Supports Unix format (`-rw-r--r--  1 user group   size date  name`) and
+    /// Windows format (`date       size  name` or `dir`).
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// - `line`: LIST 输出的单行文本
+    /// - `line`: Single line of LIST output text
     ///
-    /// # 返回
+    /// # Returns
     ///
-    /// 返回解析后的文件信息，如果无法解析返回 None
+    /// Returns parsed file info, or None if parsing fails
     pub(crate) fn parse_list_line(line: &str) -> Option<FtpFileInfo> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return None;
         }
 
-        // 尝试 Unix 格式解析
+        // Try Unix format parsing
         if let Some(info) = Self::parse_unix_list_line(trimmed) {
             return Some(info);
         }
 
-        // 尝试 Windows 格式解析
+        // Try Windows format parsing
         if let Some(info) = Self::parse_windows_list_line(trimmed) {
             return Some(info);
         }
 
-        // 尝试 MLSD 格式解析
+        // Try MLSD format parsing
         if let Some(info) = Self::parse_mlsd_line(trimmed) {
             return Some(info);
         }
@@ -1108,21 +1111,21 @@ impl FtpClient {
         })
     }
 
-    /// 解析 Windows/DOS 格式的 LIST 行
+    /// Parse Windows/DOS format LIST line
     ///
-    /// Windows 格式示例:
+    /// Windows format example:
     /// ```text
     /// 01-15-24  10:30AM    12345 filename.txt
     /// 02-03-24  02:20PM    <DIR> directory
     /// ```
     fn parse_windows_list_line(line: &str) -> Option<FtpFileInfo> {
-        // Windows 格式: "MM-DD-YY  HH:MM[AP]M  <DIR>/size  name"
-        // 最小长度检查
+        // Windows format: "MM-DD-YY  HH:MM[AP]M  <DIR>/size  name"
+        // Minimum length check
         if line.len() < 20 {
             return None;
         }
 
-        // 日期部分: MM-DD-YY (8 字符)
+        // Date part: MM-DD-YY (8 characters)
         let date_part = &line[..8];
         if date_part.len() != 8
             || date_part.chars().nth(2)? != '-'
@@ -1133,7 +1136,7 @@ impl FtpClient {
 
         let after_date = line[8..].trim_start();
 
-        // 时间部分: HH:MM[AP]M (7-9 字符)
+        // Time part: HH:MM[AP]M (7-9 characters)
         let space_pos = after_date.find(' ')?;
         let time_part = &after_date[..space_pos];
         if !time_part.contains(':') {
@@ -1142,14 +1145,14 @@ impl FtpClient {
 
         let after_time = after_date[space_pos + 1..].trim_start();
 
-        // 大小或 <DIR>
+        // Size or <DIR>
         let space_pos = after_time.find(' ')?;
         let size_or_dir = after_time[..space_pos].trim();
 
         let is_dir = size_or_dir.eq_ignore_ascii_case("<DIR>");
         let size: u64 = if is_dir { 0 } else { size_or_dir.parse().ok()? };
 
-        // 文件名
+        // Filename
         let name = after_time[space_pos + 1..].trim().to_string();
 
         if name.is_empty() || name == "." || name == ".." {
@@ -1159,17 +1162,17 @@ impl FtpClient {
         Some(FtpFileInfo { name, size, is_dir })
     }
 
-    /// 解析 MLSD (Machine Listing) 格式的行
+    /// Parse MLSD (Machine Listing) format line
     ///
-    /// MLSD 格式示例:
+    /// MLSD format example:
     /// ```text
     /// type=file;size=12345;modify=20240115103000;unix.mode=0644; filename.txt
     /// type=dir;size=4096;modify=20240203142000;unix.mode=0755; directory
     /// type=os.unix=symlink=/target;size=8; link
     /// ```
     fn parse_mlsd_line(line: &str) -> Option<FtpFileInfo> {
-        // MLSD 格式: facts; facts; ... name
-        // facts 和 name之间用空格分隔
+        // MLSD format: facts; facts; ... name
+        // Facts and name are separated by a space
         let semicolon_pos = line.rfind("; ")?;
         let (facts_str, name) = line.split_at(semicolon_pos + 2);
         let name = name.trim();
@@ -1178,7 +1181,7 @@ impl FtpClient {
             return None;
         }
 
-        // 解析事实(facts)
+        // Parse facts
         let mut is_dir = false;
         let mut size: u64 = 0;
 
@@ -1214,14 +1217,14 @@ impl FtpClient {
     }
 }
 
-// ==================== 测试模块 ====================
+// ==================== Test module ====================
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_ftp_response_checks() {
-        // 测试正向完成响应 (2xx)
+        // Test positive completion response (2xx)
         let ok = FtpResponse {
             code: 226,
             message: "Transfer complete".into(),
@@ -1230,7 +1233,7 @@ mod tests {
         assert!(ok.is_positive_completion());
         assert!(!ok.is_positive_preliminary());
 
-        // 测试正向预备响应 (1xx)
+        // Test positive preliminary response (1xx)
         let preliminary = FtpResponse {
             code: 150,
             message: "Opening data connection".into(),
@@ -1239,7 +1242,7 @@ mod tests {
         assert!(!preliminary.is_positive_completion());
         assert!(preliminary.is_positive_preliminary());
 
-        // 测试错误响应 (4xx/5xx)
+        // Test error response (4xx/5xx)
         let error = FtpResponse {
             code: 550,
             message: "File not found".into(),
@@ -1261,12 +1264,12 @@ mod tests {
 
     #[test]
     fn test_parse_pasv_response_invalid() {
-        // 缺少括号
+        // Missing parentheses
         let msg = "Entering Passive Mode 192,168,1,100,195,123";
         let result = FtpClient::parse_pasv_response(msg);
         assert!(result.is_err());
 
-        // 部分数量不对
+        // Incorrect number of parts
         let msg2 = "Entering Passive Mode (192,168,1,100,195)";
         let result2 = FtpClient::parse_pasv_response(msg2);
         assert!(result2.is_err());
@@ -1314,7 +1317,7 @@ mod tests {
         let result = FtpClient::parse_list_line(line);
         assert!(result.is_some());
         let info = result.unwrap();
-        assert_eq!(info.name, "link.txt"); // 符号链接应该返回链接名而非目标
+        assert_eq!(info.name, "link.txt"); // Symlink should return link name, not target
         assert!(!info.is_dir);
     }
 
@@ -1331,7 +1334,7 @@ mod tests {
 
     #[test]
     fn test_parse_list_line_unix_special_entries() {
-        // 应该忽略 "." 和 ".."
+        // "." and ".." should be ignored
         let dot = "drwxr-xr-x  2 user staff   4096 Jan  1 00:00 .";
         let dotdot = "drwxr-xr-x  2 user staff   4096 Jan  1 00:00 ..";
 
@@ -1402,7 +1405,7 @@ mod tests {
 
     #[test]
     fn test_parse_list_line_with_spaces_in_name() {
-        // Unix 格式，文件名包含空格
+        // Unix format, filename contains spaces
         let line = "-rw-r--r--  1 user staff   5678 Jan 20 11:00 my document with spaces.txt";
         let result = FtpClient::parse_list_line(line);
         assert!(result.is_some());
@@ -1413,7 +1416,7 @@ mod tests {
 
     #[test]
     fn test_parse_list_line_unrecognized_format() {
-        // 无法识别的格式
+        // Unrecognized format
         let line = "this is not a valid listing format";
         let result = FtpClient::parse_list_line(line);
         assert!(result.is_none());
@@ -1421,12 +1424,12 @@ mod tests {
 
     #[test]
     fn test_parse_pasv_edge_cases() {
-        // 边界值: 最小端口
+        // Edge case: minimum port
         let min_msg = "Entering Passive Mode (127,0,0,1,0,0)";
         let min_result = FtpClient::parse_pasv_response(min_msg).unwrap();
         assert_eq!(min_result.1, 0);
 
-        // 边界值: 最大端口
+        // Edge case: maximum port
         let max_msg = "Entering Passive Mode (255,255,255,255,255,255)";
         let max_result = FtpClient::parse_pasv_response(max_msg).unwrap();
         assert_eq!(max_result.1, 255 * 256 + 255); // 65535

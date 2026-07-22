@@ -681,7 +681,7 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
         // We can't actually run this in test without blocking,
         // but the error message strings should be English
         // Expected: "Failed to read session file ..."
-        // Not: "读取 session 文件失败 ..."
+        // Not: "Failed to read session file ..."
 
         // For now, just verify the function signature exists
         // In production, you'd want integration tests with actual FS errors

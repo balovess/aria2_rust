@@ -5,11 +5,11 @@ use aria2_core::config::{ConfigManager, OptionValue};
 use std::fs;
 
 fn create_temp_dir() -> tempfile::TempDir {
-    tempfile::tempdir().expect("创建临时目录失败")
+    tempfile::tempdir().expect("Failed to create temp directory")
 }
 fn write_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
     let path = dir.path().join(name);
-    fs::write(&path, content).expect("写入临时文件失败");
+    fs::write(&path, content).expect("Failed to write temp file");
     path.to_string_lossy().to_string()
 }
 

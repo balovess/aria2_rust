@@ -9,72 +9,168 @@ use aria2_core::RUNTIME_CHANGEABLE_OPTIONS;
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
-/// Valid option keys accepted by `aria2.changeOption`.
-const VALID_OPTION_KEYS: &[&str] = &[
-    "split",
-    "max-connection-per-server",
-    "max-download-limit",
-    "max-upload-limit",
+/// Options that can be changed at runtime via `aria2.changeGlobalOption`.
+///
+/// Extracted from the C++ aria2 `OptionHandlerFactory.cc` — all options
+/// with `setChangeGlobalOption(true)`. Keep in sync with the original.
+const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
+    // General
+    "allow-overwrite",
+    "allow-piece-length-change",
+    "always-resume",
+    "async-dns",
+    "auto-file-renaming",
+    "check-integrity",
+    "conditional-get",
+    "continue",
     "dir",
-    "out",
-    "seed-time",
-    "seed-ratio",
-    // File allocation
+    "download-result",
+    "enable-mmap",
     "file-allocation",
-    "mmap-threshold",
-    "secure-falloc",
-    // Checksum & cookies
-    "checksum",
+    "force-save",
+    "save-not-found",
+    "hash-check-only",
+    "keep-unfinished-download-result",
+    "max-concurrent-downloads",
+    "max-download-limit",
+    "max-overall-download-limit",
+    "max-overall-upload-limit",
+    "max-upload-limit",
+    "min-split-size",
+    "no-conf",
+    "optimize-concurrent-downloads",
+    "preview",
+    "reuse-uri",
+    "save-session-interval",
+    "server-stat-if",
+    "server-stat-of",
+    "split",
+    "stream-piece-selector",
+    "timeout",
+    "uri-selector",
+    "use-server-stat",
+    // HTTP/FTP
+    "connect-timeout",
+    "dry-run",
+    "lowest-speed-limit",
+    "max-connection-per-server",
+    "max-file-not-found",
+    "max-tries",
+    "no-netrc",
+    "proxy-method",
+    "retry-wait",
+    "ftp-type",
+    "ftp-reuse-connection",
+    "http-auth-challenge",
+    "http-no-cache",
+    "http-user",
+    "http-passwd",
+    "http-proxy",
+    "https-proxy",
+    "ftp-proxy",
+    "all-proxy",
+    "no-proxy",
+    "user-agent",
+    "referer",
+    "header",
     "cookie-file",
     "cookies",
     // BitTorrent
+    "bt-detach-seed-only",
+    "bt-enable-hook-after-hash-check",
+    "bt-enable-lpd",
     "bt-force-encrypt",
+    "bt-hash-check-seed",
+    "bt-load-saved-metadata",
+    "bt-max-peers",
+    "bt-max-upload-slots",
+    "bt-min-crypto-level",
+    "bt-prioritize-piece",
+    "bt-remove-unselected-file",
+    "bt-request-peer-speed-limit",
     "bt-require-crypto",
-    "enable-dht",
+    "bt-save-metadata",
+    "bt-seed-unverified",
+    "bt-stop-timeout",
+    "bt-tracker-connect-timeout",
+    "bt-tracker-interval",
+    "bt-tracker-timeout",
+    "dht-file-path",
+    "dht-file-path6",
     "dht-listen-port",
     "dht-entry-point",
+    "enable-dht",
+    "enable-dht6",
     "enable-public-trackers",
-    "bt-piece-selection-strategy",
-    "bt-endgame-threshold",
-    "bt-max-upload-slots",
-    "bt-optimistic-unchoke-interval",
-    "bt-snubbed-timeout",
-    "bt-prioritize-piece",
     "enable-utp",
+    "follow-torrent",
+    "listen-port",
+    "max-overall-upload-limit",
+    "peer-agent",
+    "peer-id-prefix",
+    "seed-ratio",
+    "seed-time",
     "utp-listen-port",
-    // Retry
-    "max-retries",
-    "retry-wait",
-    // DHT
-    "dht-file-path",
-    // Proxy
-    "http-proxy",
-    "all-proxy",
-    "https-proxy",
-    "ftp-proxy",
-    "no-proxy",
-    // HTTP headers
-    "header",
-    "user-agent",
-    "referer",
+    // Metalink
+    "follow-metalink",
+    "metalink-preferred-protocol",
+    "metalink-version",
+    "metalink-language",
+    "metalink-os",
+    // RPC
+    "rpc-max-request-size",
+    // Checksum
+    "checksum",
+    // Advanced
+    "auto-save-interval",
+    "disk-cache",
+    "follow-torrent",
+    "max-download-result",
+    "no-file-allocation-limit",
+    "piece-length",
+    "show-console-readout",
+    "show-files",
 ];
 
 impl RpcEngine {
     /// Handle `aria2.getGlobalOption` - Get global configuration options.
+    ///
+    /// Per C++ aria2, `rpc-secret` (PREF_RPC_SECRET) is excluded from the
+    /// output so that the secret is never leaked to RPC clients.
     pub async fn handle_get_global_option(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let opts = self.global_opts.read().await;
+        let mut value = serde_json::to_value(&*opts).unwrap_or(serde_json::json!({}));
+        // Strip rpc-secret matching C++ aria2 behaviour
+        if let Some(map) = value.as_object_mut() {
+            map.remove("rpc-secret");
+        }
         JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::to_value(&*opts).unwrap_or(serde_json::json!({})),
+            value,
         )
     }
 
     /// Handle `aria2.changeGlobalOption` - Modify global configuration options.
+    ///
+    /// Per original C++ aria2, only options with `setChangeGlobalOption(true)`
+    /// in the OptionHandler may be modified via this method. Unknown or
+    /// non-changeable option keys are rejected with `InvalidParams`.
     pub async fn handle_change_global_option(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let new_opts: HashMap<String, serde_json::Value> = req.get_param(0)?;
+
+        // Validate: only runtime-changeable global options are accepted.
+        for key in new_opts.keys() {
+            if !RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&key.as_str()) {
+                return Err(JsonRpcError::InvalidParams(format!(
+                    "Option '{}' cannot be changed via changeGlobalOption",
+                    key
+                )));
+            }
+        }
+
         let mut opts = self.global_opts.write().await;
         for (k, v) in new_opts {
             opts.insert(k, v);
@@ -152,18 +248,7 @@ impl RpcEngine {
         let gid: String = req.get_param(0)?;
         let changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
 
-        // Step 1: reject unknown option keys entirely.
-        for key in changes.keys() {
-            if !VALID_OPTION_KEYS.contains(&key.as_str()) {
-                return Err(JsonRpcError::InvalidParams(format!(
-                    "Unknown option: {}",
-                    key
-                )));
-            }
-        }
-
-        // Step 2: reject startup-only options. Per spec, only runtime-changeable
-        // options may be modified via aria2.changeOption on a live task.
+        // Validate: only runtime-changeable options are accepted.
         for key in changes.keys() {
             if !RUNTIME_CHANGEABLE_OPTIONS.contains(&key.as_str()) {
                 return Err(JsonRpcError::InvalidParams(format!(
@@ -173,7 +258,7 @@ impl RpcEngine {
             }
         }
 
-        // Step 3: propagate to the running RequestGroup (if any). The GID may
+        // Propagate to the running RequestGroup (if any). The GID may
         // not be known to RequestGroupMan yet (e.g., the task was added via
         // RPC but the download has not started); in that case we still store
         // the change in task_opts so it applies when the task starts.
@@ -194,7 +279,7 @@ impl RpcEngine {
             }
         }
 
-        // Step 4: persist in task_opts for getOption retrieval and session
+        // Persist in task_opts for getOption retrieval and session
         // reload. This runs after propagation so a failed propagate (non-
         // not-found error) returns early without mutating task_opts.
         let mut task_opts = self.task_opts.write().await;

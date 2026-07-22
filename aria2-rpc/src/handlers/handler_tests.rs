@@ -53,8 +53,8 @@ async fn test_handle_add_metalink() {
         resp.is_success(),
         "addMetalink should succeed for valid Metalink XML"
     );
-    let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(!gid.is_empty());
+    let gid_list: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert!(!gid_list.is_empty(), "addMetalink should return non-empty GID array");
     assert_eq!(engine.task_count().await, 1);
 }
 
@@ -442,11 +442,12 @@ async fn test_change_option_rejects_startup_only_key() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    // `dir` is a known option (in VALID_OPTION_KEYS) but startup-only, so
-    // changeOption must reject it with InvalidParams.
+    // `pause` is explicitly excluded from runtime-changeable options
+    // (matching original C++ aria2 exclusion list), so changeOption must
+    // reject it with InvalidParams.
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
-        serde_json::json!([gid, {"dir": "/tmp/downloads"}]),
+        serde_json::json!([gid, {"pause": "true"}]),
     )
     .with_id(2);
     let resp = engine.handle_request(&req).await;
@@ -527,21 +528,37 @@ async fn test_multicall_executes_multiple_methods() {
     let results = result_value.as_array().expect("Should return array");
     assert_eq!(results.len(), 3, "Should have 3 results");
 
+    // Per C++ aria2 spec, each successful result is wrapped in [[result]]
     let version_result = &results[0];
+    let version_inner = version_result
+        .as_array()
+        .expect("multicall success result should be wrapped in array")
+        .first()
+        .expect("inner array should have element");
     assert!(
-        version_result.get("version").is_some() || version_result.as_str().is_some(),
+        version_inner.get("version").is_some() || version_inner.as_str().is_some(),
         "getVersion result should contain version info"
     );
 
     let stat_result = &results[1];
+    let stat_inner = stat_result
+        .as_array()
+        .expect("multicall success result should be wrapped in array")
+        .first()
+        .expect("inner array should have element");
     assert!(
-        stat_result.get("downloadSpeed").is_some(),
+        stat_inner.get("downloadSpeed").is_some(),
         "getGlobalStat should contain downloadSpeed"
     );
 
     let session_result = &results[2];
+    let session_inner = session_result
+        .as_array()
+        .expect("multicall success result should be wrapped in array")
+        .first()
+        .expect("inner array should have element");
     assert!(
-        session_result.get("sessionId").is_some(),
+        session_inner.get("sessionId").is_some(),
         "getSessionInfo should contain sessionId"
     );
 }
@@ -577,13 +594,18 @@ async fn test_multicall_preserves_order() {
     let results = result_value.as_array().unwrap();
     assert_eq!(results.len(), 4, "Should have 4 results in order");
 
-    assert!(results[0].get("version").is_some() || results[0].get("enabledFeatures").is_some());
-    let active = results[1]
+    // Per C++ aria2 spec, each successful result is wrapped in [[result]]
+    let version_inner = results[0].as_array().unwrap().first().unwrap();
+    assert!(version_inner.get("version").is_some() || version_inner.get("enabledFeatures").is_some());
+    let active_inner = results[1].as_array().unwrap().first().unwrap();
+    let active = active_inner
         .as_array()
         .expect("tellActive should return array");
     assert_eq!(active.len(), 3, "Should have 3 active tasks");
-    assert!(results[2].get("downloadSpeed").is_some());
-    assert!(results[3].get("sessionId").is_some());
+    let stat_inner = results[2].as_array().unwrap().first().unwrap();
+    assert!(stat_inner.get("downloadSpeed").is_some());
+    let session_inner = results[3].as_array().unwrap().first().unwrap();
+    assert!(session_inner.get("sessionId").is_some());
 }
 
 #[tokio::test]
@@ -629,9 +651,12 @@ async fn test_multicall_with_add_uri_and_status() {
     let results = result_value.as_array().unwrap();
     assert_eq!(results.len(), 2);
 
-    assert!(!results[0].is_null(), "addUri should return a value");
+    // Per C++ aria2 spec, each successful result is wrapped in [[result]]
+    let add_uri_inner = results[0].as_array().expect("addUri result should be wrapped in array");
+    assert!(!add_uri_inner.is_empty(), "addUri should return a value");
+    let stat_inner = results[1].as_array().unwrap().first().unwrap();
     assert!(
-        results[1].get("downloadSpeed").is_some(),
+        stat_inner.get("downloadSpeed").is_some(),
         "getGlobalStat should contain downloadSpeed"
     );
 }

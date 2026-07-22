@@ -11,7 +11,7 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
     }
 
     if data.len() < 4 {
-        return Err(format!("消息长度不足: {} 字节", data.len()));
+        return Err(format!("Insufficient message length: {} bytes", data.len()));
     }
 
     let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
@@ -21,21 +21,21 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
 
     if data.len() < 4 + len {
         return Err(format!(
-            "消息不完整: 声明长度={}, 实际数据={}",
+            "Incomplete message: declared length={}, actual data={}",
             len,
             data.len()
         ));
     }
 
     if len < 1 {
-        return Err("消息体长度为0但非keepalive".to_string());
+        return Err("Message body length is 0 but not keepalive".to_string());
     }
 
     let msg_type = MessageType::try_from(data[4])?;
     let payload = &data[5..4 + len];
 
     debug!(
-        "解析BT消息: type={:?}, payload_len={}",
+        "Parsing BT message: type={:?}, payload_len={}",
         msg_type,
         payload.len()
     );
@@ -56,12 +56,13 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
         MessageType::Reject => parse_reject(payload),
         MessageType::HaveAll => Ok(Some(BtMessage::HaveAll)),
         MessageType::HaveNone => Ok(Some(BtMessage::HaveNone)),
+        MessageType::Extended => parse_extended(payload),
     }
 }
 
 fn parse_have(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 4 {
-        return Err(format!("Have消息payload不足: {}字节", payload.len()));
+        return Err(format!("Have message payload too short: {} bytes", payload.len()));
     }
     let piece_index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     Ok(Some(BtMessage::Have { piece_index }))
@@ -69,7 +70,7 @@ fn parse_have(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_bitfield(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.is_empty() {
-        return Err("Bitfield消息payload为空".to_string());
+        return Err("Bitfield message payload is empty".to_string());
     }
     Ok(Some(BtMessage::Bitfield {
         data: payload.to_vec(),
@@ -79,7 +80,7 @@ fn parse_bitfield(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 fn parse_block_op(payload: &[u8], is_request: bool) -> Result<Option<BtMessage>, String> {
     if payload.len() < 12 {
         return Err(format!(
-            "{}消息payload不足: {}字节",
+            "{} message payload too short: {} bytes",
             if is_request { "Request" } else { "Cancel" },
             payload.len()
         ));
@@ -97,7 +98,7 @@ fn parse_block_op(payload: &[u8], is_request: bool) -> Result<Option<BtMessage>,
 
 fn parse_piece(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 8 {
-        return Err(format!("Piece消息payload不足: {}字节", payload.len()));
+        return Err(format!("Piece message payload too short: {} bytes", payload.len()));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -107,7 +108,7 @@ fn parse_piece(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 2 {
-        return Err(format!("Port消息payload不足: {}字节", payload.len()));
+        return Err(format!("Port message payload too short: {} bytes", payload.len()));
     }
     let port = u16::from_be_bytes([payload[0], payload[1]]);
     Ok(Some(BtMessage::Port { port }))
@@ -115,7 +116,7 @@ fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_allowed_fast(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 4 {
-        return Err(format!("AllowedFast消息payload不足: {}字节", payload.len()));
+        return Err(format!("AllowedFast message payload too short: {} bytes", payload.len()));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     Ok(Some(BtMessage::AllowedFast { index }))
@@ -123,7 +124,7 @@ fn parse_allowed_fast(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_suggest(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 4 {
-        return Err(format!("Suggest消息payload不足: {}字节", payload.len()));
+        return Err(format!("Suggest message payload too short: {} bytes", payload.len()));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     Ok(Some(BtMessage::Suggest { index }))
@@ -131,7 +132,7 @@ fn parse_suggest(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_reject(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 12 {
-        return Err(format!("Reject消息payload不足: {}字节", payload.len()));
+        return Err(format!("Reject message payload too short: {} bytes", payload.len()));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let offset = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -140,6 +141,23 @@ fn parse_reject(payload: &[u8]) -> Result<Option<BtMessage>, String> {
         index,
         offset,
         length,
+    }))
+}
+
+/// Parse BEP 10 Extended message (ID=20).
+///
+/// Wire format: `<len><0x14><ext_id><bencoded payload>`
+/// - `ext_id` = 0: extension handshake (dict of supported extensions)
+/// - `ext_id` = 1+: application-specific (negotiated during handshake)
+fn parse_extended(payload: &[u8]) -> Result<Option<BtMessage>, String> {
+    if payload.is_empty() {
+        return Err("Extended message payload too short: 0 bytes (need at least ext_id)".to_string());
+    }
+    let ext_id = payload[0];
+    let ext_payload = payload[1..].to_vec();
+    Ok(Some(BtMessage::Extended {
+        ext_id,
+        payload: ext_payload,
     }))
 }
 
@@ -168,7 +186,7 @@ pub fn parse_message_stream(buffer: &[u8]) -> Vec<(Option<BtMessage>, usize)> {
         match parse_message(&buffer[pos..pos + total_msg_size]) {
             Ok(msg) => results.push((msg, total_msg_size)),
             Err(e) => {
-                tracing::warn!("解析消息失败: {}, 跳过", e);
+                tracing::warn!("Failed to parse message: {}, skipping", e);
                 break;
             }
         }
@@ -425,5 +443,56 @@ mod tests {
         assert!(allowed_fast.contains(&7));
         assert!(allowed_fast.contains(&100));
         assert!(!allowed_fast.contains(&999));
+    }
+
+    // --- BEP 10 Extended message tests ---
+
+    #[test]
+    fn test_parse_extended_handshake() {
+        // Extended handshake: ID=20, ext_id=0, bencoded payload
+        let bencoded = b"d1:ei0e1:m4:metae"; // dummy bencoded dict
+        let mut data = vec![0, 0, 0, 0]; // length placeholder
+        let total_len = 1 + 1 + bencoded.len(); // msg_id + ext_id + payload
+        data[0..4].copy_from_slice(&(total_len as u32).to_be_bytes());
+        data.push(20); // message ID
+        data.push(0);  // ext_id = 0 (handshake)
+        data.extend_from_slice(bencoded);
+        let msg = parse_message(&data).unwrap().unwrap();
+        match msg {
+            BtMessage::Extended { ext_id, payload } => {
+                assert_eq!(ext_id, 0);
+                assert_eq!(payload, bencoded.to_vec());
+            }
+            _ => panic!("Expected Extended message, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn test_parse_extended_ut_metadata() {
+        // ut_metadata data message: ID=20, ext_id=2 (negotiated)
+        let bencoded = b"d8:msg_typei1e5:piecei0ee";
+        let mut data = vec![0, 0, 0, 0];
+        let total_len = 1 + 1 + bencoded.len();
+        data[0..4].copy_from_slice(&(total_len as u32).to_be_bytes());
+        data.push(20);
+        data.push(2);  // ext_id = 2
+        data.extend_from_slice(bencoded);
+        let msg = parse_message(&data).unwrap().unwrap();
+        match msg {
+            BtMessage::Extended { ext_id, payload } => {
+                assert_eq!(ext_id, 2);
+                assert_eq!(payload, bencoded.to_vec());
+            }
+            _ => panic!("Expected Extended message, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn test_extended_roundtrip() {
+        use super::super::serializer::serialize_extended;
+        let payload = b"d1:ei0ee".to_vec();
+        let bytes = serialize_extended(0, payload.clone());
+        let decoded = parse_message(&bytes).unwrap().unwrap();
+        assert_eq!(decoded, BtMessage::Extended { ext_id: 0, payload });
     }
 }

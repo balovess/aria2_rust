@@ -46,7 +46,7 @@ impl ControlFile {
         if ctrl_path.exists() {
             Self::load(ctrl_path)
                 .await?
-                .ok_or_else(|| Aria2Error::Io(format!("无法加载控制文件: {}", ctrl_path.display())))
+                .ok_or_else(|| Aria2Error::Io(format!("Failed to load control file: {}", ctrl_path.display())))
         } else {
             let bitfield_len = num_pieces.div_ceil(8);
             Ok(Self {
@@ -76,12 +76,12 @@ impl ControlFile {
         }
 
         if &data[0..4] != CONTROL_MAGIC {
-            return Err(Aria2Error::Io("无效的控制文件magic".to_string()));
+            return Err(Aria2Error::Io("Invalid control file magic".to_string()));
         }
 
         let version = u16_from_le(&data[4..6]);
         if version > CONTROL_VERSION {
-            return Err(Aria2Error::Io(format!("不支持的版本: {}", version)));
+            return Err(Aria2Error::Io(format!("Unsupported version: {}", version)));
         }
 
         let flags = data[6];

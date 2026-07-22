@@ -15,6 +15,7 @@ use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::http_segment_downloader::{HttpSegmentDownloader, WriteChunk};
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
@@ -79,14 +80,16 @@ impl ConcurrentDownloader {
     /// Non-blocking cancellation check.
     ///
     /// Returns `Err` when the underlying RequestGroup has been marked
-    /// `Removed` (by `aria2.remove` / `aria2.forceRemove`). Uses `try_read`
-    /// on the outer group lock so it is safe to call from the download loop;
-    /// a contended lock is treated as "not cancelled" and the caller will
-    /// re-check on the next iteration.
+    /// removed or paused. Uses `try_read` on the outer group lock so it is
+    /// safe to call from the download loop; a contended lock is treated as
+    /// "not cancelled" and the caller will re-check on the next iteration.
     fn check_cancelled(&self) -> Result<()> {
         match self.group.try_read() {
             Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
                 "Download cancelled by user".into(),
+            )),
+            Ok(g) if g.is_paused_flag() => Err(Aria2Error::DownloadFailed(
+                "Download paused".into(),
             )),
             _ => Ok(()),
         }
@@ -104,7 +107,7 @@ impl ConcurrentDownloader {
         }
 
         let options = self.group.recover().options_arc();
-        let split = options.split.unwrap_or(1) as usize;
+        let split = options.split.unwrap_or(constants::DEFAULT_SPLIT) as usize;
         let max_conn = options
             .max_connection_per_server
             .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
@@ -157,6 +160,38 @@ impl ConcurrentDownloader {
             g.set_rate_limiter(limiter.clone());
         }
 
+        // ADR-0001: Create a control file so pause-resume works reliably.
+        // Without a control file, ResumeHelper cannot distinguish a
+        // preallocated file from a complete one, causing "unpause shows
+        // completed". The control file stores completed_length and a
+        // piece bitfield that survive across process restarts.
+        let num_pieces = manager.num_segments().max(1);
+        let ctrl_path = ControlFile::control_path_for(&self.output_path);
+        let mut ctrl_file = match ControlFile::open_or_create(&ctrl_path, total_length, num_pieces).await {
+            Ok(cf) => Some(cf),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create control file {}: {}. Resume will be less reliable.",
+                    ctrl_path.display(), e
+                );
+                None
+            }
+        };
+        // If resuming, update the control file with existing progress
+        if let Some(ref mut cf) = ctrl_file {
+            if resume_state.should_resume && resume_state.start_offset > 0 {
+                cf.update_completed_length(resume_state.start_offset);
+            }
+            if let Err(e) = cf.save().await {
+                tracing::warn!("Failed to save initial control file: {}", e);
+            }
+        }
+        // Track how many bytes have been saved to the control file so we
+        // only write it periodically (every CTRL_SAVE_INTERVAL_BYTES) rather
+        // than after every single chunk.
+        let ctrl_save_interval = total_length / num_pieces.max(1) as u64;
+        let mut ctrl_bytes_since_save: u64 = 0;
+
         let mut active: FuturesUnordered<SegmentFetchFuture> = FuturesUnordered::new();
         let mut active_segs: HashMap<u32, u64> = HashMap::new();
         let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
@@ -175,6 +210,11 @@ impl ConcurrentDownloader {
         // the main loop drains them to disk via tokio::select!
         let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
 
+        // Pause/remove check interval — allows the download loop to detect
+        // `aria2.pause` / `aria2.remove` within ~200ms even when segment
+        // futures are blocked on slow network reads.
+        let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+
         loop {
             // Check whether the task was removed. This is the primary
             // cancellation signal: `aria2.remove` / `aria2.forceRemove` sets
@@ -182,7 +222,16 @@ impl ConcurrentDownloader {
             // observes without blocking. We check at the top of the loop so a
             // cancellation is detected before spawning new segment fetches and
             // before awaiting the next segment completion.
-            self.check_cancelled()?;
+            if let Err(e) = self.check_cancelled() {
+                // ADR-0001: Save control file before exiting on pause/remove.
+                if let Some(ref mut cf) = ctrl_file {
+                    cf.update_completed_length(completed_bytes);
+                    if let Err(save_err) = cf.save().await {
+                        tracing::warn!("Control file save on pause/remove failed: {}", save_err);
+                    }
+                }
+                return Err(e);
+            }
 
             while active.len() < max_conn {
                 match manager.next_pending_segment_for_mirror(0) {
@@ -344,6 +393,20 @@ impl ConcurrentDownloader {
                         Ok(total_written) => {
                             manager.complete_segment(seg_idx, total_written as usize);
                             completed_bytes += total_written;
+
+                            // ADR-0001: Update control file with segment progress.
+                            // Mark the piece done and periodically save to disk.
+                            if let Some(ref mut cf) = ctrl_file {
+                                cf.mark_piece_done(seg_idx as usize);
+                                ctrl_bytes_since_save += total_written;
+                                if ctrl_bytes_since_save >= ctrl_save_interval {
+                                    cf.update_completed_length(completed_bytes);
+                                    if let Err(e) = cf.save().await {
+                                        tracing::warn!("Control file save failed: {}", e);
+                                    }
+                                    ctrl_bytes_since_save = 0;
+                                }
+                            }
                             // The listener's progress is now committed; remove the
                             // per-segment tracker so it does not accumulate stale
                             // entries if the same seg_idx is reused on retry.
@@ -424,6 +487,21 @@ impl ConcurrentDownloader {
                         )))
                     })?;
                 }
+                // Periodic pause/remove check — ensures the download loop
+                // detects `aria2.pause` / `aria2.remove` within ~200ms even
+                // when segment futures are blocked on slow network reads.
+                _ = cancel_tick.tick() => {
+                    if let Err(e) = self.check_cancelled() {
+                        // ADR-0001: Save control file before exiting on pause/remove.
+                        if let Some(ref mut cf) = ctrl_file {
+                            cf.update_completed_length(completed_bytes);
+                            if let Err(save_err) = cf.save().await {
+                                tracing::warn!("Control file save on pause/remove failed: {}", save_err);
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
             }
         }
 
@@ -449,6 +527,13 @@ impl ConcurrentDownloader {
 
         if should_fallback {
             let completed_ranges = manager.completed_ranges();
+            // ADR-0001: Save control file on fallback so progress is preserved.
+            if let Some(ref mut cf) = ctrl_file {
+                cf.update_completed_length(completed_bytes);
+                if let Err(e) = cf.save().await {
+                    tracing::warn!("Control file save on fallback failed: {}", e);
+                }
+            }
             tracing::warn!(
                 "Fallback: {} completed ranges will be preserved",
                 completed_ranges.len()
@@ -479,6 +564,14 @@ impl ConcurrentDownloader {
             self.output_path.display(),
             completed_bytes
         );
+        // ADR-0001: Delete control file on successful completion.
+        // The download is done; the .aria2 file is no longer needed.
+        drop(ctrl_file);
+        if ctrl_path.exists() {
+            if let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
+                tracing::debug!("Failed to delete control file on completion: {}", e);
+            }
+        }
         self.cookie_helper.save_cookies_if_configured();
         Ok(ConcurrentDownloadResult::Complete)
     }
@@ -492,7 +585,7 @@ impl ConcurrentDownloader {
     ) -> Result<ConcurrentDownloadResult> {
         tracing::info!(
             "Using concurrent download mode (split={}, max_retries/segment={})",
-            self.group.recover().options().split.unwrap_or(1),
+            self.group.recover().options().split.unwrap_or(constants::DEFAULT_SPLIT),
             max_retries_per_segment
         );
 

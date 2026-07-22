@@ -28,7 +28,7 @@ impl MockFtpServer {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
             .await
-            .expect("绑定Mock FTP服务器端口失败");
+            .expect("Failed to bind mock FTP server port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -86,7 +86,7 @@ impl MockFtpServer {
             };
             let verb_upper: &str = &verb.to_uppercase();
 
-            debug!("[MockFTP] 命令: {} {}", verb, args);
+            debug!("[MockFTP] Command: {} {}", verb, args);
 
             let response = {
                 let mut sess = session.lock().await;

@@ -9,18 +9,18 @@ use url::Url;
 
 use crate::error::{Aria2Error, Result};
 
-/// HTTP 请求方法枚举
+/// HTTP request method enum
 #[derive(Debug, Clone, PartialEq)]
 pub enum HttpMethod {
-    /// GET 请求方法
+    /// GET request method
     Get,
-    /// POST 请求方法
+    /// POST request method
     Post,
-    /// HEAD 请求方法
+    /// HEAD request method
     Head,
-    /// PUT 请求方法
+    /// PUT request method
     Put,
-    /// DELETE 请求方法
+    /// DELETE request method
     Delete,
 }
 
@@ -36,34 +36,34 @@ impl std::fmt::Display for HttpMethod {
     }
 }
 
-/// HTTP 请求结构体
+/// HTTP request struct
 ///
-/// 表示一个完整的 HTTP/1.1 请求，包含方法、URL、headers 和可选的 body。
+/// Represents a complete HTTP/1.1 request, including method, URL, headers, and optional body.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
-    /// HTTP 请求方法
+    /// HTTP request method
     pub method: HttpMethod,
-    /// 请求 URL
+    /// Request URL
     pub url: Url,
-    /// 请求 headers (支持多值)
+    /// Request headers (supports multi-value)
     pub headers: HashMap<String, String>,
-    /// 可选的请求体
+    /// Optional request body
     pub body: Option<Vec<u8>>,
 }
 
 impl HttpRequest {
-    /// 将 HTTP 请求序列化为原始字节
+    /// Serialize the HTTP request to raw bytes
     ///
-    /// 按照 HTTP/1.1 规范将请求序列化为可发送的字节序列。
-    /// 格式: `METHOD PATH VERSION\r\nHeaders\r\n\r\nBody`
+    /// Serializes the request to a byte sequence according to the HTTP/1.1 specification.
+    /// Format: `METHOD PATH VERSION\r\nHeaders\r\n\r\nBody`
     ///
     /// # Returns
     ///
-    /// 序列化后的字节数组
+    /// Serialized byte array
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut result = String::new();
 
-        // 请求行: METHOD /path HTTP/1.1
+        // Request line: METHOD /path HTTP/1.1
         let path = self.url.path();
         let query = self.url.query();
         if let Some(q) = query {
@@ -77,7 +77,7 @@ impl HttpRequest {
             result.push_str(&format!("{}: {}\r\n", key, value));
         }
 
-        // 空行分隔 header 和 body
+        // Empty line separating header and body
         result.push_str("\r\n");
 
         let mut bytes = result.into_bytes();
@@ -91,9 +91,9 @@ impl HttpRequest {
     }
 }
 
-/// HTTP 请求构建器 (Fluent API)
+/// HTTP request builder (Fluent API)
 ///
-/// 使用流式 API 构建完整的 HTTP 请求，自动添加标准 headers。
+/// Uses a fluent API to build a complete HTTP request, automatically adding standard headers.
 ///
 /// # Examples
 ///
@@ -108,27 +108,27 @@ impl HttpRequest {
 ///     .unwrap();
 /// ```
 pub struct HttpRequestBuilder {
-    /// HTTP 方法
+    /// HTTP method
     method: HttpMethod,
-    /// 目标 URL
+    /// Target URL
     url: Url,
-    /// 自定义 headers
+    /// Custom headers
     headers: HashMap<String, String>,
-    /// 可选的请求体
+    /// Optional request body
     body: Option<Vec<u8>>,
 }
 
 impl HttpRequestBuilder {
-    /// 创建新的 HTTP 请求构建器
+    /// Create a new HTTP request builder
     ///
     /// # Arguments
     ///
-    /// * `method` - HTTP 请求方法 (GET/POST/HEAD/PUT/DELETE)
-    /// * `url` - 目标 URL
+    /// * `method` - HTTP request method (GET/POST/HEAD/PUT/DELETE)
+    /// * `url` - Target URL
     ///
     /// # Returns
     ///
-    /// 新的 HttpRequestBuilder 实例
+    /// New HttpRequestBuilder instance
     pub fn new(method: HttpMethod, url: Url) -> Self {
         Self {
             method,
@@ -138,70 +138,70 @@ impl HttpRequestBuilder {
         }
     }
 
-    /// 添加单个 header
+    /// Add a single header
     ///
-    /// 如果已存在相同 key 的 header，将被覆盖。
+    /// If a header with the same key already exists, it will be overwritten.
     ///
     /// # Arguments
     ///
-    /// * `key` - header 名称
-    /// * `value` - header 值
+    /// * `key` - Header name
+    /// * `value` - Header value
     ///
     /// # Returns
     ///
-    /// Self，支持链式调用
+    /// Self, supporting chained calls
     pub fn header(mut self, key: &str, value: &str) -> Self {
         self.headers.insert(key.to_string(), value.to_string());
         self
     }
 
-    /// 批量设置 headers
+    /// Set headers in batch
     ///
-    /// 将传入的所有 headers 合并到现有 headers 中。
-    /// 如果存在重复 key，新值会覆盖旧值。
+    /// Merges all provided headers into the existing headers.
+    /// If duplicate keys exist, new values will overwrite old values.
     ///
     /// # Arguments
     ///
-    /// * `headers` - 要添加的 headers 集合
+    /// * `headers` - Headers collection to add
     ///
     /// # Returns
     ///
-    /// Self，支持链式调用
+    /// Self, supporting chained calls
     pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
         self.headers.extend(headers);
         self
     }
 
-    /// 设置请求体
+    /// Set the request body
     ///
     /// # Arguments
     ///
-    /// * `body` - 请求体的字节数据
+    /// * `body` - Byte data of the request body
     ///
     /// # Returns
     ///
-    /// Self，支持链式调用
+    /// Self, supporting chained calls
     pub fn body(mut self, body: Vec<u8>) -> Self {
         self.body = Some(body);
         self
     }
 
-    /// 构建最终的 HTTP 请求
+    /// Build the final HTTP request
     ///
-    /// 自动添加以下标准 headers:
-    /// - Host: 从 URL 中提取
+    /// Automatically adds the following standard headers:
+    /// - Host: extracted from URL
     /// - User-Agent: aria2-rust/1.0
     /// - Accept: */*
     /// - Connection: close
-    /// - Content-Length: 如果有 body
+    /// - Content-Length: if body is present
     ///
     /// # Returns
     ///
-    /// 构建完成的 HttpRequest，或错误信息
+    /// The built HttpRequest, or an error message
     pub fn build(self) -> Result<HttpRequest> {
         let mut final_headers = self.headers;
 
-        // 自动添加标准 headers (如果用户未手动设置)
+        // Automatically add standard headers (if not manually set by user)
         // Host header
         if !final_headers.contains_key("Host") {
             let host = self.url.host_str().unwrap_or("");
@@ -227,7 +227,7 @@ impl HttpRequestBuilder {
             final_headers.insert("Connection".to_string(), "close".to_string());
         }
 
-        // Content-Length header (如果有 body)
+        // Content-Length header (if body is present)
         if let Some(body) = &self.body
             && !final_headers.contains_key("Content-Length")
         {
@@ -244,58 +244,58 @@ impl HttpRequestBuilder {
     }
 }
 
-/// HTTP 响应结构体
+/// HTTP response struct
 ///
-/// 表示一个完整的 HTTP 响应，包含状态码、reason phrase、版本、headers 和可选的 body。
-/// 支持多值 headers (如 Set-Cookie)。
+/// Represents a complete HTTP response, including status code, reason phrase, version, headers, and optional body.
+/// Supports multi-value headers (e.g., Set-Cookie).
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
-    /// 状态码 (如 200, 404, 301)
+    /// Status code (e.g., 200, 404, 301)
     pub status_code: u16,
-    /// 原因短语 (如 OK, Not Found, Moved Permanently)
+    /// Reason phrase (e.g., OK, Not Found, Moved Permanently)
     pub reason_phrase: String,
-    /// HTTP 版本 (如 "HTTP/1.1")
+    /// HTTP version (e.g., "HTTP/1.1")
     pub version: String,
-    /// 响应 headers (支持多值)
+    /// Response headers (supports multi-value)
     pub headers: HashMap<String, Vec<String>>,
-    /// 可选的响应体
+    /// Optional response body
     pub body: Option<Vec<u8>>,
 }
 
 impl HttpResponse {
-    /// 从原始字节解析 HTTP 响应
+    /// Parse HTTP response from raw bytes
     ///
-    /// 解析符合 HTTP/1.1 规范的响应数据，包括状态行、headers 和 body。
-    /// 支持多值 headers (通过逗号分隔或多个同名 header)。
+    /// Parses response data conforming to the HTTP/1.1 specification, including status line, headers, and body.
+    /// Supports multi-value headers (via comma separation or multiple headers with the same name).
     ///
     /// # Arguments
     ///
-    /// * `data` - 原始 HTTP 响应字节
+    /// * `data` - Raw HTTP response bytes
     ///
     /// # Returns
     ///
-    /// 解析后的 HttpResponse，或错误信息
+    /// Parsed HttpResponse, or an error message
     ///
     /// # Errors
     ///
-    /// 返回错误如果响应格式无效或无法解析
+    /// Returns an error if the response format is invalid or cannot be parsed
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         let response_str = String::from_utf8(data.to_vec())
             .map_err(|e| Aria2Error::Parse(format!("Invalid UTF-8 in HTTP response: {}", e)))?;
 
-        // 分离 headers 和 body
+        // Separate headers and body
         let (header_part, body_part) = match response_str.find("\r\n\r\n") {
             Some(pos) => (&response_str[..pos], &response_str[pos + 4..]),
             None => (response_str.as_str(), ""),
         };
 
-        // 解析状态行
+        // Parse status line
         let mut lines = header_part.split("\r\n");
         let status_line = lines
             .next()
             .ok_or_else(|| Aria2Error::Parse("Empty HTTP response".to_string()))?;
 
-        // 解析 version, status_code, reason_phrase
+        // Parse version, status_code, reason_phrase
         let parts: Vec<&str> = status_line.split_whitespace().collect();
         if parts.len() < 2 {
             return Err(Aria2Error::Parse(
@@ -313,7 +313,7 @@ impl HttpResponse {
             String::new()
         };
 
-        // 解析 headers (支持多值)
+        // Parse headers (supports multi-value)
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         for line in lines {
             if line.is_empty() {
@@ -326,7 +326,7 @@ impl HttpResponse {
             }
         }
 
-        // 处理 body
+        // Process body
         let body = if body_part.is_empty() {
             None
         } else {
@@ -342,15 +342,15 @@ impl HttpResponse {
         })
     }
 
-    /// 获取指定 header 的第一个值
+    /// Get the first value of a specified header
     ///
     /// # Arguments
     ///
-    /// * `name` - header 名称 (不区分大小写)
+    /// * `name` - Header name (case-insensitive)
     ///
     /// # Returns
     ///
-    /// 第一个 header 值的引用，如果不存在则返回 None
+    /// Reference to the first header value, or None if not found
     pub fn header(&self, name: &str) -> Option<&String> {
         let name_lower = name.to_lowercase();
         for (key, values) in &self.headers {
@@ -361,17 +361,17 @@ impl HttpResponse {
         None
     }
 
-    /// 获取指定 header 的所有值
+    /// Get all values of a specified header
     ///
-    /// 对于 Set-Cookie 等可能多次出现的 header 特别有用。
+    /// Particularly useful for headers like Set-Cookie that may appear multiple times.
     ///
     /// # Arguments
     ///
-    /// * `name` - header 名称 (不区分大小写)
+    /// * `name` - Header name (case-insensitive)
     ///
     /// # Returns
     ///
-    /// 包含所有匹配值的向量
+    /// Vector containing all matching values
     pub fn header_all(&self, name: &str) -> Vec<String> {
         let name_lower = name.to_lowercase();
         for (key, values) in &self.headers {
@@ -382,58 +382,58 @@ impl HttpResponse {
         Vec::new()
     }
 
-    /// 获取 Content-Length header 的值
+    /// Get the value of the Content-Length header
     ///
     /// # Returns
     ///
-    /// 内容长度 (u64)，如果不存在或解析失败则返回 None
+    /// Content length (u64), or None if not present or parsing fails
     pub fn content_length(&self) -> Option<u64> {
         self.header("Content-Length")
             .and_then(|v| v.parse::<u64>().ok())
     }
 
-    /// 检查是否为重定向响应 (3xx)
+    /// Check if this is a redirect response (3xx)
     ///
     /// # Returns
     ///
-    /// 如果状态码在 300-399 范围内返回 true
+    /// true if the status code is in the 300-399 range
     pub fn is_redirect(&self) -> bool {
         (300..400).contains(&self.status_code)
     }
 
-    /// 获取 Location header 并解析为 URL
+    /// Get the Location header and parse it as a URL
     ///
-    /// 对于重定向响应特别有用。如果是相对 URL，会基于当前请求 URL 进行解析。
+    /// Particularly useful for redirect responses. If it is a relative URL, it will be resolved based on the current request URL.
     ///
     /// # Returns
     ///
-    /// 解析后的绝对 URL，如果不存在或解析失败则返回 None
+    /// Parsed absolute URL, or None if not present or parsing fails
     pub fn location(&self) -> Option<Url> {
         self.header("Location").and_then(|loc| Url::parse(loc).ok())
     }
 
-    /// 使用流式解码器获取解码后的 body
+    /// Get the decoded body using streaming decoders
     ///
-    /// 根据 HTTP 响应的 Content-Encoding 和 Transfer-Encoding headers 自动选择合适的解码器，
-    /// 对响应体进行解码。支持 GZip、Chunked、BZip2 等编码格式。
+    /// Automatically selects appropriate decoders based on the HTTP response's Content-Encoding and Transfer-Encoding headers
+    /// to decode the response body. Supports GZip, Chunked, BZip2, and other encoding formats.
     ///
-    /// 遵循 RFC 7230 Section 3.3.1 规范：Transfer-Encoding 优先于 Content-Encoding。
+    /// Follows RFC 7230 Section 3.3.1: Transfer-Encoding takes precedence over Content-Encoding.
     ///
     /// # Returns
     ///
-    /// 解码后的原始数据，或错误信息。如果没有 body 则返回空向量。
+    /// Decoded raw data, or an error message. Returns an empty vector if no body is present.
     ///
     /// # Errors
     ///
-    /// - 如果编码格式无效或数据损坏
-    /// - 如果解码过程中发生 I/O 错误
+    /// - If the encoding format is invalid or the data is corrupted
+    /// - If an I/O error occurs during decoding
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let response = /* HTTP response with Content-Encoding: gzip */;
     /// let decoded = response.decoded_body()?;
-    /// // decoded 包含解压后的原始数据
+    /// // decoded contains the decompressed raw data
     /// ```
     pub fn decoded_body(&self) -> Result<Vec<u8>> {
         use crate::http::stream_filter::{AutoFilterSelector, process_filters};
@@ -481,7 +481,7 @@ pub fn bearer_token(token: &str) -> String {
     format!("Bearer {}", token)
 }
 
-// Base64 编码已通过 use base64::{engine::general_purpose, Engine} 导入
+// Base64 encoding is imported via use base64::{engine::general_purpose, Engine}
 
 #[cfg(test)]
 mod tests {
@@ -515,16 +515,16 @@ mod tests {
             .build()
             .unwrap();
 
-        // 检查自动生成的 Host header (包含端口)
+        // Verify auto-generated Host header (with port)
         assert_eq!(request.headers.get("Host").unwrap(), "example.com:8080");
 
-        // 检查自动生成的 User-Agent
+        // Verify auto-generated User-Agent
         assert_eq!(request.headers.get("User-Agent").unwrap(), "aria2-rust/1.0");
 
-        // 检查自动生成的 Accept
+        // Verify auto-generated Accept
         assert_eq!(request.headers.get("Accept").unwrap(), "*/*");
 
-        // 检查自动生成的 Connection
+        // Verify auto-generated Connection
         assert_eq!(request.headers.get("Connection").unwrap(), "close");
     }
 
@@ -551,7 +551,7 @@ mod tests {
             .build()
             .unwrap();
 
-        // 用户自定义的 Host 应该保留
+        // User-defined Host should be preserved
         assert_eq!(request.headers.get("Host").unwrap(), "custom-host.com");
     }
 
@@ -566,13 +566,13 @@ mod tests {
         let bytes = request.to_bytes();
         let request_str = String::from_utf8(bytes).unwrap();
 
-        // 验证请求行
+        // Verify request line
         assert!(request_str.starts_with("GET /path?q=1 HTTP/1.1\r\n"));
 
-        // 验证自定义 header
+        // Verify custom header
         assert!(request_str.contains("Custom-Header: test-value"));
 
-        // 验证标准 headers
+        // Verify standard headers
         assert!(request_str.contains("Host: example.com"));
         assert!(request_str.contains("User-Agent: aria2-rust/1.0"));
     }
@@ -596,20 +596,20 @@ mod tests {
 
     #[test]
     fn test_response_status_parsing() {
-        // 测试 200 OK
+        // Test 200 OK
         let response_200 = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<body>";
         let resp = HttpResponse::from_bytes(response_200.as_bytes()).unwrap();
         assert_eq!(resp.status_code, 200);
         assert_eq!(resp.reason_phrase, "OK");
         assert_eq!(resp.version, "HTTP/1.1");
 
-        // 测试 404 Not Found
+        // Test 404 Not Found
         let response_404 = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\nNot Found";
         let resp = HttpResponse::from_bytes(response_404.as_bytes()).unwrap();
         assert_eq!(resp.status_code, 404);
         assert_eq!(resp.reason_phrase, "Not Found");
 
-        // 测试 301 Moved Permanently
+        // Test 301 Moved Permanently
         let response_301 = "HTTP/1.1 301 Moved Permanently\r\nLocation: /new-url\r\n\r\n";
         let resp = HttpResponse::from_bytes(response_301.as_bytes()).unwrap();
         assert_eq!(resp.status_code, 301);
@@ -625,13 +625,13 @@ mod tests {
 
         let resp = HttpResponse::from_bytes(response.as_bytes()).unwrap();
 
-        // 测试获取所有 Set-Cookie 值
+        // Test getting all Set-Cookie values
         let all_cookies = resp.header_all("Set-Cookie");
         assert_eq!(all_cookies.len(), 2);
         assert!(all_cookies.contains(&"session=abc123; Path=/".to_string()));
         assert!(all_cookies.contains(&"user=john; Domain=example.com".to_string()));
 
-        // 测试获取第一个值
+        // Test getting the first value
         let first_cookie = resp.header("Set-Cookie").unwrap();
         assert_eq!(first_cookie, "session=abc123; Path=/");
     }
@@ -643,7 +643,7 @@ mod tests {
 
         assert_eq!(resp.content_length(), Some(1024));
 
-        // 无 Content-Length
+        // No Content-Length
         let response_no_cl = "HTTP/1.1 200 OK\r\n\r\n";
         let resp_no_cl = HttpResponse::from_bytes(response_no_cl.as_bytes()).unwrap();
         assert_eq!(resp_no_cl.content_length(), None);
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_response_is_redirect() {
-        // 重定向状态码
+        // Redirect status codes
         let redirect_resp = HttpResponse::from_bytes(
             "HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\n\r\n".as_bytes(),
         )
@@ -662,7 +662,7 @@ mod tests {
             HttpResponse::from_bytes("HTTP/1.1 302 Found\r\n\r\n".as_bytes()).unwrap();
         assert!(redirect_302.is_redirect());
 
-        // 非重定向状态码
+        // Non-redirect status codes
         let ok_resp = HttpResponse::from_bytes("HTTP/1.1 200 OK\r\n\r\n".as_bytes()).unwrap();
         assert!(!ok_resp.is_redirect());
 
@@ -691,7 +691,7 @@ mod tests {
         assert!(resp.body.is_some());
         assert_eq!(resp.body.unwrap(), b"{\"status\":\"success\"}");
 
-        // 无 body
+        // No body
         let response_no_body = "HTTP/1.1 204 No Content\r\n\r\n";
         let resp_no_body = HttpResponse::from_bytes(response_no_body.as_bytes()).unwrap();
         assert!(resp_no_body.body.is_none());
@@ -705,9 +705,9 @@ mod tests {
 
         // Test special characters
         let auth_special = basic_auth("admin@email.com", "p@ssw0rd!");
-        // 验证格式正确
+        // Verify format is correct
         assert!(auth_special.starts_with("Basic "));
-        // 验证可以解码回原始凭证
+        // Verify it can be decoded back to original credentials
         let encoded = &auth_special["Basic ".len()..];
         let decoded = String::from_utf8(
             general_purpose::STANDARD
@@ -717,7 +717,7 @@ mod tests {
         .unwrap_or_default();
         assert_eq!(decoded, "admin@email.com:p@ssw0rd!");
 
-        // 测试空密码
+        // Test empty password
         let auth_empty_pass = basic_auth("user", "");
         assert!(auth_empty_pass.starts_with("Basic "));
     }
@@ -761,7 +761,7 @@ mod tests {
 
         let resp = HttpResponse::from_bytes(response.as_bytes()).unwrap();
 
-        // 大小写不敏感查找
+        // Case-insensitive lookup
         assert!(resp.header("content-type").is_some());
         assert!(resp.header("CONTENT-TYPE").is_some());
         assert!(resp.header("Content-Length").is_some());

@@ -63,8 +63,8 @@ impl PeerConnection {
             tokio::net::TcpStream::connect(&socket_addr),
         )
         .await
-        .map_err(|_| format!("连接peer超时: {}", socket_addr))?
-        .map_err(|e| format!("连接peer失败: {}", e))?;
+        .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
+        .map_err(|e| format!("Peer connection failed: {}", e))?;
 
         Self::from_stream(stream, info_hash).await
     }
@@ -80,7 +80,7 @@ impl PeerConnection {
         stream
             .write_all(&handshake_bytes)
             .await
-            .map_err(|e| format!("发送握手失败: {}", e))?;
+            .map_err(|e| format!("Failed to send handshake: {}", e))?;
 
         let mut response = [0u8; 68];
         match tokio::time::timeout(
@@ -90,17 +90,17 @@ impl PeerConnection {
         .await
         {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(format!("读取握手响应失败: {}", e)),
-            Err(_) => return Err("读取握手响应超时".to_string()),
+            Ok(Err(e)) => return Err(format!("Failed to read handshake response: {}", e)),
+            Err(_) => return Err("Handshake response timeout".to_string()),
         }
 
         let remote_hs = Handshake::parse(&response)?;
 
         if remote_hs.info_hash != *info_hash {
-            return Err("info_hash不匹配".to_string());
+            return Err("info_hash mismatch".to_string());
         }
 
-        info!("Peer握手成功: peer_id={}", remote_hs.peer_id_str());
+        info!("Peer handshake successful: peer_id={}", remote_hs.peer_id_str());
 
         Ok(Self {
             stream,
@@ -126,13 +126,13 @@ impl PeerConnection {
         self.stream
             .write_all(&data)
             .await
-            .map_err(|e| format!("发送消息失败: {}", e))?;
+            .map_err(|e| format!("Failed to send message: {}", e))?;
         self.stream
             .flush()
             .await
-            .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
+            .map_err(|e| format!("Failed to flush buffer: {}", e))?;
 
-        debug!("发送消息: {:?}", message.message_id());
+        debug!("Sent message: {:?}", message.message_id());
         Ok(())
     }
 
@@ -143,7 +143,7 @@ impl PeerConnection {
         match self.stream.read_exact(&mut len_buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(format!("读取消息长度失败: {}", e)),
+            Err(e) => return Err(format!("Failed to read message length: {}", e)),
         }
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -155,7 +155,7 @@ impl PeerConnection {
         self.stream
             .read_exact(&mut payload_buf)
             .await
-            .map_err(|e| format!("读取消息体失败: {}", e))?;
+            .map_err(|e| format!("Failed to read message body: {}", e))?;
 
         let mut full_msg = vec![0u8; 4 + msg_len];
         full_msg[0..4].copy_from_slice(&len_buf);

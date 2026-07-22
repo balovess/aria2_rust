@@ -98,13 +98,13 @@ impl TrackerClient {
         params: &TrackerAnnounceParams,
     ) -> Result<TrackerResponse, String> {
         for (i, url) in self.announce_urls.iter().enumerate() {
-            debug!("尝试Tracker #{}: {}", i + 1, url);
+            debug!("Trying tracker #{}: {}", i + 1, url);
             match self.announce_single(url, params).await {
                 Ok(resp) => return Ok(resp),
-                Err(e) => warn!("Tracker #{} 失败: {}", i + 1, e),
+                Err(e) => warn!("Tracker #{} failed: {}", i + 1, e),
             }
         }
-        Err("所有Tracker均失败".to_string())
+        Err("All trackers failed".to_string())
     }
 
     async fn announce_single(
@@ -134,10 +134,10 @@ impl TrackerClient {
         let response = client.execute(request).await?;
 
         if !response.is_success() {
-            return Err(format!("Tracker返回错误状态码: {}", response.status_code));
+            return Err(format!("Tracker returned error status code: {}", response.status_code));
         }
 
-        TrackerResponse::parse(&response.body).map_err(|e| format!("解析Tracker响应失败: {}", e))
+        TrackerResponse::parse(&response.body).map_err(|e| format!("Failed to parse tracker response: {}", e))
     }
 
     /// Announce to a UDP tracker
@@ -197,6 +197,7 @@ impl TrackerClient {
             seeders: udp_resp.seeders,
             leechers: udp_resp.leechers,
             peers,
+            tracker_id: None,
             warning_message: None,
             failure_reason: None,
         }

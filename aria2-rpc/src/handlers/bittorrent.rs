@@ -361,8 +361,11 @@ impl RpcEngine {
                 ),
             };
 
+            // Per C++ aria2 system.multicall spec: each successful result is
+            // wrapped in an extra array layer so the output is [[result]], not
+            // [result]. Errors remain as flat structs {code, message}.
             match sub_response.result {
-                Some(result_value) => results.push(result_value),
+                Some(result_value) => results.push(serde_json::json!([result_value])),
                 None => {
                     if let Some(err) = sub_response.error {
                         results.push(serde_json::json!({

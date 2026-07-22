@@ -124,9 +124,9 @@ mod tests {
 
         cmd.execute().await.unwrap();
 
-        assert!(path.exists(), "目标文件应存在");
+        assert!(path.exists(), "Target file should exist");
         let tmp_path = path.with_extension("sess.tmp");
-        assert!(!tmp_path.exists(), "临时文件应已被 rename 删除");
+        assert!(!tmp_path.exists(), "Temp file should have been renamed away");
 
         let _ = tokio::fs::remove_file(&path).await;
     }

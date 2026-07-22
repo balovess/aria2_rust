@@ -13,12 +13,12 @@ impl DhtSocket {
         let addr = format!("0.0.0.0:{}", port);
         let socket = UdpSocket::bind(&addr)
             .await
-            .map_err(|e| format!("DHT UDP bind 失败 ({}): {}", addr, e))?;
+            .map_err(|e| format!("DHT UDP bind failed ({}): {}", addr, e))?;
         let local_addr = socket
             .local_addr()
-            .map_err(|e| format!("获取本地地址失败: {}", e))?;
+            .map_err(|e| format!("Failed to get local address: {}", e))?;
 
-        debug!("DHT socket 绑定到: {}", local_addr);
+        debug!("DHT socket bound to: {}", local_addr);
 
         Ok(Self {
             socket: Arc::new(socket),
@@ -30,7 +30,7 @@ impl DhtSocket {
         self.socket
             .send_to(data, addr)
             .await
-            .map_err(|e| format!("DHT send_to {} 失败: {}", addr, e))
+            .map_err(|e| format!("DHT send_to {} failed: {}", addr, e))
     }
 
     pub async fn recv_with_timeout(
@@ -40,8 +40,8 @@ impl DhtSocket {
     ) -> Result<(usize, SocketAddr), String> {
         match tokio::time::timeout(timeout, self.socket.recv_from(buf)).await {
             Ok(Ok((n, addr))) => Ok((n, addr)),
-            Ok(Err(e)) => Err(format!("DHT recv 错误: {}", e)),
-            Err(_) => Err("DHT recv 超时".to_string()),
+            Ok(Err(e)) => Err(format!("DHT recv error: {}", e)),
+            Err(_) => Err("DHT recv timeout".to_string()),
         }
     }
 
@@ -123,7 +123,7 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "recv with short timeout should fail");
-        assert!(result.unwrap_err().contains("超时"));
+        assert!(result.unwrap_err().contains("timeout"));
     }
 
     #[tokio::test]

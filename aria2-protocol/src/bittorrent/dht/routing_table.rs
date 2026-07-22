@@ -23,7 +23,7 @@ impl RoutingTable {
         }
 
         if let Some(evicted) = self.buckets[bucket_idx].insert(node) {
-            tracing::debug!("DHT节点被替换: {}", evicted.id_hex());
+            tracing::debug!("DHT node evicted: {}", evicted.id_hex());
         }
     }
 

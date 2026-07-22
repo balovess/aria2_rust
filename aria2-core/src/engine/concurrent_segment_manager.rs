@@ -508,7 +508,7 @@ impl ConcurrentSegmentManager {
                 let overlap_end = std::cmp::min(segment.offset + segment.length, end_offset);
                 if overlap_end > overlap_start {
                     debug!(
-                        "段 {} 部分已完成: {}/{} bytes",
+                        "Segment {} partially completed: {}/{} bytes",
                         segment.index,
                         overlap_end - segment.offset,
                         segment.length

@@ -20,7 +20,7 @@ impl MockBtPeerServer {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = tokio::net::TcpListener::bind(addr)
             .await
-            .expect("绑定Mock Peer端口失败");
+            .expect("Failed to bind mock peer port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 

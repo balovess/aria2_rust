@@ -100,7 +100,7 @@ impl DiskAdaptor for DirectDiskAdaptor {
             }
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
-                "文件未打开".to_string(),
+                "File not open".to_string(),
             ))
         }
     }
@@ -138,7 +138,7 @@ impl DiskAdaptor for DirectDiskAdaptor {
             Ok(metadata.len())
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
-                "文件未打开".to_string(),
+                "File not open".to_string(),
             ))
         }
     }

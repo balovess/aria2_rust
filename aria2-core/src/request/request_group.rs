@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tracing::{debug, info};
 
+use crate::download::DownloadContext;
 use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
 use crate::segment::Segment;
@@ -321,24 +322,62 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
 }
 
 /// Options that can be changed at runtime via `aria2.changeOption`.
-/// All other options are startup-only and cannot be modified after the
-/// download begins. Keep in sync with [`RequestGroup::update_option`].
+///
+/// Matches the original C++ aria2 behaviour: almost all options are
+/// runtime-changeable except a short exclusion list (dry-run,
+/// parameterized-uri, pause, piece-length, rpc-save-upload-metadata).
+/// Keep in sync with [`RequestGroup::update_option`].
 pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
+    // Connection / parallelism
     "split",
     "max-connection-per-server",
+    // Speed limits (take effect immediately)
     "max-download-limit",
     "max-upload-limit",
+    // Retry
     "max-retries",
     "retry-wait",
+    // Output paths
+    "dir",
+    "out",
+    // File allocation
+    "file-allocation",
+    "mmap-threshold",
+    "secure-falloc",
+    // Checksum & cookies
+    "checksum",
+    "cookie-file",
+    "cookies",
+    // HTTP headers
     "header",
     "user-agent",
     "referer",
+    // Proxy
+    "http-proxy",
+    "all-proxy",
+    "https-proxy",
+    "ftp-proxy",
+    "no-proxy",
+    // BitTorrent
+    "bt-force-encrypt",
+    "bt-require-crypto",
     "bt-max-upload-slots",
     "bt-snubbed-timeout",
     "bt-optimistic-unchoke-interval",
     "bt-endgame-threshold",
+    "bt-piece-selection-strategy",
+    "bt-prioritize-piece",
     "seed-time",
     "seed-ratio",
+    // DHT
+    "enable-dht",
+    "dht-listen-port",
+    "dht-entry-point",
+    "dht-file-path",
+    "enable-public-trackers",
+    // uTP
+    "enable-utp",
+    "utp-listen-port",
 ];
 
 /// Lock-free progress tracking for a download task.
@@ -410,6 +449,13 @@ pub struct RequestGroup {
     pub uploaded_length: AtomicU64,
     pub bt_bitfield: std::sync::RwLock<Option<Vec<u8>>>,
 
+    /// Download context — central metadata (file entries, piece hashes, attributes).
+    /// In C++ aria2, `RequestGroup` owns `shared_ptr<DownloadContext> dctx_`.
+    /// For non-BT downloads this is created during URI resolution; for BT
+    /// downloads it is created from TorrentMeta in BtDownloadCommand.
+    /// `None` until the download engine populates it.
+    pub download_context: std::sync::RwLock<Option<Arc<DownloadContext>>>,
+
     // BT metadata fields (for session persistence enhancement)
     /// Number of pieces in the torrent (0 for non-BT downloads)
     pub bt_num_pieces: AtomicU32,
@@ -441,6 +487,7 @@ impl RequestGroup {
             progress: Arc::new(AtomicProgress::new()),
             uploaded_length: AtomicU64::new(0),
             bt_bitfield: std::sync::RwLock::new(None),
+            download_context: std::sync::RwLock::new(None),
 
             // Initialize BT metadata fields (default to 0/None for non-BT downloads)
             bt_num_pieces: AtomicU32::new(0),
@@ -529,6 +576,15 @@ impl RequestGroup {
     pub fn is_removed(&self) -> bool {
         match self.status.try_read() {
             Ok(guard) => matches!(*guard, DownloadStatus::Removed),
+            Err(_) => false,
+        }
+    }
+
+    /// Check whether this group has been paused (non-blocking).
+    /// Used by downloaders to detect `aria2.pause` / `aria2.forcePause`.
+    pub fn is_paused_flag(&self) -> bool {
+        match self.status.try_read() {
+            Ok(guard) => matches!(*guard, DownloadStatus::Paused),
             Err(_) => false,
         }
     }
@@ -687,6 +743,124 @@ impl RequestGroup {
                 if let Some(v) = value.as_f64() {
                     opts.seed_ratio = Some(v);
                 }
+                true
+            }
+            "dir" => {
+                opts.dir = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "out" => {
+                opts.out = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "file-allocation" => {
+                if let Some(s) = value.as_str() {
+                    opts.file_allocation = Some(s.to_string());
+                }
+                true
+            }
+            "mmap-threshold" => {
+                opts.mmap_threshold = value.as_u64();
+                true
+            }
+            "secure-falloc" => {
+                opts.secure_falloc = value.as_bool().unwrap_or(false);
+                true
+            }
+            "checksum" => {
+                if let Some(s) = value.as_str() {
+                    if let Some((algo, hash)) = s.split_once('=') {
+                        opts.checksum = Some((algo.to_string(), hash.to_string()));
+                    }
+                }
+                true
+            }
+            "cookie-file" => {
+                opts.cookie_file = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "cookies" => {
+                opts.cookies = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "bt-force-encrypt" => {
+                opts.bt_force_encrypt = value.as_bool().unwrap_or(false);
+                true
+            }
+            "bt-require-crypto" => {
+                opts.bt_require_crypto = value.as_bool().unwrap_or(false);
+                true
+            }
+            "enable-dht" => {
+                opts.enable_dht = value.as_bool().unwrap_or(true);
+                true
+            }
+            "dht-listen-port" => {
+                opts.dht_listen_port = value.as_u64().map(|v| v as u16);
+                true
+            }
+            "dht-entry-point" => {
+                match &value {
+                    serde_json::Value::String(s) => {
+                        opts.dht_entry_point = Some(vec![s.to_string()]);
+                    }
+                    serde_json::Value::Array(arr) => {
+                        opts.dht_entry_point = Some(
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect(),
+                        );
+                    }
+                    _ => {}
+                }
+                true
+            }
+            "enable-public-trackers" => {
+                opts.enable_public_trackers = value.as_bool().unwrap_or(true);
+                true
+            }
+            "bt-piece-selection-strategy" => {
+                if let Some(s) = value.as_str() {
+                    opts.bt_piece_selection_strategy = s.to_string();
+                }
+                true
+            }
+            "bt-prioritize-piece" => {
+                if let Some(s) = value.as_str() {
+                    opts.bt_prioritize_piece = s.to_string();
+                }
+                true
+            }
+            "enable-utp" => {
+                opts.enable_utp = value.as_bool().unwrap_or(false);
+                true
+            }
+            "utp-listen-port" => {
+                opts.utp_listen_port = value.as_u64().map(|v| v as u16);
+                true
+            }
+            "dht-file-path" => {
+                opts.dht_file_path = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "http-proxy" => {
+                opts.http_proxy = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "all-proxy" => {
+                opts.all_proxy = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "https-proxy" => {
+                opts.https_proxy = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "ftp-proxy" => {
+                opts.ftp_proxy = value.as_str().map(|s| s.to_string());
+                true
+            }
+            "no-proxy" => {
+                opts.no_proxy = value.as_str().map(|s| s.to_string());
                 true
             }
             _ => false,
@@ -860,6 +1034,28 @@ impl RequestGroup {
     /// Get info hash hex string (blocking read for non-async contexts)
     pub fn get_bt_info_hash_hex(&self) -> Option<String> {
         self.bt_info_hash_hex.recover().clone()
+    }
+
+    // -----------------------------------------------------------------------
+    // DownloadContext accessors
+    // -----------------------------------------------------------------------
+
+    /// Get a shared reference to the `DownloadContext`, if set.
+    ///
+    /// Returns `None` if the download context has not been initialized yet
+    /// (e.g. before torrent metadata is parsed for BT downloads).
+    pub fn get_download_context(&self) -> Option<Arc<DownloadContext>> {
+        self.download_context.recover().clone()
+    }
+
+    /// Set the `DownloadContext` for this download.
+    ///
+    /// In C++ aria2, `RequestGroup` always has a `DownloadContext` (created in
+    /// the constructor or by BtSetup). In Rust, we set it lazily — for BT
+    /// downloads this happens in `BtDownloadCommand::new()` after parsing
+    /// TorrentMeta.
+    pub fn set_download_context(&self, ctx: Arc<DownloadContext>) {
+        *self.download_context.recover_mut() = Some(ctx);
     }
 }
 
@@ -1352,5 +1548,75 @@ mod tests {
             "is_removed() should return false when the status write lock is held (try_read fails)"
         );
         // Lock released when _guard drops.
+    }
+
+    // -----------------------------------------------------------------------
+    // DownloadContext integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_download_context_default_is_none() {
+        let group = RequestGroup::new(
+            GroupId::new(1),
+            vec!["http://example.com/file.zip".to_string()],
+            DownloadOptions::default(),
+        );
+        assert!(
+            group.get_download_context().is_none(),
+            "download_context should default to None for non-BT downloads"
+        );
+    }
+
+    #[test]
+    fn test_set_and_get_download_context() {
+        let group = RequestGroup::new(
+            GroupId::new(2),
+            vec!["bt://test".to_string()],
+            DownloadOptions::default(),
+        );
+
+        let ctx = Arc::new(DownloadContext::new(1024, 4096, "/tmp/file.bin".into()));
+        group.set_download_context(Arc::clone(&ctx));
+
+        let retrieved = group.get_download_context();
+        assert!(retrieved.is_some(), "download_context should be set");
+        assert!(
+            Arc::ptr_eq(&retrieved.unwrap(), &ctx),
+            "should return the same Arc"
+        );
+    }
+
+    #[test]
+    fn test_torrent_attribute_on_download_context() {
+        use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+
+        let group = RequestGroup::new(
+            GroupId::new(3),
+            vec!["bt://test".to_string()],
+            DownloadOptions::default(),
+        );
+
+        let info_hash = "0123456789abcdef0123456789abcdef01234567";
+        let mut ctx = DownloadContext::new(1024, 4096, "/tmp/file.bin".into());
+        let ta = TorrentAttribute {
+            name: "test-torrent".to_string(),
+            mode: BtFileMode::Single,
+            announce_list: vec![vec!["http://tracker.example.com/announce".to_string()]],
+            nodes: Vec::new(),
+            info_hash: info_hash.to_string(),
+            metadata: Vec::new(),
+            metadata_size: 0,
+            private_torrent: false,
+            creation_date: 0,
+            comment: String::new(),
+            created_by: String::new(),
+            url_list: Vec::new(),
+        };
+        ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(ta));
+        group.set_download_context(Arc::new(ctx));
+
+        let ctx_ref = group.get_download_context().unwrap();
+        let hash = ctx_ref.get_bt_info_hash_hex();
+        assert_eq!(hash, Some(info_hash.to_string()));
     }
 }

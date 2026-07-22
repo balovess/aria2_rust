@@ -11,7 +11,7 @@ pub enum BencodeValue {
 impl BencodeValue {
     pub fn decode(bytes: &[u8]) -> Result<(Self, usize), String> {
         if bytes.is_empty() {
-            return Err("空字节流".to_string());
+            return Err("Empty byte stream".to_string());
         }
 
         match bytes[0] {
@@ -20,7 +20,7 @@ impl BencodeValue {
             b'd' => Self::decode_dict(bytes),
             b'0'..=b'9' => Self::decode_bytes(bytes),
             c => Err(format!(
-                "无效的bencode起始字符: '{}' (0x{:02x})",
+                "Invalid bencode start character: '{}' (0x{:02x})",
                 c as char, c
             )),
         }
@@ -28,19 +28,20 @@ impl BencodeValue {
 
     fn decode_int(bytes: &[u8]) -> Result<(Self, usize), String> {
         if !bytes.starts_with(b"i") {
-            return Err("整数不以'i'开头".to_string());
+            return Err("Integer does not start with 'i'".to_string());
         }
         let end = bytes
             .iter()
             .position(|&b| b == b'e')
-            .ok_or("整数缺少结束标记'e'")?;
+            .ok_or("Integer missing end marker 'e'")?;
         if end <= 1 {
-            return Err("整数为空".to_string());
+            return Err("Integer is empty".to_string());
         }
-        let num_str = unsafe { std::str::from_utf8_unchecked(&bytes[1..end]) };
+        let num_str = std::str::from_utf8(&bytes[1..end])
+            .map_err(|e| format!("Integer content is not valid UTF-8: {}", e))?;
         let value: i64 = num_str
             .parse()
-            .map_err(|e| format!("解析整数失败: {} (内容: '{}')", e, num_str))?;
+            .map_err(|e| format!("Failed to parse integer: {} (content: '{}')", e, num_str))?;
         Ok((BencodeValue::Int(value), end + 1))
     }
 
@@ -48,19 +49,20 @@ impl BencodeValue {
         let colon_pos = bytes
             .iter()
             .position(|&b| b == b':')
-            .ok_or("字节串缺少长度分隔符':'")?;
+            .ok_or("Byte string missing length separator ':'")?;
         if colon_pos == 0 {
-            return Err("字节串长度为空".to_string());
+            return Err("Byte string length is empty".to_string());
         }
-        let len_str = unsafe { std::str::from_utf8_unchecked(&bytes[..colon_pos]) };
+        let len_str = std::str::from_utf8(&bytes[..colon_pos])
+            .map_err(|e| format!("Byte string length prefix is not valid UTF-8: {}", e))?;
         let length: usize = len_str
             .parse()
-            .map_err(|e| format!("解析字节串长度失败: {}", e))?;
+            .map_err(|e| format!("Failed to parse byte string length: {}", e))?;
         let data_start = colon_pos + 1;
         let data_end = data_start + length;
         if data_end > bytes.len() {
             return Err(format!(
-                "字节串数据不足: 声明长度={}, 实际可用={}",
+                "Byte string data insufficient: declared length={}, available={}",
                 length,
                 bytes.len() - data_start
             ));
@@ -73,7 +75,7 @@ impl BencodeValue {
 
     fn decode_list(bytes: &[u8]) -> Result<(Self, usize), String> {
         if !bytes.starts_with(b"l") {
-            return Err("列表不以'l'开头".to_string());
+            return Err("List does not start with 'l'".to_string());
         }
         let mut pos = 1;
         let mut items = Vec::new();
@@ -83,14 +85,14 @@ impl BencodeValue {
             pos += consumed;
         }
         if pos >= bytes.len() {
-            return Err("列表缺少结束标记'e'".to_string());
+            return Err("List missing end marker 'e'".to_string());
         }
         Ok((BencodeValue::List(items), pos + 1))
     }
 
     fn decode_dict(bytes: &[u8]) -> Result<(Self, usize), String> {
         if !bytes.starts_with(b"d") {
-            return Err("字典不以'd'开头".to_string());
+            return Err("Dictionary does not start with 'd'".to_string());
         }
         let mut pos = 1;
         let mut entries = BTreeMap::new();
@@ -98,19 +100,19 @@ impl BencodeValue {
             let (key, key_consumed) = Self::decode(&bytes[pos..])?;
             let key_bytes = match key {
                 BencodeValue::Bytes(b) => b,
-                _ => return Err("字典键必须是字节串".to_string()),
+                _ => return Err("Dict key must be a byte string".to_string()),
             };
             pos += key_consumed;
 
             if pos >= bytes.len() || bytes[pos] == b'e' {
-                return Err("字典值缺失(奇数个元素)".to_string());
+                return Err("Dict value missing (odd number of elements)".to_string());
             }
             let (value, val_consumed) = Self::decode(&bytes[pos..])?;
             entries.insert(key_bytes, value);
             pos += val_consumed;
         }
         if pos >= bytes.len() {
-            return Err("字典缺少结束标记'e'".to_string());
+            return Err("Dict missing end marker 'e'".to_string());
         }
         Ok((BencodeValue::Dict(entries), pos + 1))
     }

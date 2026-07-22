@@ -126,20 +126,20 @@ impl ContentRange {
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         if !value.starts_with("bytes ") {
-            debug!("Content-Range格式异常: 非bytes单位");
+            debug!("Content-Range format error: not 'bytes' unit");
             return None;
         }
 
         let range_part = &value[6..];
         let parts: Vec<&str> = range_part.split('/').collect();
         if parts.len() != 2 {
-            debug!("Content-Range格式异常: 分割失败");
+            debug!("Content-Range format error: split failed");
             return None;
         }
 
         let range_values: Vec<&str> = parts[0].split('-').collect();
         if range_values.len() != 2 {
-            debug!("Content-Range范围解析失败");
+            debug!("Content-Range range parse failed");
             return None;
         }
 

@@ -47,6 +47,10 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.tellWaiting` - List waiting/queued downloads with pagination.
+    ///
+    /// Per original C++ aria2 behaviour, paused downloads are included in
+    /// the waiting list (they live in `reservedGroups_`). The `status`
+    /// field of each entry distinguishes "waiting" from "paused".
     pub async fn handle_tell_waiting(
         &self,
         req: &JsonRpcRequest,
@@ -58,9 +62,14 @@ impl RpcEngine {
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
                 let g = group_lock.recover();
-                if g.status() == DownloadStatus::Waiting {
-                    let gid_hex = gid.to_hex_string();
-                    result.push(Self::build_status_from_group(&g, &gid_hex));
+                // Original aria2: reservedGroups_ contains both waiting
+                // and paused downloads. tellWaiting returns both.
+                match g.status() {
+                    DownloadStatus::Waiting | DownloadStatus::Paused => {
+                        let gid_hex = gid.to_hex_string();
+                        result.push(Self::build_status_from_group(&g, &gid_hex));
+                    }
+                    _ => {}
                 }
             }
             result.into_iter().skip(offset).take(num).collect()
@@ -68,7 +77,10 @@ impl RpcEngine {
             let tasks = self.tasks.read().await;
             tasks
                 .values()
-                .filter(|s| s.status.status == DownloadStatus::Waiting)
+                .filter(|s| {
+                    s.status.status == DownloadStatus::Waiting
+                        || s.status.status == DownloadStatus::Paused
+                })
                 .skip(offset.min(tasks.len()))
                 .take(num)
                 .map(|s| s.status.clone())

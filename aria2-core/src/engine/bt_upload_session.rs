@@ -158,6 +158,13 @@ impl BtUploadSession {
                     BtMessage::HaveNone => {
                         debug!("Received HaveNone");
                     }
+                    BtMessage::Extended { ext_id, payload } => {
+                        debug!(
+                            "Received Extended message: ext_id={}, payload_len={}",
+                            ext_id,
+                            payload.len()
+                        );
+                    }
                 },
                 Ok(None) => {
                     debug!("EOF from peer, marking session as dead");

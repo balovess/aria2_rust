@@ -430,18 +430,22 @@ impl DownloadCommand {
 
     /// Non-blocking check whether the underlying RequestGroup has been
     /// cancelled (status set to `Removed` by `aria2.remove` /
-    /// `aria2.forceRemove`).
+    /// `aria2.forceRemove`) or paused (status set to `Paused` by
+    /// `aria2.pause` / `aria2.forcePause`).
     ///
     /// Returns `Err` with a `DownloadFailed` error when the group has been
-    /// removed, so the caller can abort the download promptly. Uses
-    /// `try_read` on the outer group lock so it is safe to call from hot
-    /// download loops; when the lock is contended the method treats the
+    /// removed or paused, so the caller can abort the download promptly.
+    /// Uses `try_read` on the outer group lock so it is safe to call from
+    /// hot download loops; when the lock is contended the method treats the
     /// download as still running (returns `Ok(())`) and the caller will
     /// re-check on the next iteration.
     fn check_cancelled(&self) -> Result<()> {
         match self.group.try_read() {
             Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
                 "Download cancelled by user".into(),
+            )),
+            Ok(g) if g.is_paused_flag() => Err(Aria2Error::DownloadFailed(
+                "Download paused".into(),
             )),
             _ => Ok(()),
         }
@@ -554,7 +558,15 @@ impl Command for DownloadCommand {
         let resume_helper = ResumeHelper::new(&self.output_path, true);
         let resume_state = resume_helper.detect(total_length).await?;
 
-        if resume_state.is_complete {
+        // When resuming from a paused state, never short-circuit as "complete" —
+        // the file on disk may be a preallocated sparse file that matches
+        // total_length but hasn't actually been fully written. A download that
+        // was explicitly paused by the user must always continue from where it
+        // left off, relying on the control file's bitfield to determine which
+        // ranges still need fetching.
+        let was_paused = self.group.recover().is_paused_flag();
+
+        if resume_state.is_complete && !was_paused {
             info!(
                 "File already exists completely, skipping download: {} ({} bytes)",
                 self.output_path.display(),

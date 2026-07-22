@@ -27,6 +27,8 @@ const EMA_ALPHA: f64 = 0.7;
 pub struct ServerStatSnapshot {
     /// Server hostname (e.g., "mirror1.example.com")
     pub host: String,
+    /// Protocol scheme (e.g., "http", "https", "ftp"); empty string if unspecified
+    pub protocol: String,
     /// Current download speed in bytes/sec
     pub download_speed: u64,
     /// Exponential moving average of single-connection download speed
@@ -49,7 +51,14 @@ pub struct ServerStatSnapshot {
 
 #[derive(Debug)]
 pub struct ServerStat {
+    /// Server hostname (e.g., "mirror1.example.com")
     pub host: String,
+    /// Protocol scheme (e.g., "http", "https", "ftp"); empty if unspecified
+    ///
+    /// In C++ aria2, ServerStat is keyed by (hostname, protocol). This field
+    /// enables the same lookup semantics. The Rust ServerStatMan uses
+    /// `(host, protocol)` as the composite key.
+    pub protocol: String,
     download_speed: AtomicU64,
     single_connection_avg_speed: AtomicU64,
     multi_connection_avg_speed: AtomicU64,
@@ -68,6 +77,7 @@ impl Clone for ServerStat {
     fn clone(&self) -> Self {
         Self {
             host: self.host.clone(),
+            protocol: self.protocol.clone(),
             download_speed: AtomicU64::new(self.download_speed.load(Ordering::Relaxed)),
             single_connection_avg_speed: AtomicU64::new(
                 self.single_connection_avg_speed.load(Ordering::Relaxed),
@@ -87,9 +97,34 @@ impl Clone for ServerStat {
 }
 
 impl ServerStat {
+    /// Creates a new ServerStat with the given hostname and no protocol.
+    ///
+    /// This is the backward-compatible constructor. For protocol-aware lookups
+    /// (matching C++ aria2 behavior), use [`ServerStat::new_with_protocol`].
     pub fn new(host: &str) -> Self {
         Self {
             host: host.to_string(),
+            protocol: String::new(),
+            download_speed: AtomicU64::new(0),
+            single_connection_avg_speed: AtomicU64::new(0),
+            multi_connection_avg_speed: AtomicU64::new(0),
+            last_updated: AtomicU64::new(0),
+            status: AtomicU32::new(0),
+            counter: AtomicU32::new(0),
+            last_error_time: None,
+            last_error_code: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// Creates a new ServerStat with the given hostname and protocol.
+    ///
+    /// This matches the C++ aria2 `ServerStat(hostname, protocol)` constructor.
+    /// The protocol field enables (host, protocol) composite key lookups.
+    pub fn new_with_protocol(host: &str, protocol: &str) -> Self {
+        Self {
+            host: host.to_string(),
+            protocol: protocol.to_string(),
             download_speed: AtomicU64::new(0),
             single_connection_avg_speed: AtomicU64::new(0),
             multi_connection_avg_speed: AtomicU64::new(0),
@@ -250,6 +285,7 @@ impl ServerStat {
     pub fn to_snapshot(&self) -> ServerStatSnapshot {
         ServerStatSnapshot {
             host: self.host.clone(),
+            protocol: self.protocol.clone(),
             download_speed: self.download_speed.load(Ordering::Relaxed),
             single_connection_avg_speed: self.single_connection_avg_speed.load(Ordering::Relaxed),
             multi_connection_avg_speed: self.multi_connection_avg_speed.load(Ordering::Relaxed),
@@ -298,6 +334,7 @@ impl ServerStat {
     pub fn from_snapshot(snapshot: &ServerStatSnapshot) -> Self {
         Self {
             host: snapshot.host.clone(),
+            protocol: snapshot.protocol.clone(),
             download_speed: AtomicU64::new(snapshot.download_speed),
             single_connection_avg_speed: AtomicU64::new(snapshot.single_connection_avg_speed),
             multi_connection_avg_speed: AtomicU64::new(snapshot.multi_connection_avg_speed),

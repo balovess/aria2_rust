@@ -16,27 +16,27 @@ async fn main() {
         .unwrap();
 
     let uri = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("用法: cargo run --example simple_download -- <URL>");
+        eprintln!("Usage: cargo run --example simple_download -- <URL>");
         std::process::exit(1);
     });
 
-    println!("下载: {}", uri);
+    println!("Downloading: {}", uri);
     println!(
-        "保存到: {}",
+        "Save to: {}",
         config.get_global_str("dir").await.unwrap_or_default()
     );
     println!(
-        "连接数: {}",
+        "Connections: {}",
         config.get_global_i64("split").await.unwrap_or(1)
     );
 
     let gids = add_download(&config, &uri).await;
     for gid in &gids {
-        println!("任务 #{} 已创建", gid);
+        println!("Task #{} created", gid);
     }
 
     let all_opts = config.get_all_global_options().await;
-    println!("\n当前配置:");
+    println!("\nCurrent config:");
     for (key, value) in &all_opts {
         if !matches!(value, OptionValue::None) {
             println!("  {} = {}", key, value);
@@ -96,7 +96,7 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
     match man.add_group(vec![uri.to_string()], download_opts) {
         Ok(gid) => vec![gid.value()],
         Err(e) => {
-            eprintln!("添加任务失败: {}", e);
+            eprintln!("Failed to add task: {}", e);
             vec![]
         }
     }

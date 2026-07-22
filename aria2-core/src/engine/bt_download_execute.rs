@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -131,9 +132,58 @@ impl Command for BtDownloadCommand {
             self.started = true;
         }
 
+        // Register this BT download into the engine's BtRegistry so that
+        // info-hash reverse lookup, peer blocklist, and cross-download BT
+        // coordination work end-to-end. In C++ aria2, this is done by
+        // `BtSetup::setup()` which calls `BtRegistry::put(gid, btObject)`.
+        if let Some(ref registry) = self.bt_registry {
+            let gid = self.group.recover().gid().value();
+            let download_context = self.group.recover().get_download_context();
+
+            // Build BtAnnounce from the torrent's announce list / announce URL.
+            // In C++ aria2, BtSetup creates BtAnnounce from TorrentAttribute's
+            // announce list and passes it to BtRegistry.
+            let (announce_list, announce_url) = {
+                use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
+                if let Some(ref ctx) = download_context {
+                    if let Some(attr) = ctx.get_attribute(ContextAttributeType::BitTorrent) {
+                        if let Some(ta) = attr.downcast_ref::<TorrentAttribute>() {
+                            let list = &ta.announce_list;
+                            let url = ta.announce_list.first()
+                                .and_then(|tier| tier.first())
+                                .cloned();
+                            (list.clone(), url)
+                        } else {
+                            (Vec::new(), None)
+                        }
+                    } else {
+                        (Vec::new(), None)
+                    }
+                } else {
+                    (Vec::new(), None)
+                }
+            };
+            let bt_announce = Arc::new(crate::engine::bt_tracker_comm::BtAnnounce::new(
+                &announce_list,
+                &announce_url,
+            ));
+            let bt_runtime = Arc::new(crate::engine::bt_runtime::BtRuntime::new());
+            let bt_object = crate::engine::bt_registry::BtObject::builder()
+                .download_context(download_context.unwrap_or_else(|| {
+                    Arc::new(crate::download::DownloadContext::new(0, 0, String::new()))
+                }))
+                .bt_announce(bt_announce)
+                .bt_runtime(bt_runtime)
+                .build();
+            if let Ok(mut reg) = registry.write() {
+                reg.put(gid, bt_object);
+                info!(gid, "Registered BT download into BtRegistry with BtAnnounce");
+            }
+        }
+
         let (meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
 
-        // P1 集成: 尝试从 .aria2 文件恢复已保存的进度
+        // P1 integration: try to resume from saved .aria2 progress file
         if let Some(ref mgr) = self.progress_manager {
             match mgr.load_progress(&meta.info_hash.bytes) {
                 Ok(saved) => {
@@ -653,7 +703,7 @@ impl BtDownloadCommand {
         let mut last_speed_update = Instant::now();
         let mut last_completed = 0u64;
 
-        // P1 集成: 进度保存时间追踪
+        // P1 integration: progress save time tracking
         let mut last_progress_save = Instant::now();
 
         let piece_selector = BtPieceSelector::new(num_pieces);
@@ -942,14 +992,14 @@ impl BtDownloadCommand {
                             }
                         }
 
-                        // P1 集成: 定期保存下载进度到 .aria2 文件
+                        // P1 integration: periodically save download progress to .aria2 file
                         if let Some(ref mgr) = self.progress_manager
                             && last_progress_save.elapsed() >= self.progress_save_interval
                         {
-                            // 构造当前进度快照
+                            // Build current progress snapshot
                             let progress = BtProgress {
                                 info_hash: meta.info_hash.bytes,
-                                bitfield: vec![], // 将在后续完善
+                                bitfield: vec![], // will be refined later
                                 peers: vec![],
                                 stats: ProgressDownloadStats {
                                     downloaded_bytes: self.completed_bytes,
@@ -961,6 +1011,9 @@ impl BtDownloadCommand {
                                 piece_length,
                                 total_size,
                                 num_pieces,
+                                upload_length: self.total_uploaded,
+                                in_flight_pieces: vec![],
+                                is_torrent: true,
                                 save_time: std::time::SystemTime::now(),
                                 version: 1,
                             };
@@ -1139,6 +1192,18 @@ impl BtDownloadCommand {
             self.completed_bytes, self.total_uploaded
         );
 
+        // Unregister from BtRegistry. In C++ aria2, this is done when
+        // DownloadEngine removes the RequestGroup. Here we do it explicitly
+        // on download completion/finalization so the registry stays clean.
+        if let Some(ref registry) = self.bt_registry {
+            let gid = self.group.recover().gid().value();
+            if let Ok(mut reg) = registry.write() {
+                if reg.remove(gid) {
+                    info!(gid, "Removed BT download from BtRegistry on finalization");
+                }
+            }
+        }
+
         if let Some(ref engine) = self.dht_engine {
             if let Err(e) = engine.announce_peer(&meta.info_hash.bytes, 0).await {
                 warn!("[BT] DHT announce failed: {}", e);
@@ -1151,7 +1216,7 @@ impl BtDownloadCommand {
             engine.shutdown();
         }
 
-        // P1 集成: 清理已完成的下载进度文件
+        // P1 integration: clean up completed download progress file
         if let Some(ref mgr) = self.progress_manager {
             if let Err(e) = mgr.remove_progress(&meta.info_hash.bytes) {
                 warn!(
@@ -1163,9 +1228,9 @@ impl BtDownloadCommand {
             }
         }
 
-        // P2 集成: 触发下载完成后处理钩子
+        // P2 integration: trigger post-download completion hooks
         if let Some(ref hm) = self.hook_manager {
-            // 获取 gid（从 group 中提取）
+            // Get gid (extracted from group)
             let gid = {
                 let g = self.group.recover();
                 g.gid()

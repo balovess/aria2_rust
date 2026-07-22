@@ -117,17 +117,17 @@ impl HttpHeaderProcessor {
             && let Some(name) = Self::extract_filename(cd)
         {
             let sanitized = Self::sanitize_filename(&name);
-            debug!("从Content-Disposition解析文件名: {}", sanitized);
+            debug!("Filename resolved from Content-Disposition: {}", sanitized);
             return sanitized;
         }
 
         if let Some(name) = Self::guess_filename_from_url(url) {
             let sanitized = Self::sanitize_filename(&name);
-            debug!("从URL路径解析文件名: {}", sanitized);
+            debug!("Filename resolved from URL path: {}", sanitized);
             return sanitized;
         }
 
-        debug!("使用默认文件名: {}", default_name);
+        debug!("Using default filename: {}", default_name);
         default_name.to_string()
     }
 }

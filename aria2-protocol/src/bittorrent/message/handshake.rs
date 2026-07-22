@@ -48,7 +48,7 @@ impl Handshake {
     pub fn parse(data: &[u8]) -> Result<Self, String> {
         if data.len() < HANDSHAKE_LENGTH {
             return Err(format!(
-                "握手数据长度不足: 需要{}字节, 实际{}字节",
+                "Insufficient handshake data: need {} bytes, got {}",
                 HANDSHAKE_LENGTH,
                 data.len()
             ));
@@ -56,7 +56,7 @@ impl Handshake {
 
         let pstrlen = data[0] as usize;
         if pstrlen != 19 {
-            return Err(format!("无效的协议字符串长度: {}", pstrlen));
+            return Err(format!("Invalid protocol string length: {}", pstrlen));
         }
 
         let protocol = {
@@ -67,7 +67,7 @@ impl Handshake {
 
         if protocol != PROTOCOL_STRING {
             return Err(format!(
-                "不支持的协议: {}",
+                "Unsupported protocol: {}",
                 std::str::from_utf8(&protocol).unwrap_or("invalid")
             ));
         }

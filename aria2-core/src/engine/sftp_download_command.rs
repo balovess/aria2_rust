@@ -599,7 +599,7 @@ mod tests {
             sftp_path_decode("/path%20with%20spaces"),
             "/path with spaces"
         );
-        // UTF-8 encoded Chinese path: "%E6%96%87%E4%BB%B6" decodes to "文件"
+        // UTF-8 encoded Chinese path: "%E6%96%87%E4%BB%B6" decodes to Chinese characters for "file"
         assert_eq!(sftp_path_decode("/%E6%96%87%E4%BB%B6"), "/\u{6587}\u{4EF6}");
         assert_eq!(sftp_path_decode("%2Froot%2Ftest"), "/root/test");
     }

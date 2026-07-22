@@ -16,7 +16,7 @@ impl MockTrackerServer {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
             .await
-            .expect("绑定Mock Tracker端口失败");
+            .expect("Failed to bind mock tracker port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 

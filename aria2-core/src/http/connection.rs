@@ -1,8 +1,8 @@
-//! HTTP 连接管理器
+//! HTTP connection manager
 //!
-//! 提供连接池复用、Keep-Alive 管理、LRU 淘汰策略和重定向跟随等功能。
+//! Provides connection pool reuse, Keep-Alive management, LRU eviction strategy, and redirect following.
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust,no_run
 //! use aria2_core::http::connection::{HttpConnectionManager, HttpConfig};
@@ -19,7 +19,7 @@
 //!     };
 //!
 //!     let manager = HttpConnectionManager::new(&config);
-//!     // 使用连接管理器...
+//!     // Use the connection manager...
 //! }
 //! ```
 
@@ -36,18 +36,18 @@ use url::Url;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::cookie_storage::{CookieJar, JarCookie};
 
-/// HTTP 连接配置
+/// HTTP connection configuration
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
-    /// 最大并发连接数
+    /// Maximum concurrent connections
     pub max_connections: usize,
-    /// TCP 连接超时
+    /// TCP connection timeout
     pub connect_timeout: Duration,
-    /// 读取超时
+    /// Read timeout
     pub read_timeout: Duration,
-    /// 写入超时
+    /// Write timeout
     pub write_timeout: Duration,
-    /// 空闲连接超时（LRU 淘汰）
+    /// Idle connection timeout (LRU eviction)
     pub idle_timeout: Duration,
 }
 
@@ -71,60 +71,60 @@ impl Default for HttpConfig {
     }
 }
 
-/// 活动连接信息
+/// Active connection information
 #[derive(Debug)]
 pub struct ActiveConnection {
-    /// 唯一连接 ID
+    /// Unique connection ID
     pub id: u64,
-    /// TCP 流
+    /// TCP stream
     pub stream: TcpStream,
-    /// 目标主机
+    /// Target host
     pub host: String,
-    /// 最后使用时间
+    /// Last used timestamp
     pub last_used: Instant,
 }
 
 impl ActiveConnection {
-    /// 检查连接是否仍然有效
+    /// Check if the connection is still valid
     pub fn is_valid(&self) -> bool {
-        // 检查连接是否已关闭或出错
+        // Check if the connection has been closed or errored
         self.stream.peer_addr().is_ok()
     }
 
-    /// 更新最后使用时间
+    /// Update last used time
     pub fn touch(&mut self) {
         self.last_used = Instant::now();
     }
 }
 
-/// HTTP 连接状态
+/// HTTP connection state
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
-    /// 空闲可用
+    /// Idle and available
     Idle,
-    /// 正在使用中
+    /// Currently in use
     InUse,
-    /// 已关闭
+    /// Closed
     Closed,
 }
 
-/// HTTP 连接管理器
+/// HTTP connection manager
 ///
-/// 提供 HTTP 连接的获取、释放、池化管理和重定向跟随功能。
-/// 支持 Keep-Alive 连接复用、LRU 淘汰策略和循环重定向检测。
+/// Provides HTTP connection acquisition, release, pool management, and redirect following.
+/// Supports Keep-Alive connection reuse, LRU eviction strategy, and circular redirect detection.
 ///
-/// # 线程安全
+/// # Thread Safety
 ///
-/// `HttpConnectionManager` 内部使用 `tokio::sync::Mutex` 保护共享状态，
-/// 可以安全地在多个异步任务之间共享。
+/// `HttpConnectionManager` uses `tokio::sync::Mutex` internally to protect shared state,
+/// and can be safely shared across multiple async tasks.
 ///
-/// # 性能特性
+/// # Performance Characteristics
 ///
-/// - **连接复用**: 通过 Keep-Alive 头部检查，避免重复建立 TCP 连接
-/// - **LRU 淘汰**: 自动清理空闲超时的连接，防止资源泄漏
-/// - **三级超时**: 分别控制连接、读取、写入三个阶段的超时时间
+/// - **Connection Reuse**: Avoids repeated TCP connections via Keep-Alive header checks
+/// - **LRU Eviction**: Automatically cleans up idle timed-out connections to prevent resource leaks
+/// - **Three-tier Timeout**: Separately controls connect, read, and write phase timeouts
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,no_run
 /// use aria2_core::http::connection::{HttpConnectionManager, HttpConfig};
@@ -142,7 +142,7 @@ pub enum ConnectionState {
 ///     let url = Url::parse("https://example.com/file")?;
 ///
 ///     let conn = manager.acquire(&url).await?;
-///     // 使用连接进行 HTTP 请求...
+///     // Use the connection for HTTP requests...
 ///     manager.release(conn.id).await;
 ///
 ///     Ok(())
@@ -170,17 +170,17 @@ pub struct HttpConnectionManager {
 }
 
 impl HttpConnectionManager {
-    /// 创建新的 HTTP 连接管理器
+    /// Create a new HTTP connection manager
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// * `config` - HTTP 连接配置，包含超时、最大连接数等参数
+    /// * `config` - HTTP connection configuration, including timeout, max connections, etc.
     ///
-    /// # 返回值
+    /// # Returns
     ///
-    /// 返回初始化完成的连接管理器实例
+    /// The initialized connection manager instance
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```
     /// use aria2_core::http::connection::{HttpConnectionManager, HttpConfig};
@@ -209,48 +209,48 @@ impl HttpConnectionManager {
         }
     }
 
-    /// 获取最大连接数配置
+    /// Get the max connections configuration
     pub fn max_connections(&self) -> usize {
         self.config.max_connections
     }
 
-    /// 获取当前活动连接数
+    /// Get the current active connection count
     pub fn active_count(&self) -> usize {
         self.active_count
     }
 
-    /// 获取连接池大小（包含空闲和使用中的连接）
+    /// Get the connection pool size (including idle and in-use connections)
     pub fn pool_size(&self) -> usize {
         self.pool.len()
     }
 
-    /// 从连接池获取或新建一个到指定 URL 的连接
+    /// Acquire or create a connection to the specified URL from the connection pool
     ///
-    /// 该方法会尝试从连接池中查找可复用的空闲连接（基于主机名匹配），
-    /// 如果没有可用连接且未达到最大连接数限制，则创建新连接。
+    /// This method attempts to find a reusable idle connection from the pool (based on hostname matching).
+    /// If no connection is available and the max connection limit has not been reached, a new connection is created.
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// * `url` - 目标 URL，用于提取主机名和端口信息
+    /// * `url` - Target URL, used to extract hostname and port information
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// * [`Aria2Error::Network`] - 当达到最大连接数限制时
-    /// * [`Aria2Error::Recoverable`] - 当连接超时或网络故障时
+    /// * [`Aria2Error::Network`] - When max connection limit is reached
+    /// * [`Aria2Error::Recoverable`] - When connection times out or network failure occurs
     ///
-    /// # 返回值
+    /// # Returns
     ///
-    /// 返回可用的活动连接实例
+    /// An available active connection instance
     ///
-    /// # Keep-Alive 复用逻辑
+    /// # Keep-Alive Reuse Logic
     ///
-    /// 1. 提取 URL 的 host:port 作为连接标识
-    /// 2. 在连接池中查找该主机的空闲连接
-    /// 3. 验证连接有效性（检查 socket 是否正常）
-    /// 4. 更新 last_used 时间戳并返回
-    /// 5. 如果无可用连接，创建新的 TCP 连接
+    /// 1. Extract the URL's host:port as the connection identifier
+    /// 2. Look up idle connections for that host in the pool
+    /// 3. Validate connection validity (check if socket is healthy)
+    /// 4. Update the last_used timestamp and return
+    /// 5. If no available connection, create a new TCP connection
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use aria2_core::http::connection::HttpConnectionManager;
@@ -262,30 +262,30 @@ impl HttpConnectionManager {
     ///     let url = Url::parse("https://example.com/resource").unwrap();
     ///
     ///     match manager.acquire(&url).await {
-    ///         Ok(conn) => println!("获取连接成功: id={}", conn.id),
-    ///         Err(e) => eprintln!("获取连接失败: {}", e),
+    ///         Ok(conn) => println!("Acquired connection: id={}", conn.id),
+    ///         Err(e) => eprintln!("Failed to acquire connection: {}", e),
     ///     }
     /// }
     /// ```
     pub async fn acquire(&mut self, url: &Url) -> Result<ActiveConnection> {
         let host = Self::extract_host(url);
 
-        // 尝试从连接池中复用空闲连接
+        // Try to reuse an idle connection from the pool
         if let Some(conn) = self.try_reuse_connection(&host)? {
-            tracing::debug!("复用连接: id={}, host={}", conn.id, host);
+            tracing::debug!("Reused connection: id={}, host={}", conn.id, host);
             return Ok(conn);
         }
 
-        // 检查是否达到最大连接数限制
+        // Check if max connection limit has been reached
         if self.active_count >= self.config.max_connections {
-            // 尝试清理过期连接
+            // Try to evict expired connections
             self.evict_idle_connections();
 
             if self.active_count >= self.config.max_connections {
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
                         message: format!(
-                            "达到最大连接数限制: {} (host={})",
+                            "Max connection limit reached: {} (host={})",
                             self.config.max_connections, host
                         ),
                     },
@@ -293,27 +293,27 @@ impl HttpConnectionManager {
             }
         }
 
-        // 创建新连接
+        // Create a new connection
         self.create_new_connection(url, &host).await
     }
 
-    /// 归还连接到连接池
+    /// Return a connection to the connection pool
     ///
-    /// 将使用完毕的连接归还到连接池中，以便后续复用。
-    /// 如果连接已失效（socket 关闭或出错），会自动从池中移除。
+    /// Returns a used connection to the pool for future reuse.
+    /// If the connection is no longer valid (socket closed or errored), it is automatically removed from the pool.
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// * `conn_id` - 要归还的连接 ID
+    /// * `conn_id` - The connection ID to return
     ///
-    /// # 行为
+    /// # Behavior
     ///
-    /// 1. 根据连接 ID 在池中查找对应连接
-    /// 2. 更新 last_used 为当前时间
-    /// 3. 将连接标记为空闲状态
-    /// 4. 如果连接无效，自动清理资源
+    /// 1. Look up the connection by ID in the pool
+    /// 2. Update last_used to current time
+    /// 3. Mark the connection as idle
+    /// 4. If the connection is invalid, automatically clean up resources
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use aria2_core::http::connection::HttpConnectionManager;
@@ -325,58 +325,58 @@ impl HttpConnectionManager {
     ///     let url = Url::parse("https://example.com").unwrap();
     ///
     ///     let conn = manager.acquire(&url).await.unwrap();
-    ///     // 使用连接完成请求后...
+    ///     // After using the connection for requests...
     ///     manager.release(conn.id).await;
     /// }
     /// ```
     pub async fn release(&mut self, conn_id: u64) {
         if let Some(mut conn) = self.pool.remove(&conn_id) {
-            // 验证连接是否仍然有效
+            // Verify if the connection is still valid
             if !conn.is_valid() {
-                tracing::debug!("连接已失效，移除: id={}", conn_id);
+                tracing::debug!("Connection no longer valid, removing: id={}", conn_id);
                 self.active_count = self.active_count.saturating_sub(1);
                 self.remove_from_host_map(&conn.host, conn_id);
                 return;
             }
 
-            // 更新最后使用时间并放回池中
+            // Update last used time and put back into the pool
             conn.touch();
             self.pool.insert(conn_id, conn);
 
-            tracing::debug!("归还连接到池: id={}", conn_id);
+            tracing::debug!("Returned connection to pool: id={}", conn_id);
         } else {
-            tracing::warn!("尝试释放不存在的连接: id={}", conn_id);
+            tracing::warn!("Attempted to release non-existent connection: id={}", conn_id);
         }
     }
 
-    /// 跟随 HTTP 重定向
+    /// Follow HTTP redirects
     ///
-    /// 解析响应中的 Location 头部，构建新的 URL 并验证重定向合法性。
-    /// 支持相对路径和绝对路径的重定向，自动处理循环重定向检测。
+    /// Parses the Location header from the response, constructs a new URL, and validates redirect legality.
+    /// Supports both relative and absolute path redirects, with automatic circular redirect detection.
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// * `response` - HTTP 响应对象，需包含 Location 头部
-    /// * `current_url` - 当前请求的 URL（用于解析相对路径）
-    /// * `redirect_chain` - 已访问过的 URL 集合（用于循环检测）
+    /// * `response` - HTTP response object, must contain a Location header
+    /// * `current_url` - Current request URL (used for resolving relative paths)
+    /// * `redirect_chain` - Set of already-visited URLs (for circular detection)
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// * [`Aria2Error::Parse`] - 当 Location 头部格式无效或 URL 解析失败时
-    /// * [`Aria2Error::Network`] - 当检测到循环重定向或超过最大跳数时
+    /// * [`Aria2Error::Parse`] - When Location header format is invalid or URL parsing fails
+    /// * [`Aria2Error::Network`] - When circular redirect is detected or max hops exceeded
     ///
-    /// # 返回值
+    /// # Returns
     ///
-    /// 返回重定向目标的新 URL
+    /// The new URL of the redirect target
     ///
-    /// # 重定向链检测机制
+    /// # Redirect Chain Detection Mechanism
     ///
-    /// 1. 使用 HashSet 记录所有已访问 URL
-    /// 2. 每次重定向前检查新 URL 是否已在集合中
-    /// 3. 维护跳数计数器，超过阈值返回错误
-    /// 4. 支持最多 5 次 301/302/303/307/308 重定向
+    /// 1. Use HashSet to record all visited URLs
+    /// 2. Check if the new URL is already in the set before each redirect
+    /// 3. Maintain a hop counter; return error when threshold is exceeded
+    /// 4. Support up to 5 301/302/303/307/308 redirects
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use aria2_core::http::connection::{HttpConnectionManager, HttpResponse};
@@ -397,8 +397,8 @@ impl HttpConnectionManager {
     ///     ));
     ///
     ///     match manager.follow_redirects(&response, &current_url, &chain, 1) {
-    ///         Ok(new_url) => println!("重定向到: {}", new_url),
-    ///         Err(e) => eprintln!("重定向失败: {}", e),
+    ///         Ok(new_url) => println!("Redirected to: {}", new_url),
+    ///         Err(e) => eprintln!("Redirect failed: {}", e),
     ///     }
     /// }
     /// ```
@@ -409,42 +409,42 @@ impl HttpConnectionManager {
         redirect_chain: &HashSet<Url>,
         redirect_count: u32,
     ) -> Result<Url> {
-        // 检查是否为重定向响应
+        // Check if this is a redirect response
         if !response.is_redirect() {
             return Err(Aria2Error::Parse(format!(
-                "非重定向响应码: {}",
+                "Non-redirect response code: {}",
                 response.status_code
             )));
         }
 
-        // 检查重定向次数限制
+        // Check redirect count limit
         if redirect_count >= self.max_redirects {
             return Err(Aria2Error::Network(format!(
-                "超过最大重定向次数限制: {}",
+                "Max redirect count exceeded: {}",
                 self.max_redirects
             )));
         }
 
-        // 获取 Location 头部
+        // Get the Location header
         let location = response
             .location()
-            .ok_or_else(|| Aria2Error::Parse("缺少 Location 头部".to_string()))?;
+            .ok_or_else(|| Aria2Error::Parse("Missing Location header".to_string()))?;
 
-        // 解析新的 URL（支持相对路径）
+        // Parse the new URL (supports relative paths)
         let new_url = current_url
             .join(location)
-            .map_err(|e| Aria2Error::Parse(format!("解析重定向 URL 失败: {}", e)))?;
+            .map_err(|e| Aria2Error::Parse(format!("Failed to parse redirect URL: {}", e)))?;
 
-        // 循环重定向检测
+        // Circular redirect detection
         if redirect_chain.contains(&new_url) {
             return Err(Aria2Error::Network(format!(
-                "检测到循环重定向: {}",
+                "Circular redirect detected: {}",
                 new_url
             )));
         }
 
         tracing::info!(
-            "跟随重定向: {} -> {} ({}/{})",
+            "Following redirect: {} -> {} ({}/{})",
             current_url,
             new_url,
             redirect_count + 1,
@@ -532,45 +532,45 @@ impl HttpConnectionManager {
         )))
     }
 
-    /// 构建 Range 请求头
+    /// Build a Range request header
     ///
-    /// 根据 start 和 end 字节位置构建符合 RFC 7233 规范的 Range 头部字符串。
-    /// 用于断点续传和分块下载场景。
+    /// Constructs a Range header string conforming to RFC 7233 based on start and end byte positions.
+    /// Used for resume downloads and chunked download scenarios.
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// * `start` - 起始字节位置（包含）
-    /// * `end` - 结束字节位置（包含），如果为 None 则表示到文件末尾
+    /// * `start` - Start byte position (inclusive)
+    /// * `end` - End byte position (inclusive); if None, means end of file
     ///
-    /// # 返回值
+    /// # Returns
     ///
-    /// 返回格式化的 Range 头部值，例如 `"bytes=0-499"` 或 `"bytes=500-"`
+    /// Formatted Range header value, e.g. `"bytes=0-499"` or `"bytes=500-"`
     ///
-    /// # 格式规范
+    /// # Format Specification
     ///
-    /// - `bytes=start-end`: 指定范围 [start, end]
-    /// - `bytes=start-`: 从 start 到文件末尾
+    /// - `bytes=start-end`: Specify range [start, end]
+    /// - `bytes=start-`: From start to end of file
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```
     /// use aria2_core::http::connection::HttpConnectionManager;
     ///
     /// let manager = HttpConnectionManager::new(&Default::default());
     ///
-    /// // 完整范围
+    /// // Full range
     /// assert_eq!(
     ///     manager.build_range_header(0, Some(499)),
     ///     "bytes=0-499"
     /// );
     ///
-    /// // 开放结束范围
+    /// // Open-ended range
     /// assert_eq!(
     ///     manager.build_range_header(1000, None),
     ///     "bytes=1000-"
     /// );
     ///
-    /// // 单字节范围
+    /// // Single byte range
     /// assert_eq!(
     ///     manager.build_range_header(42, Some(42)),
     ///     "bytes=42-42"
@@ -583,52 +583,52 @@ impl HttpConnectionManager {
         }
     }
 
-    /// 解析 Content-Range 响应头
+    /// Parse Content-Range response header
     ///
-    /// 解析服务器返回的 Content-Range 头部值，提取范围信息和总大小。
-    /// 用于验证服务器是否正确支持 Range 请求。
+    /// Parses the Content-Range header value returned by the server, extracting range information and total size.
+    /// Used to verify if the server correctly supports Range requests.
     ///
-    /// # 参数
+    /// # Arguments
     ///
-    /// * `header` - Content-Range 头部的原始字符串值
+    /// * `header` - Raw string value of the Content-Range header
     ///
-    /// # 返回值
+    /// # Returns
     ///
-    /// 如果解析成功，返回元组 `(start, end, total)`:
-    /// - `start`: 范围起始字节（包含）
-    /// - `end`: 范围结束字节（包含）
-    /// - `total`: 文件总字节数（如果未知则为 u64::MAX）
+    /// If parsing succeeds, returns a tuple `(start, end, total)`:
+    /// - `start`: Range start byte (inclusive)
+    /// - `end`: Range end byte (inclusive)
+    /// - `total`: Total file size in bytes (u64::MAX if unknown)
     ///
-    /// 如果格式无效，返回 `None`
+    /// Returns `None` if the format is invalid
     ///
-    /// # 支持格式
+    /// # Supported Formats
     ///
-    /// - `bytes 0-499/1000`: 已知总大小的范围
-    /// - `bytes 0-499/*`: 未知总大小的范围
+    /// - `bytes 0-499/1000`: Range with known total size
+    /// - `bytes 0-499/*`: Range with unknown total size
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```
     /// use aria2_core::http::connection::HttpConnectionManager;
     ///
     /// let manager = HttpConnectionManager::new(&Default::default());
     ///
-    /// // 解析已知总大小
+    /// // Parse with known total size
     /// let result = manager.parse_content_range("bytes 0-499/1000");
     /// assert_eq!(result, Some((0, 499, 1000)));
     ///
-    /// // 解析未知总大小
+    /// // Parse with unknown total size
     /// let result = manager.parse_content_range("bytes 500-999/*");
     /// assert_eq!(result, Some((500, 999, u64::MAX)));
     ///
-    /// // 无效格式
+    /// // Invalid format
     /// assert_eq!(manager.parse_content_range("invalid"), None);
     /// assert_eq!(manager.parse_content_range("bits 0-99/1000"), None);
     /// ```
     pub fn parse_content_range(&self, header: &str) -> Option<(u64, u64, u64)> {
         let header = header.trim();
 
-        // 必须以 "bytes " 开头
+        // Must start with "bytes "
         if !header.starts_with("bytes ") {
             return None;
         }
@@ -640,7 +640,7 @@ impl HttpConnectionManager {
             return None;
         }
 
-        // 解析 start-end 部分
+        // Parse the start-end portion
         let range_values: Vec<&str> = parts[0].split('-').collect();
         if range_values.len() != 2 {
             return None;
@@ -649,7 +649,7 @@ impl HttpConnectionManager {
         let start: u64 = range_values[0].trim().parse().ok()?;
         let end: u64 = range_values[1].trim().parse().ok()?;
 
-        // 解析 total 大小
+        // Parse the total size
         let total = match parts[1].trim() {
             "*" => u64::MAX,
             s => s.parse().ok()?,
@@ -658,10 +658,10 @@ impl HttpConnectionManager {
         Some((start, end, total))
     }
 
-    /// 清理所有空闲连接
+    /// Clean up all idle connections
     ///
-    /// 关闭连接池中的所有连接，释放系统资源。
-    /// 通常在下载任务完成或程序退出时调用。
+    /// Closes all connections in the pool and releases system resources.
+    /// Typically called when a download task completes or the program exits.
     pub async fn cleanup(&mut self) {
         for (_, mut conn) in self.pool.drain() {
             let _ = conn.shutdown().await;
@@ -669,7 +669,7 @@ impl HttpConnectionManager {
         self.host_connections.clear();
         self.active_count = 0;
 
-        tracing::info!("连接池已清理");
+        tracing::info!("Connection pool cleaned up");
     }
 
     /// Force close a specific connection
@@ -820,7 +820,7 @@ impl HttpConnectionManager {
 
     // ==================== Private Helper Methods ====================
 
-    /// 从 URL 中提取主机标识（host:port）
+    /// Extract host identifier from URL (host:port)
     fn extract_host(url: &Url) -> String {
         match url.port_or_known_default() {
             Some(port) => format!(
@@ -835,74 +835,74 @@ impl HttpConnectionManager {
         }
     }
 
-    /// 尝试从连接池复用连接
+    /// Try to reuse a connection from the pool
     fn try_reuse_connection(&mut self, host: &str) -> Result<Option<ActiveConnection>> {
         let conn_ids = match self.host_connections.get(host) {
             Some(ids) => ids.clone(),
             None => return Ok(None),
         };
 
-        // 查找可用的空闲连接
+        // Look for an available idle connection
         for &conn_id in &conn_ids {
             if let Some(mut conn) = self.pool.remove(&conn_id) {
-                // 验证连接有效性
+                // Validate connection validity
                 if conn.is_valid() {
                     conn.touch();
 
-                    // 检查 Keep-Alive 状态（简化版：仅检查时间）
+                    // Check Keep-Alive status (simplified: only check time)
                     let idle_time = conn.last_used.elapsed();
                     if idle_time < self.config.idle_timeout {
                         tracing::debug!(
-                            "复用空闲连接: id={}, idle={:.2}s",
+                            "Reusing idle connection: id={}, idle={:.2}s",
                             conn_id,
                             idle_time.as_secs_f64()
                         );
                         return Ok(Some(conn));
                     } else {
-                        // 连接过期，关闭并继续查找
+                        // Connection expired, close and continue searching
                         tracing::debug!(
-                            "连接已过期: id={}, idle={:.2}s",
+                            "Connection expired: id={}, idle={:.2}s",
                             conn_id,
                             idle_time.as_secs_f64()
                         );
                         self.active_count = self.active_count.saturating_sub(1);
-                        std::mem::drop(conn.shutdown()); // 忽略关闭错误
+                        std::mem::drop(conn.shutdown()); // Ignore close errors
                     }
                 } else {
-                    // 连接已失效
+                    // Connection is no longer valid
                     self.active_count = self.active_count.saturating_sub(1);
                 }
             }
         }
 
-        // 清理该主机的所有无效连接记录
+        // Clean up all invalid connection records for this host
         self.cleanup_invalid_connections(host);
 
         Ok(None)
     }
 
-    /// 创建新的 TCP 连接
+    /// Create a new TCP connection
     async fn create_new_connection(&mut self, url: &Url, host: &str) -> Result<ActiveConnection> {
-        // 解析地址
+        // Resolve address
         let addr = Self::resolve_address(url)?;
 
-        // 应用连接超时
+        // Apply connection timeout
         let stream = timeout(self.config.connect_timeout, TcpStream::connect(&addr))
             .await
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("TCP 连接失败 ({}): {}", addr, e),
+                    message: format!("TCP connection failed ({}): {}", addr, e),
                 })
             })?;
 
-        // 设置 TCP 选项
+        // Set TCP options
         if let Err(e) = stream.set_nodelay(true) {
-            tracing::warn!("设置 nodelay 失败: {}", e);
+            tracing::warn!("Failed to set nodelay: {}", e);
         }
-        // 注意: tokio TcpStream 不直接支持 set_keepalive，需要使用 socket2 或忽略
+        // Note: tokio TcpStream does not directly support set_keepalive; use socket2 or ignore
 
-        // 生成连接 ID
+        // Generate connection ID
         let conn_id = self.id_counter.fetch_add(1, Ordering::SeqCst);
 
         let conn = ActiveConnection {
@@ -912,7 +912,7 @@ impl HttpConnectionManager {
             last_used: Instant::now(),
         };
 
-        // 更新连接池状态
+        // Update connection pool state
         self.active_count += 1;
         self.host_connections
             .entry(host.to_string())
@@ -920,7 +920,7 @@ impl HttpConnectionManager {
             .push(conn_id);
 
         tracing::info!(
-            "创建新连接: id={}, host={}, active={}/{}",
+            "Created new connection: id={}, host={}, active={}/{}",
             conn_id,
             host,
             self.active_count,
@@ -930,25 +930,25 @@ impl HttpConnectionManager {
         Ok(conn)
     }
 
-    /// 解析 URL 为 SocketAddr
+    /// Resolve URL to SocketAddr
     fn resolve_address(url: &Url) -> Result<SocketAddr> {
         let host = url
             .host_str()
-            .ok_or_else(|| Aria2Error::Parse("URL 缺少主机名".to_string()))?;
+            .ok_or_else(|| Aria2Error::Parse("URL missing hostname".to_string()))?;
 
         let port = url
             .port_or_known_default()
-            .ok_or_else(|| Aria2Error::Parse("无法确定端口号".to_string()))?;
+            .ok_or_else(|| Aria2Error::Parse("Unable to determine port number".to_string()))?;
 
-        // 使用 tokio 进行 DNS 解析（同步版本用于测试兼容性）
-        // 注意：生产环境应该使用 tokio::net::lookup_host
+        // Use tokio for DNS resolution (synchronous version for test compatibility)
+        // Note: production should use tokio::net::lookup_host
         let addr_str = format!("{}:{}", host, port);
         addr_str
             .parse::<SocketAddr>()
-            .map_err(|e| Aria2Error::Parse(format!("解析地址失败: {}", e)))
+            .map_err(|e| Aria2Error::Parse(format!("Failed to resolve address: {}", e)))
     }
 
-    /// LRU 淘汰：清理空闲超时的连接
+    /// LRU eviction: clean up idle timed-out connections
     fn evict_idle_connections(&mut self) {
         let now = Instant::now();
         let mut evicted = Vec::new();
@@ -965,16 +965,16 @@ impl HttpConnectionManager {
                 std::mem::drop(conn.shutdown());
                 self.active_count = self.active_count.saturating_sub(1);
                 self.remove_from_host_map(&host, conn_id);
-                tracing::debug!("LRU 淘汰过期连接: id={}, host={}", conn_id, host);
+                tracing::debug!("LRU evicted expired connection: id={}, host={}", conn_id, host);
             }
         }
 
         if evict_count > 0 {
-            tracing::info!("LRU 淘汰了 {} 个过期连接", evict_count);
+            tracing::info!("LRU evicted {} expired connections", evict_count);
         }
     }
 
-    /// 清理指定主机的无效连接记录
+    /// Clean up invalid connection records for a specific host
     fn cleanup_invalid_connections(&mut self, host: &str) {
         if let Some(ids) = self.host_connections.get_mut(host) {
             ids.retain(|&id| self.pool.contains_key(&id));
@@ -984,7 +984,7 @@ impl HttpConnectionManager {
         }
     }
 
-    /// 从主机映射中移除连接 ID
+    /// Remove a connection ID from the host mapping
     fn remove_from_host_map(&mut self, host: &str, conn_id: u64) {
         if let Some(ids) = self.host_connections.get_mut(host) {
             ids.retain(|&id| id != conn_id);
@@ -996,10 +996,10 @@ impl HttpConnectionManager {
 }
 
 impl ActiveConnection {
-    /// 异步读取数据（带超时控制）
+    /// Asynchronous read with timeout control
     ///
-    /// 从 TCP 流中读取数据到缓冲区，受 read_timeout 限制。
-    /// 用于读取 HTTP 响应头和响应体。
+    /// Reads data from the TCP stream into the buffer, subject to read_timeout.
+    /// Used for reading HTTP response headers and body.
     pub async fn read_with_timeout(
         &mut self,
         buf: &mut [u8],
@@ -1010,15 +1010,15 @@ impl ActiveConnection {
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("读取数据失败: {}", e),
+                    message: format!("Read data failed: {}", e),
                 })
             })
     }
 
-    /// 异步写入数据（带超时控制）
+    /// Asynchronous write with timeout control
     ///
-    /// 将数据写入 TCP 流，受 write_timeout 限制。
-    /// 用于发送 HTTP 请求头和请求体。
+    /// Writes data to the TCP stream, subject to write_timeout.
+    /// Used for sending HTTP request headers and body.
     pub async fn write_with_timeout(
         &mut self,
         buf: &[u8],
@@ -1029,48 +1029,48 @@ impl ActiveConnection {
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("写入数据失败: {}", e),
+                    message: format!("Write data failed: {}", e),
                 })
             })
     }
 
-    /// 刷新写缓冲区（带超时控制）
+    /// Flush write buffer with timeout control
     pub async fn flush_with_timeout(&mut self, write_timeout: Duration) -> Result<()> {
         timeout(write_timeout, self.stream.flush())
             .await
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("刷新缓冲区失败: {}", e),
+                    message: format!("Flush buffer failed: {}", e),
                 })
             })
     }
 
-    /// 关闭连接（双向关闭）
+    /// Close the connection (bidirectional shutdown)
     pub async fn shutdown(&mut self) -> Result<()> {
         match self.stream.shutdown().await {
             Ok(_) => Ok(()),
             Err(e) => {
-                tracing::debug!("关闭连接失败: id={}, error={}", self.id, e);
+                tracing::debug!("Failed to close connection: id={}, error={}", self.id, e);
                 Ok(())
             }
         }
     }
 
-    /// 获取对等端地址
+    /// Get peer address
     pub fn peer_addr(&self) -> Result<SocketAddr> {
         self.stream.peer_addr().map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("获取对等端地址失败: {}", e),
+                message: format!("Failed to get peer address: {}", e),
             })
         })
     }
 
-    /// 获取本地地址
+    /// Get local address
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.stream.local_addr().map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("获取本地地址失败: {}", e),
+                message: format!("Failed to get local address: {}", e),
             })
         })
     }
@@ -1078,9 +1078,9 @@ impl ActiveConnection {
 
 impl Drop for HttpConnectionManager {
     fn drop(&mut self) {
-        // 同步清理（不使用 async）
+        // Synchronous cleanup (no async)
         for (_, conn) in self.pool.drain() {
-            // TcpStream 的 drop 会自动关闭
+            // TcpStream's drop will automatically close
             drop(conn);
         }
         self.host_connections.clear();
@@ -1102,7 +1102,7 @@ impl std::fmt::Debug for HttpConnectionManager {
     }
 }
 
-// 重新导出 HttpResponse 以便在 connection.rs 中使用
+// Re-export HttpResponse for use in connection.rs
 pub use aria2_protocol::http::response::HttpResponse;
 
 #[cfg(test)]
@@ -1145,16 +1145,16 @@ mod tests {
     fn test_build_range_header() {
         let manager = HttpConnectionManager::new(&Default::default());
 
-        // 完整范围
+        // Full range
         assert_eq!(manager.build_range_header(0, Some(999)), "bytes=0-999");
 
-        // 开放结束范围
+        // Open-ended range
         assert_eq!(manager.build_range_header(500, None), "bytes=500-");
 
-        // 单字节
+        // Single byte
         assert_eq!(manager.build_range_header(42, Some(42)), "bytes=42-42");
 
-        // 大数值
+        // Large values
         assert_eq!(
             manager.build_range_header(u64::MAX - 1, Some(u64::MAX)),
             "bytes=18446744073709551614-18446744073709551615"
@@ -1165,26 +1165,26 @@ mod tests {
     fn test_parse_content_range() {
         let manager = HttpConnectionManager::new(&Default::default());
 
-        // 正常格式（已知总数）
+        // Normal format (known total)
         assert_eq!(
             manager.parse_content_range("bytes 0-499/1000"),
             Some((0, 499, 1000))
         );
 
-        // 正常格式（未知总数）
+        // Normal format (unknown total)
         assert_eq!(
             manager.parse_content_range("bytes 500-999/*"),
             Some((500, 999, u64::MAX))
         );
 
-        // 边界值
+        // Boundary value
         assert_eq!(manager.parse_content_range("bytes 0-0/1"), Some((0, 0, 1)));
 
-        // 无效格式
+        // Invalid format
         assert_eq!(manager.parse_content_range(""), None);
         assert_eq!(manager.parse_content_range("invalid"), None);
         assert_eq!(manager.parse_content_range("bits 0-99/1000"), None);
-        assert_eq!(manager.parse_content_range("bytes 0-499"), None); // 缺少 /total
+        assert_eq!(manager.parse_content_range("bytes 0-499"), None); // Missing /total
         assert_eq!(manager.parse_content_range("bytes abc-def/1000"), None);
     }
 
@@ -1237,10 +1237,10 @@ mod tests {
             .headers
             .push(("Location".to_string(), "http://example.com/a".to_string()));
 
-        // 尝试重定向回已访问的 URL（循环）
+        // Attempt redirect back to a visited URL (circular)
         let result = manager.follow_redirects(&response, &url_b, &chain, 2);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("循环重定向"));
+        assert!(result.unwrap_err().to_string().to_lowercase().contains("circular redirect"));
     }
 
     #[test]
@@ -1255,10 +1255,10 @@ mod tests {
             "http://example.com/next".to_string(),
         ));
 
-        // 超过最大重定向次数
+        // Exceed max redirect count
         let result = manager.follow_redirects(&response, &current_url, &chain, 6);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("最大重定向"));
+        assert!(result.unwrap_err().to_string().contains("Max redirect"));
     }
 
     #[test]
@@ -1271,7 +1271,7 @@ mod tests {
 
         let result = manager.follow_redirects(&response, &current_url, &chain, 0);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("非重定向"));
+        assert!(result.unwrap_err().to_string().contains("Non-redirect"));
     }
 
     #[test]
@@ -1289,15 +1289,15 @@ mod tests {
 
     #[test]
     fn test_extract_host() {
-        // 带 80 端口
+        // With port 80
         let url = Url::parse("http://example.com/path").unwrap();
         assert_eq!(HttpConnectionManager::extract_host(&url), "example.com:80");
 
-        // 带 443 端口
+        // With port 443
         let url = Url::parse("https://example.com:443/path").unwrap();
         assert_eq!(HttpConnectionManager::extract_host(&url), "example.com:443");
 
-        // 自定义端口
+        // Custom port
         let url = Url::parse("http://example.com:8080/path").unwrap();
         assert_eq!(
             HttpConnectionManager::extract_host(&url),
@@ -1316,9 +1316,9 @@ mod tests {
         assert!(debug_str.contains("active_count: 0"));
     }
 
-    // ==================== 集成测试 ====================
+    // ==================== Integration Tests ====================
 
-    /// 启动一个简单的测试 HTTP 服务器
+    /// Start a simple test HTTP server
     async fn start_test_server(
         handler: impl Fn(TcpStream) + Send + 'static,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -1345,7 +1345,7 @@ mod tests {
         };
         let mut manager = HttpConnectionManager::new(&config);
 
-        // 启动测试服务器
+        // Start test server
         let (addr, server_handle) = start_test_server(|mut stream| {
             tokio::spawn(async move {
                 let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
@@ -1358,19 +1358,19 @@ mod tests {
 
         let url = Url::parse(&format!("http://{}", addr)).unwrap();
 
-        // 第一次获取连接
-        let conn1 = manager.acquire(&url).await.expect("第一次获取连接应成功");
+        // First connection acquisition
+        let conn1 = manager.acquire(&url).await.expect("First acquisition should succeed");
         let _conn1_id = conn1.id;
         assert_eq!(manager.active_count(), 1);
 
-        // 归还连接
+        // Return the connection
         manager.release(conn1.id).await;
 
-        // 第二次获取连接（应该能成功获取）
-        let conn2 = manager.acquire(&url).await.expect("第二次应能获取连接");
-        assert!(manager.active_count() >= 1); // 连接数应 >= 1
+        // Second connection acquisition (should succeed)
+        let conn2 = manager.acquire(&url).await.expect("Second acquisition should succeed");
+        assert!(manager.active_count() >= 1); // Connection count should be >= 1
 
-        // 清理
+        // Cleanup
         manager.release(conn2.id).await;
         manager.cleanup().await;
         server_handle.abort();
@@ -1403,7 +1403,7 @@ mod tests {
             let result = manager.follow_redirects(&response, &current, &redirect_chain, i as u32);
             assert!(
                 result.is_ok(),
-                "第 {} 次重定向应成功: {:?}",
+                "Redirect {} should succeed: {:?}",
                 i + 1,
                 result.err()
             );
@@ -1435,7 +1435,7 @@ mod tests {
         let result = manager.follow_redirects(&response, &url_c, &chain, 3);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("循环重定向"));
+        assert!(result.unwrap_err().to_string().to_lowercase().contains("circular redirect"));
     }
 
     #[test]
@@ -1491,7 +1491,7 @@ mod tests {
 
         assert!(
             elapsed < config.connect_timeout + Duration::from_millis(300),
-            "耗时过长: {:.2}ms",
+            "Elapsed time too long: {:.2}ms",
             elapsed.as_millis()
         );
 
@@ -1529,29 +1529,29 @@ mod tests {
         let conn2 = manager.acquire(&url).await.unwrap();
         assert!(manager.active_count() >= 2);
 
-        // 尝试获取第三个连接（应该因达到限制而失败）
+        // Attempt to acquire a third connection (should fail due to limit)
         let result = manager.acquire(&url).await;
-        assert!(result.is_err(), "超过最大连接数限制时应返回错误");
+        assert!(result.is_err(), "Should return error when max connection limit exceeded");
 
-        // 验证错误类型
+        // Verify error type
         if let Err(e) = result {
             match &e {
                 Aria2Error::Recoverable(_) => {}
-                other => panic!("期望 Recoverable 错误，得到: {:?}", other),
+                other => panic!("Expected Recoverable error, got: {:?}", other),
             }
         }
 
-        // 归还一个连接后，应该可以重新获取（如果连接池复用正常工作）
+        // After returning one connection, should be able to acquire again (if pool reuse works)
         manager.release(conn1.id).await;
-        // 注意：由于连接可能仍在池中被计费，这里我们只验证不会 panic
+        // Note: since the connection may still be counted in the pool, we only verify no panic
         match manager.acquire(&url).await {
             Ok(conn3) => {
-                println!("✓ 归还后成功获取新连接: id={}", conn3.id);
+                println!("Successfully acquired new connection after release: id={}", conn3.id);
                 manager.release(conn3.id).await;
             }
             Err(e) => {
-                println!("⚠ 归还后获取失败（可能是连接复用限制）: {}", e);
-                // 这也是可接受的行为
+                println!("Acquisition failed after release (may be connection reuse limit): {}", e);
+                // This is also acceptable behavior
             }
         }
 

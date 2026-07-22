@@ -50,6 +50,13 @@ fn build_payload(message: &BtMessage) -> Vec<u8> {
         }
         BtMessage::Suggest { index } => index.to_be_bytes().to_vec(),
         BtMessage::HaveAll | BtMessage::HaveNone => vec![],
+        BtMessage::Extended { ext_id, payload } => {
+            // Extended payload: ext_id (1 byte) + bencoded data
+            let mut buf = Vec::with_capacity(1 + payload.len());
+            buf.push(*ext_id);
+            buf.extend_from_slice(payload);
+            buf
+        }
         BtMessage::KeepAlive => vec![],
     }
 }
@@ -117,6 +124,15 @@ pub fn serialize_have_all() -> Vec<u8> {
 }
 pub fn serialize_have_none() -> Vec<u8> {
     serialize(&BtMessage::HaveNone)
+}
+
+/// Serialize BEP 10 Extended message (ID=20).
+///
+/// # Arguments
+/// * `ext_id` — Extended message ID (0 = handshake, 1+ = negotiated)
+/// * `payload` — Bencoded payload data
+pub fn serialize_extended(ext_id: u8, payload: Vec<u8>) -> Vec<u8> {
+    serialize(&BtMessage::Extended { ext_id, payload })
 }
 
 pub fn create_standard_requests(piece_index: u32, piece_size: u32, offset: u32) -> Vec<BtMessage> {

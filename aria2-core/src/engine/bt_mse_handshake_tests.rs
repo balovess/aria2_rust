@@ -1,11 +1,11 @@
-//! MSE 握手模块的集成测试
+//! Integration tests for the MSE handshake module
 //!
-//! 测试覆盖所有三个握手阶段以及状态机转换、加密/解密功能等。
+//! Tests cover all three handshake phases, state machine transitions, encryption/decryption, etc.
 
 use crate::engine::bt_mse_handshake::*;
 use sha1::{Digest, Sha1};
 
-/// 辅助函数: 创建测试用的 info_hash
+/// Helper function: create an info_hash for testing
 fn create_test_info_hash() -> [u8; 20] {
     [
         0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32,
@@ -20,7 +20,7 @@ fn test_method_selection_encrypted_support() {
 
     let method_sel = manager.build_method_selection();
 
-    // 应该返回 \x13MSegadd (8 bytes)
+    // Should return \x13MSegadd (8 bytes)
     assert_eq!(method_sel.len(), 8);
     assert_eq!(&method_sel, b"\x13MSegadd");
 }
@@ -30,8 +30,8 @@ fn test_method_selection_plain_only() {
     let info_hash = create_test_info_hash();
     let manager = MseHandshakeManager::new(info_hash).unwrap();
 
-    // 即使选择 Plain 模式，build_method_selection 也应该返回 MSegadd
-    // 因为这是协商过程，我们声明支持加密，但最终可能降级到 Plain
+    // Even when Plain mode is selected, build_method_selection should still return MSegadd
+    // Because this is the negotiation process, we declare support for encryption but may eventually fall back to Plain
     let method_sel = manager.build_method_selection();
 
     assert_eq!(method_sel.len(), 8);
@@ -47,11 +47,11 @@ fn test_parse_remote_method_msegadd() {
 
 #[test]
 fn test_parse_remote_method_invalid() {
-    // 空数据
+    // Empty data
     let result = MseHandshakeManager::parse_remote_method_selection(b"");
     assert!(result.is_err());
 
-    // 无效数据
+    // Invalid data
     let result = MseHandshakeManager::parse_remote_method_selection(b"\xffInvalid");
     assert!(result.is_err());
 }
@@ -65,21 +65,21 @@ fn test_key_exchange_payload_format() {
         .build_key_exchange_payload(&[CryptoMethod::Rc4])
         .unwrap();
 
-    // 最小长度: PAD_D(2) + PAD_LEN(2) + CryptoPro(2) + DH_PubKey(32) = 38
+    // Minimum length: PAD_D(2) + PAD_LEN(2) + CryptoPro(2) + DH_PubKey(32) = 38
     assert!(payload.len() >= 38, "Payload too short: {}", payload.len());
 
-    // 解析并验证字段
+    // Parse and verify fields
     let pad_d = u16::from_be_bytes([payload[0], payload[1]]);
     let pad_len = u16::from_be_bytes([payload[2], payload[3]]);
     let crypto_pro = u16::from_be_bytes([payload[4], payload[5]]);
 
-    // PAD_D 和 PAD_LEN 应该相等
+    // PAD_D and PAD_LEN should be equal
     assert_eq!(pad_d, pad_len);
 
-    // CryptoPro 应该包含 RC4 标志 (0x0002)
+    // CryptoPro should contain RC4 flag (0x0002)
     assert!(crypto_pro & 0x0002 != 0);
 
-    // DH 公钥应该在最后 32 字节
+    // DH public key should be in the last 32 bytes
     let dh_pubkey_start = payload.len() - 32;
     let dh_pubkey = &payload[dh_pubkey_start..];
     assert_eq!(dh_pubkey.len(), 32);
@@ -92,19 +92,19 @@ fn test_dh_shared_secret_computation() {
 
     let rng = SystemRandom::new();
 
-    // 创建 Alice 的密钥对
+    // Create Alice's key pair
     let alice_private = EphemeralPrivateKey::generate(&agreement::X25519, &rng).unwrap();
     let alice_public = alice_private.compute_public_key().unwrap();
-    let mut alice_pubkey_vec = vec![0u8; 32]; // X25519 公钥固定为 32 字节
+    let mut alice_pubkey_vec = vec![0u8; 32]; // X25519 public key is fixed at 32 bytes
     alice_pubkey_vec.copy_from_slice(alice_public.as_ref());
 
-    // 创建 Bob 的密钥对
+    // Create Bob's key pair
     let bob_private = EphemeralPrivateKey::generate(&agreement::X25519, &rng).unwrap();
     let bob_public = bob_private.compute_public_key().unwrap();
-    let mut bob_pubkey_vec = vec![0u8; 32]; // X25519 公钥固定为 32 字节
+    let mut bob_pubkey_vec = vec![0u8; 32]; // X25519 public key is fixed at 32 bytes
     bob_pubkey_vec.copy_from_slice(bob_public.as_ref());
 
-    // Alice 计算 shared secret using Bob's public key
+    // Alice computes shared secret using Bob's public key
     let bob_pubkey_parsed = UnparsedPublicKey::new(&agreement::X25519, &bob_pubkey_vec);
     let alice_shared = agreement::agree_ephemeral(
         alice_private,
@@ -113,7 +113,7 @@ fn test_dh_shared_secret_computation() {
     )
     .unwrap();
 
-    // Bob 计算 shared secret using Alice's public key
+    // Bob computes shared secret using Alice's public key
     let alice_pubkey_parsed = UnparsedPublicKey::new(&agreement::X25519, &alice_pubkey_vec);
     let bob_shared = agreement::agree_ephemeral(
         bob_private,
@@ -122,7 +122,7 @@ fn test_dh_shared_secret_computation() {
     )
     .unwrap();
 
-    // 双方计算出的共享密钥必须相同
+    // Shared secrets computed by both parties must match
     assert_eq!(alice_shared, bob_shared, "DH shared secrets must match");
 }
 
@@ -131,21 +131,21 @@ fn test_skey_computation() {
     let info_hash = create_test_info_hash();
     let mut manager = MseHandshakeManager::new(info_hash).unwrap();
 
-    // 手动设置共享密钥用于测试
+    // Manually set shared secret for testing
     let fake_shared_secret: Vec<u8> = vec![0x42; 32];
     manager.shared_secret = Some(fake_shared_secret.clone());
 
-    // 计算 SKEY
+    // Compute SKEY
     let skey = manager.compute_skey().unwrap();
 
-    // 验证 SKEY = SHA-1(info_hash || shared_secret)
+    // Verify SKEY = SHA-1(info_hash || shared_secret)
     let mut hasher = Sha1::new();
     hasher.update(info_hash);
     hasher.update(&fake_shared_secret);
     let expected_skey = hasher.finalize();
 
     assert_eq!(skey.to_vec(), expected_skey.to_vec());
-    assert_eq!(skey.len(), 20); // SHA-1 输出 20 bytes
+    assert_eq!(skey.len(), 20); // SHA-1 outputs 20 bytes
 }
 
 #[test]
@@ -156,13 +156,13 @@ fn test_key_derivation_send_recv_different() {
     let (send_key, recv_key): (Vec<u8>, Vec<u8>) =
         MseHandshakeManager::derive_keys(&skey, &shared_secret);
 
-    // send_key 和 recv_key 应该不同
+    // send_key and recv_key should be different
     assert_ne!(
         send_key, recv_key,
         "Send and receive keys must be different"
     );
 
-    // 密钥长度应该是 16 bytes
+    // Key length should be 16 bytes
     assert_eq!(send_key.len(), 16);
     assert_eq!(recv_key.len(), 16);
 }
@@ -172,16 +172,16 @@ fn test_rc4_encrypt_decrypt_roundtrip() {
     let send_key = vec![0xA5u8; 16];
     let recv_key = vec![0xB6u8; 16];
 
-    // 模拟发送方: 用 send_key 加密
+    // Simulate sender: encrypt with send_key
     let mut sender_ctx = MseCryptoContext::new(&send_key, &recv_key, CryptoMethod::Rc4);
     let plaintext = b"Hello, BitTorrent MSE!";
     let encrypted = sender_ctx.encrypt(plaintext).unwrap();
 
-    // 加密后应该与原文不同
+    // Encrypted data should differ from plaintext
     assert_ne!(encrypted, plaintext.to_vec());
 
-    // 模拟接收方: 用 recv_key 解密 (recv_key 必须与发送方的 send_key 匹配)
-    // 在真实 MSE 场景中: 发送方.send_key == 接收方.recv_key
+    // Simulate receiver: decrypt with recv_key (recv_key must match sender's send_key)
+    // In real MSE scenario: sender.send_key == receiver.recv_key
     let mut receiver_ctx = MseCryptoContext::new(&recv_key, &send_key, CryptoMethod::Rc4);
     let decrypted = receiver_ctx.decrypt(&encrypted).unwrap();
     assert_eq!(
@@ -193,16 +193,16 @@ fn test_rc4_encrypt_decrypt_roundtrip() {
 
 #[test]
 fn test_rc4_initial_state_discard() {
-    // 验证 RC4 初始化时丢弃了前 1024 字节 keystream
-    // 通过比较两个独立的加密上下文来验证
+    // Verify that RC4 initialization discards the first 1024 bytes of keystream
+    // Verified by comparing two independent encryption contexts
 
     let key = vec![0x42u8; 16];
 
-    // 创建两个使用相同密钥的上下文
+    // Create two contexts using the same key
     let mut ctx1 = MseCryptoContext::new(&key, &key, CryptoMethod::Rc4);
     let mut ctx2 = MseCryptoContext::new(&key, &key, CryptoMethod::Rc4);
 
-    // 相同明文应该产生相同的密文（因为都丢弃了前 1024 字节）
+    // Same plaintext should produce same ciphertext (because both discard the first 1024 bytes)
     let data = b"Test data for keystream discard verification";
     let enc1 = ctx1.encrypt(data).unwrap();
     let enc2 = ctx2.encrypt(data).unwrap();
@@ -222,7 +222,7 @@ fn test_plaintext_fallback_no_op() {
 
     let plaintext = b"Plain text should not be modified";
 
-    // 加密和 decrypt 应该返回原文
+    // Encrypt and decrypt should return the original plaintext
     let mut ctx_mut = ctx;
     let encrypted = ctx_mut.encrypt(plaintext).unwrap();
     assert_eq!(encrypted, plaintext.to_vec());
@@ -236,10 +236,10 @@ fn test_state_machine_full_flow() {
     let info_hash = create_test_info_hash();
     let manager = MseHandshakeManager::new(info_hash).unwrap();
 
-    // 初始状态: Idle
+    // Initial state: Idle
     assert!(matches!(manager.state(), MseState::Idle));
 
-    // Phase 1: 发送 Method Selection
+    // Phase 1: Send Method Selection
     manager.set_state(MseState::MethodSelectionSent);
     assert!(matches!(manager.state(), MseState::MethodSelectionSent));
 
@@ -251,7 +251,7 @@ fn test_state_machine_full_flow() {
     manager.set_state(MseState::VerificationPending);
     assert!(matches!(manager.state(), MseState::VerificationPending));
 
-    // 完成: Established
+    // Complete: Established
     let fallback_ctx = MseHandshakeManager::plaintext_fallback();
     manager.set_state(MseState::Established(fallback_ctx));
     assert!(matches!(manager.state(), MseState::Established(_)));
@@ -274,7 +274,7 @@ fn test_crypto_method_negotiation_rc4() {
     let bob_method = bob.build_method_selection();
     assert_eq!(&bob_method, b"\x13MSegadd");
 
-    // 双方都支持加密
+    // Both parties support encryption
     let alice_parse = MseHandshakeManager::parse_remote_method_selection(&bob_method).unwrap();
     let bob_parse = MseHandshakeManager::parse_remote_method_selection(&alice_method).unwrap();
     assert_eq!(alice_parse, CryptoMethod::Rc4);
@@ -288,22 +288,22 @@ fn test_crypto_method_negotiation_rc4() {
         .build_key_exchange_payload(&[CryptoMethod::Rc4])
         .unwrap();
 
-    // 处理对方的公钥
+    // Process the other party's public key
     alice.process_remote_key_exchange(&bob_payload).unwrap();
     bob.process_remote_key_exchange(&alice_payload).unwrap();
 
-    // 双方应该计算出相同的共享密钥
+    // Both parties should compute the same shared secret
     assert_eq!(
         alice.shared_secret(),
         bob.shared_secret(),
         "Shared secrets must match"
     );
 
-    // Phase 3: Verification - 构建和解析验证载荷
+    // Phase 3: Verification - build and parse verification payload
     let alice_verify = alice.build_verification_payload(CryptoMethod::Rc4).unwrap();
     let bob_verify = bob.build_verification_payload(CryptoMethod::Rc4).unwrap();
 
-    // 处理对方的验证
+    // Process the other party's verification
     let _alice_ctx = alice.process_remote_verification(&bob_verify).unwrap();
     let _bob_ctx = bob.process_remote_verification(&alice_verify).unwrap();
 }
@@ -312,18 +312,18 @@ fn test_crypto_method_negotiation_rc4() {
 fn test_crypto_method_negotiation_fallback_to_plain() {
     let info_hash = create_test_info_hash();
 
-    // Alice 支持加密
+    // Alice supports encryption
     let _alice = MseHandshakeManager::new(info_hash).unwrap();
 
-    // Bob 仅支持明文 (发送 \x00)
+    // Bob only supports plaintext (sends \x00)
     let bob_method_selection = b"\x00".to_vec();
 
-    // Alice 解析 Bob 的 method selection
+    // Alice parses Bob's method selection
     let parsed = MseHandshakeManager::parse_remote_method_selection(&bob_method_selection).unwrap();
 
     assert_eq!(parsed, CryptoMethod::Plain);
 
-    // 使用明文回退
+    // Use plaintext fallback
     let ctx = MseHandshakeManager::plaintext_fallback();
     assert!(!ctx.is_encrypted());
 }

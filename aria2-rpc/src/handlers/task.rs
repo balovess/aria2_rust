@@ -142,6 +142,9 @@ impl RpcEngine {
     /// Handle `aria2.addMetalink` - Add downloads from Metalink XML.
     ///
     /// Original aria2 signature: `[metalink, opts?, pos?]`
+    ///
+    /// Returns an array of GIDs (one per download in the metalink), matching
+    /// the C++ original which returns a list of GIDs rather than a single GID.
     pub async fn handle_add_metalink(
         &self,
         req: &JsonRpcRequest,
@@ -182,9 +185,13 @@ impl RpcEngine {
             );
             let _ = self.handle_change_position(&pos_req).await;
         }
+        // Return an array of GIDs matching C++ aria2 behaviour.
+        // Currently we create a single download task per metalink; when
+        // multi-file metalink parsing is implemented, this will return
+        // one GID per file in the metalink document.
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            gid,
+            vec![gid],
         ))
     }
 
@@ -192,6 +199,8 @@ impl RpcEngine {
     ///
     /// Removes the task from active downloads and adds it to stopped tasks
     /// so it can be queried via `tellStopped`, `removeDownloadResult`, etc.
+    /// Matches original aria2c behaviour: the task is moved to the stopped
+    /// list with `removed` status.
     pub async fn handle_remove(
         &self,
         req: &JsonRpcRequest,
@@ -208,7 +217,7 @@ impl RpcEngine {
 
         let mut tasks = self.tasks.write().await;
         match tasks.remove(&gid) {
-            Some(state) => {
+            Some(mut state) => {
                 // Cancel the CancellationToken so any running DownloadCommand
                 // is signalled to stop. The DownloadCommand also independently
                 // polls the RequestGroup status (set to `Removed` by
@@ -218,6 +227,12 @@ impl RpcEngine {
                 if let Some(cancel_token) = &state.cancel_token {
                     cancel_token.cancel();
                 }
+
+                // Set status to Removed before pushing to stopped_tasks so
+                // tellStopped returns the correct status (matching aria2c).
+                state.status.status = DownloadStatus::Removed;
+                // Original aria2c sets errorCode=31 (REMOVED) for removed downloads
+                state.status.error_code = Some(31);
 
                 self.num_stopped_total.fetch_add(1, Ordering::Relaxed);
 
@@ -263,6 +278,11 @@ impl RpcEngine {
         match tasks.get_mut(&gid) {
             Some(state) => {
                 state.status.status = DownloadStatus::Paused;
+                // Cancel the running task's token so the download loop
+                // detects the pause on its next check_cancelled() call.
+                if let Some(cancel_token) = &state.cancel_token {
+                    cancel_token.cancel();
+                }
                 let _ = self.event_publisher.publish(
                     EventType::DownloadPause,
                     DownloadEvent::download_pause(&gid),
@@ -336,6 +356,43 @@ impl RpcEngine {
         match tasks.get_mut(&gid) {
             Some(state) => {
                 state.status.status = DownloadStatus::Active;
+
+                // When the RPC server is wired to a running DownloadEngine,
+                // create a new DownloadCommand for the paused group and submit
+                // it so the download actually resumes. Without this, the status
+                // changes to Active but no download task runs.
+                if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
+                    let man = group_man.read().await;
+                    if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+                        if let Some(group) = man.group_by_id(gid_parsed) {
+                            let group_guard = group.recover();
+                            let options = group_guard.options_arc();
+                            let uris = group_guard.uris().to_vec();
+                            let first_uri = uris.first().map(|s| s.as_str()).unwrap_or("");
+                            drop(group_guard);
+
+                            if !first_uri.is_empty() {
+                                match DownloadCommand::new_with_group(
+                                    group,
+                                    first_uri,
+                                    &options,
+                                    options.dir.as_deref(),
+                                    options.out.as_deref(),
+                                ) {
+                                    Ok(cmd) => {
+                                        if let Err(e) = cmd_tx.send(Box::new(cmd)) {
+                                            tracing::warn!("Failed to send resume command: {}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create resume command: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let _ = self.event_publisher.publish(
                     EventType::DownloadResume,
                     DownloadEvent::download_resume(&gid),
@@ -373,6 +430,10 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.forceRemove` - Forcefully remove download(s) without graceful shutdown.
+    ///
+    /// Matches original aria2c behaviour: removes the task from the active
+    /// tasks map, cancels any running download, and pushes to stopped_tasks
+    /// with `removed` status so it appears in `tellStopped`.
     pub async fn handle_force_remove(
         &self,
         req: &JsonRpcRequest,
@@ -390,27 +451,37 @@ impl RpcEngine {
         }
 
         let mut tasks = self.tasks.write().await;
+        let mut actually_removed = 0usize;
+        let mut removed_statuses: Vec<(String, StatusInfo, Vec<String>)> = Vec::new();
+
         for gid in &gids {
-            if let Some(state) = tasks.get_mut(gid) {
-                state.status.status = DownloadStatus::Removed;
+            if let Some(mut state) = tasks.remove(gid) {
                 // Cancel the CancellationToken to interrupt any running
                 // DownloadCommand. `man.remove_group` above already set the
                 // RequestGroup status to `Removed` (the primary signal the
                 // download loop polls), but cancelling the token keeps this
-                // handler consistent with `handle_force_pause` /
-                // `handle_force_shutdown`.
+                // handler consistent with `handle_remove`.
                 if let Some(cancel_token) = &state.cancel_token {
                     cancel_token.cancel();
                 }
+
+                // Set status to Removed before pushing to stopped_tasks.
+                state.status.status = DownloadStatus::Removed;
+                // Original aria2c sets errorCode=31 (REMOVED) for removed downloads
+                state.status.error_code = Some(31);
+                actually_removed += 1;
+                removed_statuses.push((gid.clone(), state.status.clone(), state.uris.clone()));
             }
         }
-        let removed_count = gids.len();
-        self.num_stopped_total.fetch_add(removed_count, Ordering::Relaxed);
 
-        // Publish DownloadStop events for each removed task
-        for gid in &gids {
-            if let Some(state) = tasks.get(gid) {
-                let file_info = build_file_info_from_uris(&state.uris);
+        self.num_stopped_total.fetch_add(actually_removed, Ordering::Relaxed);
+
+        // Push removed tasks into stopped_tasks and publish events
+        {
+            let mut stopped = self.stopped_tasks.write().await;
+            for (gid, status, uris) in &removed_statuses {
+                stopped.push(status.clone());
+                let file_info = build_file_info_from_uris(uris);
                 let _ = self.event_publisher.publish(
                     EventType::DownloadStop,
                     DownloadEvent::download_stop(gid, file_info),
@@ -707,9 +778,10 @@ impl RpcEngine {
 
     /// Build a complete StatusInfo from a RequestGroup read guard.
     ///
-    /// Populates all available fields: progress, files, BT metadata, etc.
-    /// This is the shared helper used by `get_status`, `tellActive`,
-    /// `tellWaiting`, and `tellStopped`.
+    /// Populates all available fields matching original aria2c's
+    /// `gatherProgress` / `gatherProgressCommon` output structure:
+    /// - Active/waiting/paused downloads: gatherProgress fields
+    /// - Stopped/completed/removed/error: gatherStoppedDownload fields
     pub(crate) fn build_status_from_group(
         g: &aria2_core::request::request_group::RequestGroup,
         gid_hex: &str,
@@ -723,9 +795,13 @@ impl RpcEngine {
         let dir = g.options().dir.clone().unwrap_or_default();
         let uris: Vec<String> = g.uris().to_vec();
         let first_uri = uris.first().cloned().unwrap_or_default();
+
+        // Build file entries matching original createFileEntry:
+        // index (1-based), path, selected, length, completedLength, uris
         let files = vec![FileInfo::new(first_uri, total)
             .with_completed(completed)
             .with_index(1)];
+
         let connections = g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16;
 
         // BT-specific fields: bitfield, piece length, num pieces, info hash
@@ -755,7 +831,9 @@ impl RpcEngine {
             .with_dir(dir)
             .with_files(files);
 
-        // Attach BT-specific fields only when applicable
+        // Attach BT-specific fields only when applicable (matching original:
+        // pieceLength/numPieces are always emitted, bitfield/infoHash/numSeeders
+        // only for BT downloads)
         if let Some(bf) = bt_bitfield {
             info = info.with_bitfield(bf);
         }
@@ -767,19 +845,46 @@ impl RpcEngine {
         }
         if let Some(ih) = bt_info_hash {
             info = info.with_info_hash(ih);
+            // numSeeders is only emitted for BT downloads (original:
+            // gatherProgressBitTorrent / gatherStoppedDownload)
+            info = info.with_num_seeders(0);
         }
 
-        // Additional progress fields
-        info = info.with_num_seeders(0);
-        // verified_length and verify_integrity_pending - use available progress data
-        info = info.with_verified_length(g.get_completed_length());
-        info = info.with_verify_integrity_pending("false");
+        // pieceLength and numPieces are always emitted in original aria2c
+        // (gatherProgressCommon and gatherStoppedDownload both emit them).
+        // If BT fields were not set above, fill from progress data.
+        // Original aria2c default piece length is 1 MiB.
+        const ARIA2_DEFAULT_PIECE_LENGTH: u64 = 1048576;
+        if info.piece_length.is_none() && total > 0 {
+            info = info.with_piece_length(ARIA2_DEFAULT_PIECE_LENGTH);
+        }
+        if info.num_pieces.is_none() && total > 0 {
+            let pl = info.piece_length.unwrap_or(ARIA2_DEFAULT_PIECE_LENGTH);
+            if pl > 0 {
+                info = info.with_num_pieces(((total + pl - 1) / pl) as u32);
+            }
+        }
 
-        // Extract error message from Error status
-        if let DownloadStatus::Error(ref msg) = status {
-            info = info.with_error_message(msg.clone());
-            // -1 for unknown errors (original aria2 convention)
-            info = info.with_error_code(-1);
+        // Error handling matching original gatherStoppedDownload:
+        // REMOVED (31) -> status="removed", errorCode="31"
+        // FINISHED (0) -> status="complete", errorCode="0"
+        // Other errors -> status="error", errorCode=<numeric>
+        match &status {
+            DownloadStatus::Error(msg) => {
+                info = info.with_error_message(msg.clone());
+                // Use error_code 1 (UNKNOWN_ERROR) for generic errors
+                // matching original aria2 convention
+                info = info.with_error_code(1);
+            }
+            DownloadStatus::Complete => {
+                // Original aria2c sets errorCode=0 for FINISHED
+                info = info.with_error_code(0);
+            }
+            DownloadStatus::Removed => {
+                // Original aria2c uses error_code::REMOVED = 31
+                info = info.with_error_code(31);
+            }
+            _ => {}
         }
 
         info
@@ -789,7 +894,9 @@ impl RpcEngine {
     ///
     /// Prefers live progress from `RequestGroupMan` (atomic fields updated by
     /// the download engine). Falls back to the placeholder `tasks` map when
-    /// shared state is unavailable (e.g., unit tests).
+    /// shared state is unavailable (e.g., unit tests). Finally checks
+    /// `stopped_tasks` so that `tellStatus` can return removed/completed
+    /// downloads (matching original aria2c behaviour).
     async fn get_status(&self, gid: &str) -> Option<StatusInfo> {
         // Try RequestGroupMan first (live progress)
         if let Some(group_man) = &self.group_man {
@@ -800,10 +907,17 @@ impl RpcEngine {
             }
         }
         // Fallback to tasks map (placeholder, for tests/no-engine mode)
-        let mut tasks = self.tasks.write().await;
-        let state = tasks.get_mut(gid)?;
-        state.update_status_info();
-        Some(state.status.clone())
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(state) = tasks.get_mut(gid) {
+                state.update_status_info();
+                return Some(state.status.clone());
+            }
+        }
+        // Check stopped_tasks (removed/completed downloads that are still
+        // queryable via tellStatus until purged, matching original aria2c).
+        let stopped = self.stopped_tasks.read().await;
+        stopped.iter().find(|s| s.gid == *gid).cloned()
     }
 }
 

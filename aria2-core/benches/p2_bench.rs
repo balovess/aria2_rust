@@ -1,6 +1,6 @@
-//! P2 新模块性能基准测试
+//! P2 new module performance benchmarks
 //!
-//! 覆盖: 认证系统 / LPD 发现 / MSE 加密 / 流式解码器 / BT 进度持久化
+//! Coverage: auth system / LPD discovery / MSE encryption / stream decoder / BT progress persistence
 
 use aria2_core::auth::credential_store::CredentialStore;
 use aria2_core::auth::digest_auth::{
@@ -110,7 +110,7 @@ fn create_large_progress(num_pieces: u32) -> BtProgress {
     }
 }
 
-// ====== 认证系统 Benchmarks (4个) ======
+// ====== Auth System Benchmarks (4) ======
 
 fn bench_digest_md5_build_header(c: &mut Criterion) {
     let provider = create_digest_provider(DigestAlgorithm::Md5);
@@ -172,7 +172,7 @@ fn bench_www_authenticate_parse(c: &mut Criterion) {
     });
 }
 
-// ====== LPD Benchmarks (3个) ======
+// ====== LPD Benchmarks (3) ======
 
 fn bench_lpd_announce_serialize_50(c: &mut Criterion) {
     // Benchmark: format 50 LPD announcement text messages (Hash/Port/Token)
@@ -349,7 +349,7 @@ fn bench_x25519_key_exchange(c: &mut Criterion) {
     });
 }
 
-// ====== 流式解码器 Benchmarks (3个) ======
+// ====== Stream Decoder Benchmarks (3) ======
 
 fn bench_gzip_decode_1mb(c: &mut Criterion) {
     let original = vec![0x41u8; 1024 * 1024];
@@ -401,7 +401,7 @@ fn bench_filter_chain_gzip_then_chunked_512kb(c: &mut Criterion) {
     });
 }
 
-// ====== BT 进度持久化 Benchmark (1个) ======
+// ====== BT Progress Persistence Benchmark (1) ======
 
 fn bench_progress_save_load_1000pieces(c: &mut Criterion) {
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");

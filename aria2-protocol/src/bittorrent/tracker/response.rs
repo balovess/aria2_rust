@@ -24,6 +24,10 @@ pub struct TrackerResponse {
     pub seeders: u32,
     pub leechers: u32,
     pub peers: Vec<PeerInfo>,
+    /// Tracker ID from the tracker response ("tracker id" key in bencode).
+    /// The client must echo this back as the `trackerid` parameter in
+    /// subsequent announce requests, per the BitTorrent tracker protocol.
+    pub tracker_id: Option<String>,
     pub warning_message: Option<String>,
     pub failure_reason: Option<String>,
 }
@@ -49,6 +53,7 @@ impl TrackerResponse {
                 seeders: 0,
                 leechers: 0,
                 peers: vec![],
+                tracker_id: None,
                 warning_message: None,
                 failure_reason,
             });
@@ -59,15 +64,17 @@ impl TrackerResponse {
         let seeders = root.dict_get_int("complete").unwrap_or(0) as u32;
         let leechers = root.dict_get_int("incomplete").unwrap_or(0) as u32;
         let warning_message = root.dict_get_str("warning message").map(|s| s.to_string());
+        let tracker_id = root.dict_get_str("tracker id").map(|s| s.to_string());
 
         let peers = Self::parse_peers(&root)?;
 
         debug!(
-            "Tracker响应: interval={}s, seeders={}, leechers={}, peers={}",
+            "Tracker response: interval={}s, seeders={}, leechers={}, peers={}, tracker_id={:?}",
             interval,
             seeders,
             leechers,
-            peers.len()
+            peers.len(),
+            tracker_id,
         );
 
         Ok(Self {
@@ -76,6 +83,7 @@ impl TrackerResponse {
             seeders,
             leechers,
             peers,
+            tracker_id,
             warning_message,
             failure_reason: None,
         })
@@ -97,7 +105,7 @@ impl TrackerResponse {
 
     fn parse_compact_peers(data: &[u8]) -> Result<Vec<PeerInfo>, String> {
         if !data.len().is_multiple_of(6) {
-            return Err(format!("compact peers数据长度({})不是6的倍数", data.len()));
+            return Err(format!("Compact peers data length ({}) is not a multiple of 6", data.len()));
         }
 
         let mut peers = Vec::new();
@@ -122,7 +130,7 @@ impl TrackerResponse {
     ) -> Result<Vec<PeerInfo>, String> {
         let mut peers = Vec::new();
         for item in list {
-            let dict = item.as_dict().ok_or("peer条目不是字典")?;
+            let dict = item.as_dict().ok_or("Peer entry is not a dictionary")?;
             let ip = dict
                 .get(&b"ip"[..])
                 .and_then(|v| v.as_str())
@@ -205,5 +213,43 @@ mod tests {
         assert_eq!(TrackerEvent::Started.as_str(), "started");
         assert_eq!(TrackerEvent::Completed.as_str(), "completed");
         assert_eq!(TrackerEvent::Stopped.as_str(), "stopped");
+    }
+
+    #[test]
+    fn test_parse_tracker_id() {
+        let mut peers_data = vec![0u8; 6];
+        peers_data[0..4].copy_from_slice(&[127, 0, 0, 1]);
+        peers_data[4..6].copy_from_slice(&6881u16.to_be_bytes());
+
+        let mut resp_dict = BTreeMap::new();
+        resp_dict.insert(b"interval".to_vec(), BencodeValue::Int(300));
+        resp_dict.insert(b"peers".to_vec(), BencodeValue::Bytes(peers_data));
+        resp_dict.insert(
+            b"tracker id".to_vec(),
+            BencodeValue::Bytes(b"my-tracker-42".to_vec()),
+        );
+
+        let root = BencodeValue::Dict(resp_dict);
+        let encoded = root.encode();
+        let parsed = TrackerResponse::parse(&encoded).unwrap();
+
+        assert_eq!(parsed.tracker_id.as_deref(), Some("my-tracker-42"));
+    }
+
+    #[test]
+    fn test_parse_no_tracker_id() {
+        let mut peers_data = vec![0u8; 6];
+        peers_data[0..4].copy_from_slice(&[127, 0, 0, 1]);
+        peers_data[4..6].copy_from_slice(&6881u16.to_be_bytes());
+
+        let mut resp_dict = BTreeMap::new();
+        resp_dict.insert(b"interval".to_vec(), BencodeValue::Int(300));
+        resp_dict.insert(b"peers".to_vec(), BencodeValue::Bytes(peers_data));
+
+        let root = BencodeValue::Dict(resp_dict);
+        let encoded = root.encode();
+        let parsed = TrackerResponse::parse(&encoded).unwrap();
+
+        assert!(parsed.tracker_id.is_none());
     }
 }

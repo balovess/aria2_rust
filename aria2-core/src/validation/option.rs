@@ -6,17 +6,17 @@ const MAX_PATH_LEN: usize = 4096;
 pub fn validate_dir_path(path: &str) -> Result<PathBuf> {
     if path.is_empty() {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "目录路径不能为空".into(),
+            "Directory path must not be empty".into(),
         )));
     }
     if path.contains('\0') {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "路径包含非法字符".into(),
+            "Path contains illegal characters".into(),
         )));
     }
     if path.len() > MAX_PATH_LEN {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "路径过长".into(),
+            "Path too long".into(),
         )));
     }
     Ok(PathBuf::from(path))
@@ -31,20 +31,20 @@ static WINDOWS_RESERVED_NAMES: &[&str] = &[
 pub fn validate_out_filename(name: &str) -> Result<String> {
     if name.is_empty() {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "文件名不能为空".into(),
+            "Filename must not be empty".into(),
         )));
     }
     let stem = name.split('.').next().unwrap_or("");
     let upper = stem.to_uppercase();
     if WINDOWS_RESERVED_NAMES.contains(&upper.as_str()) {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            format!("保留名称: {}", stem),
+            format!("Reserved name: {}", stem),
         )));
     }
     for c in ILLEGAL_FILENAME_CHARS {
         if name.contains(*c) {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                format!("非法字符: {}", c),
+                format!("Illegal character: {}", c),
             )));
         }
     }
@@ -54,7 +54,7 @@ pub fn validate_out_filename(name: &str) -> Result<String> {
 pub fn validate_split_value(n: u16) -> Result<u16> {
     if n == 0 || n > 16 {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "split值必须在1-16之间".into(),
+            "split value must be between 1 and 16".into(),
         )));
     }
     Ok(n)
@@ -63,7 +63,7 @@ pub fn validate_split_value(n: u16) -> Result<u16> {
 pub fn validate_connection_limit(n: u16) -> Result<u16> {
     if n == 0 || n > 16 {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "连接数必须在1-16之间".into(),
+            "connection count must be between 1 and 16".into(),
         )));
     }
     Ok(n)

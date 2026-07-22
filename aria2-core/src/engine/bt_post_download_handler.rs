@@ -1,7 +1,8 @@
-//! BitTorrent 下载后处理钩子系统
+//! BitTorrent post-download hook system
 //!
-//! 提供下载完成后的自定义处理能力，支持文件移动、重命名、时间戳更新和外部命令执行等功能。
-//! 通过 HookManager 管理多个钩子的执行链，支持配置错误处理策略。
+//! Provides custom processing capabilities after download completion, supporting file moving,
+//! renaming, timestamp updating, and external command execution.
+//! HookManager manages the execution chain of multiple hooks and supports configuring error handling strategies.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,34 +19,34 @@ use crate::request::request_group::GroupId;
 pub use crate::request::request_group::DownloadStatus;
 
 // ============================================================================
-// 核心数据结构
+// Core data structures
 // ============================================================================
 
-/// 钩子执行的上下文信息，包含下载任务的状态和数据统计
+/// Hook execution context, containing download task status and data statistics
 #[derive(Clone, Debug)]
 pub struct HookContext {
-    /// 下载任务的唯一标识符
+    /// Unique identifier of the download task
     pub gid: GroupId,
-    /// 下载文件的完整路径
+    /// Full path of the downloaded file
     pub file_path: PathBuf,
-    /// 当前下载状态
+    /// Current download status
     pub status: DownloadStatus,
-    /// 下载统计数据
+    /// Download statistics
     pub stats: DownloadStats,
-    /// 错误信息（如果有）
+    /// Error message (if any)
     pub error: Option<String>,
 }
 
 impl HookContext {
-    /// 创建一个新的钩子上下文
+    /// Create a new hook context
     ///
     /// # Arguments
     ///
-    /// * `gid` - 下载任务组 ID
-    /// * `file_path` - 下载文件路径
-    /// * `status` - 下载状态
-    /// * `stats` - 下载统计信息
-    /// * `error` - 可选的错误信息
+    /// * `gid` - Download task group ID
+    /// * `file_path` - Download file path
+    /// * `status` - Download status
+    /// * `stats` - Download statistics
+    /// * `error` - Optional error message
     pub fn new(
         gid: GroupId,
         file_path: PathBuf,
@@ -62,7 +63,7 @@ impl HookContext {
         }
     }
 
-    /// 获取文件名（不含路径）
+    /// Get filename (without path)
     pub fn filename(&self) -> &str {
         self.file_path
             .file_name()
@@ -70,7 +71,7 @@ impl HookContext {
             .unwrap_or("unknown")
     }
 
-    /// 获取文件扩展名
+    /// Get file extension
     pub fn extension(&self) -> &str {
         self.file_path
             .extension()
@@ -78,24 +79,24 @@ impl HookContext {
             .unwrap_or("")
     }
 
-    /// 获取父目录路径
+    /// Get parent directory path
     pub fn directory(&self) -> &Path {
         self.file_path.parent().unwrap_or(self.file_path.as_path())
     }
 }
 
-/// 下载统计数据
+/// Download statistics
 #[derive(Clone, Debug)]
 pub struct DownloadStats {
-    /// 已上传的字节数
+    /// Uploaded bytes
     pub uploaded_bytes: u64,
-    /// 已下载的字节数
+    /// Downloaded bytes
     pub downloaded_bytes: u64,
-    /// 上传速度（字节/秒）
+    /// Upload speed (bytes/sec)
     pub upload_speed: f64,
-    /// 下载速度（字节/秒）
+    /// Download speed (bytes/sec)
     pub download_speed: f64,
-    /// 已用时间（秒）
+    /// Elapsed time (seconds)
     pub elapsed_seconds: u64,
 }
 
@@ -125,12 +126,12 @@ impl std::fmt::Display for DownloadStats {
     }
 }
 
-/// 钩子系统配置
+/// Hook system configuration
 #[derive(Clone, Debug)]
 pub struct HookConfig {
-    /// 是否在遇到错误时停止后续钩子执行
+    /// Whether to stop subsequent hook execution on error
     pub stop_on_error: bool,
-    /// 单个钩子执行的超时时间
+    /// Timeout for individual hook execution
     pub timeout: std::time::Duration,
 }
 
@@ -144,64 +145,65 @@ impl Default for HookConfig {
 }
 
 // ============================================================================
-// PostDownloadHook Trait 定义
+// PostDownloadHook trait definition
 // ============================================================================
 
-/// 下载后处理钩子 trait
+/// Post-download hook trait
 ///
-/// 实现此 trait 可以自定义下载完成后的行为。
-/// 所有方法都是异步的，支持在异步上下文中执行耗时操作。
+/// Implement this trait to customize behavior after download completion.
+/// All methods are async, supporting time-consuming operations in async contexts.
 #[async_trait]
 pub trait PostDownloadHook: Send + Sync {
-    /// 下载成功完成时的回调
+    /// Callback when download completes successfully
     ///
     /// # Arguments
     ///
-    /// * `context` - 包含下载任务信息的上下文
+    /// * `context` - Context containing download task information
     ///
     /// # Returns
     ///
-    /// 返回 `Ok(())` 表示处理成功，`Err(e)` 表示处理失败
+    /// Returns `Ok(())` on success, `Err(e)` on failure
     async fn on_complete(&self, context: &HookContext) -> Result<()>;
 
-    /// 下载失败时的回调
+    /// Callback when download fails
     ///
     /// # Arguments
     ///
-    /// * `context` - 包含下载任务信息的上下文
-    /// * `error` - 错误描述字符串
+    /// * `context` - Context containing download task information
+    /// * `error` - Error description string
     ///
     /// # Returns
     ///
-    /// 返回 `Ok(())` 表示错误处理成功，`Err(e)` 表示错误处理本身失败
+    /// Returns `Ok(())` if error handling succeeded, `Err(e)` if error handling itself failed
     async fn on_error(&self, context: &HookContext, error: &str) -> Result<()>;
 
-    /// 返回钩子的名称，用于日志记录和管理
+    /// Returns the hook name for logging and management
     fn name(&self) -> &'static str;
 }
 
 // ============================================================================
-// 内置钩子实现
+// Built-in hook implementations
 // ============================================================================
 
-/// 文件移动钩子
+/// File move hook
 ///
-/// 在下载完成后将文件移动到指定目录。支持自动创建目标目录结构。
+/// Moves the file to a specified directory after download completion.
+/// Supports automatic creation of target directory structure.
 #[derive(Clone, Debug)]
 pub struct MoveHook {
-    /// 目标目录路径
+    /// Target directory path
     target_dir: PathBuf,
-    /// 是否自动创建不存在的目录
+    /// Whether to automatically create non-existent directories
     create_dirs: bool,
 }
 
 impl MoveHook {
-    /// 创建新的移动钩子
+    /// Create a new move hook
     ///
     /// # Arguments
     ///
-    /// * `target_dir` - 目标目录路径
-    /// * `create_dirs` - 是否自动创建目录
+    /// * `target_dir` - Target directory path
+    /// * `create_dirs` - Whether to automatically create directories
     pub fn new(target_dir: PathBuf, create_dirs: bool) -> Self {
         Self {
             target_dir,
@@ -212,21 +214,21 @@ impl MoveHook {
 
 #[async_trait]
 impl PostDownloadHook for MoveHook {
-    /// 执行文件移动操作
+    /// Execute file move operation
     ///
-    /// 验证源文件存在后，将其移动到目标目录。
-    /// 如果 `create_dirs` 为 true，会自动创建所需的目录层级。
+    /// Verifies the source file exists, then moves it to the target directory.
+    /// If `create_dirs` is true, the required directory hierarchy is created automatically.
     async fn on_complete(&self, context: &HookContext) -> Result<()> {
         let source = &context.file_path;
 
-        // 验证源文件存在
+        // Verify source file exists
         if !source.exists() {
             return Err(Aria2Error::Fatal(crate::error::FatalError::FileNotFound {
                 path: source.to_string_lossy().to_string(),
             }));
         }
 
-        // 创建目标目录（如果需要）
+        // Create target directory (if needed)
         if self.create_dirs && !self.target_dir.exists() {
             debug!(
                 hook = "MoveHook",
@@ -244,7 +246,7 @@ impl PostDownloadHook for MoveHook {
                 })?;
         }
 
-        // 构建目标路径
+        // Build destination path
         let filename = context.filename();
         let destination = self.target_dir.join(filename);
 
@@ -255,7 +257,7 @@ impl PostDownloadHook for MoveHook {
             "Moving file"
         );
 
-        // 执行移动操作
+        // Execute move operation
         tokio::fs::rename(source, &destination).await.map_err(|e| {
             Aria2Error::Io(format!(
                 "Failed to move file from {} to {}: {}",
@@ -268,9 +270,9 @@ impl PostDownloadHook for MoveHook {
         Ok(())
     }
 
-    /// 移动钩子在错误时不执行任何操作
+    /// Move hook does nothing on error
     async fn on_error(&self, _context: &HookContext, _error: &str) -> Result<()> {
-        // 文件移动在错误情况下通常不需要执行
+        // File move typically does not need to be executed on error
         Ok(())
     }
 
@@ -279,42 +281,42 @@ impl PostDownloadHook for MoveHook {
     }
 }
 
-/// 文件重命名钩子
+/// File rename hook
 ///
-/// 使用模板模式对下载的文件进行重命名。
-/// 支持以下占位符：
-/// - `%d`: 源文件所在目录
-/// - `%f`: 原始文件名
-/// - `%e`: 文件扩展名
-/// - `%i`: 下载任务 GID
-/// - `%t`: 当前时间戳（Unix 时间戳）
+/// Renames downloaded files using a template pattern.
+/// Supported placeholders:
+/// - `%d`: Source file directory
+/// - `%f`: Original filename
+/// - `%e`: File extension
+/// - `%i`: Download task GID
+/// - `%t`: Current timestamp (Unix timestamp)
 #[derive(Clone, Debug)]
 pub struct RenameHook {
-    /// 重命名模板模式
+    /// Rename template pattern
     pattern: String,
 }
 
 impl RenameHook {
-    /// 创建新的重命名钩子
+    /// Create a new rename hook
     ///
     /// # Arguments
     ///
-    /// * `pattern` - 重命名模板，支持占位符替换
+    /// * `pattern` - Rename template supporting placeholder substitution
     pub fn new(pattern: String) -> Self {
         Self { pattern }
     }
 
-    /// 展开模板中的占位符
+    /// Expand placeholders in the template
     ///
-    /// 将模板字符串中的特殊标记替换为实际值。
+    /// Replaces special markers in the template string with actual values.
     ///
     /// # Arguments
     ///
-    /// * `context` - 钩子上下文，用于获取替换值
+    /// * `context` - Hook context used to obtain replacement values
     ///
     /// # Returns
     ///
-    /// 替换后的完整文件名
+    /// The expanded filename with all placeholders replaced
     pub fn expand_pattern(&self, context: &HookContext) -> String {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -332,9 +334,9 @@ impl RenameHook {
 
 #[async_trait]
 impl PostDownloadHook for RenameHook {
-    /// 执行文件重命名操作
+    /// Execute file rename operation
     ///
-    /// 根据模板模式生成新文件名并重命名文件。
+    /// Generates a new filename based on the template pattern and renames the file.
     async fn on_complete(&self, context: &HookContext) -> Result<()> {
         let source = &context.file_path;
 
@@ -346,7 +348,7 @@ impl PostDownloadHook for RenameHook {
 
         let new_name = self.expand_pattern(context);
 
-        // 如果新名称包含路径分隔符，视为完整路径；否则在同一目录下重命名
+        // If the new name contains a path separator, treat it as a full path; otherwise rename in the same directory
         let destination = if new_name.contains(std::path::MAIN_SEPARATOR)
             || (std::path::MAIN_SEPARATOR == '\\' && new_name.contains('/'))
         {
@@ -374,7 +376,7 @@ impl PostDownloadHook for RenameHook {
         Ok(())
     }
 
-    /// 重命名钩子在错误时不执行
+    /// Rename hook does nothing on error
     async fn on_error(&self, _context: &HookContext, _error: &str) -> Result<()> {
         Ok(())
     }
@@ -384,14 +386,14 @@ impl PostDownloadHook for RenameHook {
     }
 }
 
-/// 文件时间戳更新钩子
+/// File timestamp update hook
 ///
-/// 在下载完成后更新文件的修改时间和访问时间为当前系统时间。
+/// Updates the file's modification time and access time to the current system time after download completion.
 #[derive(Clone, Debug)]
 pub struct TouchHook;
 
 impl TouchHook {
-    /// 创建新的 TouchHook 实例
+    /// Create a new TouchHook instance
     pub fn new() -> Self {
         Self
     }
@@ -405,9 +407,9 @@ impl Default for TouchHook {
 
 #[async_trait]
 impl PostDownloadHook for TouchHook {
-    /// 更新文件的修改时间和访问时间
+    /// Update the file's modification time and access time
     ///
-    /// 将文件的 mtime 和 atime 都设置为当前系统时间。
+    /// Sets both the file's mtime and atime to the current system time.
     async fn on_complete(&self, context: &HookContext) -> Result<()> {
         let path = &context.file_path;
 
@@ -425,10 +427,10 @@ impl PostDownloadHook for TouchHook {
             "Updating file timestamps"
         );
 
-        // 使用 filetime crate 或标准库设置时间
+        // Use filetime crate or standard library to set timestamps
         #[cfg(unix)]
         {
-            // 获取现有权限以保持不变
+            // Get existing permissions to preserve them
             let _metadata = tokio::fs::metadata(path).await.map_err(|e| {
                 Aria2Error::Io(format!(
                     "Failed to get metadata for {}: {}",
@@ -465,11 +467,11 @@ impl PostDownloadHook for TouchHook {
 
         #[cfg(windows)]
         {
-            // Windows 下使用标准库的 set_times 功能（需要 Rust 1.75+）
-            // 或者通过重新写入文件来更新时间戳
+            // On Windows, use the standard library's set_times feature (requires Rust 1.75+)
+            // or update timestamps by re-writing the file
             use std::fs;
 
-            // 简单方案：读取文件元数据并设置时间
+            // Simple approach: read file metadata and set time
             let file = fs::OpenOptions::new().write(true).open(path).map_err(|e| {
                 Aria2Error::Io(format!("Failed to open file {}: {}", path.display(), e))
             })?;
@@ -492,7 +494,7 @@ impl PostDownloadHook for TouchHook {
         Ok(())
     }
 
-    /// TouchHook 在错误时不执行
+    /// TouchHook does nothing on error
     async fn on_error(&self, _context: &HookContext, _error: &str) -> Result<()> {
         Ok(())
     }
@@ -502,40 +504,41 @@ impl PostDownloadHook for TouchHook {
     }
 }
 
-/// 外部命令执行钩子
+/// External command execution hook
 ///
-/// 在下载完成后执行指定的外部命令，并将下载相关信息作为环境变量注入。
-/// 支持的环境变量：
-/// - `ARIA2_GID`: 任务组 ID
-/// - `ARIA2_PATH`: 文件路径
-/// - `ARIA2_STATUS`: 下载状态
-/// - `ARIA2_ERROR`: 错误信息（如有）
-/// - `ARIA2_DOWNLOADED_BYTES`: 已下载字节数
-/// - `ARIA2_UPLOADED_BYTES`: 已上传字节数
-/// - `ARIA2_DOWNLOAD_SPEED`: 下载速度
-/// - `ARIA2_UPLOAD_SPEED`: 上传速度
+/// Executes a specified external command after download completion, injecting download-related
+/// information as environment variables.
+/// Supported environment variables:
+/// - `ARIA2_GID`: Task group ID
+/// - `ARIA2_PATH`: File path
+/// - `ARIA2_STATUS`: Download status
+/// - `ARIA2_ERROR`: Error message (if any)
+/// - `ARIA2_DOWNLOADED_BYTES`: Downloaded bytes
+/// - `ARIA2_UPLOADED_BYTES`: Uploaded bytes
+/// - `ARIA2_DOWNLOAD_SPEED`: Download speed
+/// - `ARIA2_UPLOAD_SPEED`: Upload speed
 #[derive(Clone, Debug)]
 pub struct ExecHook {
-    /// 要执行的命令
+    /// Command to execute
     command: String,
-    /// 额外的环境变量
+    /// Additional environment variables
     env_vars: HashMap<String, String>,
 }
 
 impl ExecHook {
-    /// 创建新的命令执行钩子
+    /// Create a new command execution hook
     ///
     /// # Arguments
     ///
-    /// * `command` - 要执行的 shell 命令
-    /// * `env_vars` - 额外的环境变量键值对
+    /// * `command` - Shell command to execute
+    /// * `env_vars` - Additional environment variable key-value pairs
     pub fn new(command: String, env_vars: HashMap<String, String>) -> Self {
         Self { command, env_vars }
     }
 
-    /// 构建环境变量映射
+    /// Build environment variable mapping
     ///
-    /// 合并用户自定义环境变量和 aria2 内置环境变量。
+    /// Merges user-defined environment variables with aria2 built-in environment variables.
     fn build_env(
         &self,
         context: &HookContext,
@@ -543,7 +546,7 @@ impl ExecHook {
     ) -> HashMap<String, String> {
         let mut env = HashMap::new();
 
-        // 注入 aria2 特定环境变量
+        // Inject aria2-specific environment variables
         env.insert("ARIA2_GID".to_string(), context.gid.value().to_string());
         env.insert(
             "ARIA2_PATH".to_string(),
@@ -575,7 +578,7 @@ impl ExecHook {
             context.stats.upload_speed.to_string(),
         );
 
-        // 合并用户自定义环境变量（可覆盖内置变量）
+        // Merge user-defined environment variables (can override built-in variables)
         for (k, v) in &self.env_vars {
             env.insert(k.clone(), v.clone());
         }
@@ -586,10 +589,10 @@ impl ExecHook {
 
 #[async_trait]
 impl PostDownloadHook for ExecHook {
-    /// 执行外部命令
+    /// Execute external command
     ///
-    /// 通过 shell 执行配置的命令，注入 aria2 相关环境变量。
-    /// 非 zero 退出码会被视为执行失败。
+    /// Executes the configured command via shell, injecting aria2-related environment variables.
+    /// Non-zero exit codes are treated as execution failures.
     async fn on_complete(&self, context: &HookContext) -> Result<()> {
         let env = self.build_env(context, None);
 
@@ -638,9 +641,9 @@ impl PostDownloadHook for ExecHook {
         Ok(())
     }
 
-    /// 在下载错误时执行命令
+    /// Execute command on download error
     ///
-    /// 与 `on_complete` 类似，但状态会被设置为 "error"。
+    /// Similar to `on_complete`, but the status is set to "error".
     async fn on_error(&self, context: &HookContext, error: &str) -> Result<()> {
         let mut ctx_with_error = context.clone();
         ctx_with_error.error = Some(error.to_string());
@@ -684,26 +687,27 @@ impl PostDownloadHook for ExecHook {
 }
 
 // ============================================================================
-// HookManager 钩子链管理器
+// HookManager - Hook chain manager
 // ============================================================================
 
-/// 钩子链管理器
+/// Hook chain manager
 ///
-/// 负责管理和协调多个下载后处理钩子的执行。
-/// 支持按顺序执行钩子链，并根据配置决定遇到错误时的处理策略。
+/// Responsible for managing and coordinating the execution of multiple post-download hooks.
+/// Supports sequential execution of the hook chain, and determines the error handling strategy
+/// based on configuration.
 pub struct HookManager {
-    /// 注册的钩子列表（按注册顺序执行）
+    /// Registered hook list (executed in registration order)
     hooks: Vec<Box<dyn PostDownloadHook>>,
-    /// 钩子系统配置
+    /// Hook system configuration
     config: HookConfig,
 }
 
 impl HookManager {
-    /// 创建新的钩子管理器
+    /// Create a new hook manager
     ///
     /// # Arguments
     ///
-    /// * `config` - 钩子系统配置选项
+    /// * `config` - Hook system configuration options
     pub fn new(config: HookConfig) -> Self {
         Self {
             hooks: Vec::new(),
@@ -711,46 +715,46 @@ impl HookManager {
         }
     }
 
-    /// 向钩子链添加一个新的钩子
+    /// Add a new hook to the hook chain
     ///
-    /// 钩子将按照添加的顺序被执行。
+    /// Hooks are executed in the order they are added.
     ///
     /// # Arguments
     ///
-    /// * `hook` - 要添加的钩子实例（必须实现 `PostDownloadHook` trait）
+    /// * `hook` - Hook instance to add (must implement the `PostDownloadHook` trait)
     pub fn add_hook(&mut self, hook: Box<dyn PostDownloadHook>) {
         info!(hook_name = hook.name(), "Adding hook to chain");
         self.hooks.push(hook);
     }
 
-    /// 按名称移除钩子
+    /// Remove hook by name
     ///
     /// # Arguments
     ///
-    /// * `name` - 要移除的钩子名称
+    /// * `name` - Name of the hook to remove
     ///
     /// # Returns
     ///
-    /// 返回被移除的钩子（如果找到），否则返回 `None`
+    /// Returns the removed hook (if found), otherwise returns `None`
     pub fn remove_hook(&mut self, name: &str) -> Option<Box<dyn PostDownloadHook>> {
         let pos = self.hooks.iter().position(|h| h.name() == name)?;
         info!(hook_name = name, "Removing hook from chain");
         Some(self.hooks.remove(pos))
     }
 
-    /// 触发所有钩子的 on_complete 回调
+    /// Trigger on_complete callback for all hooks
     ///
-    /// 按注册顺序依次调用每个钩子的 `on_complete` 方法。
-    /// 根据 `config.stop_on_error` 决定是否在第一个失败时停止。
+    /// Calls each hook's `on_complete` method in registration order.
+    /// Based on `config.stop_on_error`, decides whether to stop on the first failure.
     ///
     /// # Arguments
     ///
-    /// * `context` - 下载完成的上下文信息
+    /// * `context` - Download completion context information
     ///
     /// # Returns
     ///
-    /// 返回每个钩子的执行结果描述向量。如果 `stop_on_error=true` 且某个钩子失败，
-    /// 返回 `Err` 包含该错误信息。
+    /// Returns a vector of execution result descriptions for each hook.
+    /// If `stop_on_error=true` and a hook fails, returns `Err` containing the error message.
     pub async fn fire_complete(&self, context: &HookContext) -> Result<Vec<String>> {
         let mut results = Vec::with_capacity(self.hooks.len());
 
@@ -783,18 +787,18 @@ impl HookManager {
         Ok(results)
     }
 
-    /// 触发所有钩子的 on_error 回调
+    /// Trigger on_error callback for all hooks
     ///
-    /// 与 `fire_complete` 类似，但调用的是 `on_error` 方法。
+    /// Similar to `fire_complete`, but calls the `on_error` method instead.
     ///
     /// # Arguments
     ///
-    /// * `context` - 下载失败的上下文信息
-    /// * `error` - 错误描述字符串
+    /// * `context` - Download failure context information
+    /// * `error` - Error description string
     ///
     /// # Returns
     ///
-    /// 返回每个钩子的执行结果描述向量
+    /// Returns a vector of execution result descriptions for each hook
     pub async fn fire_error(&self, context: &HookContext, error: &str) -> Result<Vec<String>> {
         let mut results = Vec::with_capacity(self.hooks.len());
         let error_owned = error.to_string();
@@ -828,12 +832,12 @@ impl HookManager {
         Ok(results)
     }
 
-    /// 获取当前注册的钩子数量
+    /// Get the number of currently registered hooks
     pub fn hook_count(&self) -> usize {
         self.hooks.len()
     }
 
-    /// 清空所有已注册的钩子
+    /// Clear all registered hooks
     pub fn clear_hooks(&mut self) {
         info!("Clearing all hooks");
         self.hooks.clear();
@@ -844,7 +848,7 @@ impl HookManager {
 mod tests {
     use super::*;
 
-    /// 辅助函数：创建测试用的 HookContext
+    /// Helper function: create a test HookContext
     fn create_test_context(file_path: &Path) -> HookContext {
         HookContext {
             gid: GroupId::new(42),
@@ -866,7 +870,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let src_file = temp_dir.path().join("test_file.txt");
 
-        // 创建测试文件
+        // Create test file
         tokio::fs::write(&src_file, b"test content")
             .await
             .expect("Failed to write test file");
@@ -874,7 +878,7 @@ mod tests {
         let target_dir = temp_dir.path().join("target");
         let hook = MoveHook::new(target_dir.clone(), false);
 
-        // 手动创建目标目录
+        // Manually create target directory
         tokio::fs::create_dir_all(&target_dir)
             .await
             .expect("Failed to create target dir");
@@ -883,7 +887,7 @@ mod tests {
 
         assert!(hook.on_complete(&context).await.is_ok());
 
-        // 验证文件已被移动
+        // Verify file has been moved
         let moved_file = target_dir.join("test_file.txt");
         assert!(
             moved_file.exists(),
@@ -901,7 +905,7 @@ mod tests {
             .await
             .expect("Failed to write test file");
 
-        // 目标目录不存在且有多层嵌套
+        // Target directory does not exist and has multiple nested levels
         let target_dir = temp_dir.path().join("nested").join("deep").join("target");
         let hook = MoveHook::new(target_dir.clone(), true);
 
@@ -909,7 +913,7 @@ mod tests {
 
         assert!(hook.on_complete(&context).await.is_ok());
 
-        // 验证目录被自动创建且文件已移动
+        // Verify directory was auto-created and file was moved
         let moved_file = target_dir.join("test_file.txt");
         assert!(
             moved_file.exists(),
@@ -929,14 +933,14 @@ mod tests {
         let hook = RenameHook::new("%f.renamed".to_string());
         let context = create_test_context(&src_file);
 
-        // 测试 expand_pattern
+        // Test expand_pattern
         let expanded = hook.expand_pattern(&context);
         assert!(
             expanded.contains("archive.tar.gz.renamed"),
             "Pattern should contain original filename"
         );
 
-        // 测试实际重命名
+        // Test actual rename
         assert!(hook.on_complete(&context).await.is_ok());
 
         let renamed_file = temp_dir.path().join("archive.tar.gz.renamed");
@@ -988,11 +992,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_hook_env_vars_injected() {
-        // 创建一个简单的测试脚本，输出环境变量到文件
+        // Create a simple test script that outputs environment variables to a file
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let output_file = temp_dir.path().join("env_output.txt");
 
-        // 使用 echo 命令写入环境变量（跨平台兼容）
+        // Use echo command to write environment variables (cross-platform compatible)
         let cmd = format!("echo $ARIA2_GID > {}", output_file.display());
 
         let mut env_vars = HashMap::new();
@@ -1001,15 +1005,15 @@ mod tests {
         let hook = ExecHook::new(cmd, env_vars);
         let context = create_test_context(&temp_dir.path().join("dummy.txt"));
 
-        // 注意：这个测试在非 Unix 系统上可能需要调整
+        // Note: This test may need adjustment on non-Unix systems
         #[cfg(unix)]
         {
             let result = hook.on_complete(&context).await;
-            // 即使命令失败（因为可能没有 sh），我们主要验证构建逻辑正确性
+            // Even if the command fails (because sh may not be available), we mainly verify the build logic correctness
             let _ = result;
         }
 
-        // 验证环境变量构建逻辑
+        // Verify environment variable build logic
         let built_env = hook.build_env(&context, None);
         assert_eq!(
             built_env.get("ARIA2_GID").unwrap(),
@@ -1056,13 +1060,13 @@ mod tests {
     async fn test_hook_chain_execution_order() {
         let mut manager = HookManager::new(HookConfig::default());
 
-        // 验证钩子按注册顺序添加和计数
+        // Verify hooks are added and counted in registration order
         manager.add_hook(Box::new(TouchHook));
         manager.add_hook(Box::new(RenameHook::new("%f.copy".to_string())));
 
         assert_eq!(manager.hook_count(), 2, "Should have 2 hooks registered");
 
-        // 验证可以按名称移除钩子（从链的末尾开始）
+        // Verify hooks can be removed by name (starting from the end of the chain)
         let removed = manager.remove_hook("RenameHook");
         assert!(removed.is_some(), "Should be able to remove RenameHook");
         assert_eq!(
@@ -1081,7 +1085,7 @@ mod tests {
         };
         let mut manager = HookManager::new(config);
 
-        // 添加一个会失败的 ExecHook
+        // Add an ExecHook that will fail
         manager.add_hook(Box::new(ExecHook::new(
             "exit 1".to_string(),
             HashMap::new(),
@@ -1089,7 +1093,7 @@ mod tests {
 
         let context = create_test_context(&temp_dir.path().join("test.txt"));
 
-        // 不应该因为第一个钩子失败而返回错误
+        // Should not return error because the first hook failed
         let results = manager.fire_complete(&context).await;
         assert!(results.is_ok(), "Should not fail when stop_on_error=false");
 
@@ -1110,12 +1114,12 @@ mod tests {
         };
         let mut manager = HookManager::new(config);
 
-        // 第一个钩子会失败
+        // First hook will fail
         manager.add_hook(Box::new(ExecHook::new(
             "exit 1".to_string(),
             HashMap::new(),
         )));
-        // 第二个钩子不应该被执行
+        // Second hook should not be executed
         manager.add_hook(Box::new(ExecHook::new(
             "echo success".to_string(),
             HashMap::new(),
@@ -1144,7 +1148,7 @@ mod tests {
         assert_eq!(removed.unwrap().name(), "TouchHook");
         assert_eq!(manager.hook_count(), 1, "Should have 1 hook remaining");
 
-        // 尝试移除不存在的钩子
+        // Try to remove a non-existent hook
         let not_found = manager.remove_hook("NonExistentHook");
         assert!(
             not_found.is_none(),

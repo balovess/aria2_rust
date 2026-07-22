@@ -84,20 +84,14 @@ pub fn sort_by_score(stats: &mut [&ServerStat]) {
 }
 
 fn extract_host(uri: &str) -> Option<String> {
-    let uri = uri.trim();
-    if !uri.contains("://") {
-        return None;
-    }
-    let after_scheme = &uri[uri.find("://").unwrap() + 3..];
-    let host_part = if let Some(slash_idx) = after_scheme.find('/') {
-        &after_scheme[..slash_idx]
-    } else {
-        after_scheme
-    };
-    if host_part.is_empty() {
-        return None;
-    }
-    Some(host_part.to_string())
+    crate::selector::feedback_uri_selector::extract_host_and_protocol(uri).map(|(h, _)| h)
+}
+
+/// Extract both host and protocol from a URI string.
+///
+/// This is a thin wrapper around [`feedback_uri_selector::extract_host_and_protocol`].
+fn extract_host_and_protocol(uri: &str) -> Option<(String, String)> {
+    crate::selector::feedback_uri_selector::extract_host_and_protocol(uri)
 }
 
 pub struct AdaptiveUriSelector {
@@ -175,29 +169,31 @@ impl AdaptiveUriSelector {
         self.nb_server_toevaluate.store(n, Ordering::Relaxed);
     }
 
-    fn extract_hosts(&self, uris: &[String]) -> Vec<(usize, String)> {
+    fn extract_hosts(&self, uris: &[String]) -> Vec<(usize, String, String)> {
         uris.iter()
             .enumerate()
-            .filter_map(|(i, u)| extract_host(u).map(|h| (i, h)))
+            .filter_map(|(i, u)| {
+                extract_host_and_protocol(u).map(|(h, p)| (i, h, p))
+            })
             .collect()
     }
 
     fn get_first_not_tested<'a>(
         &self,
-        hosts: &'a [(usize, String)],
-    ) -> Option<&'a (usize, String)> {
-        hosts.iter().find(|(_, host)| {
+        hosts: &'a [(usize, String, String)],
+    ) -> Option<&'a (usize, String, String)> {
+        hosts.iter().find(|(_, host, protocol)| {
             self.stat_man
-                .find_stat(host)
+                .find_stat_by_protocol(host, protocol)
                 .is_none_or(|s| s.get_counter() == 0)
         })
     }
 
     fn get_first_to_test<'a>(
         &self,
-        hosts: &'a [(usize, String)],
+        hosts: &'a [(usize, String, String)],
         max_test: i32,
-    ) -> Option<&'a (usize, String)> {
+    ) -> Option<&'a (usize, String, String)> {
         let tested_count = self.get_nb_tested_servers(hosts);
         if tested_count < max_test as usize {
             self.get_first_not_tested(hosts)
@@ -208,13 +204,13 @@ impl AdaptiveUriSelector {
 
     fn get_best_mirror(
         &self,
-        hosts: &[(usize, String)],
+        hosts: &[(usize, String, String)],
         used_hosts: &[(usize, String)],
     ) -> Option<usize> {
         let mut candidates: Vec<(usize, u64)> = hosts
             .iter()
-            .filter_map(|(idx, host)| {
-                let stat = self.stat_man.find_stat(host)?;
+            .filter_map(|(idx, host, protocol)| {
+                let stat = self.stat_man.find_stat_by_protocol(host, protocol)?;
                 if !stat.is_ok() {
                     return None;
                 }
@@ -254,7 +250,7 @@ impl AdaptiveUriSelector {
 
         if let Some(selected) = self.get_first_to_test(&hosts, max_eval) {
             let idx = selected.0;
-            if let Some(stat) = self.stat_man.find_stat(&selected.1) {
+            if let Some(stat) = self.stat_man.find_stat_by_protocol(&selected.1, &selected.2) {
                 stat.increment_counter();
             }
             return Some(idx);
@@ -263,12 +259,12 @@ impl AdaptiveUriSelector {
         self.get_best_mirror(&hosts, used_hosts)
     }
 
-    fn get_nb_tested_servers(&self, hosts: &[(usize, String)]) -> usize {
+    fn get_nb_tested_servers(&self, hosts: &[(usize, String, String)]) -> usize {
         hosts
             .iter()
-            .filter(|(_, host)| {
+            .filter(|(_, host, protocol)| {
                 self.stat_man
-                    .find_stat(host)
+                    .find_stat_by_protocol(host, protocol)
                     .is_some_and(|s| s.get_counter() > 0)
             })
             .count()
@@ -278,7 +274,11 @@ impl AdaptiveUriSelector {
         let hosts = self.extract_hosts(uris);
         let speeds: Vec<u64> = hosts
             .iter()
-            .filter_map(|(_, host)| self.stat_man.find_stat(host).map(|s| s.get_avg_speed()))
+            .filter_map(|(_, host, protocol)| {
+                self.stat_man
+                    .find_stat_by_protocol(host, protocol)
+                    .map(|s| s.get_avg_speed())
+            })
             .collect();
 
         if speeds.is_empty() {
@@ -432,7 +432,7 @@ mod tests {
             "http://slow.com/b".to_string(),
         ];
 
-        sel.stat_man.update("slow.com", 10000, false);
+        sel.stat_man.update_with_protocol("slow.com", "http", 10000, false);
 
         let result = sel.select(&uris, &[]);
         assert_eq!(result, Some(0));
@@ -446,12 +446,12 @@ mod tests {
             "http://fast.com/b".to_string(),
         ];
 
-        sel.stat_man.update("slow.com", 100, false);
-        sel.stat_man.update("fast.com", 10000, false);
+        sel.stat_man.update_with_protocol("slow.com", "http", 100, false);
+        sel.stat_man.update_with_protocol("fast.com", "http", 10000, false);
 
-        let s1 = sel.stat_man.find_stat("slow.com").unwrap();
+        let s1 = sel.stat_man.find_stat_by_protocol("slow.com", "http").unwrap();
         s1.increment_counter();
-        let s2 = sel.stat_man.find_stat("fast.com").unwrap();
+        let s2 = sel.stat_man.find_stat_by_protocol("fast.com", "http").unwrap();
         s2.increment_counter();
 
         let result = sel.select(&uris, &[]);
@@ -466,12 +466,12 @@ mod tests {
             "http://ok.com/b".to_string(),
         ];
 
-        sel.stat_man.update("error.com", 99999, false);
-        sel.stat_man.update("ok.com", 5000, false);
-        let err_stat = sel.stat_man.find_stat("error.com").unwrap();
+        sel.stat_man.update_with_protocol("error.com", "http", 99999, false);
+        sel.stat_man.update_with_protocol("ok.com", "http", 5000, false);
+        let err_stat = sel.stat_man.find_stat_by_protocol("error.com", "http").unwrap();
         err_stat.set_error();
         err_stat.increment_counter();
-        let ok_stat = sel.stat_man.find_stat("ok.com").unwrap();
+        let ok_stat = sel.stat_man.find_stat_by_protocol("ok.com", "http").unwrap();
         ok_stat.increment_counter();
 
         let result = sel.select(&uris, &[]);
@@ -486,11 +486,11 @@ mod tests {
             "http://free.com/b".to_string(),
         ];
 
-        sel.stat_man.update("used.com", 8000, false);
-        sel.stat_man.update("free.com", 6000, false);
-        let su = sel.stat_man.find_stat("used.com").unwrap();
+        sel.stat_man.update_with_protocol("used.com", "http", 8000, false);
+        sel.stat_man.update_with_protocol("free.com", "http", 6000, false);
+        let su = sel.stat_man.find_stat_by_protocol("used.com", "http").unwrap();
         su.increment_counter();
-        let sf = sel.stat_man.find_stat("free.com").unwrap();
+        let sf = sel.stat_man.find_stat_by_protocol("free.com", "http").unwrap();
         sf.increment_counter();
 
         let used = vec![(0, "used.com".to_string())];
@@ -503,8 +503,8 @@ mod tests {
         let sel = create_selector();
         let uris = vec!["http://only.com/a".to_string()];
 
-        sel.stat_man.update("only.com", 5000, false);
-        let s = sel.stat_man.find_stat("only.com").unwrap();
+        sel.stat_man.update_with_protocol("only.com", "http", 5000, false);
+        let s = sel.stat_man.find_stat_by_protocol("only.com", "http").unwrap();
         s.increment_counter();
 
         let used = vec![(0, "only.com".to_string())];
@@ -526,15 +526,15 @@ mod tests {
         let r1 = sel.select(&uris, &[]).unwrap();
         assert_eq!(r1, 0, "First select picks first untested host");
 
-        sel.stat_man.update("a.com", 100, false);
-        sel.stat_man.update("b.com", 10000, false);
-        let sb = sel.stat_man.find_stat("b.com").unwrap();
+        sel.stat_man.update_with_protocol("a.com", "http", 100, false);
+        sel.stat_man.update_with_protocol("b.com", "http", 10000, false);
+        let sb = sel.stat_man.find_stat_by_protocol("b.com", "http").unwrap();
         sb.increment_counter();
 
         let _r2 = sel.select(&uris, &[]).unwrap();
 
         assert!(
-            sel.stat_man.find_stat("a.com").is_some() || sel.stat_man.find_stat("b.com").is_some(),
+            sel.stat_man.find_stat_by_protocol("a.com", "http").is_some() || sel.stat_man.find_stat_by_protocol("b.com", "http").is_some(),
             "Stats should be created for tested hosts"
         );
     }
@@ -565,9 +565,9 @@ mod tests {
             "http://slow.com/s".to_string(),
         ];
         for _ in 0..20 {
-            sel.stat_man.update("fast.com", 10000, false);
+            sel.stat_man.update_with_protocol("fast.com", "http", 10000, false);
         }
-        sel.stat_man.update("slow.com", 2000, false);
+        sel.stat_man.update_with_protocol("slow.com", "http", 2000, false);
 
         let limit = sel.adjust_lowest_speed_limit(&uris);
         assert!(limit > 0);
@@ -590,8 +590,8 @@ mod tests {
     #[test]
     fn test_reset_counters() {
         let sel = create_selector();
-        sel.stat_man.update("test.com", 5000, false);
-        let s = sel.stat_man.find_stat("test.com").unwrap();
+        sel.stat_man.update_with_protocol("test.com", "http", 5000, false);
+        let s = sel.stat_man.find_stat_by_protocol("test.com", "http").unwrap();
         s.increment_counter();
         s.increment_counter();
         assert_eq!(s.get_counter(), 2);
@@ -617,8 +617,8 @@ mod tests {
         ];
 
         for host in &["a.com", "b.com", "c.com"] {
-            sel.stat_man.update(host, 5000, false);
-            let s = sel.stat_man.find_stat(host).unwrap();
+            sel.stat_man.update_with_protocol(host, "http", 5000, false);
+            let s = sel.stat_man.find_stat_by_protocol(host, "http").unwrap();
             s.increment_counter();
         }
 

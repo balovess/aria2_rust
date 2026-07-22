@@ -178,20 +178,55 @@ pub struct FileBackedPieceProvider {
     piece_length: u32,
     num_pieces: u32,
     multi_file_layout: Option<MultiFileLayout>,
+    /// Per-piece availability: `pieces[i]` is `true` if piece i is available
+    /// for upload. For a complete seed this is all-true; for a partial seed
+    /// only the completed pieces are marked true.
+    pieces: Vec<bool>,
 }
 
 impl FileBackedPieceProvider {
+    /// Create a new `FileBackedPieceProvider` assuming all pieces are available
+    /// (complete seed scenario).
     pub fn new(
         file_path: std::path::PathBuf,
         piece_length: u32,
         num_pieces: u32,
         multi_file_layout: Option<MultiFileLayout>,
     ) -> Self {
+        let pieces = vec![true; num_pieces as usize];
         Self {
             file_path,
             piece_length,
             num_pieces,
             multi_file_layout,
+            pieces,
+        }
+    }
+
+    /// Create a `FileBackedPieceProvider` with explicit piece availability.
+    ///
+    /// Use this for partial seeds where only some pieces are available.
+    pub fn with_pieces(
+        file_path: std::path::PathBuf,
+        piece_length: u32,
+        num_pieces: u32,
+        multi_file_layout: Option<MultiFileLayout>,
+        pieces: Vec<bool>,
+    ) -> Self {
+        debug_assert_eq!(pieces.len(), num_pieces as usize);
+        Self {
+            file_path,
+            piece_length,
+            num_pieces,
+            multi_file_layout,
+            pieces,
+        }
+    }
+
+    /// Mark a piece as available (completed).
+    pub fn mark_piece_available(&mut self, piece_index: u32) {
+        if let Some(available) = self.pieces.get_mut(piece_index as usize) {
+            *available = true;
         }
     }
 }
@@ -270,8 +305,10 @@ impl PieceDataProvider for FileBackedPieceProvider {
         }
     }
 
-    fn has_piece(&self, _piece_index: u32) -> bool {
-        true
+    fn has_piece(&self, piece_index: u32) -> bool {
+        self.pieces
+            .get(piece_index as usize)
+            .is_some_and(|&available| available)
     }
 
     fn num_pieces(&self) -> u32 {
@@ -335,10 +372,16 @@ pub async fn write_piece_to_multi_files(
                 .to_path_buf();
 
             if let std::collections::hash_map::Entry::Vacant(e) = file_writers.entry(file_idx) {
+                // NOTE: Do NOT use .truncate(true) — it would destroy existing
+                // file content from previously completed pieces (data corruption
+                // on partial / resumed downloads).  We seek + write at the
+                // correct offset, so the file must be opened for random-access
+                // writing without truncation (matching C++ aria2 behavior).
                 let f = tokio::fs::OpenOptions::new()
                     .create(true)
-                    .truncate(true)
+                    .truncate(false)
                     .write(true)
+                    .read(true)
                     .open(&file_path)
                     .await
                     .map_err(|e| {
@@ -509,10 +552,14 @@ pub async fn write_piece_to_multi_files_coalesced(
 
         let writer = match file_writers.entry(cw.file_idx) {
             std::collections::hash_map::Entry::Vacant(e) => {
+                // NOTE: Do NOT use .truncate(true) — it would destroy existing
+                // file content from previously completed pieces.  We seek +
+                // write at the correct offset for random-access writing.
                 let f = tokio::fs::OpenOptions::new()
                     .create(true)
-                    .truncate(true)
+                    .truncate(false)
                     .write(true)
+                    .read(true)
                     .open(&file_path)
                     .await
                     .map_err(|e| {
