@@ -22,10 +22,18 @@
 //! - **No vtable overhead**: enum dispatch is zero-cost at the call site.
 //! - **Exhaustive matching**: Adding a new variant requires updating all match arms,
 //!   preventing the "forgot to override" bugs common in C++ virtual hierarchies.
-//! - **ID-based references**: Uses `u64` IDs instead of `Arc<>` or raw pointers
-//!   to reference DownloadContext, PieceStorage, and RequestGroup. This matches
-//!   the project's existing pattern and avoids lifetime complexity. Objects are
-//!   resolved through a central registry at runtime.
+//! - **Direct Arc<> references**: Uses `Arc<DownloadContext>` and `Arc<dyn PieceStorage>`
+//!   instead of ID-based lookups, matching C++ `shared_ptr<>` semantics.
+//!
+//! # Interior Mutability Note
+//!
+//! `PieceStorage` trait methods like `mark_piece_verified` and `mark_piece_failed`
+//! require `&mut self`, but the validator holds `Arc<dyn PieceStorage>` (shared
+//! reference). To resolve this, `PieceHashValidator::validate_chunk()` collects
+//! validation results internally, and the caller applies them via
+//! `apply_validation_results()` when a `&mut dyn PieceStorage` is available.
+//! This matches the C++ `shared_ptr<PieceStorage>` pattern where mutable access
+//! is taken without Rust's borrow-checker enforcement.
 //!
 //! # C++ Reference
 //!
@@ -35,7 +43,30 @@
 //! - `PieceHashCheckIntegrityEntry.h/.cc` — piece-hash based integrity checking
 //! - `StreamCheckIntegrityEntry.h/.cc` — stream download integrity checking
 
-use tracing::{info, trace};
+use std::sync::Arc;
+use tracing::{info, trace, warn};
+
+// ---------------------------------------------------------------------------
+// PieceValidationResult — per-piece validation outcome
+// ---------------------------------------------------------------------------
+
+/// Result of validating a single piece against its expected hash.
+///
+/// Collected by `PieceHashValidator::validate_chunk()` and later applied
+/// to `PieceStorage` via `apply_validation_results()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PieceValidationResult {
+    /// Piece hash matched the expected value.
+    Verified {
+        /// Index of the verified piece.
+        piece_index: usize,
+    },
+    /// Piece hash did NOT match the expected value.
+    Failed {
+        /// Index of the failed piece.
+        piece_index: usize,
+    },
+}
 
 // ---------------------------------------------------------------------------
 // ValidatorKind — replaces C++ IteratableValidator virtual hierarchy
@@ -121,6 +152,16 @@ impl ValidatorKind {
             ValidatorKind::PieceHash(v) => v.total_length(),
         }
     }
+
+    /// Apply all collected validation results to the given PieceStorage.
+    ///
+    /// No-op for `ValidatorKind::None`.
+    pub fn apply_validation_results(&self, ps: &mut dyn crate::segment::piece_storage::PieceStorage) {
+        match self {
+            ValidatorKind::None => {}
+            ValidatorKind::PieceHash(v) => v.apply_validation_results(ps),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,29 +176,35 @@ impl ValidatorKind {
 ///
 /// # Algorithm (matching C++ behavior)
 ///
-/// 1. `init()` — reset state, prepare hash context for the piece hash algorithm.
-/// 2. `validate_chunk()` — read one piece from disk, compute its hash, compare
-///    against the expected hash. Update the bitfield accordingly.
-/// 3. When all pieces are validated, sync the bitfield back to PieceStorage.
+/// 1. `init()` — reset state, compute the expected bitfield length.
+/// 2. `validate_chunk()` — read one piece from disk via PieceStorage, compute its
+///    hash, compare against the expected hash from DownloadContext. Store the
+///    result internally (does NOT directly mutate PieceStorage).
+/// 3. When all pieces are validated, call `apply_validation_results()` to sync
+///    the bitfield back to PieceStorage.
 ///
-/// # ID-based References
+/// # Interior Mutability
 ///
-/// Instead of holding `Arc<DownloadContext>` and `Arc<PieceStorage>` (as the C++
-/// version does with `shared_ptr`), this struct uses `u64` IDs. The actual
-/// objects are resolved through a central registry at runtime when I/O is
-/// performed. This avoids lifetime complexity and reference cycles.
+/// `PieceStorage::mark_piece_verified()` and `mark_piece_failed()` require
+/// `&mut self`, but this validator holds `Arc<dyn PieceStorage>` (shared ref).
+/// Rather than wrapping the Arc in a Mutex (which adds overhead and complicates
+/// the API), `validate_chunk()` collects results in a `Vec<PieceValidationResult>`.
+/// The caller applies them via `apply_validation_results(&mut dyn PieceStorage)`.
 ///
-/// # TODO
+/// # Direct Arc<> References
 ///
-/// - Wire up actual disk I/O through DiskAdaptor (currently skeleton).
-/// - Implement bitfield update on validation completion.
-/// - Implement piece hash lookup from DownloadContext registry.
-#[derive(Debug)]
+/// Holds `Arc<DownloadContext>` and `Arc<dyn PieceStorage>` directly, matching
+/// C++ `shared_ptr<DownloadContext>` and `shared_ptr<PieceStorage>`. This
+/// replaces the previous ID-based reference pattern.
 pub struct PieceHashValidator {
-    /// ID reference to the DownloadContext that holds piece hashes and metadata.
-    download_context_id: u64,
-    /// ID reference to the PieceStorage that holds the download bitfield and disk adaptor.
-    piece_storage_id: u64,
+    /// Shared download context containing piece hashes and metadata.
+    /// C++ uses `shared_ptr<DownloadContext>`.
+    download_context: Arc<crate::download::DownloadContext>,
+    /// Shared piece storage holding the download bitfield and disk adaptor.
+    /// C++ uses `shared_ptr<PieceStorage>`.
+    /// Used for `read_data()` (`&self` method). Mutation is done via
+    /// `apply_validation_results()` which takes `&mut dyn PieceStorage`.
+    piece_storage: Arc<dyn crate::segment::piece_storage::PieceStorage>,
     /// Index of the piece currently being validated.
     current_piece_index: usize,
     /// Total number of pieces to validate.
@@ -170,6 +217,28 @@ pub struct PieceHashValidator {
     total_length: u64,
     /// Piece length in bytes (typically 1 MiB for HTTP, variable for BT).
     piece_length: u64,
+    /// Number of pieces that passed hash verification.
+    pieces_ok: usize,
+    /// Number of pieces that failed hash verification.
+    pieces_failed: usize,
+    /// Collected validation results, applied later via `apply_validation_results()`.
+    validation_results: Vec<PieceValidationResult>,
+}
+
+impl std::fmt::Debug for PieceHashValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PieceHashValidator")
+            .field("current_piece_index", &self.current_piece_index)
+            .field("total_pieces", &self.total_pieces)
+            .field("finished", &self.finished)
+            .field("current_offset", &self.current_offset)
+            .field("total_length", &self.total_length)
+            .field("piece_length", &self.piece_length)
+            .field("pieces_ok", &self.pieces_ok)
+            .field("pieces_failed", &self.pieces_failed)
+            .field("validation_results_len", &self.validation_results.len())
+            .finish()
+    }
 }
 
 impl PieceHashValidator {
@@ -177,27 +246,30 @@ impl PieceHashValidator {
     ///
     /// # Arguments
     ///
-    /// * `download_context_id` — ID of the DownloadContext containing piece hashes.
-    /// * `piece_storage_id` — ID of the PieceStorage holding the download bitfield.
+    /// * `download_context` — Shared DownloadContext containing piece hashes.
+    /// * `piece_storage` — Shared PieceStorage holding the download bitfield.
     /// * `total_pieces` — Total number of pieces to validate.
     /// * `total_length` — Total byte length of the download.
     /// * `piece_length` — Byte length of each piece (except possibly the last).
     pub fn new(
-        download_context_id: u64,
-        piece_storage_id: u64,
+        download_context: Arc<crate::download::DownloadContext>,
+        piece_storage: Arc<dyn crate::segment::piece_storage::PieceStorage>,
         total_pieces: usize,
         total_length: u64,
         piece_length: u64,
     ) -> Self {
         Self {
-            download_context_id,
-            piece_storage_id,
+            download_context,
+            piece_storage,
             current_piece_index: 0,
             total_pieces,
             finished: total_pieces == 0,
             current_offset: 0,
             total_length,
             piece_length,
+            pieces_ok: 0,
+            pieces_failed: 0,
+            validation_results: Vec::new(),
         }
     }
 
@@ -205,67 +277,116 @@ impl PieceHashValidator {
     ///
     /// Resets piece index, offset, and finished flag. In the C++ version, this
     /// also creates the `MessageDigest` context and clears the bitfield.
-    /// The actual I/O and hash context setup will be wired when DiskAdaptor
-    /// integration is complete.
     pub fn init(&mut self) {
         trace!(
-            dctx_id = self.download_context_id,
-            ps_id = self.piece_storage_id,
             total_pieces = self.total_pieces,
             "PieceHashValidator initializing"
         );
         self.current_piece_index = 0;
         self.current_offset = 0;
         self.finished = self.total_pieces == 0;
-
-        // TODO: Create MessageDigest context from DownloadContext's piece_hash_type.
-        // TODO: Clear the bitfield in PieceStorage.
+        self.pieces_ok = 0;
+        self.pieces_failed = 0;
+        self.validation_results.clear();
     }
 
     /// Validate a single piece (chunk).
     ///
-    /// Reads the piece data from disk, computes its hash, and compares against
-    /// the expected hash from DownloadContext. Updates the bitfield accordingly.
+    /// Reads the piece data from disk via PieceStorage, computes its hash,
+    /// and compares against the expected hash from DownloadContext. The result
+    /// is stored internally in `validation_results` — it is NOT applied to
+    /// PieceStorage directly because `mark_piece_verified`/`mark_piece_failed`
+    /// require `&mut self` and we hold `Arc<dyn PieceStorage>`.
     ///
-    /// In the C++ version, this method:
+    /// Call `apply_validation_results()` after validation completes to apply
+    /// all results to a `&mut dyn PieceStorage`.
+    ///
+    /// In the C++ version (`IteratableChunkChecksumValidator::validateChunk()`):
     /// 1. Computes the expected piece length (last piece may be shorter).
     /// 2. Reads piece data from DiskAdaptor.
     /// 3. Hashes the data and compares with the expected piece hash.
     /// 4. Sets/unsets the bitfield bit for this piece.
     /// 5. Advances to the next piece index.
     /// 6. When finished, syncs the bitfield back to PieceStorage.
-    ///
-    /// # TODO
-    ///
-    /// - Wire up actual disk read via DiskAdaptor.
-    /// - Wire up piece hash lookup from DownloadContext.
-    /// - Wire up bitfield update in PieceStorage.
     pub fn validate_chunk(&mut self) {
         if self.finished {
             trace!("PieceHashValidator::validate_chunk called after completion — no-op");
             return;
         }
 
-        trace!(
-            piece_index = self.current_piece_index,
-            total_pieces = self.total_pieces,
-            offset = self.current_offset,
-            "Validating piece chunk"
-        );
+        let piece_index = self.current_piece_index;
 
-        // TODO: Actual hash validation logic:
-        //   1. Determine piece length (last piece may be shorter).
-        //      let piece_len = if self.current_piece_index + 1 == self.total_pieces {
-        //          self.total_length - self.current_offset
-        //      } else {
-        //          self.piece_length
-        //      };
-        //
-        //   2. Read piece data from DiskAdaptor via PieceStorage registry.
-        //   3. Compute hash using MessageDigest.
-        //   4. Compare with expected hash from DownloadContext registry.
-        //   5. Set/unset bit in bitfield accordingly.
-        //   6. On I/O error (RecoverableException in C++), unset bit and continue.
+        // Determine piece length (last piece may be shorter).
+        let piece_len = if piece_index + 1 == self.total_pieces {
+            self.total_length.saturating_sub(self.current_offset)
+        } else {
+            self.piece_length
+        };
+
+        // Compute expected hash for this piece from DownloadContext.
+        // get_piece_hash() returns "" if index is out of range.
+        let expected_hash = self.download_context.get_piece_hash(piece_index);
+        let has_expected = !expected_hash.is_empty();
+
+        // Read piece data from DiskAdaptor via PieceStorage.
+        // In C++, this calls `pieceStorage_->getDiskAdaptor()->readData()`.
+        // Here we use the PieceStorage's read interface.
+        match self.piece_storage.read_data(piece_index) {
+            Ok(data) if data.len() as u64 == piece_len => {
+                // Compute the hash of the piece data.
+                let computed_hash = self.compute_hash(&data);
+
+                if has_expected {
+                    if computed_hash.eq_ignore_ascii_case(expected_hash) {
+                        // Hash matches — record verified result.
+                        trace!(piece_index, "Piece hash verified OK");
+                        self.validation_results
+                            .push(PieceValidationResult::Verified { piece_index });
+                        self.pieces_ok += 1;
+                    } else {
+                        // Hash mismatch — record failed result.
+                        warn!(
+                            piece_index,
+                            expected_hash_len = expected_hash.len(),
+                            computed_hash_len = computed_hash.len(),
+                            "Piece hash mismatch — marking for re-download"
+                        );
+                        self.validation_results
+                            .push(PieceValidationResult::Failed { piece_index });
+                        self.pieces_failed += 1;
+                    }
+                } else {
+                    // No expected hash available — cannot verify this piece.
+                    // In C++ this doesn't happen (pieces always have hashes),
+                    // but we handle it gracefully.
+                    trace!(piece_index, "No expected hash for piece — skipping verification");
+                }
+            }
+            Ok(data) => {
+                // Read returned wrong length — treat as failure.
+                warn!(
+                    piece_index,
+                    expected_len = piece_len,
+                    actual_len = data.len(),
+                    "Piece data length mismatch during integrity check"
+                );
+                self.validation_results
+                    .push(PieceValidationResult::Failed { piece_index });
+                self.pieces_failed += 1;
+            }
+            Err(e) => {
+                // I/O error reading piece data — treat as failure.
+                // In C++, `RecoverableException` causes the bit to be unset.
+                warn!(
+                    piece_index,
+                    error = %e,
+                    "Failed to read piece data during integrity check"
+                );
+                self.validation_results
+                    .push(PieceValidationResult::Failed { piece_index });
+                self.pieces_failed += 1;
+            }
+        }
 
         // Advance to next piece
         self.current_piece_index += 1;
@@ -280,13 +401,51 @@ impl PieceHashValidator {
         if self.current_piece_index >= self.total_pieces {
             self.finished = true;
             info!(
-                dctx_id = self.download_context_id,
                 total_pieces = self.total_pieces,
+                pieces_ok = self.pieces_ok,
+                pieces_failed = self.pieces_failed,
                 "PieceHashValidator completed all piece validation"
             );
-            // TODO: Sync bitfield back to PieceStorage:
-            //   pieceStorage_->setBitfield(bitfield_->getBitfield(), bitfield_->getBitfieldLength());
         }
+    }
+
+    /// Apply all collected validation results to the given PieceStorage.
+    ///
+    /// This is the Rust equivalent of the C++ pattern where
+    /// `IteratableChunkChecksumValidator` directly calls
+    /// `pieceStorage_->setBit(index)` or `unsetBit(index)` on the bitfield.
+    /// In Rust, we separate validation from mutation because `Arc<dyn PieceStorage>`
+    /// does not allow calling `&mut self` methods.
+    ///
+    /// The caller must provide a `&mut dyn PieceStorage` to apply results to.
+    /// This is typically done after `is_finished()` returns `true`.
+    pub fn apply_validation_results(
+        &self,
+        ps: &mut dyn crate::segment::piece_storage::PieceStorage,
+    ) {
+        for result in &self.validation_results {
+            match result {
+                PieceValidationResult::Verified { piece_index } => {
+                    ps.mark_piece_verified(*piece_index);
+                }
+                PieceValidationResult::Failed { piece_index } => {
+                    ps.mark_piece_failed(*piece_index);
+                }
+            }
+        }
+    }
+
+    /// Compute the SHA-1 hash of a piece's data and return as hex string.
+    ///
+    /// In C++, this uses `MessageDigest` with the algorithm from
+    /// `dctx->getPieceHashType()`. Currently only SHA-1 is supported
+    /// (the standard for BitTorrent and most HTTP downloads).
+    fn compute_hash(&self, data: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        let mut hasher = Sha1::new();
+        hasher.update(data);
+        let result = hasher.finalize();
+        hex::encode(result)
     }
 
     /// Whether validation has completed all pieces.
@@ -318,14 +477,29 @@ impl PieceHashValidator {
         self.total_pieces
     }
 
-    /// Return the DownloadContext ID reference.
-    pub fn download_context_id(&self) -> u64 {
-        self.download_context_id
+    /// Return the number of pieces that passed verification.
+    pub fn pieces_ok(&self) -> usize {
+        self.pieces_ok
     }
 
-    /// Return the PieceStorage ID reference.
-    pub fn piece_storage_id(&self) -> u64 {
-        self.piece_storage_id
+    /// Return the number of pieces that failed verification.
+    pub fn pieces_failed(&self) -> usize {
+        self.pieces_failed
+    }
+
+    /// Return a reference to the collected validation results.
+    pub fn validation_results(&self) -> &[PieceValidationResult] {
+        &self.validation_results
+    }
+
+    /// Return a reference to the DownloadContext.
+    pub fn download_context(&self) -> &Arc<crate::download::DownloadContext> {
+        &self.download_context
+    }
+
+    /// Return a reference to the PieceStorage.
+    pub fn piece_storage(&self) -> &Arc<dyn crate::segment::piece_storage::PieceStorage> {
+        &self.piece_storage
     }
 }
 
@@ -354,16 +528,28 @@ impl PieceHashValidator {
 /// | `onDownloadIncomplete()`       | `on_download_incomplete()`    |
 /// | `cutTrailingGarbage()`         | `cut_trailing_garbage()`      |
 /// | `shouldReportIncompleteAsError()` | `should_report_incomplete_as_error()` |
-#[derive(Debug)]
 pub struct StreamCheckIntegrity {
     /// The validator assigned to this entry.
     /// Equivalent to C++ `CheckIntegrityEntry::validator_`.
     validator: ValidatorKind,
-    /// ID reference to the RequestGroup that owns this download.
-    request_group_id: u64,
+    /// Shared download context containing piece hashes.
+    download_context: Option<Arc<crate::download::DownloadContext>>,
+    /// Shared piece storage for data reading and bitfield updates.
+    piece_storage: Option<Arc<dyn crate::segment::piece_storage::PieceStorage>>,
     /// If true, only perform hash checking and do NOT proceed to file allocation
     /// after the check completes. Matches C++ `PREF_HASH_CHECK_ONLY` option.
     hash_check_only: bool,
+}
+
+impl std::fmt::Debug for StreamCheckIntegrity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamCheckIntegrity")
+            .field("validator", &self.validator)
+            .field("download_context", &self.download_context.is_some())
+            .field("piece_storage", &self.piece_storage.is_some())
+            .field("hash_check_only", &self.hash_check_only)
+            .finish()
+    }
 }
 
 impl StreamCheckIntegrity {
@@ -371,12 +557,18 @@ impl StreamCheckIntegrity {
     ///
     /// # Arguments
     ///
-    /// * `request_group_id` — ID of the owning RequestGroup.
+    /// * `download_context` — Shared DownloadContext containing piece hashes.
+    /// * `piece_storage` — Shared PieceStorage for data reading and bitfield updates.
     /// * `hash_check_only` — If true, skip file allocation after integrity check.
-    pub fn new(request_group_id: u64, hash_check_only: bool) -> Self {
+    pub fn new(
+        download_context: Arc<crate::download::DownloadContext>,
+        piece_storage: Arc<dyn crate::segment::piece_storage::PieceStorage>,
+        hash_check_only: bool,
+    ) -> Self {
         Self {
             validator: ValidatorKind::None,
-            request_group_id,
+            download_context: Some(download_context),
+            piece_storage: Some(piece_storage),
             hash_check_only,
         }
     }
@@ -384,17 +576,15 @@ impl StreamCheckIntegrity {
     /// Whether the validation is ready to begin.
     ///
     /// In C++ `PieceHashCheckIntegrityEntry::isValidationReady()`, this checks
-    /// `dctx->isPieceHashVerificationAvailable()`. Since we use ID-based
-    /// references, the actual check requires registry lookup.
-    ///
-    /// For now, returns `true` as a placeholder. The real implementation will
-    /// look up the DownloadContext from the registry and call
-    /// `is_piece_hash_verification_available()`.
-    // TODO: Wire up registry lookup for DownloadContext.
+    /// `dctx->isPieceHashVerificationAvailable()`. Here we check if the
+    /// DownloadContext has piece hashes set.
     pub fn is_validation_ready(&self) -> bool {
         // C++: dctx->isPieceHashVerificationAvailable()
-        // Placeholder — will be resolved via registry.
-        true
+        if let Some(ctx) = &self.download_context {
+            !ctx.get_piece_hashes().is_empty()
+        } else {
+            false
+        }
     }
 
     /// Initialize the validator for chunk-by-chunk processing.
@@ -402,30 +592,28 @@ impl StreamCheckIntegrity {
     /// In C++ `PieceHashCheckIntegrityEntry::initValidator()`, this creates an
     /// `IteratableChunkChecksumValidator` with the DownloadContext and PieceStorage,
     /// calls `init()` on it, and stores it as the validator.
-    ///
-    /// The actual creation requires registry lookup. This method creates a
-    /// `PieceHashValidator` with placeholder piece count and length values.
-    /// TODO: Wire up registry lookup for DownloadContext and PieceStorage.
-    pub fn init_validator(&mut self, total_pieces: usize, total_length: u64, piece_length: u64) {
-        trace!(
-            rg_id = self.request_group_id,
-            "StreamCheckIntegrity initializing validator"
-        );
+    pub fn init_validator(&mut self) {
+        trace!("StreamCheckIntegrity initializing validator");
 
-        // C++ creates IteratableChunkChecksumValidator(dctx, pieceStorage)
-        // then calls validator->init() and setValidator(std::move(validator)).
-        let dctx_id = self.request_group_id; // Same RG owns the DownloadContext
-        let ps_id = self.request_group_id; // Same RG owns the PieceStorage
+        if let (Some(ctx), Some(ps)) = (&self.download_context, &self.piece_storage) {
+            let total_pieces = ctx.get_piece_hashes().len();
+            if total_pieces == 0 {
+                trace!("No piece hashes available — skipping validator creation");
+                return;
+            }
+            let total_length = ctx.get_total_length();
+            let piece_length = ctx.get_piece_length() as u64;
 
-        let mut validator = PieceHashValidator::new(
-            dctx_id,
-            ps_id,
-            total_pieces,
-            total_length,
-            piece_length,
-        );
-        validator.init();
-        self.validator = ValidatorKind::PieceHash(validator);
+            let mut validator = PieceHashValidator::new(
+                Arc::clone(ctx),
+                Arc::clone(ps),
+                total_pieces,
+                total_length,
+                piece_length,
+            );
+            validator.init();
+            self.validator = ValidatorKind::PieceHash(validator);
+        }
     }
 
     /// Validate a single chunk, delegating to the underlying validator.
@@ -460,10 +648,7 @@ impl StreamCheckIntegrity {
     // TODO: Wire up command dispatch when command system is implemented.
     pub fn on_download_finished(&self) {
         // C++: no-op for StreamCheckIntegrityEntry
-        trace!(
-            rg_id = self.request_group_id,
-            "StreamCheckIntegrity::on_download_finished (no-op)"
-        );
+        trace!("StreamCheckIntegrity::on_download_finished (no-op)");
     }
 
     /// Called when the download is incomplete after integrity check.
@@ -478,7 +663,6 @@ impl StreamCheckIntegrity {
     /// - Wire up file allocation entry creation and dispatch.
     pub fn on_download_incomplete(&self) {
         trace!(
-            rg_id = self.request_group_id,
             hash_check_only = self.hash_check_only,
             "StreamCheckIntegrity::on_download_incomplete"
         );
@@ -487,10 +671,7 @@ impl StreamCheckIntegrity {
         // TODO: pieceStorage.on_download_incomplete() via registry.
 
         if self.hash_check_only {
-            trace!(
-                rg_id = self.request_group_id,
-                "hash_check_only is set — skipping file allocation"
-            );
+            trace!("hash_check_only is set — skipping file allocation");
             return;
         }
 
@@ -503,10 +684,7 @@ impl StreamCheckIntegrity {
     /// In C++, this calls `pieceStorage->getDiskAdaptor()->cutTrailingGarbage()`.
     // TODO: Wire up DiskAdaptor::cutTrailingGarbage() via registry.
     pub fn cut_trailing_garbage(&self) {
-        trace!(
-            rg_id = self.request_group_id,
-            "StreamCheckIntegrity::cut_trailing_garbage"
-        );
+        trace!("StreamCheckIntegrity::cut_trailing_garbage");
         // TODO: Resolve PieceStorage from registry, then call disk_adaptor.cut_trailing_garbage().
     }
 
@@ -516,11 +694,6 @@ impl StreamCheckIntegrity {
     /// Default is `true` for stream downloads.
     pub fn should_report_incomplete_as_error(&self) -> bool {
         true
-    }
-
-    /// Return the request group ID reference.
-    pub fn request_group_id(&self) -> u64 {
-        self.request_group_id
     }
 
     /// Return whether hash-check-only mode is enabled.
@@ -560,12 +733,31 @@ impl StreamCheckIntegrity {
 /// The C++ version does not have an explicit `BtCheckIntegrityEntry` class;
 /// BT integrity checking is handled differently in the command pipeline.
 /// We provide this struct for a clean separation of concerns.
-#[derive(Debug)]
+///
+/// # Direct Arc<> References
+///
+/// Holds `Arc<DownloadContext>` and `Arc<dyn PieceStorage>` directly, matching
+/// C++ `shared_ptr<DownloadContext>` and `shared_ptr<PieceStorage>`. This
+/// replaces the previous ID-based reference pattern.
 pub struct BtCheckIntegrity {
     /// The validator assigned to this entry.
     validator: ValidatorKind,
-    /// ID reference to the RequestGroup that owns this download.
-    request_group_id: u64,
+    /// Shared download context containing piece hashes and metadata.
+    /// C++ uses `shared_ptr<DownloadContext>`.
+    download_context: Option<Arc<crate::download::DownloadContext>>,
+    /// Shared piece storage for data reading and bitfield updates.
+    /// C++ uses `shared_ptr<PieceStorage>`.
+    piece_storage: Option<Arc<dyn crate::segment::piece_storage::PieceStorage>>,
+}
+
+impl std::fmt::Debug for BtCheckIntegrity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BtCheckIntegrity")
+            .field("validator", &self.validator)
+            .field("download_context", &self.download_context.is_some())
+            .field("piece_storage", &self.piece_storage.is_some())
+            .finish()
+    }
 }
 
 impl BtCheckIntegrity {
@@ -573,11 +765,16 @@ impl BtCheckIntegrity {
     ///
     /// # Arguments
     ///
-    /// * `request_group_id` — ID of the owning RequestGroup.
-    pub fn new(request_group_id: u64) -> Self {
+    /// * `download_context` — Shared DownloadContext containing piece hashes.
+    /// * `piece_storage` — Shared PieceStorage for data reading and bitfield updates.
+    pub fn new(
+        download_context: Arc<crate::download::DownloadContext>,
+        piece_storage: Arc<dyn crate::segment::piece_storage::PieceStorage>,
+    ) -> Self {
         Self {
             validator: ValidatorKind::None,
-            request_group_id,
+            download_context: Some(download_context),
+            piece_storage: Some(piece_storage),
         }
     }
 
@@ -585,32 +782,42 @@ impl BtCheckIntegrity {
     ///
     /// For BT downloads, this checks if piece hash verification is available
     /// in the DownloadContext (BT always has piece hashes from the torrent metadata).
-    // TODO: Wire up registry lookup for DownloadContext.
     pub fn is_validation_ready(&self) -> bool {
-        // BT downloads always have piece hashes from the .torrent metadata.
-        true
+        if let Some(ctx) = &self.download_context {
+            !ctx.get_piece_hashes().is_empty()
+        } else {
+            // BT downloads always have piece hashes from the .torrent metadata.
+            true
+        }
     }
 
     /// Initialize the validator for chunk-by-chunk processing.
-    // TODO: Wire up registry lookup for DownloadContext and PieceStorage.
-    pub fn init_validator(&mut self, total_pieces: usize, total_length: u64, piece_length: u64) {
-        trace!(
-            rg_id = self.request_group_id,
-            "BtCheckIntegrity initializing validator"
-        );
+    ///
+    /// Retrieves all metadata (total_pieces, total_length, piece_length) from
+    /// the stored `Arc<DownloadContext>`, eliminating the need for external
+    /// parameters.
+    pub fn init_validator(&mut self) {
+        trace!("BtCheckIntegrity initializing validator");
 
-        let dctx_id = self.request_group_id;
-        let ps_id = self.request_group_id;
+        if let (Some(ctx), Some(ps)) = (&self.download_context, &self.piece_storage) {
+            let total_pieces = ctx.get_piece_hashes().len();
+            if total_pieces == 0 {
+                trace!("No piece hashes available — skipping validator creation");
+                return;
+            }
+            let total_length = ctx.get_total_length();
+            let piece_length = ctx.get_piece_length() as u64;
 
-        let mut validator = PieceHashValidator::new(
-            dctx_id,
-            ps_id,
-            total_pieces,
-            total_length,
-            piece_length,
-        );
-        validator.init();
-        self.validator = ValidatorKind::PieceHash(validator);
+            let mut validator = PieceHashValidator::new(
+                Arc::clone(ctx),
+                Arc::clone(ps),
+                total_pieces,
+                total_length,
+                piece_length,
+            );
+            validator.init();
+            self.validator = ValidatorKind::PieceHash(validator);
+        }
     }
 
     /// Validate a single chunk, delegating to the underlying validator.
@@ -639,10 +846,7 @@ impl BtCheckIntegrity {
     /// through its own command chain (e.g., seeding mode transition).
     // TODO: Wire up command dispatch when command system is implemented.
     pub fn on_download_finished(&self) {
-        trace!(
-            rg_id = self.request_group_id,
-            "BtCheckIntegrity::on_download_finished (no-op)"
-        );
+        trace!("BtCheckIntegrity::on_download_finished (no-op)");
     }
 
     /// Called when the download is incomplete after integrity check.
@@ -652,10 +856,7 @@ impl BtCheckIntegrity {
     /// the BT pipeline re-downloads missing pieces through its own mechanism.
     // TODO: Wire up PieceStorage::onDownloadIncomplete() via registry.
     pub fn on_download_incomplete(&self) {
-        trace!(
-            rg_id = self.request_group_id,
-            "BtCheckIntegrity::on_download_incomplete"
-        );
+        trace!("BtCheckIntegrity::on_download_incomplete");
         // C++: ps->onDownloadIncomplete()
         // No file allocation for BT downloads.
     }
@@ -663,10 +864,7 @@ impl BtCheckIntegrity {
     /// Cut trailing garbage data beyond the expected total length.
     // TODO: Wire up DiskAdaptor::cutTrailingGarbage() via registry.
     pub fn cut_trailing_garbage(&self) {
-        trace!(
-            rg_id = self.request_group_id,
-            "BtCheckIntegrity::cut_trailing_garbage"
-        );
+        trace!("BtCheckIntegrity::cut_trailing_garbage");
     }
 
     /// Whether incomplete validation should be reported as an error.
@@ -675,11 +873,6 @@ impl BtCheckIntegrity {
     /// during partial seeding and the BT pipeline handles re-downloading.
     pub fn should_report_incomplete_as_error(&self) -> bool {
         false
-    }
-
-    /// Return the request group ID reference.
-    pub fn request_group_id(&self) -> u64 {
-        self.request_group_id
     }
 
     /// Return a reference to the underlying validator.
@@ -727,12 +920,12 @@ impl CheckIntegrityKind {
 
     /// Initialize the validator.
     ///
-    /// The caller must provide piece metadata since enum dispatch cannot
-    /// access the registry directly.
-    pub fn init_validator(&mut self, total_pieces: usize, total_length: u64, piece_length: u64) {
+    /// Each variant retrieves its metadata from the stored `Arc<DownloadContext>`,
+    /// so no external parameters are needed.
+    pub fn init_validator(&mut self) {
         match self {
-            CheckIntegrityKind::Stream(s) => s.init_validator(total_pieces, total_length, piece_length),
-            CheckIntegrityKind::Bt(b) => b.init_validator(total_pieces, total_length, piece_length),
+            CheckIntegrityKind::Stream(s) => s.init_validator(),
+            CheckIntegrityKind::Bt(b) => b.init_validator(),
         }
     }
 
@@ -799,14 +992,6 @@ impl CheckIntegrityKind {
             CheckIntegrityKind::Bt(b) => b.should_report_incomplete_as_error(),
         }
     }
-
-    /// Return the request group ID reference.
-    pub fn request_group_id(&self) -> u64 {
-        match self {
-            CheckIntegrityKind::Stream(s) => s.request_group_id(),
-            CheckIntegrityKind::Bt(b) => b.request_group_id(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +1001,28 @@ impl CheckIntegrityKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Test fixture helpers ─────────────────────────────────────────────────
+
+    /// Create a test `Arc<DownloadContext>` with the given piece length and total length.
+    fn make_dctx(piece_length: u32, total_length: u64) -> Arc<crate::download::DownloadContext> {
+        Arc::new(crate::download::DownloadContext::new(
+            piece_length,
+            total_length,
+            "/tmp/test_check_integrity.bin".to_string(),
+        ))
+    }
+
+    /// Create a test `Arc<dyn PieceStorage>` with the given piece length and total length.
+    fn make_ps(
+        piece_length: u64,
+        total_length: u64,
+    ) -> Arc<dyn crate::segment::piece_storage::PieceStorage> {
+        Arc::new(crate::segment::piece_storage::DefaultPieceStorage::new(
+            piece_length,
+            total_length,
+        ))
+    }
 
     // ── ValidatorKind enum dispatch tests ─────────────────────────────────
 
@@ -843,8 +1050,10 @@ mod tests {
 
     #[test]
     fn test_validator_kind_piece_hash_dispatch() {
+        let ctx = make_dctx(1_048_576, 5_242_880);
+        let ps = make_ps(1_048_576, 5_242_880);
         let v = ValidatorKind::PieceHash(
-            PieceHashValidator::new(1, 2, 5, 5_242_880, 1_048_576)
+            PieceHashValidator::new(ctx, ps, 5, 5_242_880, 1_048_576)
         );
         assert!(!v.is_finished(), "PieceHash with 5 pieces should not be finished initially");
         assert_eq!(v.total_length(), 5_242_880);
@@ -855,9 +1064,9 @@ mod tests {
 
     #[test]
     fn test_piece_hash_validator_new() {
-        let v = PieceHashValidator::new(10, 20, 4, 4_194_304, 1_048_576);
-        assert_eq!(v.download_context_id(), 10);
-        assert_eq!(v.piece_storage_id(), 20);
+        let ctx = make_dctx(1_048_576, 4_194_304);
+        let ps = make_ps(1_048_576, 4_194_304);
+        let v = PieceHashValidator::new(ctx, ps, 4, 4_194_304, 1_048_576);
         assert_eq!(v.current_piece_index(), 0);
         assert_eq!(v.total_pieces(), 4);
         assert!(!v.is_finished());
@@ -867,13 +1076,17 @@ mod tests {
 
     #[test]
     fn test_piece_hash_validator_zero_pieces_is_finished() {
-        let v = PieceHashValidator::new(1, 2, 0, 0, 1_048_576);
+        let ctx = make_dctx(1_048_576, 0);
+        let ps = make_ps(1_048_576, 0);
+        let v = PieceHashValidator::new(ctx, ps, 0, 0, 1_048_576);
         assert!(v.is_finished(), "Zero pieces should be immediately finished");
     }
 
     #[test]
     fn test_piece_hash_validator_init_resets_state() {
-        let mut v = PieceHashValidator::new(1, 2, 3, 3_145_728, 1_048_576);
+        let ctx = make_dctx(1_048_576, 3_145_728);
+        let ps = make_ps(1_048_576, 3_145_728);
+        let mut v = PieceHashValidator::new(ctx, ps, 3, 3_145_728, 1_048_576);
         // Simulate partial progress
         v.validate_chunk();
         v.validate_chunk();
@@ -888,7 +1101,9 @@ mod tests {
 
     #[test]
     fn test_piece_hash_validator_init_with_zero_pieces() {
-        let mut v = PieceHashValidator::new(1, 2, 0, 0, 1024);
+        let ctx = make_dctx(1024, 0);
+        let ps = make_ps(1024, 0);
+        let mut v = PieceHashValidator::new(ctx, ps, 0, 0, 1024);
         v.init();
         assert!(v.is_finished(), "Init with zero pieces should set finished");
     }
@@ -897,7 +1112,9 @@ mod tests {
 
     #[test]
     fn test_piece_hash_validator_validate_chunk_advances() {
-        let mut v = PieceHashValidator::new(1, 2, 3, 3_145_728, 1_048_576);
+        let ctx = make_dctx(1_048_576, 3_145_728);
+        let ps = make_ps(1_048_576, 3_145_728);
+        let mut v = PieceHashValidator::new(ctx, ps, 3, 3_145_728, 1_048_576);
 
         v.validate_chunk();
         assert_eq!(v.current_piece_index(), 1);
@@ -912,7 +1129,9 @@ mod tests {
 
     #[test]
     fn test_piece_hash_validator_saturates_at_total_length() {
-        let mut v = PieceHashValidator::new(1, 2, 2, 2_097_152, 1_048_576);
+        let ctx = make_dctx(1_048_576, 2_097_152);
+        let ps = make_ps(1_048_576, 2_097_152);
+        let mut v = PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576);
 
         v.validate_chunk(); // piece 0 → piece 1
         v.validate_chunk(); // piece 1 → finished
@@ -926,7 +1145,9 @@ mod tests {
 
     #[test]
     fn test_piece_hash_validator_finished_after_all_chunks() {
-        let mut v = PieceHashValidator::new(1, 2, 2, 2_097_152, 1_048_576);
+        let ctx = make_dctx(1_048_576, 2_097_152);
+        let ps = make_ps(1_048_576, 2_097_152);
+        let mut v = PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576);
 
         assert!(!v.is_finished());
         v.validate_chunk();
@@ -937,7 +1158,9 @@ mod tests {
 
     #[test]
     fn test_piece_hash_validator_validate_after_finished_is_noop() {
-        let mut v = PieceHashValidator::new(1, 2, 1, 1_048_576, 1_048_576);
+        let ctx = make_dctx(1_048_576, 1_048_576);
+        let ps = make_ps(1_048_576, 1_048_576);
+        let mut v = PieceHashValidator::new(ctx, ps, 1, 1_048_576, 1_048_576);
 
         v.validate_chunk();
         assert!(v.is_finished());
@@ -948,15 +1171,53 @@ mod tests {
         assert_eq!(v.current_piece_index(), 1);
     }
 
+    // ── Validation result collection tests ─────────────────────────────────
+
+    #[test]
+    fn test_piece_hash_validator_collects_failed_results() {
+        // No disk adaptor connected → all reads fail → all pieces marked failed
+        let ctx = make_dctx(1_048_576, 2_097_152);
+        let ps = make_ps(1_048_576, 2_097_152);
+        let mut v = PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576);
+
+        v.validate_chunk();
+        v.validate_chunk();
+        assert!(v.is_finished());
+
+        // All pieces should have failed (no disk adaptor)
+        let results = v.validation_results();
+        assert_eq!(results.len(), 2);
+        assert!(matches!(results[0], PieceValidationResult::Failed { piece_index: 0 }));
+        assert!(matches!(results[1], PieceValidationResult::Failed { piece_index: 1 }));
+        assert_eq!(v.pieces_failed(), 2);
+        assert_eq!(v.pieces_ok(), 0);
+    }
+
+    #[test]
+    fn test_piece_hash_validator_apply_results() {
+        let ctx = make_dctx(1_048_576, 2_097_152);
+        let ps = make_ps(1_048_576, 2_097_152);
+        let mut v = PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576);
+
+        v.validate_chunk();
+        v.validate_chunk();
+
+        // Apply results to a fresh PieceStorage
+        let mut ps2 = crate::segment::piece_storage::DefaultPieceStorage::new(1_048_576, 2_097_152);
+        v.apply_validation_results(&mut ps2);
+        // Should not panic
+    }
+
     // ── CheckIntegrityKind enum dispatch tests ────────────────────────────
 
     #[test]
     fn test_check_integrity_kind_stream() {
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
         let entry = CheckIntegrityKind::Stream(
-            StreamCheckIntegrity::new(42, false)
+            StreamCheckIntegrity::new(ctx, ps, false)
         );
-        assert_eq!(entry.request_group_id(), 42);
-        assert!(entry.is_validation_ready());
+        assert!(!entry.is_validation_ready()); // No piece hashes set
         assert!(entry.is_finished()); // No validator yet (None), so finished
         assert_eq!(entry.total_length(), 0);
         assert_eq!(entry.current_length(), 0);
@@ -965,11 +1226,12 @@ mod tests {
 
     #[test]
     fn test_check_integrity_kind_bt() {
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
         let entry = CheckIntegrityKind::Bt(
-            BtCheckIntegrity::new(99)
+            BtCheckIntegrity::new(ctx, ps)
         );
-        assert_eq!(entry.request_group_id(), 99);
-        assert!(entry.is_validation_ready());
+        assert!(!entry.is_validation_ready()); // No piece hashes set
         assert!(entry.is_finished()); // No validator yet (None), so finished
         assert_eq!(entry.total_length(), 0);
         assert_eq!(entry.current_length(), 0);
@@ -978,30 +1240,27 @@ mod tests {
 
     #[test]
     fn test_check_integrity_kind_init_and_validate_stream() {
+        let ctx = make_dctx(1_048_576, 3_145_728);
+        let ps = make_ps(1_048_576, 3_145_728);
         let mut entry = CheckIntegrityKind::Stream(
-            StreamCheckIntegrity::new(1, false)
+            StreamCheckIntegrity::new(ctx, ps, false)
         );
-        entry.init_validator(3, 3_145_728, 1_048_576);
-        assert!(!entry.is_finished());
-
-        entry.validate_chunk();
-        assert_eq!(entry.current_length(), 1_048_576);
-
-        entry.validate_chunk();
-        entry.validate_chunk();
+        entry.init_validator();
+        // Without piece hashes, the validator won't be created,
+        // so it remains finished (ValidatorKind::None).
         assert!(entry.is_finished());
     }
 
     #[test]
     fn test_check_integrity_kind_init_and_validate_bt() {
+        let ctx = make_dctx(1_048_576, 2_097_152);
+        let ps = make_ps(1_048_576, 2_097_152);
         let mut entry = CheckIntegrityKind::Bt(
-            BtCheckIntegrity::new(2)
+            BtCheckIntegrity::new(ctx, ps)
         );
-        entry.init_validator(2, 2_097_152, 1_048_576);
-        assert!(!entry.is_finished());
-
-        entry.validate_chunk();
-        entry.validate_chunk();
+        entry.init_validator();
+        // Without piece hashes, the validator won't be created,
+        // so it remains finished (ValidatorKind::None).
         assert!(entry.is_finished());
     }
 
@@ -1009,15 +1268,18 @@ mod tests {
 
     #[test]
     fn test_stream_check_integrity_new() {
-        let s = StreamCheckIntegrity::new(42, false);
-        assert_eq!(s.request_group_id(), 42);
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let s = StreamCheckIntegrity::new(ctx, ps, false);
         assert!(!s.hash_check_only());
         assert!(s.is_finished()); // No validator → finished
     }
 
     #[test]
     fn test_stream_check_integrity_hash_check_only() {
-        let mut s = StreamCheckIntegrity::new(1, true);
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let mut s = StreamCheckIntegrity::new(ctx, ps, true);
         assert!(s.hash_check_only());
         s.set_hash_check_only(false);
         assert!(!s.hash_check_only());
@@ -1025,40 +1287,81 @@ mod tests {
 
     #[test]
     fn test_stream_check_integrity_validation_ready() {
-        let s = StreamCheckIntegrity::new(1, false);
-        // Placeholder returns true
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let s = StreamCheckIntegrity::new(ctx, ps, false);
+        // No piece hashes set → not ready
+        assert!(!s.is_validation_ready());
+    }
+
+    #[test]
+    fn test_stream_check_integrity_validation_ready_with_hashes() {
+        let mut ctx = crate::download::DownloadContext::new(1024, 4096, "/tmp/test.bin".to_string());
+        ctx.set_piece_hashes(
+            "sha-1".to_string(),
+            vec!["h1".to_string(), "h2".to_string(), "h3".to_string(), "h4".to_string()],
+        );
+        let ctx = Arc::new(ctx);
+        let ps = make_ps(1024, 4096);
+        let s = StreamCheckIntegrity::new(ctx, ps, false);
         assert!(s.is_validation_ready());
     }
 
     #[test]
     fn test_stream_check_integrity_init_validator() {
-        let mut s = StreamCheckIntegrity::new(1, false);
+        let ctx = make_dctx(1_048_576, 4_194_304);
+        let ps = make_ps(1_048_576, 4_194_304);
+        let mut s = StreamCheckIntegrity::new(ctx, ps, false);
         assert!(s.is_finished()); // No validator yet
 
-        s.init_validator(4, 4_194_304, 1_048_576);
+        // Without piece hashes, init_validator is a no-op (validator stays None)
+        s.init_validator();
+        assert!(s.is_finished()); // Still finished (no validator created)
+    }
+
+    #[test]
+    fn test_stream_check_integrity_init_validator_with_hashes() {
+        let mut ctx = crate::download::DownloadContext::new(1_048_576, 4_194_304, "/tmp/test.bin".to_string());
+        ctx.set_piece_hashes(
+            "sha-1".to_string(),
+            vec!["h1".to_string(), "h2".to_string(), "h3".to_string(), "h4".to_string()],
+        );
+        let ctx = Arc::new(ctx);
+        let ps = make_ps(1_048_576, 4_194_304);
+        let mut s = StreamCheckIntegrity::new(ctx, ps, false);
+        assert!(s.is_finished()); // No validator yet
+
+        s.init_validator();
         assert!(!s.is_finished()); // Validator created, not yet finished
         assert_eq!(s.total_length(), 4_194_304);
     }
 
     #[test]
     fn test_stream_check_integrity_validator_access() {
-        let mut s = StreamCheckIntegrity::new(1, false);
+        let ctx = make_dctx(1_048_576, 1_048_576);
+        let ps = make_ps(1_048_576, 1_048_576);
+        let mut s = StreamCheckIntegrity::new(ctx, ps, false);
         assert!(matches!(s.validator(), ValidatorKind::None));
 
-        s.init_validator(1, 1_048_576, 1_048_576);
-        assert!(matches!(s.validator(), ValidatorKind::PieceHash(_)));
+        // Without piece hashes, init_validator is a no-op
+        s.init_validator();
+        assert!(matches!(s.validator(), ValidatorKind::None));
     }
 
     #[test]
     fn test_stream_check_integrity_on_download_finished_noop() {
-        let s = StreamCheckIntegrity::new(1, false);
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let s = StreamCheckIntegrity::new(ctx, ps, false);
         // Should not panic
         s.on_download_finished();
     }
 
     #[test]
     fn test_stream_check_integrity_on_download_incomplete() {
-        let s = StreamCheckIntegrity::new(1, false);
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let s = StreamCheckIntegrity::new(ctx, ps, false);
         // Should not panic
         s.on_download_incomplete();
     }
@@ -1068,8 +1371,12 @@ mod tests {
         // This test verifies the hash_check_only path logic.
         // The actual file allocation dispatch is TODO, but we verify
         // the method runs without panic for both branches.
-        let s_with = StreamCheckIntegrity::new(1, true);
-        let s_without = StreamCheckIntegrity::new(1, false);
+        let ctx1 = make_dctx(1024, 4096);
+        let ps1 = make_ps(1024, 4096);
+        let ctx2 = make_dctx(1024, 4096);
+        let ps2 = make_ps(1024, 4096);
+        let s_with = StreamCheckIntegrity::new(ctx1, ps1, true);
+        let s_without = StreamCheckIntegrity::new(ctx2, ps2, false);
         s_with.on_download_incomplete();
         s_without.on_download_incomplete();
     }
@@ -1078,23 +1385,33 @@ mod tests {
 
     #[test]
     fn test_bt_check_integrity_new() {
-        let b = BtCheckIntegrity::new(7);
-        assert_eq!(b.request_group_id(), 7);
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let b = BtCheckIntegrity::new(ctx, ps);
         assert!(b.is_finished()); // No validator yet
         assert!(!b.should_report_incomplete_as_error());
     }
 
     #[test]
     fn test_bt_check_integrity_init_validator() {
-        let mut b = BtCheckIntegrity::new(1);
-        b.init_validator(2, 2_097_152, 1_048_576);
+        let mut ctx = crate::download::DownloadContext::new(1_048_576, 2_097_152, "/tmp/test.bin".to_string());
+        ctx.set_piece_hashes(
+            "sha-1".to_string(),
+            vec!["h1".to_string(), "h2".to_string()],
+        );
+        let ctx = Arc::new(ctx);
+        let ps = make_ps(1_048_576, 2_097_152);
+        let mut b = BtCheckIntegrity::new(ctx, ps);
+        b.init_validator();
         assert!(!b.is_finished());
         assert_eq!(b.total_length(), 2_097_152);
     }
 
     #[test]
     fn test_bt_check_integrity_on_download_handlers() {
-        let b = BtCheckIntegrity::new(1);
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let b = BtCheckIntegrity::new(ctx, ps);
         // Should not panic
         b.on_download_finished();
         b.on_download_incomplete();
@@ -1104,8 +1421,10 @@ mod tests {
 
     #[test]
     fn test_validator_kind_piece_hash_full_lifecycle() {
+        let ctx = make_dctx(1_048_576, 2_097_152);
+        let ps = make_ps(1_048_576, 2_097_152);
         let mut v = ValidatorKind::PieceHash(
-            PieceHashValidator::new(1, 2, 2, 2_097_152, 1_048_576)
+            PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576)
         );
 
         v.init();
@@ -1126,8 +1445,10 @@ mod tests {
 
     #[test]
     fn test_validator_kind_init_on_piece_hash() {
+        let ctx = make_dctx(1_048_576, 3_145_728);
+        let ps = make_ps(1_048_576, 3_145_728);
         let mut v = ValidatorKind::PieceHash(
-            PieceHashValidator::new(1, 2, 3, 3_145_728, 1_048_576)
+            PieceHashValidator::new(ctx, ps, 3, 3_145_728, 1_048_576)
         );
         v.validate_chunk(); // advance to piece 1
         assert_eq!(v.current_offset(), 1_048_576);
@@ -1135,5 +1456,60 @@ mod tests {
         v.init(); // reset
         assert_eq!(v.current_offset(), 0);
         assert!(!v.is_finished());
+    }
+
+    #[test]
+    fn test_validator_kind_apply_validation_results() {
+        let ctx = make_dctx(1_048_576, 2_097_152);
+        let ps = make_ps(1_048_576, 2_097_152);
+        let mut v = ValidatorKind::PieceHash(
+            PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576)
+        );
+
+        v.validate_chunk();
+        v.validate_chunk();
+        assert!(v.is_finished());
+
+        // Apply results to a fresh PieceStorage
+        let mut ps2 = crate::segment::piece_storage::DefaultPieceStorage::new(1_048_576, 2_097_152);
+        v.apply_validation_results(&mut ps2);
+        // Should not panic
+    }
+
+    #[test]
+    fn test_validator_kind_apply_validation_results_none_variant() {
+        let v = ValidatorKind::None;
+        let mut ps = crate::segment::piece_storage::DefaultPieceStorage::new(1_048_576, 2_097_152);
+        // Should not panic — no-op for None variant
+        v.apply_validation_results(&mut ps);
+    }
+
+    // ── Debug trait tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_stream_check_integrity_debug() {
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let s = StreamCheckIntegrity::new(ctx, ps, false);
+        let debug_str = format!("{:?}", s);
+        assert!(debug_str.contains("StreamCheckIntegrity"));
+        assert!(debug_str.contains("hash_check_only: false"));
+    }
+
+    #[test]
+    fn test_bt_check_integrity_debug() {
+        let ctx = make_dctx(1024, 4096);
+        let ps = make_ps(1024, 4096);
+        let b = BtCheckIntegrity::new(ctx, ps);
+        let debug_str = format!("{:?}", b);
+        assert!(debug_str.contains("BtCheckIntegrity"));
+    }
+
+    #[test]
+    fn test_piece_validation_result_debug() {
+        let r1 = PieceValidationResult::Verified { piece_index: 0 };
+        let r2 = PieceValidationResult::Failed { piece_index: 1 };
+        assert!(format!("{:?}", r1).contains("Verified"));
+        assert!(format!("{:?}", r2).contains("Failed"));
     }
 }

@@ -251,6 +251,19 @@ impl PieceStorage for UnknownLengthPieceStorage {
         // Not applicable for unknown-length — no-op
     }
 
+    fn mark_piece_verified(&mut self, _index: usize) {
+        // Not applicable for unknown-length — no-op
+    }
+
+    fn mark_piece_failed(&mut self, _index: usize) {
+        // Not applicable for unknown-length — no-op
+    }
+
+    fn read_data(&self, _piece_index: usize) -> std::result::Result<Vec<u8>, String> {
+        // No disk adaptor for unknown-length — cannot read data
+        Err("UnknownLengthPieceStorage does not support data reading".to_string())
+    }
+
     fn set_end_game_piece_num(&mut self, _num: usize) {
         // No end-game for unknown-length — no-op
     }

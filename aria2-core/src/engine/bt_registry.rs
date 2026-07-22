@@ -17,6 +17,7 @@
 //! | `shared_ptr<DownloadContext>` | `Arc<DownloadContext>` | Same shared-ownership semantics |
 //! | `shared_ptr<BtRuntime>` | `Arc<BtRuntime>` | Same shared-ownership semantics |
 //! | `shared_ptr<PieceStorage>` | `Option<Arc<dyn PieceStorage>>` | Same shared-ownership semantics via trait object |
+//! | `shared_ptr<PeerStorage>` | `Option<Arc<dyn PeerStorage>>` | Same shared-ownership semantics via trait object |
 //! | `shared_ptr<BtAnnounce>` | `Option<Arc<BtAnnounce>>` | Same shared-ownership semantics |
 //! | `shared_ptr<LpdMessageReceiver>` | `Option<u64>` ID-based reference | Type not yet implemented |
 //! | `shared_ptr<UDPTrackerClient>` | `Option<u64>` ID-based reference | Type not yet implemented |
@@ -31,6 +32,7 @@ use tracing::trace;
 
 use crate::download::DownloadContext;
 use crate::engine::bt_peer_blocklist::BtPeerBlocklist;
+use crate::engine::bt_peer_storage::PeerStorage;
 use crate::engine::bt_runtime::BtRuntime;
 use crate::engine::bt_tracker_comm::BtAnnounce;
 use crate::segment::piece_storage::PieceStorage;
@@ -48,7 +50,7 @@ use crate::segment::piece_storage::PieceStorage;
 ///
 /// # ID-Based References
 ///
-/// Fields like `peer_storage_id`, `bt_progress_info_file_id` store an ID that
+/// Fields like `bt_progress_info_file_id` store an ID that
 /// can be used to look up the actual object in a global registry. This avoids
 /// tight coupling to types that haven't been ported to Rust yet. Once those
 /// types are implemented, these fields can be migrated to direct `Arc<>`
@@ -61,9 +63,9 @@ pub struct BtObject {
     /// C++ uses `shared_ptr<PieceStorage>`.
     pub piece_storage: Option<Arc<dyn PieceStorage>>,
 
-    /// ID-based reference to the peer storage for this download.
-    /// PeerStorage trait is not yet implemented in Rust; only DefaultPeerStorage exists.
-    pub peer_storage_id: Option<u64>,
+    /// Shared peer storage for this download (trait object for polymorphism).
+    /// C++ uses `shared_ptr<PeerStorage>`.
+    pub peer_storage: Option<Arc<dyn PeerStorage>>,
 
     /// Shared BT announce handler for this download.
     /// C++ uses `shared_ptr<BtAnnounce>`.
@@ -83,7 +85,7 @@ impl BtObject {
         Self {
             download_context: None,
             piece_storage: None,
-            peer_storage_id: None,
+            peer_storage: None,
             bt_announce: None,
             bt_runtime: None,
             bt_progress_info_file_id: None,
@@ -116,7 +118,10 @@ impl fmt::Debug for BtObject {
                 "piece_storage",
                 &self.piece_storage.as_ref().map(|_| "<PieceStorage>"),
             )
-            .field("peer_storage_id", &self.peer_storage_id)
+            .field(
+                "peer_storage",
+                &self.peer_storage.as_ref().map(|_| "<PeerStorage>"),
+            )
             .field(
                 "bt_announce",
                 &self.bt_announce.as_ref().map(|_| "<BtAnnounce>"),
@@ -155,7 +160,7 @@ impl fmt::Debug for BtObject {
 pub struct BtObjectBuilder {
     download_context: Option<Arc<DownloadContext>>,
     piece_storage: Option<Arc<dyn PieceStorage>>,
-    peer_storage_id: Option<u64>,
+    peer_storage: Option<Arc<dyn PeerStorage>>,
     bt_announce: Option<Arc<BtAnnounce>>,
     bt_runtime: Option<Arc<BtRuntime>>,
     bt_progress_info_file_id: Option<u64>,
@@ -174,9 +179,9 @@ impl BtObjectBuilder {
         self
     }
 
-    /// Set the peer storage ID.
-    pub fn peer_storage_id(mut self, id: u64) -> Self {
-        self.peer_storage_id = Some(id);
+    /// Set the peer storage.
+    pub fn peer_storage(mut self, storage: Arc<dyn PeerStorage>) -> Self {
+        self.peer_storage = Some(storage);
         self
     }
 
@@ -203,7 +208,7 @@ impl BtObjectBuilder {
         BtObject {
             download_context: self.download_context,
             piece_storage: self.piece_storage,
-            peer_storage_id: self.peer_storage_id,
+            peer_storage: self.peer_storage,
             bt_announce: self.bt_announce,
             bt_runtime: self.bt_runtime,
             bt_progress_info_file_id: self.bt_progress_info_file_id,
@@ -528,13 +533,14 @@ mod tests {
         let obj = make_bt_object_with_ctx(1024, 4096, "/tmp/file.bin");
         registry.put(1, obj);
 
-        // Mutate through get_mut
+        // Mutate through get_mut — set peer_storage to a real DefaultPeerStorage
         let obj_mut = registry.get_mut(1).unwrap();
-        obj_mut.peer_storage_id = Some(42);
+        let ps = Arc::new(crate::engine::bt_peer_storage::DefaultPeerStorage::new());
+        obj_mut.peer_storage = Some(ps);
 
         // Verify the mutation is visible
         let obj_ref = registry.get(1).unwrap();
-        assert_eq!(obj_ref.peer_storage_id, Some(42));
+        assert!(obj_ref.peer_storage.is_some());
     }
 
     #[test]
@@ -698,17 +704,18 @@ mod tests {
     fn test_bt_object_builder() {
         let ctx = Arc::new(DownloadContext::new(1024, 4096, "/tmp/file.bin".into()));
         let bt_announce = Arc::new(BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string())));
+        let peer_storage = Arc::new(crate::engine::bt_peer_storage::DefaultPeerStorage::new());
 
         let obj = BtObject::builder()
             .download_context(ctx)
-            .peer_storage_id(20)
+            .peer_storage(peer_storage)
             .bt_announce(bt_announce)
             .bt_progress_info_file_id(40)
             .build();
 
         assert!(obj.download_context.is_some());
         assert!(obj.piece_storage.is_none());
-        assert_eq!(obj.peer_storage_id, Some(20));
+        assert!(obj.peer_storage.is_some());
         assert!(obj.bt_announce.is_some());
         assert_eq!(obj.bt_progress_info_file_id, Some(40));
         assert!(obj.bt_runtime.is_none());
@@ -723,7 +730,7 @@ mod tests {
         let obj = BtObject::default();
         assert!(obj.download_context.is_none());
         assert!(obj.piece_storage.is_none());
-        assert!(obj.peer_storage_id.is_none());
+        assert!(obj.peer_storage.is_none());
         assert!(obj.bt_announce.is_none());
         assert!(obj.bt_runtime.is_none());
         assert!(obj.bt_progress_info_file_id.is_none());
@@ -803,7 +810,7 @@ mod tests {
         let obj = BtObject::new();
         assert!(obj.download_context.is_none());
         assert!(obj.piece_storage.is_none());
-        assert!(obj.peer_storage_id.is_none());
+        assert!(obj.peer_storage.is_none());
         assert!(obj.bt_announce.is_none());
         assert!(obj.bt_runtime.is_none());
         assert!(obj.bt_progress_info_file_id.is_none());
