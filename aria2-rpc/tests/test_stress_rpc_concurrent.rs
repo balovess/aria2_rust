@@ -236,7 +236,7 @@ async fn test_stress_websocket_event_publisher() {
 
         publish_handles.push(tokio::spawn(async move {
             let event =
-                DownloadEvent::download_start(format!("gid-{}", i), vec![json!({"index": i})]);
+                DownloadEvent::download_start(format!("gid-{}", i));
 
             publisher_clone.publish_event(event).unwrap_or_else(|e| {
                 eprintln!("Publish error: {}", e);
@@ -291,7 +291,7 @@ fn test_stress_notification_batcher_high_throughput() {
 
     for i in 0..1000 {
         let gid = format!("gid-{}", i % 50); // 50 unique GIDs (creates duplicates)
-        let event = DownloadEvent::download_complete(gid, vec![json!({"index": i})]);
+        let event = DownloadEvent::download_complete(gid);
 
         if batcher.push(event) {
             // Auto-flush triggered
@@ -683,7 +683,6 @@ async fn test_stress_event_publish_subscribe_mixed() {
         pub_handles.push(tokio::spawn(async move {
             let event = DownloadEvent::download_complete(
                 format!("event-gid-{}", i),
-                vec![json!({"seq": i})],
             );
 
             publisher_clone.publish_event(event).ok();

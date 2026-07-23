@@ -550,14 +550,26 @@ impl SegmentMan {
 
     /// Marks a segment as completed.
     ///
-    /// Delegates to `PieceStorage::complete_piece()` and removes the
-    /// tracking entry. Returns `true` if the segment was found and
-    /// completed, `false` otherwise.
-    pub fn complete_segment(&mut self, _cuid: u64, segment: &SegmentKind) -> bool {
+    /// Delegates to `PieceStorage::complete_piece()`, advertises the
+    /// completed piece (propagates Have messages to interested peers),
+    /// and removes the tracking entry. Returns `true` if the segment
+    /// was found and completed, `false` otherwise.
+    ///
+    /// # C++ Reference
+    ///
+    /// `SegmentMan::completeSegment()` calls both
+    /// `pieceStorage_->completePiece()` and
+    /// `pieceStorage_->advertisePiece(cuid, index, wallclock)`.
+    pub fn complete_segment(&mut self, cuid: u64, segment: &SegmentKind) -> bool {
+        let piece_index = segment.index();
+
         // Complete the piece in storage
         if let Some(piece) = segment.piece() {
             if let Some(ref mut ps) = self.piece_storage {
                 ps.complete_piece(piece);
+                // Advertise the completed piece so other commands send Have messages
+                // to their peers. C++: pieceStorage_->advertisePiece(cuid, index, wallclock)
+                ps.advertise_piece(cuid, piece_index);
             }
         }
 
@@ -565,7 +577,7 @@ impl SegmentMan {
         let idx = self
             .used_segment_entries
             .iter()
-            .position(|e| e.segment_index == segment.index());
+            .position(|e| e.segment_index == piece_index);
 
         match idx {
             Some(i) => {
@@ -593,6 +605,194 @@ impl SegmentMan {
             .filter(|e| e.cuid == cuid)
             .map(|e| e.segment_index)
             .collect()
+    }
+
+    // ── Have advertisement (BT piece propagation) ─────────────────────
+
+    /// Advertises that a piece was completed by the given CUID.
+    ///
+    /// Delegates to `PieceStorage::advertise_piece()`. Other commands
+    /// query the advertised piece indexes to send Have messages to
+    /// their interested peers.
+    ///
+    /// # C++ Reference
+    ///
+    /// `PieceStorage::advertisePiece(cuid, index, registeredTime)`.
+    /// In C++, this is called by `SegmentMan::completeSegment()` and
+    /// also directly by callers like `BtDownloadCommand`.
+    ///
+    /// # Arguments
+    ///
+    /// * `cuid` — Connection ID that completed the piece
+    /// * `index` — Piece index that was completed
+    #[cfg(feature = "bittorrent")]
+    pub fn advertise_piece(&mut self, cuid: u64, index: usize) {
+        if let Some(ref mut ps) = self.piece_storage {
+            ps.advertise_piece(cuid, index);
+            trace!(
+                cuid,
+                index,
+                "SegmentMan: advertised piece completion"
+            );
+        }
+    }
+
+    /// Gets piece indexes advertised since `last_have_index` by CUIDs
+    /// other than `my_cuid`.
+    ///
+    /// Delegates to `PieceStorage::get_advertised_piece_indexes()`.
+    /// Returns a tuple of `(indexes, new_last_have_index)`.
+    ///
+    /// # C++ Reference
+    ///
+    /// `PieceStorage::getAdvertisedPieceIndexes(indexes, myCuid, lastHaveIndex)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `my_cuid` — Exclude entries from this CUID (our own completions)
+    /// * `last_have_index` — Only return entries newer than this index
+    #[cfg(feature = "bittorrent")]
+    pub fn get_advertised_piece_indexes(
+        &self,
+        my_cuid: u64,
+        last_have_index: u64,
+    ) -> (Vec<usize>, u64) {
+        match &self.piece_storage {
+            Some(ps) => ps.get_advertised_piece_indexes(my_cuid, last_have_index),
+            None => (Vec::new(), last_have_index),
+        }
+    }
+
+    /// Removes have entries older than `expiry_ms` (millis since epoch).
+    ///
+    /// Delegates to `PieceStorage::remove_advertised_piece()`.
+    ///
+    /// # C++ Reference
+    ///
+    /// `PieceStorage::removeAdvertisedPiece(expiry)`.
+    #[cfg(feature = "bittorrent")]
+    pub fn remove_advertised_piece(&mut self, expiry_ms: u64) {
+        if let Some(ref mut ps) = self.piece_storage {
+            ps.remove_advertised_piece(expiry_ms);
+            trace!(
+                expiry_ms,
+                "SegmentMan: removed expired have entries"
+            );
+        }
+    }
+
+    // ── Multi-file segment selection ──────────────────────────────────
+
+    /// Gets segments scoped to a specific file entry for multi-file downloads.
+    ///
+    /// Checkouts segments in the byte range of `[file_offset, file_offset + file_length)`
+    /// and pushes them into `segments` until `segments.len() < max_segments` is false.
+    /// Segments outside the file entry's range are immediately cancelled.
+    ///
+    /// # C++ Reference
+    ///
+    /// `SegmentMan::getSegment(vector<Segment*>&, cuid_t, minSplitSize, FileEntry&, maxSegments)`:
+    /// ```cpp
+    /// BitfieldMan filter(ignoreBitfield_);
+    /// filter.enableFilter();
+    /// filter.addNotFilter(fileEntry->getOffset(), fileEntry->getLength());
+    /// while(segments.size() < maxSegments) {
+    ///   segment = checkoutSegment(cuid,
+    ///     pieceStorage_->getMissingPiece(minSplitSize, filter.getFilterBitfield(),
+    ///                                     filter.getBitfieldLength(), cuid));
+    ///   if(!segment) break;
+    ///   if(segment->getPositionToWrite() < fileEntry->getOffset() ||
+    ///      fileEntry->getLastOffset() <= segment->getPositionToWrite()) {
+    ///     pending.push_back(segment);
+    ///   } else {
+    ///     segments.push_back(segment);
+    ///   }
+    /// }
+    /// // Cancel pending segments outside the file range
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `cuid` — Connection ID requesting segments
+    /// * `min_split_size` — Minimum split size for piece selection
+    /// * `file_offset` — Byte offset of the file entry in the global stream
+    /// * `file_length` — Length of the file entry in bytes
+    /// * `max_segments` — Maximum number of segments to return
+    ///
+    /// # Returns
+    ///
+    /// A vector of `SegmentKind` scoped to the file entry's byte range.
+    /// The caller owns each returned `SegmentKind`.
+    pub fn get_segments_for_file_entry(
+        &mut self,
+        cuid: u64,
+        min_split_size: u64,
+        file_offset: u64,
+        file_length: u64,
+        max_segments: usize,
+    ) -> Vec<SegmentKind> {
+        if max_segments == 0 || file_length == 0 {
+            return Vec::new();
+        }
+
+        let file_last_offset = file_offset.saturating_add(file_length);
+
+        // Build a combined filter: start from the ignore bitfield, then add
+        // a NOT filter for the file entry's range. This selects pieces that
+        // are NOT ignored AND fall within the file entry's byte range.
+        // C++: BitfieldMan filter(ignoreBitfield_); filter.enableFilter();
+        //      filter.addNotFilter(fileEntry->getOffset(), fileEntry->getLength());
+        let mut filter = self.ignore_bitfield.clone();
+        filter.enable_filter();
+        filter.add_not_filter(file_offset, file_length);
+
+        let mut segments: Vec<SegmentKind> = Vec::new();
+        let mut pending_indices: Vec<usize> = Vec::new();
+
+        while segments.len() < max_segments {
+            let filter_bf = filter.get_filter_bitfield().to_vec();
+            let bf_len = filter.get_bitfield_length();
+
+            let piece = self.piece_storage.as_mut().and_then(|ps| {
+                ps.get_missing_piece(min_split_size, &filter_bf, bf_len as u64, cuid)
+            });
+
+            let segment = match self.checkout_segment(cuid, piece) {
+                Some(s) => s,
+                None => break, // No more pieces available
+            };
+
+            // Check if the segment's write position falls within the file entry
+            let pos = segment.position_to_write();
+            if pos < file_offset || file_last_offset <= pos {
+                // Segment is outside the file entry's range — cancel later
+                pending_indices.push(segment.index());
+                // We still need to track the segment temporarily for cancellation
+                // but don't add it to the result
+            } else {
+                segments.push(segment);
+            }
+        }
+
+        // Cancel any segments that were checked out but fall outside the file range.
+        // In C++, this calls cancelSegment(cuid, segment) for each pending segment.
+        // Since the caller doesn't own these segments, we cancel internally by index.
+        for idx in pending_indices {
+            self.cancel_segment_by_index(idx);
+        }
+
+        if segments.len() < max_segments {
+            trace!(
+                cuid,
+                file_offset,
+                file_length,
+                got = segments.len(),
+                requested = max_segments,
+                "SegmentMan: get_segments_for_file_entry returned fewer than requested"
+            );
+        }
+
+        segments
     }
 
     // ── Peer statistics ────────────────────────────────────────────────
@@ -1196,5 +1396,211 @@ mod tests {
 
         assert!(man.download_finished());
         assert_eq!(man.download_length(), 5 * 1024 * 1024);
+    }
+
+    // ── complete_segment advertises piece ──────────────────────────────────
+
+    #[test]
+    fn test_complete_segment_advertises_piece() {
+        let mut man = create_segment_man(1024, 4096);
+        man.recognize_segment_for(0, 4096);
+
+        // Complete a segment — should advertise the piece
+        let seg = man.get_segment(1, 0).unwrap();
+        let piece_index = seg.index();
+        let result = man.complete_segment(1, &seg);
+        assert!(result);
+        assert!(man.has_segment(piece_index));
+
+        // Verify advertisement via PieceStorage delegation
+        // get_advertised_piece_indexes should return the completed piece
+        let (indexes, _) = man.piece_storage.as_ref().unwrap().get_advertised_piece_indexes(999, 0);
+        assert!(indexes.contains(&piece_index));
+    }
+
+    #[test]
+    fn test_complete_segment_advertises_multiple_pieces() {
+        let mut man = create_segment_man(1024, 4096);
+        man.recognize_segment_for(0, 4096);
+
+        // Complete all 4 pieces
+        let mut completed = Vec::new();
+        for _ in 0..4 {
+            let seg = man.get_segment(1, 0).unwrap();
+            completed.push(seg.index());
+            man.complete_segment(1, &seg);
+        }
+
+        // All 4 pieces should be advertised
+        let (indexes, _) = man.piece_storage.as_ref().unwrap().get_advertised_piece_indexes(999, 0);
+        assert_eq!(indexes.len(), 4);
+        for idx in &completed {
+            assert!(indexes.contains(idx));
+        }
+    }
+
+    // ── get_segments_for_file_entry ────────────────────────────────────────
+
+    #[test]
+    fn test_get_segments_for_file_entry_basic() {
+        // 8 pieces of 1024 bytes each = 8192 total
+        let mut man = create_segment_man(1024, 8192);
+        man.recognize_segment_for(0, 8192);
+
+        // File entry covers pieces 2-4 (offset=2048, length=3072)
+        let segments = man.get_segments_for_file_entry(1, 0, 2048, 3072, 3);
+        assert!(!segments.is_empty());
+        // All returned segments should have position_to_write within [2048, 5120)
+        for seg in &segments {
+            let pos = seg.position_to_write();
+            assert!(pos >= 2048, "segment pos {} should be >= 2048", pos);
+            assert!(pos < 5120, "segment pos {} should be < 5120", pos);
+        }
+    }
+
+    #[test]
+    fn test_get_segments_for_file_entry_max_segments() {
+        let mut man = create_segment_man(1024, 8192);
+        man.recognize_segment_for(0, 8192);
+
+        // Request only 1 segment for a file that covers pieces 0-3
+        let segments = man.get_segments_for_file_entry(1, 0, 0, 4096, 1);
+        assert_eq!(segments.len(), 1);
+    }
+
+    #[test]
+    fn test_get_segments_for_file_entry_zero_max() {
+        let mut man = create_segment_man(1024, 8192);
+        man.recognize_segment_for(0, 8192);
+
+        // max_segments=0 should return empty
+        let segments = man.get_segments_for_file_entry(1, 0, 0, 4096, 0);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_get_segments_for_file_entry_zero_length() {
+        let mut man = create_segment_man(1024, 8192);
+        man.recognize_segment_for(0, 8192);
+
+        // file_length=0 should return empty
+        let segments = man.get_segments_for_file_entry(1, 0, 0, 0, 5);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_get_segments_for_file_entry_respects_ignore() {
+        let mut man = create_segment_man(1024, 8192);
+        // By default all segments are ignored
+        let segments = man.get_segments_for_file_entry(1, 0, 0, 4096, 3);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_get_segments_for_file_entry_multi_file() {
+        // Simulate a multi-file torrent:
+        // Total = 8192 bytes, piece_length = 1024, 8 pieces
+        // File A: offset=0, length=3072 (pieces 0-2)
+        // File B: offset=3072, length=5120 (pieces 3-7)
+        let mut man = create_segment_man(1024, 8192);
+        man.recognize_segment_for(0, 8192);
+
+        // Get segments for File B (offset=3072, length=5120)
+        let segments_b = man.get_segments_for_file_entry(1, 0, 3072, 5120, 5);
+        // All segments should fall within File B's range [3072, 8192)
+        for seg in &segments_b {
+            let pos = seg.position_to_write();
+            assert!(pos >= 3072, "segment pos {} should be >= 3072", pos);
+            assert!(pos < 8192, "segment pos {} should be < 8192", pos);
+        }
+
+        // Get segments for File A (offset=0, length=3072)
+        let segments_a = man.get_segments_for_file_entry(2, 0, 0, 3072, 3);
+        for seg in &segments_a {
+            let pos = seg.position_to_write();
+            // pos is u64, always >= 0
+            assert!(pos < 3072, "segment pos {} should be < 3072", pos);
+        }
+    }
+
+    // ── Have advertisement (BT-specific) ──────────────────────────────────
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn test_advertise_piece_delegation() {
+        let mut man = create_segment_man(1024, 4096);
+        man.recognize_segment_for(0, 4096);
+
+        // Advertise piece 0 by CUID 1
+        man.advertise_piece(1, 0);
+
+        // Query from another CUID — should see piece 0
+        let (indexes, new_last) = man.get_advertised_piece_indexes(2, 0);
+        assert!(indexes.contains(&0));
+        assert!(new_last > 0);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn test_get_advertised_piece_indexes_excludes_own_cuid() {
+        let mut man = create_segment_man(1024, 4096);
+        man.recognize_segment_for(0, 4096);
+
+        // CUID 1 completes piece 0
+        man.advertise_piece(1, 0);
+
+        // CUID 1 querying should NOT see its own advertisement
+        let (indexes, _) = man.get_advertised_piece_indexes(1, 0);
+        assert!(!indexes.contains(&0));
+
+        // CUID 2 querying should see piece 0
+        let (indexes2, _) = man.get_advertised_piece_indexes(2, 0);
+        assert!(indexes2.contains(&0));
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn test_get_advertised_piece_indexes_since_last() {
+        let mut man = create_segment_man(1024, 4096);
+        man.recognize_segment_for(0, 4096);
+
+        // Advertise pieces 0 and 1
+        man.advertise_piece(1, 0);
+        man.advertise_piece(1, 1);
+
+        // Get all indexes
+        let (indexes, new_last) = man.get_advertised_piece_indexes(2, 0);
+        assert_eq!(indexes.len(), 2);
+
+        // Now advertise piece 2
+        man.advertise_piece(1, 2);
+
+        // Only new entries since new_last should appear
+        let (indexes2, _) = man.get_advertised_piece_indexes(2, new_last);
+        assert!(indexes2.contains(&2));
+        assert!(!indexes2.contains(&0));
+        assert!(!indexes2.contains(&1));
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn test_remove_advertised_piece() {
+        let mut man = create_segment_man(1024, 4096);
+        man.recognize_segment_for(0, 4096);
+
+        // Advertise a piece
+        man.advertise_piece(1, 0);
+
+        // Verify it's there
+        let (indexes, _) = man.get_advertised_piece_indexes(2, 0);
+        assert!(indexes.contains(&0));
+
+        // Remove all entries with registered_time <= far future (effectively all)
+        let far_future_ms = std::u64::MAX;
+        man.remove_advertised_piece(far_future_ms);
+
+        // Should be empty now
+        let (indexes2, _) = man.get_advertised_piece_indexes(2, 0);
+        assert!(indexes2.is_empty());
     }
 }

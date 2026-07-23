@@ -37,7 +37,7 @@ rustls = { workspace = true, features = ["ring"] }
 flate2 = "1.0"
 base64.workspace = true
 url = "2.5"
-md5 = "0.7"
+md-5 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
 digest = "0.10"
@@ -52,6 +52,7 @@ num-traits = { version = "0.2", optional = true }
 
 # ── SFTP-only dependencies ────────────────────────────────────────────
 russh = { version = "0.59", default-features = false, features = ["ring", "rsa"], optional = true }
+dirs = { version = "6", optional = true }
 
 # ── Metalink-only dependencies ────────────────────────────────────────
 quick-xml = { version = "0.31", optional = true }
@@ -68,7 +69,7 @@ default = []
 http = []
 bittorrent = ["dep:num-bigint-dig", "dep:num-traits", "dep:base32"]
 metalink = ["dep:quick-xml"]
-sftp = ["dep:russh"]
+sftp = ["dep:russh", "dep:dirs"]
 
 [dev-dependencies]
 tempfile.workspace = true

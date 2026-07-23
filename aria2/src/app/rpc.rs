@@ -108,11 +108,17 @@ impl App {
             .with_global_opts(user_opts_json);
 
         // Build server config
+        let max_request_size = self
+            .get_opt_usize("rpc-max-request-size")
+            .await
+            .unwrap_or(aria2_rpc::constants::DEFAULT_RPC_MAX_REQUEST_SIZE);
+
         let mut config = ServerConfig::default()
             .with_host(&host)
             .with_port(port)
             .with_auth(auth)
-            .with_cors(cors);
+            .with_cors(cors)
+            .with_max_request_size(max_request_size);
 
         // Create server with the pre-configured shared engine
         let server = if rpc_secure {

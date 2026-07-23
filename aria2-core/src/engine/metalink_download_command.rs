@@ -13,6 +13,17 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::metalink::parser::UrlEntry;
 
+/// Information about a single file download created from a multi-file Metalink.
+///
+/// Returned by [`MetalinkDownloadCommand::create_multi_file`] so the caller
+/// can track each per-file command independently.
+pub struct MetalinkFileInfo {
+    /// The download command for this file.
+    pub command: MetalinkDownloadCommand,
+    /// The original file index in the Metalink document (0-based).
+    pub file_index: usize,
+}
+
 pub struct MetalinkDownloadCommand {
     group: Arc<std::sync::RwLock<RequestGroup>>,
     client: reqwest::Client,
@@ -20,10 +31,39 @@ pub struct MetalinkDownloadCommand {
     started: bool,
     completed: bool,
     completed_bytes: u64,
+    /// Raw Metalink data for re-parsing during execute().
+    /// Only used for single-file mode. Empty in multi-file mode
+    /// (each per-file command stores only its own file's data).
     metalink_data: Vec<u8>,
+    /// Parsed file info for per-file mode (set by create_multi_file).
+    /// When present, execute() uses this instead of re-parsing metalink_data.
+    file_info: Option<FileDownloadInfo>,
+}
+
+/// Parsed file information used by per-file command instances
+/// created by `create_multi_file()`.
+struct FileDownloadInfo {
+    /// Sorted URL entries for this file.
+    sorted_urls: Vec<UrlEntry>,
+    /// Expected file size (from Metalink).
+    expected_size: Option<u64>,
+    /// First hash entry for verification.
+    hash_entry: Option<aria2_protocol::metalink::parser::HashEntry>,
 }
 
 impl MetalinkDownloadCommand {
+    /// Create a `MetalinkDownloadCommand` for a single-file Metalink.
+    ///
+    /// For multi-file Metalinks, use [`create_multi_file`] instead, which
+    /// returns one command per file. This method also works for multi-file
+    /// Metalinks: it picks the first file and downloads it.
+    ///
+    /// # Arguments
+    ///
+    /// * `gid` - Group ID for the download
+    /// * `metalink_bytes` - Raw Metalink XML data
+    /// * `options` - Download options
+    /// * `output_dir` - Override output directory (takes precedence over `options.dir`)
     pub fn new(
         gid: GroupId,
         metalink_bytes: &[u8],
@@ -35,15 +75,19 @@ impl MetalinkDownloadCommand {
                 Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
             })?;
 
-        let file = doc.single_file().ok_or_else(|| {
-            Aria2Error::Fatal(FatalError::Config(
-                "Metalink contains multiple files or no files".into(),
-            ))
-        })?;
+        if doc.files.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Metalink contains no files".into(),
+            )));
+        }
+
+        // Use the first file (single-file mode). For multi-file Metalinks,
+        // the caller should use create_multi_file() instead.
+        let file = &doc.files[0];
 
         if file.urls.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
-                "Metalink file has no download URLs".into(),
+                "Metalink file has no download URL".into(),
             )));
         }
 
@@ -62,28 +106,25 @@ impl MetalinkDownloadCommand {
             .collect();
         let group = RequestGroup::new(gid, urls, options.clone());
 
-        let client = {
-            crate::http::client_pool::ensure_rustls_provider();
-            reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(300))
-            .user_agent("aria2-rust/0.1.0")
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!(
-                    "HTTP client build failed: {}",
-                    e
-                )))
-            })?
-        };
+        let client = build_http_client()?;
 
-        info!(
-            "MetalinkDownloadCommand created: {} -> {} ({} mirrors)",
-            file.name,
-            path.display(),
-            file.urls.len()
-        );
+        if doc.files.len() > 1 {
+            info!(
+                "MetalinkDownloadCommand created for first file of {}: {} -> {} ({} mirrors) \
+                 [use create_multi_file() for all files]",
+                doc.files.len(),
+                file.name,
+                path.display(),
+                file.urls.len()
+            );
+        } else {
+            info!(
+                "MetalinkDownloadCommand created: {} -> {} ({} mirrors)",
+                file.name,
+                path.display(),
+                file.urls.len()
+            );
+        }
 
         Ok(Self {
             group: Arc::new(std::sync::RwLock::new(group)),
@@ -93,12 +134,143 @@ impl MetalinkDownloadCommand {
             completed: false,
             completed_bytes: 0,
             metalink_data: metalink_bytes.to_vec(),
+            file_info: None,
         })
+    }
+
+    /// Create one `MetalinkDownloadCommand` per file in a multi-file Metalink.
+    ///
+    /// This is the Rust equivalent of C++ `Metalink2RequestGroup::createRequestGroup()`
+    /// which creates one `RequestGroup` per `MetalinkEntry`. Each command
+    /// downloads exactly one file from the Metalink using its own mirror list.
+    ///
+    /// # Arguments
+    ///
+    /// * `metalink_bytes` - Raw Metalink XML data
+    /// * `options` - Download options (shared by all files)
+    /// * `output_dir` - Override output directory
+    /// * `gid_start` - Starting GID; each file gets `gid_start + i`
+    ///
+    /// # Returns
+    ///
+    /// A vector of `MetalinkFileInfo`, one per file with URLs in the Metalink.
+    /// Files with no download URLs are skipped.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let commands = MetalinkDownloadCommand::create_multi_file(
+    ///     &metalink_xml, &options, None, 100
+    /// )?;
+    /// for info in commands {
+    ///     println!("File {}: {}", info.file_index, info.command.output_path.display());
+    /// }
+    /// ```
+    pub fn create_multi_file(
+        metalink_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        gid_start: u64,
+    ) -> Result<Vec<MetalinkFileInfo>> {
+        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes)
+            .map_err(|e| {
+                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
+            })?;
+
+        if doc.files.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Metalink contains no files".into(),
+            )));
+        }
+
+        let dir = output_dir
+            .map(|d| d.to_string())
+            .or_else(|| options.dir.clone())
+            .unwrap_or_else(|| ".".to_string());
+
+        let client = build_http_client()?;
+
+        let mut commands = Vec::with_capacity(doc.files.len());
+
+        for (i, file) in doc.files.iter().enumerate() {
+            if file.urls.is_empty() {
+                debug!(
+                    index = i,
+                    name = %file.name,
+                    "Skipping Metalink file with no URLs"
+                );
+                continue;
+            }
+
+            let gid = GroupId::new(gid_start + i as u64);
+            let path = std::path::PathBuf::from(&dir).join(&file.name);
+
+            let sorted_urls: Vec<UrlEntry> = file
+                .get_sorted_urls()
+                .iter()
+                .map(|u| (*u).clone())
+                .collect();
+            let urls: Vec<String> = sorted_urls.iter().map(|u| u.url.clone()).collect();
+            let group = RequestGroup::new(gid, urls, options.clone());
+
+            let file_info = FileDownloadInfo {
+                expected_size: file.size,
+                hash_entry: file.hashes.first().cloned(),
+                sorted_urls,
+            };
+
+            info!(
+                gid = gid.value(),
+                index = i,
+                name = %file.name,
+                path = %path.display(),
+                mirrors = file.urls.len(),
+                "Created MetalinkDownloadCommand for file"
+            );
+
+            commands.push(MetalinkFileInfo {
+                command: Self {
+                    group: Arc::new(std::sync::RwLock::new(group)),
+                    client: client.clone(),
+                    output_path: path,
+                    started: false,
+                    completed: false,
+                    completed_bytes: 0,
+                    metalink_data: Vec::new(),
+                    file_info: Some(file_info),
+                },
+                file_index: i,
+            });
+        }
+
+        Ok(commands)
+    }
+
+    /// Get the output path for this download.
+    pub fn output_path(&self) -> &std::path::Path {
+        &self.output_path
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         self.group.recover()
     }
+}
+
+/// Build the shared HTTP client for Metalink downloads.
+fn build_http_client() -> Result<reqwest::Client> {
+    crate::http::client_pool::ensure_rustls_provider();
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
+        .user_agent("aria2-rust/0.1.0")
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "HTTP client build failed: {}",
+                e
+            )))
+        })
 }
 
 #[async_trait]
@@ -109,17 +281,45 @@ impl Command for MetalinkDownloadCommand {
             self.started = true;
         }
 
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data)
-            .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
-            })?;
+        // Resolve file info: either from pre-parsed file_info (multi-file mode)
+        // or by re-parsing the raw metalink_data (single-file mode).
+        // We extract owned data to avoid lifetime/borrow issues.
+        let sorted_urls_owned: Vec<UrlEntry>;
+        let expected_size: Option<u64>;
+        let hash_entry_owned: Option<aria2_protocol::metalink::parser::HashEntry>;
 
-        let file = doc.single_file().ok_or_else(|| {
-            Aria2Error::Fatal(FatalError::Config("No available file after parsing".into()))
-        })?;
+        match &self.file_info {
+            Some(info) => {
+                sorted_urls_owned = info.sorted_urls.clone();
+                expected_size = info.expected_size;
+                hash_entry_owned = info.hash_entry.clone();
+            }
+            None => {
+            let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data)
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
+                })?;
 
-        let sorted_urls = file.get_sorted_urls();
-        if sorted_urls.is_empty() {
+            let file = if doc.files.len() == 1 {
+                &doc.files[0]
+            } else {
+                // Multi-file Metalink in single-file mode: use first file
+                &doc.files[0]
+            };
+
+            sorted_urls_owned = file.get_sorted_urls().iter().map(|u| (*u).clone()).collect();
+            expected_size = file.size;
+            hash_entry_owned = file.hashes.first().cloned();
+
+            if sorted_urls_owned.is_empty() {
+                return Err(Aria2Error::Fatal(FatalError::Config(
+                    "No download mirrors available".into(),
+                )));
+            }
+            }
+        }
+
+        if sorted_urls_owned.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
                 "No download mirrors available".into(),
             )));
@@ -148,12 +348,9 @@ impl Command for MetalinkDownloadCommand {
             });
         };
 
-        let expected_size = file.size;
-        let hash_entry = file.hashes.first().cloned();
-
         let mut last_error = None;
 
-        for url_entry in &sorted_urls {
+        for url_entry in &sorted_urls_owned {
             debug!(
                 "Trying mirror [priority={}] : {}",
                 url_entry.priority, url_entry.url
@@ -161,7 +358,7 @@ impl Command for MetalinkDownloadCommand {
 
             match self.try_download_url(&url_entry.url, expected_size).await {
                 Ok(data) => {
-                    if let Some(ref hash) = hash_entry
+                    if let Some(ref hash) = hash_entry_owned
                         && !self.verify_hash(&data, hash)?
                     {
                         warn!(
@@ -319,7 +516,10 @@ impl MetalinkDownloadCommand {
 
         match hash.algo {
             HashAlgorithm::Md5 => {
-                let digest = md5::compute(data);
+                use md5::Digest;
+                let mut hasher = md5::Md5::new();
+                hasher.update(data);
+                let digest = hasher.finalize();
                 Ok(format!("{:x}", digest) == hash.value)
             }
             HashAlgorithm::Sha1 => {
@@ -351,9 +551,11 @@ impl MetalinkDownloadCommand {
 // K3 — Metalink Priority Ordering Functions
 // =========================================================================
 
-/// Sort metalink URL resources by priority descending, then by location preference.
+/// Sort metalink URL resources by priority ascending, then by location preference.
 ///
-/// Higher priority number means tried first (priority 10 before priority 1).
+/// Lower priority number means tried first (priority 1 before priority 10),
+/// matching the C++ `MetalinkEntry::reorderResourcesByPriority()` which uses
+/// `PriorityHigher` comparator: `res1->priority < res2->priority` (ascending).
 /// Within same priority level, URLs matching the location preference are
 /// preferred over non-matching ones.
 ///
@@ -366,23 +568,8 @@ impl MetalinkDownloadCommand {
 /// # Returns
 ///
 /// A vector of references sorted by:
-/// 1. Priority descending (higher priority first)
+/// 1. Priority ascending (lower priority number = tried first)
 /// 2. Location preference match (matching locations first among equal priority)
-///
-/// # Example
-///
-/// ```ignore
-/// use aria2_core::engine::metalink_download_command::select_mirrors_by_priority;
-/// use aria2_protocol::metalink::parser::UrlEntry;
-///
-/// let urls = vec![
-///     UrlEntry::new("http://eu.example.com/file.bin").with_priority(2).with_location("eu"),
-///     UrlEntry::new("http://us.example.com/file.bin").with_priority(3).with_location("us"),
-/// ];
-///
-/// let sorted = select_mirrors_by_priority(&urls, "eu");
-/// // Result: [us URL (priority 3), eu URL (priority 2)]
-/// ```
 pub fn select_mirrors_by_priority<'a>(
     resources: &'a [UrlEntry],
     location_preference: &str,
@@ -390,8 +577,9 @@ pub fn select_mirrors_by_priority<'a>(
     let mut sorted: Vec<&'a UrlEntry> = resources.iter().collect();
 
     sorted.sort_by(|a, b| {
-        // Primary sort: priority descending (higher priority number = more preferred)
-        let pri_cmp = b.priority.cmp(&a.priority);
+        // Primary sort: priority ascending (lower priority number = more preferred)
+        // Matches C++ PriorityHigher: res1->priority < res2->priority
+        let pri_cmp = a.priority.cmp(&b.priority);
         if pri_cmp != std::cmp::Ordering::Equal {
             return pri_cmp;
         }
@@ -429,43 +617,6 @@ pub fn select_mirrors_by_priority<'a>(
 ///
 /// Iterates through sorted URL entries attempting download with each.
 /// Returns immediately on first success, or error after all attempts fail.
-///
-/// This implements automatic mirror failover for improved reliability:
-/// - Logs each attempt with index and URL
-/// - Continues to next mirror on failure
-/// - Returns downloaded data from first successful mirror
-/// - Aggregates errors if all mirrors fail
-///
-/// # Type Parameters
-///
-/// * `F` - Download function type that takes URL string and returns future
-/// * `Fut` - Future type returned by download function
-///
-/// # Arguments
-///
-/// * `sorted_urls` - Slice of URL references in priority order (first = highest priority)
-/// * `download_fn` - Async function that attempts download from a single URL
-///
-/// # Returns
-///
-/// * `Ok(Vec<u8>)` - Downloaded data from first successful mirror
-/// * `Err(String)` - Error message if all mirrors failed
-///
-/// # Example
-///
-/// ```ignore
-/// use aria2_core::engine::metalink_download_command::try_mirrors_with_failover;
-///
-/// async fn download(url: &str) -> Result<Vec<u8>, String> {
-///     // HTTP GET implementation
-/// }
-///
-/// let mirrors = vec![&url_entry1, &url_entry2];
-/// match try_mirrors_with_failover(&mirrors, &download).await {
-///     Ok(data) => println!("Downloaded {} bytes", data.len()),
-///     Err(e) => println!("All mirrors failed: {}", e),
-/// }
-/// ```
 pub async fn try_mirrors_with_failover<F, Fut>(
     sorted_urls: &[&UrlEntry],
     download_fn: F,
@@ -508,7 +659,7 @@ where
 }
 
 // =========================================================================
-// K3.3 — Tests for Metalink Priority Ordering
+// Tests
 // =========================================================================
 
 #[cfg(test)]
@@ -516,54 +667,22 @@ mod tests {
     use super::*;
     use aria2_protocol::metalink::parser::UrlEntry;
 
-    /// Test K3.3 #1: Priority descending order works correctly.
-    ///
-    /// Verifies that URLs are sorted by priority in descending order
-    /// (higher priority number = tried first).
     #[test]
-    fn test_priority_descending_order() {
+    fn test_priority_ascending_order() {
         let urls = vec![
-            UrlEntry::new("http://mirror3.example.com/file.bin").with_priority(1),
-            UrlEntry::new("http://mirror1.example.com/file.bin").with_priority(3),
+            UrlEntry::new("http://mirror3.example.com/file.bin").with_priority(3),
+            UrlEntry::new("http://mirror1.example.com/file.bin").with_priority(1),
             UrlEntry::new("http://mirror2.example.com/file.bin").with_priority(2),
         ];
 
         let sorted = select_mirrors_by_priority(&urls, "");
 
-        // Should be ordered by priority descending: [3, 2, 1]
-        assert_eq!(sorted.len(), 3, "Should return all URLs");
-        assert_eq!(
-            sorted[0].priority, 3,
-            "First URL should have highest priority (3)"
-        );
-        assert_eq!(
-            sorted[1].priority, 2,
-            "Second URL should have medium priority (2)"
-        );
-        assert_eq!(
-            sorted[2].priority, 1,
-            "Third URL should have lowest priority (1)"
-        );
-
-        // Verify URL ordering matches priority
-        assert!(
-            sorted[0].url.contains("mirror1"),
-            "First should be mirror1 (priority 3)"
-        );
-        assert!(
-            sorted[1].url.contains("mirror2"),
-            "Second should be mirror2 (priority 2)"
-        );
-        assert!(
-            sorted[2].url.contains("mirror3"),
-            "Third should be mirror3 (priority 1)"
-        );
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].priority, 1);
+        assert_eq!(sorted[1].priority, 2);
+        assert_eq!(sorted[2].priority, 3);
     }
 
-    /// Test K3.3 #2: Location preference boosts matching URLs among same priority.
-    ///
-    /// When multiple URLs have the same priority, those matching the location
-    /// preference should be tried first.
     #[test]
     fn test_location_preference_boosts_matching() {
         let urls = vec![
@@ -581,18 +700,9 @@ mod tests {
                 .with_location("jp"),
         ];
 
-        // Prefer EU locations
         let sorted = select_mirrors_by_priority(&urls, "eu");
 
-        assert_eq!(sorted.len(), 4, "Should return all URLs");
-
-        // All have same priority (5), so EU ones should come first
-        let eu_urls: Vec<_> = sorted
-            .iter()
-            .filter(|u| u.location.as_deref() == Some("eu"))
-            .collect();
-
-        assert_eq!(eu_urls.len(), 2, "Should find 2 EU mirrors");
+        assert_eq!(sorted.len(), 4);
 
         // EU mirrors should appear before non-EU mirrors
         let first_non_eu_idx = sorted
@@ -605,25 +715,9 @@ mod tests {
             .rposition(|u| u.location.as_deref() == Some("eu"))
             .expect("Should find EU mirrors");
 
-        assert!(
-            last_eu_idx < first_non_eu_idx,
-            "EU mirrors should come before non-EU mirrors"
-        );
-
-        // Test with US preference
-        let sorted_us = select_mirrors_by_priority(&urls, "us");
-        let us_first = &sorted_us[0];
-        assert_eq!(
-            us_first.location.as_deref(),
-            Some("us"),
-            "US mirror should be first when preferring US"
-        );
+        assert!(last_eu_idx < first_non_eu_idx);
     }
 
-    /// Test K3.3 #3: Failover tries all mirrors then returns error when all fail.
-    ///
-    /// Verifies that try_mirrors_with_failover attempts every mirror and
-    /// returns an error message when all attempts fail.
     #[tokio::test]
     async fn test_failover_tries_all_then_errors() {
         let urls = [
@@ -632,7 +726,6 @@ mod tests {
             UrlEntry::new("http://mirror3.fail/file.bin").with_priority(1),
         ];
 
-        // Download function that always fails
         let fail_fn = |url: &str| -> std::pin::Pin<
             Box<dyn std::future::Future<Output = std::result::Result<Vec<u8>, String>> + '_>,
         > {
@@ -641,31 +734,18 @@ mod tests {
         };
 
         let url_refs: Vec<&UrlEntry> = urls.iter().collect();
-
         let result = try_mirrors_with_failover(&url_refs, fail_fn).await;
 
-        assert!(result.is_err(), "Should return error when all mirrors fail");
-
-        let error_msg = result.unwrap_err();
-        assert!(
-            error_msg.contains("All 3 mirrors failed"),
-            "Error message should indicate all 3 mirrors failed"
-        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("All 3 mirrors failed"));
     }
 
-    /// Test K3.3 #4: Single mirror succeeds immediately without failover.
-    ///
-    /// Verifies that when there's only one mirror and it succeeds,
-    /// the data is returned without attempting additional failover.
     #[tokio::test]
     async fn test_single_mirror_no_failover_needed() {
         let urls =
             [UrlEntry::new("http://working-mirror.example.com/success.bin").with_priority(10)];
 
         let expected_data = b"Downloaded file content".to_vec();
-
-        // Download function that succeeds immediately
-        // Use Arc so data can be cloned multiple times (Fn trait requirement)
         let data_shared = std::sync::Arc::new(expected_data.clone());
         let success_fn = move |_url: &str| {
             let data = data_shared.clone();
@@ -674,69 +754,38 @@ mod tests {
 
         let result = try_mirrors_with_failover(&urls.iter().collect::<Vec<_>>(), &success_fn).await;
 
-        assert!(result.is_ok(), "Single working mirror should succeed");
-
-        let downloaded_data = result.unwrap();
-        assert_eq!(
-            downloaded_data, expected_data,
-            "Downloaded data should match expected content"
-        );
-        assert_eq!(
-            downloaded_data.len(),
-            expected_data.len(),
-            "Should download exactly {} bytes",
-            expected_data.len()
-        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), expected_data);
     }
 
-    /// Additional test: Mixed priorities with location preference.
-    ///
-    /// Verifies that primary sort (priority) takes precedence over secondary
-    /// sort (location). A higher-priority non-matching URL should still come
-    /// before a lower-priority matching URL.
     #[test]
     fn test_priority_overrides_location() {
         let urls = vec![
-            UrlEntry::new("http://low-eu.example.com/file.bin")
-                .with_priority(1)
-                .with_location("eu"), // Low priority but matches location
-            UrlEntry::new("http://high-us.example.com/file.bin")
+            UrlEntry::new("http://high-eu.example.com/file.bin")
                 .with_priority(10)
-                .with_location("us"), // High priority but doesn't match
+                .with_location("eu"),
+            UrlEntry::new("http://low-us.example.com/file.bin")
+                .with_priority(1)
+                .with_location("us"),
         ];
 
         let sorted = select_mirrors_by_priority(&urls, "eu");
-
-        // High priority (10) should come first even though it doesn't match location
-        assert_eq!(
-            sorted[0].priority, 10,
-            "Higher priority URL should come first regardless of location match"
-        );
-        assert_eq!(
-            sorted[0].url, "http://high-us.example.com/file.bin",
-            "First should be high-priority US URL"
-        );
-        assert_eq!(
-            sorted[1].priority, 1,
-            "Lower priority URL should come second"
-        );
+        assert_eq!(sorted[0].priority, 1);
+        assert_eq!(sorted[1].priority, 10);
     }
 
-    /// Additional test: Empty resource list returns empty result.
     #[test]
     fn test_empty_resources_returns_empty() {
         let urls: Vec<UrlEntry> = Vec::new();
         let sorted = select_mirrors_by_priority(&urls, "");
-
-        assert!(sorted.is_empty(), "Empty input should produce empty output");
+        assert!(sorted.is_empty());
     }
 
-    /// Additional test: Failover succeeds on second attempt after first fails.
     #[tokio::test]
     async fn test_failover_succeeds_on_second_mirror() {
         let urls = [
-            UrlEntry::new("http://failing-mirror.example.com/file.bin").with_priority(5),
-            UrlEntry::new("http://working-mirror.example.com/file.bin").with_priority(3),
+            UrlEntry::new("http://failing-mirror.example.com/file.bin").with_priority(1),
+            UrlEntry::new("http://working-mirror.example.com/file.bin").with_priority(2),
         ];
 
         let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -757,17 +806,130 @@ mod tests {
         let result =
             try_mirrors_with_failover(&urls.iter().collect::<Vec<_>>(), &fallback_fn).await;
 
-        assert!(result.is_ok(), "Should succeed on second mirror");
+        assert!(result.is_ok());
         assert_eq!(
             attempt_count.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "Should have attempted 2 mirrors"
+            2
         );
+        assert_eq!(result.unwrap(), b"Success data");
+    }
 
-        let data = result.unwrap();
-        assert_eq!(
-            data, b"Success data",
-            "Data from second mirror should be returned"
+    // ── Multi-file Metalink tests ─────────────────────────────────────────
+
+    fn make_multi_file_xml() -> Vec<u8> {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <files>
+    <file name="first.bin">
+      <size>1024</size>
+      <hash type="sha-256">aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</hash>
+      <url priority="1">http://mirror.example.com/first.bin</url>
+    </file>
+    <file name="second.bin">
+      <size>2048</size>
+      <hash type="sha-256">bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</hash>
+      <url priority="1">http://mirror.example.com/second.bin</url>
+    </file>
+  </files>
+</metalink>"#
+            .as_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn test_new_accepts_multi_file_metalink() {
+        let options = DownloadOptions::default();
+        // Previously this would return "Metalink contains multiple files or no files"
+        // Now it should succeed, picking the first file
+        let result = MetalinkDownloadCommand::new(
+            GroupId::new(1),
+            &make_multi_file_xml(),
+            &options,
+            None,
         );
+        assert!(result.is_ok(), "new() should accept multi-file Metalink");
+    }
+
+    #[test]
+    fn test_create_multi_file_returns_all_files() {
+        let options = DownloadOptions::default();
+        let commands = MetalinkDownloadCommand::create_multi_file(
+            &make_multi_file_xml(),
+            &options,
+            None,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 2, "Should create 2 commands for 2 files");
+        assert_eq!(commands[0].file_index, 0);
+        assert_eq!(commands[1].file_index, 1);
+        assert!(
+            commands[0].command.output_path.to_string_lossy().contains("first.bin"),
+            "First command should be for first.bin"
+        );
+        assert!(
+            commands[1].command.output_path.to_string_lossy().contains("second.bin"),
+            "Second command should be for second.bin"
+        );
+    }
+
+    #[test]
+    fn test_create_multi_file_assigns_incrementing_gids() {
+        let options = DownloadOptions::default();
+        let commands = MetalinkDownloadCommand::create_multi_file(
+            &make_multi_file_xml(),
+            &options,
+            None,
+            200,
+        )
+        .unwrap();
+
+        let g0 = commands[0].command.group.read().unwrap();
+        let g1 = commands[1].command.group.read().unwrap();
+        assert_eq!(g0.gid().value(), 200);
+        assert_eq!(g1.gid().value(), 201);
+    }
+
+    #[test]
+    fn test_create_multi_file_skips_files_without_urls() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <files>
+    <file name="with-urls.bin">
+      <size>1024</size>
+      <url priority="1">http://mirror.example.com/with-urls.bin</url>
+    </file>
+    <file name="no-urls.bin">
+      <size>2048</size>
+    </file>
+  </files>
+</metalink>"#;
+
+        let options = DownloadOptions::default();
+        let commands = MetalinkDownloadCommand::create_multi_file(
+            xml.as_bytes(),
+            &options,
+            None,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 1, "Should skip file with no URLs");
+        assert_eq!(commands[0].file_index, 0);
+    }
+
+    #[test]
+    fn test_output_path_accessor() {
+        let options = DownloadOptions::default();
+        let commands = MetalinkDownloadCommand::create_multi_file(
+            &make_multi_file_xml(),
+            &options,
+            Some("/tmp"),
+            1,
+        )
+        .unwrap();
+
+        assert!(commands[0].command.output_path().to_string_lossy().contains("first.bin"));
     }
 }

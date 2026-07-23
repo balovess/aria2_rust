@@ -42,9 +42,15 @@ impl ConcurrentDownloadCommand {
                 Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
             })?;
 
-        let file = doc
-            .single_file()
-            .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("No file in Metalink".into())))?;
+        if doc.files.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Metalink contains no files".into(),
+            )));
+        }
+
+        // Use the first file. For multi-file Metalinks, the caller
+        // should use create_multi_file_sequential() on MetalinkDownloadCommand.
+        let file = &doc.files[0];
 
         if file.urls.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -125,9 +131,8 @@ impl Command for ConcurrentDownloadCommand {
                 Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
             })?;
 
-        let file = doc
-            .single_file()
-            .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("No available file".into())))?;
+        // Use the first file for single-file mode
+        let file = &doc.files[0];
 
         let sorted_urls = file.get_sorted_urls();
         if sorted_urls.len() < 2 {
@@ -425,7 +430,10 @@ impl ConcurrentDownloadCommand {
         use aria2_protocol::metalink::parser::HashAlgorithm;
         match hash.algo {
             HashAlgorithm::Md5 => {
-                let digest = md5::compute(data);
+                use md5::Digest;
+                let mut hasher = md5::Md5::new();
+                hasher.update(data);
+                let digest = hasher.finalize();
                 Ok(format!("{:x}", digest) == hash.value)
             }
             HashAlgorithm::Sha1 => {

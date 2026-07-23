@@ -241,11 +241,9 @@ impl RpcEngine {
                 let mut stopped = self.stopped_tasks.write().await;
                 stopped.push(state.status.clone());
 
-                // Build file info from the removed task's URIs for WebSocket notification
-                let file_info = build_file_info_from_uris(&state.uris);
                 let _ = self.event_publisher.publish(
                     EventType::DownloadStop,
-                    DownloadEvent::download_stop(&gid, file_info),
+                    DownloadEvent::download_stop(&gid),
                 );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
@@ -393,9 +391,11 @@ impl RpcEngine {
                     }
                 }
 
+                // C++ aria2 fires onDownloadStart (not a separate onDownloadResume)
+                // when a download is unpaused. Match that behavior for compatibility.
                 let _ = self.event_publisher.publish(
-                    EventType::DownloadResume,
-                    DownloadEvent::download_resume(&gid),
+                    EventType::DownloadStart,
+                    DownloadEvent::download_start(&gid),
                 );
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
@@ -479,12 +479,11 @@ impl RpcEngine {
         // Push removed tasks into stopped_tasks and publish events
         {
             let mut stopped = self.stopped_tasks.write().await;
-            for (gid, status, uris) in &removed_statuses {
+            for (gid, status, _uris) in &removed_statuses {
                 stopped.push(status.clone());
-                let file_info = build_file_info_from_uris(uris);
                 let _ = self.event_publisher.publish(
                     EventType::DownloadStop,
-                    DownloadEvent::download_stop(gid, file_info),
+                    DownloadEvent::download_stop(gid),
                 );
             }
         }
@@ -747,31 +746,10 @@ impl RpcEngine {
             let mut tasks = self.tasks.write().await;
             tasks.insert(gid_str.clone(), state);
         }
-        // Build file info for the start notification (with empty URIs as used)
-        let file_info: Vec<serde_json::Value> = if uris.is_empty() {
-            vec![serde_json::json!({
-                "index": 1,
-                "path": "",
-                "length": 0,
-                "completedLength": 0,
-                "selected": true,
-                "uris": []
-            })]
-        } else {
-            uris.iter().enumerate().map(|(i, u)| {
-                serde_json::json!({
-                    "index": i + 1,
-                    "path": u,
-                    "length": 0,
-                    "completedLength": 0,
-                    "selected": true,
-                    "uris": [{"uri": u, "status": "used"}]
-                })
-            }).collect()
-        };
+        // C++ aria2 notification only includes gid (no files field)
         let _ = self.event_publisher.publish(
             EventType::DownloadStart,
-            DownloadEvent::download_start(&gid_str, file_info),
+            DownloadEvent::download_start(&gid_str),
         );
         Ok(gid_str)
     }
@@ -1015,35 +993,5 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         header,
         user_agent: get_str("user-agent"),
         referer: get_str("referer"),
-    }
-}
-
-/// Build file_info JSON array from URIs for WebSocket events.
-///
-/// Produces the same structure used in `add_task()`:
-/// ```json
-/// [{"index": 1, "path": "uri", "length": 0, "completedLength": 0, "selected": true, "uris": [{"uri": "..", "status": "used"}]}]
-/// ```
-fn build_file_info_from_uris(uris: &[String]) -> Vec<serde_json::Value> {
-    if uris.is_empty() {
-        vec![serde_json::json!({
-            "index": 1,
-            "path": "",
-            "length": 0,
-            "completedLength": 0,
-            "selected": true,
-            "uris": []
-        })]
-    } else {
-        uris.iter().enumerate().map(|(i, u)| {
-            serde_json::json!({
-                "index": i + 1,
-                "path": u,
-                "length": 0,
-                "completedLength": 0,
-                "selected": true,
-                "uris": [{"uri": u, "status": "used"}]
-            })
-        }).collect()
     }
 }

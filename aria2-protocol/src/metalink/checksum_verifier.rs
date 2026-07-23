@@ -229,8 +229,10 @@ fn compute_hash(data: &[u8], algo: &HashAlgorithm) -> Result<String, String> {
             Ok(format!("{:x}", hasher.finalize()))
         }
         HashAlgorithm::Md5 => {
-            // md5 0.7 provides compute() convenience function
-            let digest = md5::compute(data);
+            use md5::Digest;
+            let mut hasher = md5::Md5::new();
+            hasher.update(data);
+            let digest = hasher.finalize();
             Ok(format!("{:x}", digest))
         }
     }
@@ -414,7 +416,12 @@ mod tests {
         let path = make_test_file(b"test", "_md5_test");
 
         // First compute the actual MD5 to verify our expectation
-        let actual_md5 = md5::compute(b"test");
+        let actual_md5 = {
+            use md5::Digest;
+            let mut h = md5::Md5::new();
+            h.update(b"test");
+            h.finalize()
+        };
         let actual_hex = format!("{:x}", actual_md5);
 
         let expected = HashEntry::new(HashAlgorithm::Md5, &actual_hex);

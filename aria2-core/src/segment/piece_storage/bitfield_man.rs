@@ -62,6 +62,7 @@ pub(crate) fn bf_count_set(bitfield: &[u8], num_bits: usize) -> usize {
 /// - **completion**: which pieces have been fully downloaded
 /// - **use**: which pieces are currently being downloaded (in-flight)
 /// - **filter**: which pieces are filtered out (not to be downloaded)
+#[derive(Clone)]
 pub struct BitfieldMan {
     /// Bitfield tracking completed pieces
     bitfield: Vec<u8>,

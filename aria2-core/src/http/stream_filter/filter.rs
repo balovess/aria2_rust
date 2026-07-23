@@ -91,4 +91,146 @@ impl AutoFilterSelector {
         content_encoding: Option<&str>,
         transfer_encoding: Option<&str>,
     ) -> Vec<Box<dyn StreamFilter>> {
-        let mut filters: Vec<Box<dyn
+        let mut filters: Vec<Box<dyn StreamFilter>> = Vec::new();
+
+        // Transfer-Encoding takes priority over Content-Encoding (RFC 7230)
+        if let Some(te) = transfer_encoding {
+            // Parse multiple values (comma-separated)
+            for encoding in te.split(',') {
+                let encoding = encoding.trim().to_lowercase();
+                match encoding.as_str() {
+                    "chunked" => {
+                        filters.push(Box::new(ChunkedDecoder::new()));
+                    }
+                    "gzip" | "x-gzip" => {
+                        filters.push(Box::new(GZipDecoder::new()));
+                    }
+                    "deflate" => {
+                        // TODO: Future support for ZlibDecoder
+                        tracing::warn!("Deflate encoding not yet implemented");
+                    }
+                    "bzip2" | "x-bzip2" => {
+                        filters.push(Box::new(BZip2Decoder::new()));
+                    }
+                    _ => {
+                        // Identity / none encoding -> passthrough (no decoder needed)
+                        if encoding.eq_ignore_ascii_case("identity")
+                            || encoding.eq_ignore_ascii_case("none")
+                        {
+                            continue;
+                        }
+
+                        // LZMA / x-lzma -> log warning, return identity (not yet supported)
+                        if encoding.contains("lzma") {
+                            tracing::warn!(
+                                "LZMA encoding not yet supported, returning passthrough"
+                            );
+                            continue;
+                        }
+
+                        // Brotli (br) -> placeholder for future support
+                        if encoding.eq_ignore_ascii_case("br") {
+                            tracing::debug!("Brotli encoding detected but not yet implemented");
+                            continue;
+                        }
+
+                        tracing::debug!("Unknown transfer encoding: {}", encoding);
+                    }
+                }
+            }
+        } else if let Some(ce) = content_encoding {
+            // Only process Content-Encoding when Transfer-Encoding is absent
+            for encoding in ce.split(',') {
+                let encoding = encoding.trim().to_lowercase();
+                match encoding.as_str() {
+                    "gzip" | "x-gzip" => {
+                        filters.push(Box::new(GZipDecoder::new()));
+                    }
+                    "deflate" => {
+                        // TODO: Future support for ZlibDecoder
+                        tracing::warn!("Deflate encoding not yet implemented");
+                    }
+                    "bzip2" | "x-bzip2" => {
+                        filters.push(Box::new(BZip2Decoder::new()));
+                    }
+                    "identity" | "" => {
+                        // identity means no encoding, ignore
+                    }
+                    _ => {
+                        // Identity / none encoding -> passthrough (no decoder needed)
+                        if encoding.eq_ignore_ascii_case("identity")
+                            || encoding.eq_ignore_ascii_case("none")
+                        {
+                            continue;
+                        }
+
+                        // LZMA / x-lzma -> log warning, return identity (not yet supported)
+                        if encoding.contains("lzma") {
+                            tracing::warn!(
+                                "LZMA encoding not yet supported, returning passthrough"
+                            );
+                            continue;
+                        }
+
+                        // Brotli (br) -> placeholder for future support
+                        if encoding.eq_ignore_ascii_case("br") {
+                            tracing::debug!("Brotli encoding detected but not yet implemented");
+                            continue;
+                        }
+
+                        tracing::debug!("Unknown content encoding: {}", encoding);
+                    }
+                }
+            }
+        }
+
+        filters
+    }
+}
+
+/// Detect content encoding from magic bytes as fallback when Content-Encoding header
+/// may be incorrect or missing.
+///
+/// Examines the first few bytes of data to identify known compression formats:
+/// - Gzip: bytes [0x1f, 0x8b]
+/// - BZ2: bytes [0x42, 0x5a] ("BZ")
+/// - Zlib/Deflate: byte [0x78] followed by valid flag byte
+///
+/// # Arguments
+///
+/// * `data` - Raw data bytes to examine
+///
+/// # Returns
+///
+/// A string slice representing the detected encoding:
+/// - "gzip" for GZip compressed data
+/// - "bzip2" for BZip2 compressed data
+/// - "deflate" for Zlib/Deflate compressed data
+/// - "identity" for uncompressed/unknown data
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use aria2_core::http::stream_filter::detect_encoding_from_magic_bytes;
+///
+/// let gzip_data = vec![0x1f, 0x8b, 0x08, ...];
+/// assert_eq!(detect_encoding_from_magic_bytes(&gzip_data), "gzip");
+/// ```
+pub fn detect_encoding_from_magic_bytes(data: &[u8]) -> &'static str {
+    // Check for Gzip magic number: 0x1f 0x8b
+    if data.len() >= 2 {
+        if data[0] == 0x1f && data[1] == 0x8b {
+            return "gzip";
+        }
+        // Check for BZip2 magic number: 0x42 0x5a ("BZ")
+        if data[0] == 0x42 && data[1] == 0x5a {
+            return "bzip2";
+        }
+    }
+    // Check for Zlib/Deflate magic number: 0x78 followed by valid flag byte
+    if !data.is_empty() && data[0] == 0x78 {
+        return "deflate";
+    }
+    // Default to identity (no compression)
+    "identity"
+}

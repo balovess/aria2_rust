@@ -116,18 +116,12 @@ impl HttpAuth {
         let ha2 = Self::compute_ha2(method, uri);
 
         let response = if challenge.qop.is_empty() {
-            format!(
-                "{:x}",
-                md5::compute(format!("{}:{}{}", ha1, challenge.nonce, ha2))
-            )
+            md5_hex(format!("{}:{}{}", ha1, challenge.nonce, ha2))
         } else {
-            format!(
-                "{:x}",
-                md5::compute(format!(
-                    "{}:{}:{:08x}:{}:{}:{}",
-                    ha1, challenge.nonce, nc, cnonce, challenge.qop, ha2
-                ))
-            )
+            md5_hex(format!(
+                "{}:{}:{:08x}:{}:{}:{}",
+                ha1, challenge.nonce, nc, cnonce, challenge.qop, ha2
+            ))
         };
 
         let mut parts = vec![
@@ -153,13 +147,21 @@ impl HttpAuth {
     }
 
     fn compute_ha1(username: &str, realm: &str, password: &str, _algorithm: &str) -> String {
-        let a1 = format!("{}:{}:{}", username, realm, password);
-        format!("{:x}", md5::compute(a1))
+        md5_hex(format!("{}:{}:{}", username, realm, password))
     }
 
     fn compute_ha2(method: &str, uri: &str) -> String {
-        format!("{:x}", md5::compute(format!("{}:{}", method, uri)))
+        md5_hex(format!("{}:{}", method, uri))
     }
+}
+
+/// Compute MD5 hash of input and return as lowercase hex string.
+/// Replaces `format!("{:x}", md5::compute(...))` from the old md5 0.7 API.
+fn md5_hex(input: impl AsRef<[u8]>) -> String {
+    use md5::Digest;
+    let mut hasher = md5::Md5::new();
+    hasher.update(input.as_ref());
+    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Clone)]

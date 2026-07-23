@@ -69,7 +69,7 @@ async fn test_list_notifications_returns_all_events() {
     assert!(resp.is_success());
 
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(notifications.len(), 7);
+    assert_eq!(notifications.len(), 6);
 }
 
 #[tokio::test]
@@ -96,9 +96,8 @@ async fn test_list_notifications_contains_bt_events() {
 
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
 
-    // BitTorrent-specific events
+    // BitTorrent-specific events (only onBtDownloadComplete in C++ aria2)
     assert!(notifications.contains(&"aria2.onBtDownloadComplete".to_string()));
-    assert!(notifications.contains(&"aria2.onBtDownloadError".to_string()));
 }
 
 #[tokio::test]

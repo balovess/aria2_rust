@@ -372,6 +372,9 @@ pub struct ServerConfig {
     pub cors: CorsConfig,
     /// TLS configuration for HTTPS RPC
     pub tls: Option<TlsConfig>,
+    /// Maximum allowed size for a single RPC request / WebSocket message in bytes.
+    /// Prevents OOM from oversized payloads. Default: 2 MiB.
+    pub max_request_size: usize,
 }
 
 impl Default for ServerConfig {
@@ -382,6 +385,7 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             cors: CorsConfig::default(),
             tls: None,
+            max_request_size: crate::constants::DEFAULT_RPC_MAX_REQUEST_SIZE,
         }
     }
 }
@@ -405,6 +409,14 @@ impl ServerConfig {
     }
     pub fn with_tls(mut self, tls: TlsConfig) -> Self {
         self.tls = Some(tls);
+        self
+    }
+    /// Set the maximum RPC request / WebSocket message size in bytes.
+    ///
+    /// Both `max_frame_size` and `max_message_size` on the WebSocket upgrade
+    /// will be set to this value, preventing OOM from oversized payloads.
+    pub fn with_max_request_size(mut self, size: usize) -> Self {
+        self.max_request_size = size;
         self
     }
 
@@ -590,6 +602,7 @@ impl RpcServer {
         // Create shared state with the persistent RPC engine
         let state = RpcState {
             engine: self.engine.clone(),
+            max_request_size: self.config.max_request_size,
         };
 
         // Build CORS layer
@@ -641,6 +654,8 @@ impl RpcServer {
 #[derive(Clone)]
 struct RpcState {
     engine: Arc<RpcEngine>,
+    /// Maximum allowed size for a single WebSocket frame/message in bytes.
+    max_request_size: usize,
 }
 
 /// Root handler - returns server info
@@ -699,8 +714,13 @@ async fn handle_jsonrpc_or_ws(
 
     match ws {
         Some(upgrade) => {
-            // WebSocket upgrade request from Aria2 Explorer or other clients
-            upgrade.on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
+            // WebSocket upgrade request from Aria2 Explorer or other clients.
+            // Enforce max frame/message size to prevent OOM from oversized payloads.
+            let max_size = state.max_request_size;
+            upgrade
+                .max_frame_size(max_size)
+                .max_message_size(max_size)
+                .on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
         }
         None => {
             // Regular GET request
@@ -723,14 +743,25 @@ async fn ws_handler(
     axum::extract::State(state): axum::extract::State<RpcState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl axum::response::IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
+    // Enforce max frame/message size to prevent OOM from oversized payloads.
+    let max_size = state.max_request_size;
+    ws.max_frame_size(max_size)
+        .max_message_size(max_size)
+        .on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
 }
 
 /// Handle an upgraded WebSocket connection.
 ///
-/// Subscribes to the engine's event publisher and forwards events
-/// to the connected WebSocket client as JSON-RPC notifications.
-/// Detects client disconnect via incoming messages and cleans up.
+/// Serves dual purpose (matching C++ aria2's `WebSocketSession::onMsgRecvCallback`):
+/// - **OUTBOUND**: Subscribes to the engine's event publisher and forwards
+///   download event notifications to the connected WebSocket client.
+/// - **INBOUND**: Processes incoming `Text` messages as JSON-RPC requests
+///   (single or batch), dispatches them through `RpcEngine::handle_request`,
+///   and sends the response(s) back over the WebSocket.
+///
+/// The `tokio::select!` loop interleaves both directions so that event
+/// notifications continue flowing even while request/response traffic is
+/// active on the same connection.
 async fn handle_ws_socket(
     mut socket: axum::extract::ws::WebSocket,
     engine: std::sync::Arc<crate::engine::RpcEngine>,
@@ -742,7 +773,7 @@ async fn handle_ws_socket(
 
     loop {
         tokio::select! {
-            // Wait for events from the engine
+            // Wait for events from the engine (outbound notifications)
             result = rx.recv() => {
                 match result {
                     Ok((_event_type, event)) => {
@@ -766,9 +797,13 @@ async fn handle_ws_socket(
                 }
             }
 
-            // Wait for incoming messages from client (to detect disconnect)
+            // Wait for incoming messages from client
             msg = socket.recv() => {
                 match msg {
+                    Some(Ok(axum::extract::ws::Message::Text(text))) => {
+                        // Process incoming text as a JSON-RPC request
+                        process_ws_jsonrpc(&mut socket, &engine, &text).await;
+                    }
                     Some(Ok(axum::extract::ws::Message::Close(_))) | None => {
                         break; // Client disconnected
                     }
@@ -783,7 +818,7 @@ async fn handle_ws_socket(
                         break;
                     }
                     _ => {
-                        // Ignore other message types (pong, etc.)
+                        // Ignore other message types (pong, binary, etc.)
                         continue;
                     }
                 }
@@ -792,6 +827,87 @@ async fn handle_ws_socket(
     }
 
     tracing::debug!("WebSocket client disconnected");
+}
+
+/// Process an incoming WebSocket text message as a JSON-RPC request.
+///
+/// Mirrors C++ aria2's `WebSocketSession::onMsgRecvCallback`:
+/// 1. Parse the text as JSON (single object or batch array).
+/// 2. If parse fails → send a JSON-RPC Parse Error (-32700) response.
+/// 3. If valid single request → dispatch through `RpcEngine::handle_request`,
+///    send one response object.
+/// 4. If valid batch request → dispatch each element, send a JSON array of
+///    responses.
+/// 5. If the JSON value is neither object nor array → send Invalid Request
+///    (-32600) response.
+async fn process_ws_jsonrpc(
+    socket: &mut axum::extract::ws::WebSocket,
+    engine: &Arc<RpcEngine>,
+    text: &str,
+) {
+    use crate::json_rpc::{JsonRpcBatchResponse, parse_request};
+
+    // Step 1: Parse the incoming text as JSON-RPC request(s)
+    let requests = match parse_request(text.as_bytes()) {
+        Ok(reqs) => reqs,
+        Err(e) => {
+            // Step 2: Parse error → send -32700 response
+            tracing::warn!("WebSocket JSON-RPC parse error: {}", e);
+            let resp = e.into_response(None);
+            send_ws_response(socket, &resp).await;
+            return;
+        }
+    };
+
+    // Step 3/4: Dispatch request(s) through the engine
+    if requests.len() == 1 {
+        // Single request — send single response object (not wrapped in array)
+        let resp = engine.handle_request(&requests[0]).await;
+        send_ws_response(socket, &resp).await;
+    } else {
+        // Batch request — send array of response objects
+        let mut results = Vec::with_capacity(requests.len());
+        for req in &requests {
+            let resp = engine.handle_request(req).await;
+            results.push(resp);
+        }
+        let batch = JsonRpcBatchResponse(results);
+        match batch.to_string() {
+            Ok(json_str) => {
+                if socket
+                    .send(axum::extract::ws::Message::Text(json_str.into()))
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!("Failed to send WS batch response (client disconnected)");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize WS batch response: {}", e);
+            }
+        }
+    }
+}
+
+/// Send a single JSON-RPC response over the WebSocket connection.
+async fn send_ws_response(
+    socket: &mut axum::extract::ws::WebSocket,
+    resp: &crate::json_rpc::JsonRpcResponse,
+) {
+    match resp.to_string() {
+        Ok(json_str) => {
+            if socket
+                .send(axum::extract::ws::Message::Text(json_str.into()))
+                .await
+                .is_err()
+            {
+                tracing::debug!("Failed to send WS response (client disconnected)");
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to serialize WS JSON-RPC response: {}", e);
+        }
+    }
 }
 
 impl std::fmt::Debug for RpcServer {
@@ -1144,6 +1260,22 @@ mod tests {
         assert!(!config.is_secure());
         assert_eq!(config.scheme(), "http");
         assert!(config.tls.is_none());
+    }
+
+    #[test]
+    fn test_server_config_max_request_size_default() {
+        let config = ServerConfig::default();
+        assert_eq!(
+            config.max_request_size,
+            crate::constants::DEFAULT_RPC_MAX_REQUEST_SIZE
+        );
+        assert_eq!(config.max_request_size, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_server_config_with_max_request_size() {
+        let config = ServerConfig::default().with_max_request_size(4 * 1024 * 1024);
+        assert_eq!(config.max_request_size, 4 * 1024 * 1024);
     }
 
     // =========================================================================

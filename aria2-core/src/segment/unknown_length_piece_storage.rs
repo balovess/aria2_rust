@@ -30,6 +30,8 @@
 //! | End game | Supported | Not supported |
 //! | BitTorrent | Supported | All BT methods panic |
 
+use std::sync::Arc;
+
 use tracing::trace;
 
 use super::piece::Piece;
@@ -53,15 +55,24 @@ use super::piece_storage::{BitfieldMan, PieceStorage};
 /// - Ignore bitfield is ignored (single piece, no selection logic)
 pub struct UnknownLengthPieceStorage {
     /// The single in-flight piece, if any
+    /// C++: `std::shared_ptr<Piece> piece_`
     piece: Option<Piece>,
     /// Bitfield manager — created only after download completion
+    /// C++: `std::unique_ptr<BitfieldMan> bitfield_`
     bitfield: Option<BitfieldMan>,
     /// Total download length (0 until completion, then set from piece length)
+    /// C++: `int64_t totalLength_`
     total_length: u64,
     /// Piece length (used when creating the bitfield after completion)
+    /// C++ reads this from `downloadContext_->getPieceLength()`
     piece_length: u64,
     /// Whether the download has finished
+    /// C++: `bool downloadFinished_`
     download_finished: bool,
+    /// Disk adaptor for file I/O (optional).
+    /// C++: `std::shared_ptr<DirectDiskAdaptor> diskAdaptor_`
+    /// Set via `set_disk_adaptor()`. Used by `read_data()` for integrity checking.
+    disk_adaptor: Option<Arc<tokio::sync::Mutex<dyn crate::filesystem::disk_adaptor::DiskAdaptor>>>,
 }
 
 impl UnknownLengthPieceStorage {
@@ -77,12 +88,32 @@ impl UnknownLengthPieceStorage {
             total_length: 0,
             piece_length,
             download_finished: false,
+            disk_adaptor: None,
         }
     }
 
     /// Returns the piece length in bytes.
     pub fn piece_length(&self) -> u64 {
         self.piece_length
+    }
+
+    /// Set the disk adaptor for file I/O.
+    ///
+    /// In C++, `UnknownLengthPieceStorage::initStorage()` creates a
+    /// `DirectDiskAdaptor` and connects it to a `DefaultDiskWriter`.
+    /// Here we use `Arc<Mutex<dyn DiskAdaptor>>` for async-safe shared access.
+    pub fn set_disk_adaptor(
+        &mut self,
+        adaptor: Arc<tokio::sync::Mutex<dyn crate::filesystem::disk_adaptor::DiskAdaptor>>,
+    ) {
+        self.disk_adaptor = Some(adaptor);
+    }
+
+    /// Get a reference to the disk adaptor.
+    pub fn get_disk_adaptor(
+        &self,
+    ) -> Option<&Arc<tokio::sync::Mutex<dyn crate::filesystem::disk_adaptor::DiskAdaptor>>> {
+        self.disk_adaptor.as_ref()
     }
 }
 
@@ -175,12 +206,14 @@ impl PieceStorage for UnknownLengthPieceStorage {
     }
 
     fn get_completed_length(&self) -> u64 {
-        if self.download_finished {
-            self.total_length
-        } else if let Some(ref piece) = self.piece {
-            piece.completed_length()
+        // C++: if piece_ is not null, returns piece_->getLength() (total piece
+        // length, NOT completed_length). Otherwise returns totalLength_.
+        // The C++ has a TODO: "we have to return actual completed length here?"
+        // Our Rust version returns piece.length() to match C++ behavior.
+        if let Some(ref piece) = self.piece {
+            piece.length()
         } else {
-            0
+            self.total_length
         }
     }
 
@@ -219,11 +252,15 @@ impl PieceStorage for UnknownLengthPieceStorage {
     // ── New PieceStorage methods (most are no-ops for unknown-length) ────
 
     fn get_piece(&self, index: usize) -> Option<Piece> {
-        // Return the piece without checkout (for upload)
+        // Return the piece without checkout (for upload).
+        // C++ returns an empty Piece for index 0 when no piece is checked out.
         if index != 0 {
             return None;
         }
-        self.piece.clone()
+        match &self.piece {
+            Some(p) => Some(p.clone()),
+            None => Some(Piece::new(0, 0)),
+        }
     }
 
     fn get_filtered_total_length(&self) -> u64 {
@@ -244,7 +281,21 @@ impl PieceStorage for UnknownLengthPieceStorage {
     }
 
     fn mark_all_pieces_done(&mut self) {
-        // Not applicable for unknown-length — no-op
+        // C++: if piece is in-flight, take its length as totalLength;
+        // reset the piece, create bitfield, set downloadFinished = true.
+        if let Some(ref piece) = self.piece {
+            self.total_length = piece.length();
+        }
+        self.piece = None;
+
+        // Create bitfield retroactively
+        if self.total_length > 0 {
+            let mut bfman = BitfieldMan::new(self.piece_length, self.total_length);
+            bfman.mark_all_done();
+            self.bitfield = Some(bfman);
+        }
+
+        self.download_finished = true;
     }
 
     fn mark_piece_missing(&mut self, _index: usize) {
@@ -259,9 +310,33 @@ impl PieceStorage for UnknownLengthPieceStorage {
         // Not applicable for unknown-length — no-op
     }
 
-    fn read_data(&self, _piece_index: usize) -> std::result::Result<Vec<u8>, String> {
-        // No disk adaptor for unknown-length — cannot read data
-        Err("UnknownLengthPieceStorage does not support data reading".to_string())
+    fn read_data(&self, piece_index: usize) -> std::result::Result<Vec<u8>, String> {
+        // Only piece 0 is valid
+        if piece_index != 0 {
+            return Err(format!("Piece index {} out of range for unknown-length storage", piece_index));
+        }
+
+        // Read piece data from disk via DiskAdaptor.
+        // C++: pieceStorage_->getDiskAdaptor()->readData(buf, len, offset)
+        if let Some(ref disk_adaptor) = self.disk_adaptor {
+            match disk_adaptor.try_lock() {
+                Ok(mut adaptor) => {
+                    let rt = tokio::runtime::Handle::try_current();
+                    match rt {
+                        Ok(handle) => {
+                            match handle.block_on(adaptor.read(0, self.total_length)) {
+                                Ok(data) => Ok(data),
+                                Err(e) => Err(format!("Disk read error: {}", e)),
+                            }
+                        }
+                        Err(_) => Err("No tokio runtime available for synchronous read".to_string()),
+                    }
+                }
+                Err(_) => Err("Disk adaptor is busy (locked by another task)".to_string()),
+            }
+        } else {
+            Err("UnknownLengthPieceStorage: no disk adaptor connected".to_string())
+        }
     }
 
     fn set_end_game_piece_num(&mut self, _num: usize) {

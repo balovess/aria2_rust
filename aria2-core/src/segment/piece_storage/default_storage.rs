@@ -511,16 +511,19 @@ impl PieceStorage for DefaultPieceStorage {
         last_have_index: u64,
     ) -> (Vec<usize>, u64) {
         let mut indexes = Vec::new();
-        let mut new_last = last_have_index;
+        // C++ sets lastHaveIndex_ to the max have_index across ALL entries
+        // (not just those returned), so future queries skip already-scanned
+        // entries regardless of which CUID produced them.
+        let mut max_have_index = last_have_index;
         for entry in &self.haves {
             if entry.have_index > last_have_index && entry.cuid != my_cuid {
                 indexes.push(entry.index);
             }
-            if entry.have_index >= new_last {
-                new_last = entry.have_index + 1;
+            if entry.have_index > max_have_index {
+                max_have_index = entry.have_index;
             }
         }
-        (indexes, new_last)
+        (indexes, max_have_index)
     }
 
     fn remove_advertised_piece(&mut self, expiry_ms: u64) {

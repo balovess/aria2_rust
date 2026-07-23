@@ -253,7 +253,7 @@ mod tests {
         let info_hash = "efefefefefefefefefefefefefefefefefefefef";
 
         // Register torrent
-        lpd.register_torrent(info_hash).await.unwrap();
+        lpd.register_torrent(info_hash, false).await.unwrap();
 
         // Verify registered
         let active = lpd.active_hashes.read().await;

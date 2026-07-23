@@ -358,12 +358,14 @@ async fn test_change_uri_adds_uris() {
 }
 
 #[tokio::test]
-async fn test_download_resume_event() {
-    let event = DownloadEvent::download_resume("gid-resume-001");
-    assert_eq!(event.event_type().unwrap(), EventType::DownloadResume);
-    assert_eq!(event.method(), "aria2.onDownloadResume");
+async fn test_unpause_fires_download_start_event() {
+    // C++ aria2 fires onDownloadStart (not onDownloadResume) when unpaused.
+    // This test verifies the notification format matches C++ exactly.
+    let event = DownloadEvent::download_start("gid-resume-001");
+    assert_eq!(event.event_type().unwrap(), EventType::DownloadStart);
+    assert_eq!(event.method(), "aria2.onDownloadStart");
     let json = event.to_json().unwrap();
-    assert!(json.contains("\"method\":\"aria2.onDownloadResume\""));
+    assert!(json.contains("\"method\":\"aria2.onDownloadStart\""));
     assert!(json.contains("\"gid\":\"gid-resume-001\""));
 }
 

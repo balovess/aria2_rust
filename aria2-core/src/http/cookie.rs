@@ -84,9 +84,9 @@ impl Cookie {
 
     pub fn to_netscape_line(&self) -> String {
         let d = if self.host_only {
-            format!(".{}", self.domain)
-        } else {
             self.domain.clone()
+        } else {
+            format!(".{}", self.domain)
         };
         let sub = if self.host_only { "FALSE" } else { "TRUE" };
         let sec = if self.secure { "TRUE" } else { "FALSE" };

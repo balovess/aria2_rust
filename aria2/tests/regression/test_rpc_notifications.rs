@@ -1,10 +1,10 @@
 //! RPC notification regression tests for aria2-rust.
 //!
 //! These tests verify that WebSocket event notifications fire at the correct
-//! lifecycle points for all supported event types:
+//! lifecycle points for all supported event types (matching C++ aria2):
 //! - aria2.onDownloadStart, onDownloadPause, onDownloadStop
 //! - aria2.onDownloadComplete, onDownloadError
-//! - aria2.onBtDownloadComplete, onDownloadResume
+//! - aria2.onBtDownloadComplete
 
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
@@ -117,9 +117,10 @@ async fn notification_remove_fires_download_stop() {
     assert_eq!(event_type, EventType::DownloadStop);
 }
 
-/// Test: aria2.unpause fires onDownloadResume notification.
+/// Test: aria2.unpause fires onDownloadStart notification (matching C++ behavior).
+/// C++ aria2 does not have a separate onDownloadResume event; it reuses onDownloadStart.
 #[tokio::test]
-async fn notification_unpause_fires_download_resume() {
+async fn notification_unpause_fires_download_start() {
     let engine = RpcEngine::new();
     let mut rx = engine.publisher().subscribe("test-resume", None).await;
 
@@ -131,7 +132,7 @@ async fn notification_unpause_fires_download_resume() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    // Consume the DownloadStart event
+    // Consume the DownloadStart event from addUri
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
 
     // Pause then unpause
@@ -143,7 +144,7 @@ async fn notification_unpause_fires_download_resume() {
     let unpause_resp = engine.handle_request(&unpause_req).await;
     assert_success(&unpause_resp);
 
-    // Should receive a DownloadResume (or DownloadStart - depending on implementation)
+    // C++ aria2 fires onDownloadStart when a download is unpaused
     let (event_type, _event) = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         rx.recv(),
@@ -152,11 +153,10 @@ async fn notification_unpause_fires_download_resume() {
     .expect("Should receive notification within timeout")
     .expect("Should receive valid event");
 
-    // The event type should be DownloadResume
-    assert_eq!(event_type, EventType::DownloadResume);
+    assert_eq!(event_type, EventType::DownloadStart);
 }
 
-/// Test: system.listNotifications returns all 7 event types.
+/// Test: system.listNotifications returns all 6 C++ event types.
 #[tokio::test]
 async fn notification_list_notifications_returns_all_events() {
     let engine = RpcEngine::new();
@@ -173,8 +173,7 @@ async fn notification_list_notifications_returns_all_events() {
     assert!(notifications.contains(&"aria2.onDownloadComplete".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadError".to_string()));
     assert!(notifications.contains(&"aria2.onBtDownloadComplete".to_string()));
-    assert!(notifications.contains(&"aria2.onBtDownloadError".to_string()));
-    assert_eq!(notifications.len(), 7);
+    assert_eq!(notifications.len(), 6);
 }
 
 /// Test: forceRemove fires onDownloadStop notification.

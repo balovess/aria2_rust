@@ -704,7 +704,7 @@ async fn bt_lpd_register_announce_packet() {
 
     // Register a download using hex string info_hash
     let info_hex = "0102030405060708090a0b0c0d0e0f1011121415";
-    manager.register_torrent(info_hex).await.unwrap();
+    manager.register_torrent(info_hex, false).await.unwrap();
 
     // Verify the download appears in active hashes
     let active = manager.active_hashes.read().await;
@@ -731,24 +731,24 @@ async fn bt_lpd_register_announce_packet() {
 
     // Test BEP 14 text format parsing with valid announcement
     let valid_msg =
-        b"Hash: 0102030405060708090a0b0c0d0e0f1011121415\nPort: 6881\nToken: deadbeef\n";
+        b"BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0102030405060708090a0b0c0d0e0f1011121415\r\n\r\n\r\n";
     let sender_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 42));
     let parsed = parse_lpd_announcement(valid_msg, sender_ip);
-    assert!(parsed.is_some(), "Valid LPD message should parse");
+    assert!(parsed.is_some(), "Valid BEP 14 LPD message should parse");
     let peer = parsed.unwrap();
     assert_eq!(peer.info_hash, info_hex);
     assert_eq!(peer.port, 6881);
     assert_eq!(peer.addr, sender_ip);
-    assert_eq!(peer.token, Some(0xdeadbeef));
+    assert!(peer.is_local, "10.x.x.x should be local");
 
     // Test parsing rejects malformed messages
-    let short_hash = b"Hash: abc\nPort: 1234\nToken: 01020304\n";
+    let short_hash = b"BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 1234\r\nInfohash: abc\r\n\r\n\r\n";
     assert!(
         parse_lpd_announcement(short_hash, sender_ip).is_none(),
         "Short hash should be rejected"
     );
 
-    let missing_port = b"Hash: 0102030405060708090a0b0c0d0e0f1011121415\nToken: deadbeef\n";
+    let missing_port = b"BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nInfohash: 0102030405060708090a0b0c0d0e0f1011121415\r\n\r\n\r\n";
     assert!(
         parse_lpd_announcement(missing_port, sender_ip).is_none(),
         "Missing port should be rejected"
@@ -790,18 +790,17 @@ async fn bt_lpd_peer_discovery_roundtrip() {
     let info_hex = "a0b0c0d0e0f0102030405060708090a0b0c0d0e1011";
 
     // Register the torrent we want to discover peers for
-    manager.register_torrent(info_hex).await.unwrap();
+    manager.register_torrent(info_hex, false).await.unwrap();
 
     // Initially no peers for this hash
     let peers = manager.get_peers_for(info_hex).await;
     assert!(peers.is_empty(), "Should start with 0 peers");
 
     // Manually add discovered peers (simulating what parse_lpd_announcement + update_peers would do)
-    let peer1 = LpdPeer::with_token(
+    let peer1 = LpdPeer::new(
         info_hex,
         6881,
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 42)),
-        0xdeadbeef,
     );
     let peer2 = LpdPeer::new(
         info_hex,
@@ -830,10 +829,8 @@ async fn bt_lpd_peer_discovery_roundtrip() {
     assert!(ports.contains(&6881), "Should contain port 6881");
     assert!(ports.contains(&6991), "Should contain port 6991");
 
-    // Check token is preserved for the peer that had one
-    let with_token: Vec<_> = discovered.iter().filter(|p| p.token.is_some()).collect();
-    assert_eq!(with_token.len(), 1, "Exactly 1 peer should have token");
-    assert_eq!(with_token[0].token, Some(0xdeadbeef));
+    // Both peers from 10.x.x.x should be detected as local
+    assert!(discovered.iter().all(|p| p.is_local), "10.x.x.x peers should be local");
 
     // Adding same peer again should dedup (LpdPeer Hash uses info_hash + addr)
     manager.update_peers(info_hex, vec![peer1.clone()]).await;

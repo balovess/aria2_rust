@@ -506,8 +506,11 @@ impl BtDownloadCommand {
                     "LPD discovered local peers"
                 );
 
-                // Register current download for LPD announcement
-                let _ = lpd.register_torrent(&info_hash_hex).await;
+                // Register current download for LPD announcement.
+                // Pass private_torrent from TorrentAttribute (BEP 0027):
+                // private torrents must NOT be announced via LPD.
+                let is_private = self.is_private;
+                let _ = lpd.register_torrent(&info_hash_hex, is_private).await;
             } else {
                 debug!("LPD no local peers found for this torrent");
             }

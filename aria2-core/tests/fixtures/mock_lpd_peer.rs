@@ -2,6 +2,15 @@
 //!
 //! Provides a mock UDP multicast server that simulates LPD announcements
 //! for testing BitTorrent local peer discovery functionality.
+//!
+//! Uses BEP 14 message format:
+//! ```http
+//! BT-SEARCH * HTTP/1.1\r\n
+//! Host: 239.192.152.143:6771\r\n
+//! Port: <listen_port>\r\n
+//! Infohash: <40-char-hex-info-hash>\r\n
+//! \r\n\r\n
+//! ```
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -24,10 +33,16 @@ pub struct LpdAnnouncement {
     pub info_hash: String,
     /// The peer's listen port
     pub port: u16,
-    /// The anti-spoofing token
-    pub token: u32,
     /// The source IP address
     pub source_addr: IpAddr,
+}
+
+/// Build a BEP 14 LPD announcement message
+pub fn build_bep14_announcement(info_hash: &str, port: u16) -> String {
+    format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: {}\r\nInfohash: {}\r\n\r\n\r\n",
+        port, info_hash
+    )
 }
 
 /// Mock LPD server that can send and receive LPD announcements
@@ -184,7 +199,7 @@ impl MockLpdServer {
         *running = false;
     }
 
-    /// Send an LPD announcement to a target address
+    /// Send a BEP 14 LPD announcement to a target address
     ///
     /// This simulates a peer announcing itself via LPD.
     #[allow(dead_code)]
@@ -194,32 +209,7 @@ impl MockLpdServer {
         port: u16,
         target: SocketAddr,
     ) -> Result<(), String> {
-        let token: u32 = rand::random();
-        let msg = format!(
-            "Hash: {}\nPort: {}\nToken: {:08x}\n",
-            info_hash, port, token
-        );
-
-        self.socket
-            .send_to(msg.as_bytes(), target)
-            .map_err(|e| format!("Failed to send announcement: {}", e))?;
-
-        Ok(())
-    }
-
-    /// Send an LPD announcement with a specific token
-    #[allow(dead_code)]
-    pub fn send_announcement_with_token(
-        &self,
-        info_hash: &str,
-        port: u16,
-        token: u32,
-        target: SocketAddr,
-    ) -> Result<(), String> {
-        let msg = format!(
-            "Hash: {}\nPort: {}\nToken: {:08x}\n",
-            info_hash, port, token
-        );
+        let msg = build_bep14_announcement(info_hash, port);
 
         self.socket
             .send_to(msg.as_bytes(), target)
@@ -254,36 +244,59 @@ impl MockLpdServer {
     }
 
     /// Parse an LPD announcement from raw bytes
+    ///
+    /// Supports both BEP 14 format and legacy format for backward compat.
     fn parse_announcement(data: &[u8], source_ip: IpAddr) -> Option<LpdAnnouncement> {
         let text = std::str::from_utf8(data).ok()?;
         let mut info_hash = String::new();
         let mut port = 0u16;
-        let mut token: Option<u32> = None;
 
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("Hash:") {
-                let val = rest.trim();
-                if val.len() == 40 && val.chars().all(|c| c.is_ascii_hexdigit()) {
-                    info_hash = val.to_lowercase();
-                } else {
-                    return None;
+        let first_line = text.lines().next()?;
+        if first_line.starts_with("BT-SEARCH ") {
+            // BEP 14 format
+            for line in text.lines() {
+                let line = line.trim_end_matches('\r');
+                if let Some(rest) = line.strip_prefix("Infohash:") {
+                    let val = rest.trim();
+                    if val.len() == 40 && val.chars().all(|c| c.is_ascii_hexdigit()) {
+                        info_hash = val.to_lowercase();
+                    } else {
+                        return None;
+                    }
+                } else if let Some(rest) = line.strip_prefix("Port:") {
+                    let val = rest.trim();
+                    port = val.parse().ok()?;
+                    if port == 0 {
+                        return None;
+                    }
                 }
-            } else if let Some(rest) = line.strip_prefix("Port:") {
-                port = rest.trim().parse().ok()?;
-                if port == 0 {
-                    return None;
+            }
+        } else {
+            // Legacy format: Hash:/Port:/Token:
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("Hash:") {
+                    let val = rest.trim();
+                    if val.len() == 40 && val.chars().all(|c| c.is_ascii_hexdigit()) {
+                        info_hash = val.to_lowercase();
+                    } else {
+                        return None;
+                    }
+                } else if let Some(rest) = line.strip_prefix("Port:") {
+                    let val = rest.trim();
+                    port = val.parse().ok()?;
+                    if port == 0 {
+                        return None;
+                    }
                 }
-            } else if let Some(rest) = line.strip_prefix("Token:") {
-                token = u32::from_str_radix(rest.trim(), 16).ok();
+                // Ignore Token: lines in legacy format
             }
         }
 
         if !info_hash.is_empty() && port > 0 {
-            token.map(|token| LpdAnnouncement {
+            Some(LpdAnnouncement {
                 info_hash,
                 port,
-                token,
                 source_addr: source_ip,
             })
         } else {
@@ -338,23 +351,19 @@ impl MockLpdPeer {
         }
     }
 
-    /// Format an LPD announcement message
-    pub fn format_announcement(&self, token: u32) -> String {
-        format!(
-            "Hash: {}\nPort: {}\nToken: {:08x}\n",
-            self.info_hash, self.port, token
-        )
+    /// Format a BEP 14 LPD announcement message
+    pub fn format_announcement(&self) -> String {
+        build_bep14_announcement(&self.info_hash, self.port)
     }
 
     /// Send an announcement to a target socket
     #[allow(dead_code)]
-    pub fn announce_to(&self, socket: &UdpSocket, target: SocketAddr) -> Result<u32, String> {
-        let token: u32 = rand::random();
-        let msg = self.format_announcement(token);
+    pub fn announce_to(&self, socket: &UdpSocket, target: SocketAddr) -> Result<(), String> {
+        let msg = self.format_announcement();
         socket
             .send_to(msg.as_bytes(), target)
             .map_err(|e| format!("Failed to send: {}", e))?;
-        Ok(token)
+        Ok(())
     }
 }
 
@@ -385,10 +394,10 @@ mod tests {
             Ipv4Addr::new(192, 168, 1, 1),
         );
 
-        let msg = peer.format_announcement(0xDEADBEEF);
-        assert!(msg.contains("Hash: 0123456789abcdef0123456789abcdef01234567"));
+        let msg = peer.format_announcement();
+        assert!(msg.starts_with("BT-SEARCH * HTTP/1.1\r\n"));
+        assert!(msg.contains("Infohash: 0123456789abcdef0123456789abcdef01234567"));
         assert!(msg.contains("Port: 6881"));
-        assert!(msg.contains("Token: deadbeef"));
     }
 
     #[test]
@@ -401,7 +410,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_valid_announcement() {
+    fn test_parse_bep14_announcement() {
+        let data = b"BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n";
+        let result =
+            MockLpdServer::parse_announcement(data, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+
+        assert!(result.is_some());
+        let ann = result.unwrap();
+        assert_eq!(ann.info_hash, "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(ann.port, 6881);
+    }
+
+    #[test]
+    fn test_parse_legacy_announcement() {
+        // Legacy format should still be accepted
         let data = b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: deadbeef\n";
         let result =
             MockLpdServer::parse_announcement(data, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
@@ -410,23 +432,17 @@ mod tests {
         let ann = result.unwrap();
         assert_eq!(ann.info_hash, "0123456789abcdef0123456789abcdef01234567");
         assert_eq!(ann.port, 6881);
-        assert_eq!(ann.token, 0xDEADBEEF);
     }
 
     #[test]
     fn test_parse_invalid_announcement() {
-        // Missing token
-        let data = b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n";
-        let result = MockLpdServer::parse_announcement(data, IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert!(result.is_none());
-
         // Invalid hash length
-        let data = b"Hash: short\nPort: 6881\nToken: deadbeef\n";
+        let data = b"BT-SEARCH * HTTP/1.1\r\nPort: 6881\r\nInfohash: short\r\n\r\n\r\n";
         let result = MockLpdServer::parse_announcement(data, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert!(result.is_none());
 
         // Port 0
-        let data = b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 0\nToken: deadbeef\n";
+        let data = b"BT-SEARCH * HTTP/1.1\r\nPort: 0\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n";
         let result = MockLpdServer::parse_announcement(data, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert!(result.is_none());
     }

@@ -161,7 +161,7 @@ enum HashState {
     Sha1(sha1::Sha1),
     Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
-    Md5(md5::Context),
+    Md5(md5::Md5),
 }
 
 impl HashState {
@@ -174,7 +174,7 @@ impl HashState {
             "sha-1" | "sha1" => Some(HashState::Sha1(sha1::Sha1::new())),
             "sha-256" | "sha256" => Some(HashState::Sha256(sha2::Sha256::new())),
             "sha-512" | "sha512" => Some(HashState::Sha512(sha2::Sha512::new())),
-            "md5" => Some(HashState::Md5(md5::Context::new())),
+            "md5" => Some(HashState::Md5(md5::Md5::new())),
             other => {
                 trace!("Unsupported hash type for piece verification: {}", other);
                 None
@@ -188,7 +188,7 @@ impl HashState {
             HashState::Sha1(ctx) => Digest::update(ctx, data),
             HashState::Sha256(ctx) => Digest::update(ctx, data),
             HashState::Sha512(ctx) => Digest::update(ctx, data),
-            HashState::Md5(ctx) => ctx.consume(data),
+            HashState::Md5(ctx) => md5::Digest::update(ctx, data),
         }
     }
 
@@ -211,7 +211,7 @@ fn finalize_hash(state: HashState) -> Vec<u8> {
         HashState::Sha1(ctx) => ctx.finalize().to_vec(),
         HashState::Sha256(ctx) => ctx.finalize().to_vec(),
         HashState::Sha512(ctx) => ctx.finalize().to_vec(),
-        HashState::Md5(ctx) => ctx.compute().to_vec(),
+        HashState::Md5(ctx) => md5::Digest::finalize(ctx).to_vec(),
     }
 }
 

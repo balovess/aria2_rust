@@ -1,16 +1,20 @@
 //! Tests for Local Peer Discovery (LPD) Manager - Phase 15 H8
 //!
 //! Comprehensive tests covering:
-//! - LPD announcement format validation
+//! - BEP 14 LPD announcement format validation
 //! - Announcement parsing (valid, invalid, edge cases)
+//! - Legacy format backward compatibility
 //! - Duplicate suppression
 //! - LpdPeer equality and hashing
 //! - LpdManager lifecycle operations
+//! - Private address detection
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use crate::engine::lpd_manager::{LpdManager, LpdPeer, parse_lpd_announcement};
+use crate::engine::lpd_manager::{
+    LpdManager, LpdPeer, is_private_address, parse_lpd_announcement,
+};
 
 // =========================================================================
 // Helper Functions
@@ -31,115 +35,88 @@ fn test_ip() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))
 }
 
+/// Build a BEP 14 compliant LPD message
+fn make_bep14_message(info_hash: &str, port: u16) -> Vec<u8> {
+    format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: {}\r\nInfohash: {}\r\n\r\n\r\n",
+        port, info_hash
+    )
+    .into_bytes()
+}
+
 // =========================================================================
-// Test: LPD Announcement Format
+// Test: BEP 14 Announcement Format
 // =========================================================================
 
 #[test]
-fn test_lpd_announce_format() {
-    // Build a valid LPD announcement message manually and verify format
+fn test_lpd_bep14_format() {
+    // Build a valid BEP 14 LPD announcement and verify format
     let info_hash = test_info_hash();
     let port = 6881u16;
-    let token = 0xDEADBEEFu32;
 
     let msg = format!(
-        "Hash: {}\nPort: {}\nToken: {:08x}\n",
-        info_hash, port, token
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: {}\r\nInfohash: {}\r\n\r\n\r\n",
+        port, info_hash
     );
 
-    // Verify message contains all required fields in correct format
-    assert!(msg.starts_with("Hash:"), "Should start with Hash:");
+    // Verify message contains BEP 14 request line
+    assert!(
+        msg.starts_with("BT-SEARCH * HTTP/1.1\r\n"),
+        "Should start with BEP 14 request line"
+    );
+    assert!(
+        msg.contains("Host: 239.192.152.143:6771"),
+        "Should contain Host header"
+    );
     assert!(
         msg.contains(&format!("Port: {}", port)),
-        "Should contain Port field"
+        "Should contain Port header"
     );
-    assert!(msg.contains("Token:"), "Should contain Token field");
     assert!(
-        msg.contains(format!("{:08x}", token).as_str()),
-        "Token should be 8 hex chars"
+        msg.contains(&format!("Infohash: {}", info_hash)),
+        "Should contain Infohash header"
     );
-
-    // Verify Hash value is exactly 40 hex characters
-    let hash_line: Vec<&str> = msg.lines().filter(|l| l.starts_with("Hash:")).collect();
-    assert_eq!(hash_line.len(), 1, "Should have exactly one Hash line");
-    let hash_val = hash_line[0][5..].trim();
-    assert_eq!(hash_val.len(), 40, "Info hash should be 40 chars");
     assert!(
-        hash_val.chars().all(|c| c.is_ascii_hexdigit()),
-        "Info hash should be all hex digits"
-    );
-
-    // Verify Port is valid u16 range
-    let port_line: Vec<&str> = msg.lines().filter(|l| l.starts_with("Port:")).collect();
-    assert_eq!(port_line.len(), 1);
-    let parsed_port: u16 = port_line[0][5..].trim().parse().unwrap();
-    assert!(
-        (1..=65535).contains(&parsed_port),
-        "Port should be in valid range"
-    );
-}
-
-#[test]
-fn test_lpd_announce_format_token_is_hex() {
-    // Token must be exactly 8 lowercase hex characters
-    let msg = format!(
-        "Hash: {}\nPort: {}\nToken: {:08x}\n",
-        test_info_hash(),
-        6881,
-        0x12345678u32
-    );
-    let token_line: &str = msg.lines().find(|l| l.starts_with("Token:")).unwrap();
-    let token_val = token_line[6..].trim();
-
-    assert_eq!(token_val.len(), 8, "Token should be 8 characters");
-    assert!(
-        token_val.chars().all(|c| c.is_ascii_hexdigit()),
-        "Token should be all hex"
+        msg.ends_with("\r\n\r\n\r\n"),
+        "Should end with double CRLF"
     );
 }
 
 // =========================================================================
-// Test: LPD Receive / Parse Valid Announcements
+// Test: LPD Receive / Parse BEP 14 Announcements
 // =========================================================================
 
 #[test]
-fn test_lpd_receive_parses_valid_announcement() {
+fn test_lpd_receive_parses_bep14_announcement() {
     let info_hash = test_info_hash();
     let port = 6882u16;
     let sender_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
-    let token = 0xAABBCCDDu32;
 
-    // Construct a valid LPD announcement
-    let data = format!(
-        "Hash: {}\nPort: {}\nToken: {:08x}\n",
-        info_hash, port, token
-    )
-    .into_bytes();
-
-    // Parse it
+    let data = make_bep14_message(info_hash, port);
     let result = parse_lpd_announcement(&data, sender_ip);
 
     assert!(
         result.is_some(),
-        "Valid announcement should parse successfully"
+        "Valid BEP 14 announcement should parse successfully"
     );
 
     let peer = result.unwrap();
     assert_eq!(peer.info_hash, info_hash.to_lowercase());
     assert_eq!(peer.port, port);
     assert_eq!(peer.addr, sender_ip);
-    assert_eq!(peer.token, Some(token));
+    assert!(peer.is_local, "10.x.x.x should be detected as local");
 }
 
 #[test]
-fn test_lpd_receive_parses_case_insensitive_hash() {
+fn test_lpd_receive_parses_bep14_case_insensitive_hash() {
     let sender_ip = test_ip();
 
-    // Mixed case info hash
-    let data =
-        "Hash: ABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD\nPort: 6881\nToken: deadbeef\n".as_bytes();
+    // Mixed case info hash in BEP 14 format
+    let data = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: ABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD\r\n\r\n\r\n"
+    ).into_bytes();
 
-    let result = parse_lpd_announcement(data, sender_ip);
+    let result = parse_lpd_announcement(&data, sender_ip);
     assert!(result.is_some());
 
     let peer = result.unwrap();
@@ -149,13 +126,15 @@ fn test_lpd_receive_parses_case_insensitive_hash() {
 }
 
 #[test]
-fn test_lpd_receive_parses_extra_whitespace() {
+fn test_lpd_receive_parses_bep14_extra_whitespace() {
     let sender_ip = test_ip();
 
     // Extra whitespace around values
-    let data = "Hash:   0123456789abcdef0123456789abcdef01234567   \nPort:   6881   \nToken:   abcdef01   \n".as_bytes();
+    let data = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort:   6881   \r\nInfohash:   0123456789abcdef0123456789abcdef01234567   \r\n\r\n\r\n"
+    ).into_bytes();
 
-    let result = parse_lpd_announcement(data, sender_ip);
+    let result = parse_lpd_announcement(&data, sender_ip);
     assert!(result.is_some(), "Should handle extra whitespace");
 
     let peer = result.unwrap();
@@ -164,20 +143,59 @@ fn test_lpd_receive_parses_extra_whitespace() {
 }
 
 #[test]
-fn test_lpd_receive_parses_unordered_fields() {
+fn test_lpd_receive_parses_bep14_unordered_headers() {
     let sender_ip = test_ip();
 
-    // Fields in non-standard order (Port before Hash)
-    let data =
-        "Port: 6999\nToken: 11223344\nHash: 0123456789abcdef0123456789abcdef01234567\n".as_bytes();
+    // Infohash before Port (C++ uses HttpHeaderProcessor which is order-independent)
+    let data = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\nPort: 6999\r\n\r\n\r\n"
+    ).into_bytes();
 
-    let result = parse_lpd_announcement(data, sender_ip);
-    assert!(result.is_some(), "Should handle unordered fields");
+    let result = parse_lpd_announcement(&data, sender_ip);
+    assert!(result.is_some(), "Should handle unordered headers");
 
     let peer = result.unwrap();
     assert_eq!(peer.port, 6999);
-    assert_eq!(peer.token, Some(0x11223344));
     assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
+}
+
+// =========================================================================
+// Test: Legacy Format Backward Compatibility
+// =========================================================================
+
+#[test]
+fn test_lpd_receive_parses_legacy_format() {
+    let sender_ip = test_ip();
+
+    // Old proprietary format (Hash:/Port:/Token:) should still parse
+    let data =
+        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: abcdef01\n"
+            .as_bytes();
+
+    let result = parse_lpd_announcement(data, sender_ip);
+    assert!(
+        result.is_some(),
+        "Legacy format should be parsed for backward compatibility"
+    );
+
+    let peer = result.unwrap();
+    assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(peer.port, 6881);
+}
+
+#[test]
+fn test_lpd_legacy_format_without_token_still_works() {
+    let sender_ip = test_ip();
+
+    // Legacy format without Token field should also parse
+    let data =
+        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n".as_bytes();
+
+    let result = parse_lpd_announcement(data, sender_ip);
+    assert!(result.is_some(), "Legacy format without Token should parse");
+
+    let peer = result.unwrap();
+    assert_eq!(peer.port, 6881);
 }
 
 // =========================================================================
@@ -194,34 +212,27 @@ fn test_lpd_receive_ignores_invalid() {
         "Non-UTF8 should return None"
     );
 
-    // Case 2: Missing Hash field
-    let no_hash = "Port: 6881\nToken: abcdef01\n".as_bytes();
+    // Case 2: Missing Infohash field in BEP14 format
+    let no_infohash = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\n\r\n\r\n".as_bytes();
     assert!(
-        parse_lpd_announcement(no_hash, sender_ip).is_none(),
-        "Missing Hash should return None"
+        parse_lpd_announcement(no_infohash, sender_ip).is_none(),
+        "Missing Infohash should return None"
     );
 
-    // Case 3: Missing Port field
-    let no_port = "Hash: 0123456789abcdef0123456789abcdef01234567\nToken: abcdef01\n".as_bytes();
+    // Case 3: Missing Port field in BEP14 format
+    let no_port = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n".as_bytes();
     assert!(
         parse_lpd_announcement(no_port, sender_ip).is_none(),
         "Missing Port should return None"
     );
 
-    // Case 4: Missing Token field
-    let no_token = "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n".as_bytes();
-    assert!(
-        parse_lpd_announcement(no_token, sender_ip).is_none(),
-        "Missing Token should return None"
-    );
-
-    // Case 5: Empty announcement
+    // Case 4: Empty announcement
     assert!(
         parse_lpd_announcement(b"", sender_ip).is_none(),
         "Empty data should return None"
     );
 
-    // Case 6: Only whitespace
+    // Case 5: Only whitespace
     assert!(
         parse_lpd_announcement(b"   \n\t\n  ", sender_ip).is_none(),
         "Whitespace-only should return None"
@@ -232,27 +243,21 @@ fn test_lpd_receive_ignores_invalid() {
 fn test_lpd_receive_ignores_invalid_hash_format() {
     let sender_ip = test_ip();
 
-    // Too short (39 chars)
-    let short_hash =
-        "Hash: 0123456789abcdef0123456789abcdef0123456\nPort: 6881\nToken: abcdef01\n".as_bytes();
+    // Too short (39 chars) in BEP14 format
+    let short_hash = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0123456789abcdef0123456789abcdef0123456\r\n\r\n\r\n"
+    ).into_bytes();
     assert!(
-        parse_lpd_announcement(short_hash, sender_ip).is_none(),
+        parse_lpd_announcement(&short_hash, sender_ip).is_none(),
         "Too-short hash should fail"
     );
 
-    // Too long (41 chars)
-    let long_hash =
-        "Hash: 0123456789abcdef0123456789abcdef012345678\nPort: 6881\nToken: abcdef01\n".as_bytes();
-    assert!(
-        parse_lpd_announcement(long_hash, sender_ip).is_none(),
-        "Too-long hash should fail"
-    );
-
     // Contains non-hex characters
-    let bad_chars =
-        "Hash: gggg56789abcdef0123456789abcdef01234567\nPort: 6881\nToken: abcdef01\n".as_bytes();
+    let bad_chars = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: gggg56789abcdef0123456789abcdef01234567\r\n\r\n\r\n"
+    ).into_bytes();
     assert!(
-        parse_lpd_announcement(bad_chars, sender_ip).is_none(),
+        parse_lpd_announcement(&bad_chars, sender_ip).is_none(),
         "Non-hex hash should fail"
     );
 }
@@ -261,19 +266,21 @@ fn test_lpd_receive_ignores_invalid_hash_format() {
 fn test_lpd_receive_ignores_invalid_port() {
     let sender_ip = test_ip();
 
-    // Port 0 (invalid)
-    let port_zero =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 0\nToken: abcdef01\n".as_bytes();
+    // Port 0 (invalid) in BEP14 format
+    let port_zero = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 0\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n"
+    ).into_bytes();
     assert!(
-        parse_lpd_announcement(port_zero, sender_ip).is_none(),
+        parse_lpd_announcement(&port_zero, sender_ip).is_none(),
         "Port 0 should be invalid"
     );
 
-    // Non-numeric port
-    let bad_port =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: abc\nToken: abcdef01\n".as_bytes();
+    // Non-numeric port in BEP14 format
+    let bad_port = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: abc\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n"
+    ).into_bytes();
     assert!(
-        parse_lpd_announcement(bad_port, sender_ip).is_none(),
+        parse_lpd_announcement(&bad_port, sender_ip).is_none(),
         "Non-numeric port should fail"
     );
 }
@@ -282,13 +289,15 @@ fn test_lpd_receive_ignores_invalid_port() {
 fn test_lpd_receive_ignores_unknown_fields() {
     let sender_ip = test_ip();
 
-    // Unknown/extra fields should not cause failure if required fields present
-    let with_extra = "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: abcdef01\nExtraField: value\nUnknown: data\n".as_bytes();
+    // Unknown/extra headers should not cause failure
+    let with_extra = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\nExtraField: value\r\nUnknown: data\r\n\r\n\r\n"
+    ).into_bytes();
 
-    let result = parse_lpd_announcement(with_extra, sender_ip);
+    let result = parse_lpd_announcement(&with_extra, sender_ip);
     assert!(
         result.is_some(),
-        "Extra unknown fields should not prevent parsing"
+        "Extra unknown headers should not prevent parsing"
     );
     assert_eq!(result.unwrap().port, 6881);
 }
@@ -302,11 +311,10 @@ fn test_lpd_duplicate_suppression_same_hash_and_ip() {
     let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 50));
 
     // Same announcement from same IP twice
-    let data =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: aabbccdd\n".as_bytes();
+    let data = make_bep14_message("0123456789abcdef0123456789abcdef01234567", 6881);
 
-    let peer1 = parse_lpd_announcement(data, ip);
-    let peer2 = parse_lpd_announcement(data, ip);
+    let peer1 = parse_lpd_announcement(&data, ip);
+    let peer2 = parse_lpd_announcement(&data, ip);
 
     assert!(peer1.is_some());
     assert!(peer2.is_some());
@@ -321,14 +329,11 @@ fn test_lpd_duplicate_suppression_same_hash_and_ip() {
 fn test_lpd_duplicate_suppression_different_ports_ok() {
     let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 51));
 
-    // Different ports on same IP + same hash are still same peer (by our Eq impl)
-    let data1 =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: aabbccdd\n".as_bytes();
-    let data2 =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6882\nToken: eeff0011\n".as_bytes();
+    let data1 = make_bep14_message("0123456789abcdef0123456789abcdef01234567", 6881);
+    let data2 = make_bep14_message("0123456789abcdef0123456789abcdef01234567", 6882);
 
-    let p1 = parse_lpd_announcement(data1, ip).unwrap();
-    let p2 = parse_lpd_announcement(data2, ip).unwrap();
+    let p1 = parse_lpd_announcement(&data1, ip).unwrap();
+    let p2 = parse_lpd_announcement(&data2, ip).unwrap();
 
     // Our Eq implementation uses (info_hash, addr) only, so these are equal
     assert_eq!(
@@ -341,14 +346,11 @@ fn test_lpd_duplicate_suppression_different_ports_ok() {
 fn test_lpd_different_hashes_not_duplicates() {
     let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 52));
 
-    let data1 = format!("Hash: {}\nPort: 6881\nToken: aabbccdd\n", test_info_hash());
-    let data2 = format!(
-        "Hash: {}\nPort: 6881\nToken: eeff0011\n",
-        test_info_hash_2()
-    );
+    let data1 = make_bep14_message(test_info_hash(), 6881);
+    let data2 = make_bep14_message(test_info_hash_2(), 6881);
 
-    let p1 = parse_lpd_announcement(data1.as_bytes(), ip).unwrap();
-    let p2 = parse_lpd_announcement(data2.as_bytes(), ip).unwrap();
+    let p1 = parse_lpd_announcement(&data1, ip).unwrap();
+    let p2 = parse_lpd_announcement(&data2, ip).unwrap();
 
     // Different hashes = different peers even from same IP
     assert_ne!(p1, p2, "Different info_hashes should not be duplicates");
@@ -359,11 +361,10 @@ fn test_lpd_different_ips_not_duplicates() {
     let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 53));
     let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 54));
 
-    let data =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: aabbccdd\n".as_bytes();
+    let data = make_bep14_message("0123456789abcdef0123456789abcdef01234567", 6881);
 
-    let p1 = parse_lpd_announcement(data, ip1).unwrap();
-    let p2 = parse_lpd_announcement(data, ip2).unwrap();
+    let p1 = parse_lpd_announcement(&data, ip1).unwrap();
+    let p2 = parse_lpd_announcement(&data, ip2).unwrap();
 
     assert_ne!(p1, p2, "Different IPs should not be duplicates");
 }
@@ -383,20 +384,8 @@ fn test_lpd_peer_creation() {
     assert_eq!(peer.info_hash, "abc123def456abc123def456abc123def456abcd");
     assert_eq!(peer.port, 6881);
     assert_eq!(peer.addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
-    assert!(peer.token.is_none());
+    assert!(peer.is_local, "127.0.0.1 should be detected as local");
     assert!(!peer.is_expired(Duration::from_secs(99999)));
-}
-
-#[test]
-fn test_lpd_peer_with_token() {
-    let peer = LpdPeer::with_token(
-        "0123456789abcdef0123456789abcdef01234567",
-        6999,
-        IpAddr::V4(Ipv4Addr::BROADCAST),
-        0xCAFEBABE,
-    );
-
-    assert_eq!(peer.token, Some(0xCAFEBABE));
 }
 
 #[test]
@@ -436,15 +425,56 @@ fn test_lpd_peer_hash_equality_for_set_dedup() {
 }
 
 // =========================================================================
+// Test: Private Address Detection
+// =========================================================================
+
+#[test]
+fn test_is_private_address_ipv4() {
+    // 10.0.0.0/8
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))));
+
+    // 172.16.0.0/12
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))));
+
+    // 192.168.0.0/16
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(192, 168, 255, 255))));
+
+    // 127.0.0.0/8 (loopback)
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::LOCALHOST)));
+
+    // 169.254.0.0/16 (link-local)
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255))));
+
+    // NOT private
+    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
+    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 15, 0, 1))));
+    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 32, 0, 1))));
+}
+
+#[test]
+fn test_is_private_address_ipv6() {
+    // fc00::/7 (unique local)
+    assert!(is_private_address(&IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1))));
+    assert!(is_private_address(&IpAddr::V6(Ipv6Addr::new(0xfdff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff))));
+
+    // ::1 (loopback)
+    assert!(is_private_address(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
+
+    // NOT private
+    assert!(!is_private_address(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))));
+}
+
+// =========================================================================
 // Test: LpdAnnouncer Validation
 // =========================================================================
 
 #[test]
 fn test_lpd_announcer_rejects_bad_info_hash() {
-    // We can't easily create a real socket in tests without admin rights,
-    // so we test the validation logic through the parser instead.
-    // The announce method validates info_hash format.
-
     let invalid_hashes = vec![
         "",                                                        // Empty
         "short",                                                   // Too short
@@ -453,7 +483,6 @@ fn test_lpd_announcer_rejects_bad_info_hash() {
     ];
 
     for hash in invalid_hashes {
-        // These would all fail validation in announce()
         let is_valid = hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit());
         assert!(!is_valid, "Hash '{}' should be invalid", hash);
     }
@@ -482,7 +511,7 @@ async fn test_lpd_manager_register_unregister() {
     let manager = LpdManager::default();
 
     // Register a torrent
-    manager.register_torrent(test_info_hash()).await.unwrap();
+    manager.register_torrent(test_info_hash(), false).await.unwrap();
 
     // Check active hashes
     let active = manager.active_hashes.read().await;
@@ -515,27 +544,24 @@ async fn test_lpd_manager_update_and_get_peers() {
     let manager = LpdManager::default();
 
     // Register first
-    manager.register_torrent(test_info_hash()).await.unwrap();
+    manager.register_torrent(test_info_hash(), false).await.unwrap();
 
     // Add some discovered peers
     let new_peers = vec![
-        LpdPeer::with_token(
+        LpdPeer::new(
             test_info_hash(),
             6881,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            0xAA,
         ),
-        LpdPeer::with_token(
+        LpdPeer::new(
             test_info_hash(),
             6882,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            0xBB,
         ),
-        LpdPeer::with_token(
+        LpdPeer::new(
             test_info_hash(),
             6883,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
-            0xCC,
         ),
     ];
 
@@ -549,8 +575,8 @@ async fn test_lpd_manager_update_and_get_peers() {
 async fn test_lpd_manager_multiple_torrents_independent() {
     let manager = LpdManager::default();
 
-    manager.register_torrent(test_info_hash()).await.unwrap();
-    manager.register_torrent(test_info_hash_2()).await.unwrap();
+    manager.register_torrent(test_info_hash(), false).await.unwrap();
+    manager.register_torrent(test_info_hash_2(), false).await.unwrap();
 
     // Add peers to first torrent
     manager
@@ -590,7 +616,7 @@ async fn test_lpd_manager_multiple_torrents_independent() {
 #[tokio::test]
 async fn test_lpd_manager_cleanup_expired_peers() {
     let manager = LpdManager::default();
-    manager.register_torrent(test_info_hash()).await.unwrap();
+    manager.register_torrent(test_info_hash(), false).await.unwrap();
 
     // Add a peer that's immediately "expired" (max_age = 0)
     let peer = LpdPeer::new(test_info_hash(), 6881, test_ip());
@@ -610,5 +636,31 @@ async fn test_lpd_manager_is_available() {
     assert!(
         manager.is_available(),
         "Default manager should be available"
+    );
+}
+
+#[tokio::test]
+async fn test_lpd_private_torrent_rejected() {
+    // Per BEP 0027, private torrents must NOT be announced via LPD
+    let manager = LpdManager::default();
+
+    // Public torrent should register fine
+    let result = manager.register_torrent(test_info_hash(), false).await;
+    assert!(result.is_ok(), "Public torrent should register for LPD");
+
+    // Private torrent should be rejected
+    let private_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let result = manager.register_torrent(private_hash, true).await;
+    assert!(result.is_err(), "Private torrent should be rejected from LPD");
+    assert!(
+        result.unwrap_err().contains("BEP 0027"),
+        "Error should reference BEP 0027"
+    );
+
+    // Verify the private hash was NOT added to active set
+    let active = manager.active_hashes.read().await;
+    assert!(
+        !active.contains(private_hash),
+        "Private hash should not be in active LPD set"
     );
 }

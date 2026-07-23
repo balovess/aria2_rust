@@ -710,8 +710,8 @@ async fn e2e_system_list_notifications_returns_array() {
     let notifications = resp["result"].as_array().unwrap();
     assert_eq!(
         notifications.len(),
-        7,
-        "should list exactly 7 notifications"
+        6,
+        "should list exactly 6 notifications (matching C++ aria2)"
     );
 
     let names: Vec<&str> = notifications.iter().filter_map(|v| v.as_str()).collect();
@@ -722,7 +722,6 @@ async fn e2e_system_list_notifications_returns_array() {
         "aria2.onDownloadComplete",
         "aria2.onDownloadError",
         "aria2.onBtDownloadComplete",
-        "aria2.onBtDownloadError",
     ] {
         assert!(
             names.contains(&expected),

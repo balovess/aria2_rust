@@ -51,10 +51,36 @@ impl HashType {
             HashType::Adler32,
         ]
     }
+
+    /// Return the relative cryptographic strength of this hash algorithm.
+    ///
+    /// Higher number = stronger algorithm. Used by `is_stronger()` to choose
+    /// the strongest available hash when multiple are provided (e.g., Metalink
+    /// with both SHA-256 and MD5). Matches C++ `MessageDigest::isStronger()`.
+    ///
+    /// Ordering: Adler32(0) < MD5(1) < SHA-1(2) < SHA-256(3) < SHA-512(4)
+    pub fn strength(&self) -> u8 {
+        match self {
+            HashType::Adler32 => 0,
+            HashType::Md5 => 1,
+            HashType::Sha1 => 2,
+            HashType::Sha256 => 3,
+            HashType::Sha512 => 4,
+        }
+    }
+
+    /// Returns true if `self` is a stronger hash algorithm than `other`.
+    ///
+    /// Matches C++ `MessageDigest::isStronger(other)`.
+    /// Used when multiple hashes are available to pick the strongest
+    /// for verification (e.g., Metalink with both SHA-256 and MD5).
+    pub fn is_stronger(&self, other: &HashType) -> bool {
+        self.strength() > other.strength()
+    }
 }
 
 enum DigestInner {
-    Md5(md5::Context),
+    Md5(md5::Md5),
     Sha1(sha1::Sha1),
     Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
@@ -68,7 +94,7 @@ pub struct MessageDigest {
 impl MessageDigest {
     pub fn new(algo: HashType) -> Self {
         let inner = match algo {
-            HashType::Md5 => DigestInner::Md5(md5::Context::new()),
+            HashType::Md5 => DigestInner::Md5(md5::Md5::new()),
             HashType::Sha1 => DigestInner::Sha1(sha1::Sha1::new()),
             HashType::Sha256 => DigestInner::Sha256(sha2::Sha256::new()),
             HashType::Sha512 => DigestInner::Sha512(sha2::Sha512::new()),
@@ -79,7 +105,7 @@ impl MessageDigest {
 
     pub fn update(&mut self, data: &[u8]) {
         match &mut self.inner {
-            DigestInner::Md5(d) => d.consume(data),
+            DigestInner::Md5(d) => { md5::Digest::update(d, data); }
             DigestInner::Sha1(d) => d.update(data),
             DigestInner::Sha256(d) => d.update(data),
             DigestInner::Sha512(d) => d.update(data),
@@ -89,7 +115,7 @@ impl MessageDigest {
 
     pub fn finalize(self) -> Vec<u8> {
         match self.inner {
-            DigestInner::Md5(d) => d.compute().to_vec(),
+            DigestInner::Md5(d) => md5::Digest::finalize(d).to_vec(),
             DigestInner::Sha1(d) => d.finalize().to_vec(),
             DigestInner::Sha256(d) => d.finalize().to_vec(),
             DigestInner::Sha512(d) => d.finalize().to_vec(),
@@ -117,7 +143,7 @@ impl MessageDigest {
 
     pub fn reset(&mut self) {
         match &mut self.inner {
-            DigestInner::Md5(d) => *d = md5::Context::new(),
+            DigestInner::Md5(d) => *d = md5::Md5::new(),
             DigestInner::Sha1(d) => *d = sha1::Sha1::new(),
             DigestInner::Sha256(d) => *d = sha2::Sha256::new(),
             DigestInner::Sha512(d) => *d = sha2::Sha512::new(),
@@ -237,5 +263,24 @@ mod tests {
         let h1 = MessageDigest::hash_hex(HashType::Md5, b"first data");
         let h2 = MessageDigest::hash_hex(HashType::Md5, b"second data");
         assert_ne!(h1, h2, "different data should produce different hash value");
+    }
+
+    #[test]
+    fn test_hash_type_strength_ordering() {
+        // Verify strength ordering: Adler32 < MD5 < SHA-1 < SHA-256 < SHA-512
+        assert!(HashType::Sha512.strength() > HashType::Sha256.strength());
+        assert!(HashType::Sha256.strength() > HashType::Sha1.strength());
+        assert!(HashType::Sha1.strength() > HashType::Md5.strength());
+        assert!(HashType::Md5.strength() > HashType::Adler32.strength());
+    }
+
+    #[test]
+    fn test_is_stronger() {
+        assert!(HashType::Sha256.is_stronger(&HashType::Md5));
+        assert!(HashType::Sha256.is_stronger(&HashType::Sha1));
+        assert!(HashType::Sha512.is_stronger(&HashType::Sha256));
+        assert!(!HashType::Md5.is_stronger(&HashType::Sha256));
+        assert!(!HashType::Sha256.is_stronger(&HashType::Sha256));
+        assert!(HashType::Md5.is_stronger(&HashType::Adler32));
     }
 }

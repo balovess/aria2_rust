@@ -14,7 +14,7 @@ from aria2_rust_client.types import (
 
 
 class TestEventType:
-    def test_all_seven_values(self):
+    def test_all_six_values(self):
         expected = [
             "DOWNLOAD_START",
             "DOWNLOAD_PAUSE",
@@ -22,7 +22,6 @@ class TestEventType:
             "DOWNLOAD_COMPLETE",
             "DOWNLOAD_ERROR",
             "BT_DOWNLOAD_COMPLETE",
-            "BT_DOWNLOAD_ERROR",
         ]
         values = [e.value for e in EventType]
         assert values == expected

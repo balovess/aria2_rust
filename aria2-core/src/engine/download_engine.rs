@@ -8,6 +8,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use super::command::{Command, ProgressUpdate};
+#[cfg(feature = "bittorrent")]
 use super::bt_registry::BtRegistry;
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
@@ -66,6 +67,7 @@ pub struct DownloadEngine {
     /// Here it is owned by the engine and accessible via `bt_registry()`.
     /// Used for info-hash reverse lookup, peer blocklist, and BT component
     /// coordination across all active downloads.
+    #[cfg(feature = "bittorrent")]
     bt_registry: Arc<std::sync::RwLock<BtRegistry>>,
 }
 
@@ -98,6 +100,7 @@ impl DownloadEngine {
             )),
             dns_cache: Arc::new(Mutex::new(DnsCache::new())),
             keep_alive: false,
+            #[cfg(feature = "bittorrent")]
             bt_registry: Arc::new(std::sync::RwLock::new(BtRegistry::new())),
         };
 
@@ -252,6 +255,7 @@ impl DownloadEngine {
     /// supports info-hash reverse lookup, peer blocklist, and BT component
     /// coordination across all active downloads. In C++ aria2, this is a global
     /// singleton owned by `DownloadEngine`.
+    #[cfg(feature = "bittorrent")]
     pub fn bt_registry(&self) -> &Arc<std::sync::RwLock<BtRegistry>> {
         &self.bt_registry
     }
@@ -899,6 +903,7 @@ mod tests {
 
     // ==================== BtRegistry accessor tests ====================
 
+    #[cfg(feature = "bittorrent")]
     /// Verify that the engine creates a BtRegistry and the accessor returns it.
     #[test]
     fn test_bt_registry_accessor_returns_valid_registry() {
@@ -910,6 +915,7 @@ mod tests {
         assert_eq!(reg.udp_port(), 0);
     }
 
+    #[cfg(feature = "bittorrent")]
     /// Verify that multiple Arc clones of the BtRegistry share the same
     /// underlying data, so changes made through one clone are visible
     /// through the other.
@@ -932,6 +938,7 @@ mod tests {
         assert!(reg.get(42).is_some());
     }
 
+    #[cfg(feature = "bittorrent")]
     /// Verify BtRegistry info-hash lookup works end-to-end when a
     /// DownloadContext with TorrentAttribute is registered.
     #[test]

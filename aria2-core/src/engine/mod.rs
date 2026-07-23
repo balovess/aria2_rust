@@ -81,6 +81,8 @@ pub mod bt_web_seed;
 #[cfg(feature = "bittorrent")]
 pub mod lpd_manager;
 #[cfg(feature = "bittorrent")]
+pub mod lpd_receive_loop;
+#[cfg(feature = "bittorrent")]
 pub mod magnet_download_command;
 #[cfg(feature = "bittorrent")]
 pub mod extension_registry;
@@ -97,6 +99,10 @@ pub mod bt_integration_tests;
 // ── Metalink feature-gated modules ────────────────────────────────────
 #[cfg(feature = "metalink")]
 pub mod metalink_download_command;
+#[cfg(feature = "metalink")]
+pub mod metalink_post_download_handler;
+#[cfg(feature = "metalink")]
+pub mod metalink_to_request_group;
 
 // ── SFTP feature-gated modules ───────────────────────────────────────
 #[cfg(feature = "sftp")]

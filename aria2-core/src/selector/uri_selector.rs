@@ -82,7 +82,7 @@ impl UriSelector for InorderUriSelector {
 
 /// URI selector that sorts by explicit priority values
 pub struct PriorityUriSelector {
-    priorities: Vec<i32>,    // one per URI, higher = tried first
+    priorities: Vec<i32>,    // one per URI, lower number = higher preference (tried first)
     rr_counter: AtomicUsize, // round-robin counter for equal priority
 }
 
@@ -101,9 +101,9 @@ impl UriSelector for PriorityUriSelector {
             return None;
         }
 
-        // Sort indices by priority descending
+        // Sort indices by priority ascending (lower number = higher preference)
         let mut indexed: Vec<(usize, i32)> = self.priorities.iter().cloned().enumerate().collect();
-        indexed.sort_by_key(|b| std::cmp::Reverse(b.1)); // descending
+        indexed.sort_by_key(|b| b.1); // ascending: lowest priority number first
 
         // Among highest priority group, round-robin
         let top_priority = indexed.first().map(|&(_, p)| p)?;
@@ -197,18 +197,19 @@ mod tests {
 
     #[test]
     fn test_priority_selector_sorting() {
-        let selector = PriorityUriSelector::new(vec![1, 3, 2]); // index 1 has highest priority
+        // Priority values: lower number = higher preference (tried first)
+        let selector = PriorityUriSelector::new(vec![1, 3, 2]); // index 0 has lowest number = highest preference
         let uris = vec![
-            "http://low.com/a".to_string(),
-            "http://high.com/b".to_string(),
+            "http://best.com/a".to_string(),
+            "http://worst.com/b".to_string(),
             "http://medium.com/c".to_string(),
         ];
 
         let result = selector.select(&uris, &[]);
         assert_eq!(
             result,
-            Some(1),
-            "Should select highest priority URI (index 1)"
+            Some(0),
+            "Should select lowest priority number URI (index 0, priority 1)"
         );
     }
 

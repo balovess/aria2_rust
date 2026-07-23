@@ -3,6 +3,10 @@ pub const DEFAULT_RPC_HOST: &str = "127.0.0.1";
 pub const DEFAULT_RPC_PORT: u16 = 6800;
 pub const RPC_SERVER_NAME: &str = "aria2-rust";
 
+/// Default max RPC request body size in bytes (2 MiB).
+/// Matches C++ PREF_RPC_MAX_REQUEST_SIZE default.
+pub const DEFAULT_RPC_MAX_REQUEST_SIZE: usize = 2 * 1024 * 1024;
+
 // CORS defaults (CORS_ALLOW_METHODS, CORS_ALLOW_HEADERS, CORS_MAX_AGE are in aria2-core)
 pub const CORS_DEFAULT_ORIGIN: &str = "*";
 
@@ -26,13 +30,10 @@ pub const GID_HEX_DIGITS: usize = 16;
 // RPC endpoint
 pub const RPC_ENDPOINT_PATH: &str = "/jsonrpc";
 
-// WebSocket event names
+// WebSocket event names (matching C++ aria2 WebSocketSessionMan exactly — 6 events)
 pub const WS_EVENT_DOWNLOAD_START: &str = "aria2.onDownloadStart";
 pub const WS_EVENT_DOWNLOAD_PAUSE: &str = "aria2.onDownloadPause";
 pub const WS_EVENT_DOWNLOAD_STOP: &str = "aria2.onDownloadStop";
 pub const WS_EVENT_DOWNLOAD_COMPLETE: &str = "aria2.onDownloadComplete";
 pub const WS_EVENT_DOWNLOAD_ERROR: &str = "aria2.onDownloadError";
-pub const WS_EVENT_BT_CACHE_CHANGED: &str = "aria2.onBtCacheChanged";
 pub const WS_EVENT_BT_DOWNLOAD_COMPLETE: &str = "aria2.onBtDownloadComplete";
-pub const WS_EVENT_BT_DOWNLOAD_ERROR: &str = "aria2.onBtDownloadError";
-pub const WS_EVENT_DOWNLOAD_RESUME: &str = "aria2.onDownloadResume";

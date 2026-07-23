@@ -82,10 +82,15 @@ pub struct UrlEntry {
 }
 
 impl UrlEntry {
+    /// Default priority for unsorted/unspecified URL entries.
+    /// Matches C++ `MetalinkResource::getLowestPriority()` = 999999,
+    /// so URLs without an explicit priority are tried last.
+    pub const LOWEST_PRIORITY: i32 = 999999;
+
     pub fn new(url: &str) -> Self {
         Self {
             url: url.trim().to_string(),
-            priority: 0,
+            priority: Self::LOWEST_PRIORITY,
             location: None,
             max_connections: None,
             preference: None,
@@ -140,11 +145,15 @@ pub struct MetaUrlEntry {
 }
 
 impl MetaUrlEntry {
+    /// Default priority for unsorted/unspecified metaurl entries.
+    /// Matches C++ `MetalinkResource::getLowestPriority()` = 999999.
+    pub const LOWEST_PRIORITY: i32 = 999999;
+
     pub fn new(url: &str, mediatype: MediaType) -> Self {
         Self {
             url: url.trim().to_string(),
             mediatype,
-            priority: 0,
+            priority: Self::LOWEST_PRIORITY,
             name: None,
         }
     }

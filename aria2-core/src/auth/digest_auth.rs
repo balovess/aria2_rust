@@ -327,7 +327,10 @@ impl DigestAuthProvider {
     fn hash_from_bytes(&self, input: &[u8]) -> String {
         match self.algorithm {
             DigestAlgorithm::Md5 => {
-                let digest = md5::compute(input);
+                use md5::Digest;
+                let mut hasher = md5::Md5::new();
+                hasher.update(input);
+                let digest = hasher.finalize();
                 format!("{:x}", digest)
             }
             DigestAlgorithm::Sha256 => {
