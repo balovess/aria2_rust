@@ -76,6 +76,205 @@ impl FtpClient {
         }
     }
 
+    /// Query file modification time (MDTM command, RFC 3659)
+    ///
+    /// Sends `MDTM <path>` and parses the 213 response with format
+    /// `YYYYMMDDhhmmss[.sss]`. Returns the modification time as
+    /// `SystemTime` in UTC. If the server returns a non-213 response,
+    /// returns `Ok(None)` (the command is advisory-only).
+    ///
+    /// # Arguments
+    ///
+    /// - `path`: Remote file path (should be percent-decoded)
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(SystemTime))` on 213 with valid timestamp,
+    /// `Ok(None)` if MDTM is unsupported or response is unparseable.
+    pub async fn mdtm(&mut self, path: &str) -> Result<Option<std::time::SystemTime>> {
+        debug!("Querying file modification time: {}", path);
+        self.send_command(&format!("MDTM {}", path)).await?;
+        let resp = self.read_response().await?;
+
+        if resp.code != 213 {
+            info!(
+                "MDTM command returned non-213 response: {} {}",
+                resp.code, resp.message
+            );
+            return Ok(None);
+        }
+
+        // Parse 213 YYYYMMDDhhmmss from the response message
+        // The message may look like: "213 20240115103000"
+        let msg = resp.message.trim();
+        // Skip response code if present in message
+        let timestamp_str = if msg.starts_with("213") {
+            msg[3..].trim()
+        } else {
+            msg
+        };
+
+        // Take first 14 characters (YYYYMMDDhhmmss), drop fractional part
+        if timestamp_str.len() < 14 {
+            warn!("MDTM response too short to parse: {}", timestamp_str);
+            return Ok(None);
+        }
+
+        let ts = &timestamp_str[..14];
+        match parse_mdtm_timestamp(ts) {
+            Some(t) => {
+                debug!("MDTM parsed modification time: {:?}", t);
+                Ok(Some(t))
+            }
+            None => {
+                warn!("Failed to parse MDTM timestamp: {}", ts);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Query file size (SIZE command)
+    ///
+    /// Sends `SIZE <path>` and parses the 213 response.
+    /// Returns `Ok(Some(size))` on success, `Ok(None)` if the server
+    /// does not support SIZE or returns a non-213 response.
+    ///
+    /// # Arguments
+    ///
+    /// - `path`: Remote file path (should be percent-decoded)
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(u64))` with file size on 213 response,
+    /// `Ok(None)` if SIZE is not supported by server.
+    pub async fn size(&mut self, path: &str) -> Result<Option<u64>> {
+        debug!("Querying file size: {}", path);
+        self.send_command(&format!("SIZE {}", path)).await?;
+        let resp = self.read_response().await?;
+
+        if resp.code == 213 {
+            let msg = resp.message.trim();
+            // Skip response code if present in message
+            let size_str = if msg.starts_with("213") {
+                msg[3..].trim()
+            } else {
+                msg
+            };
+            match size_str.parse::<u64>() {
+                Ok(size) => {
+                    debug!("File size: {} bytes", size);
+                    Ok(Some(size))
+                }
+                Err(_) => {
+                    warn!("Failed to parse SIZE response: {}", size_str);
+                    Ok(None)
+                }
+            }
+        } else {
+            info!(
+                "SIZE command returned non-213 response: {} {}",
+                resp.code, resp.message
+            );
+            Ok(None)
+        }
+    }
+
+    /// Send REST command to set resume offset
+    ///
+    /// In the C++ aria2 implementation, REST is sent AFTER the data
+    /// connection method (PASV/PORT) is established, not before.
+    /// If the server returns a non-350 response and the offset is
+    /// non-zero, this is a CANNOT_RESUME error.
+    ///
+    /// # Arguments
+    ///
+    /// - `offset`: Byte offset to resume from (0 means no resume)
+    ///
+    /// # Errors
+    ///
+    /// Returns `RecoverableError::CannotResume` if the server does not
+    /// support REST and the requested offset is non-zero.
+    pub async fn rest(&mut self, offset: u64) -> Result<()> {
+        if offset == 0 {
+            return Ok(());
+        }
+        debug!("Setting resume offset: {} bytes", offset);
+        self.send_command(&format!("REST {}", offset)).await?;
+        let resp = self.read_response().await?;
+
+        if resp.code == 350 {
+            debug!("REST accepted by server");
+            Ok(())
+        } else {
+            warn!(
+                "REST command not accepted by server: {} {}",
+                resp.code, resp.message
+            );
+            // C++ aria2: if offset != 0 and server doesn't support REST, CANNOT_RESUME
+            Err(Aria2Error::Recoverable(
+                crate::error::RecoverableError::CannotResume,
+            ))
+        }
+    }
+
+    /// Initiate file retrieval (RETR command)
+    ///
+    /// # Arguments
+    ///
+    /// - `path`: Remote file path (should be percent-decoded)
+    ///
+    /// # Errors
+    ///
+    /// - 550 File not found
+    /// - Non-150/125 response
+    pub async fn retr(&mut self, path: &str) -> Result<()> {
+        debug!("Initiating file retrieval: {}", path);
+        self.send_command(&format!("RETR {}", path)).await?;
+        let resp = self.read_response().await?;
+
+        if resp.code == 150 || resp.code == 125 {
+            Ok(())
+        } else if resp.code == 550 {
+            Err(Aria2Error::Recoverable(
+                crate::error::RecoverableError::ServerError { code: 550 },
+            ))
+        } else {
+            Err(Aria2Error::DownloadFailed(format!(
+                "RETR command failed: {} {}",
+                resp.code, resp.message
+            )))
+        }
+    }
+
+    /// Read the transfer-complete response (226) after data transfer finishes
+    ///
+    /// Per C++ aria2 FtpFinishDownloadCommand, a non-226 response is not
+    /// treated as a fatal error since the data was already received. Returns
+    /// `Ok(true)` if 226 was received, `Ok(false)` for other responses.
+    pub async fn read_transfer_complete(&mut self) -> Result<bool> {
+        let resp = self.read_response().await?;
+        if resp.code == 226 {
+            debug!("Transfer complete (226): {}", resp.message.trim());
+            Ok(true)
+        } else {
+            warn!(
+                "Transfer completion response non-226: {} {}",
+                resp.code, resp.message
+            );
+            Ok(false)
+        }
+    }
+
+    /// Get the base working directory
+    pub fn base_working_dir(&self) -> &str {
+        &self.base_working_dir
+    }
+
+    /// Set the base working directory (used when reusing pooled connections)
+    pub fn set_base_working_dir(&mut self, dir: String) {
+        self.base_working_dir = dir;
+    }
+
     /// Abort an in-progress transfer
     ///
     /// Sends the ABOR command to interrupt the current data transfer operation.
@@ -237,4 +436,51 @@ impl FtpClient {
             message,
         })
     }
+}
+
+/// Parse an MDTM timestamp in `YYYYMMDDhhmmss` format to `SystemTime` (UTC).
+///
+/// Returns `None` if the string cannot be parsed. Matches the C++ aria2
+/// implementation in `FtpConnection::receiveMdtmResponse` which uses
+/// `timegm()` to convert to UTC epoch.
+fn parse_mdtm_timestamp(s: &str) -> Option<std::time::SystemTime> {
+    if s.len() < 14 {
+        return None;
+    }
+    let year: i32 = s[0..4].parse().ok()?;
+    let month: u32 = s[4..6].parse().ok()?;
+    let day: u32 = s[6..8].parse().ok()?;
+    let hour: u32 = s[8..10].parse().ok()?;
+    let minute: u32 = s[10..12].parse().ok()?;
+    let second: u32 = s[12..14].parse().ok()?;
+
+    // Validate ranges
+    if !(1990..=2999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+
+    // Convert to Unix epoch using chrono-free approach
+    // Days from year 1970 to start of `year`
+    let days_since_epoch = days_from_civil(year, month, day)?;
+    let secs = days_since_epoch as u64 * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+/// Calculate days since 1970-01-01 for a given civil date.
+/// Uses Howard Hinnant's algorithm for correctness across the full range.
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<u64> {
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = if month <= 2 { month + 9 } else { month - 3 };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400) as u64;
+    let doy = (153 * m as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as u64 * 146097 + doe - 719468;
+    Some(days)
 }

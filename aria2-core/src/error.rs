@@ -67,6 +67,9 @@ pub enum RecoverableError {
 
     #[error("Invalid piece index: {index} (max: {max_index})")]
     InvalidPieceIndex { index: u32, max_index: u32 },
+
+    #[error("FTP server does not support resuming (CANNOT_RESUME)")]
+    CannotResume,
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]

@@ -103,4 +103,8 @@ pub struct FtpClient {
     pub(crate) connect_timeout: Duration,
     /// Read timeout
     pub(crate) read_timeout: Duration,
+    /// Base working directory obtained from PWD after login.
+    /// Used for connection pooling: a pooled connection must have
+    /// the same base_working_dir to be reused for the same host.
+    pub(crate) base_working_dir: String,
 }

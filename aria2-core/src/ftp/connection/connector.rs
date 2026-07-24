@@ -48,6 +48,7 @@ impl FtpClient {
             port,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             read_timeout: Self::DEFAULT_READ_TIMEOUT,
+            base_working_dir: "/".to_string(),
         };
 
         // Read welcome message

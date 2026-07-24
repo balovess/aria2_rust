@@ -6,6 +6,7 @@
 use crate::error::Result;
 use crate::http::stream_filter::bzip2::BZip2Decoder;
 use crate::http::stream_filter::chunked::ChunkedDecoder;
+use crate::http::stream_filter::deflate::DeflateDecoder;
 use crate::http::stream_filter::gzip::GZipDecoder;
 use crate::http::stream_filter::types::StreamFilter;
 
@@ -49,7 +50,7 @@ pub fn flush_filters(filters: &mut [Box<dyn StreamFilter>]) -> Result<Vec<u8>> {
 ///
 /// 1. **Transfer-Encoding: chunked** -> Add `ChunkedDecoder`
 /// 2. **Content-Encoding: gzip | x-gzip** -> Add `GZipDecoder`
-/// 3. **Content-Encoding: deflate** -> Add `ZlibDecoder` (future support)
+/// 3. **Content-Encoding: deflate** -> Add `DeflateDecoder`
 /// 4. **Content-Encoding: bzip2 | x-bzip2** -> Add `BZip2Decoder`
 ///
 /// # Examples
@@ -106,8 +107,7 @@ impl AutoFilterSelector {
                         filters.push(Box::new(GZipDecoder::new()));
                     }
                     "deflate" => {
-                        // TODO: Future support for ZlibDecoder
-                        tracing::warn!("Deflate encoding not yet implemented");
+                        filters.push(Box::new(DeflateDecoder::new()));
                     }
                     "bzip2" | "x-bzip2" => {
                         filters.push(Box::new(BZip2Decoder::new()));
@@ -147,8 +147,7 @@ impl AutoFilterSelector {
                         filters.push(Box::new(GZipDecoder::new()));
                     }
                     "deflate" => {
-                        // TODO: Future support for ZlibDecoder
-                        tracing::warn!("Deflate encoding not yet implemented");
+                        filters.push(Box::new(DeflateDecoder::new()));
                     }
                     "bzip2" | "x-bzip2" => {
                         filters.push(Box::new(BZip2Decoder::new()));

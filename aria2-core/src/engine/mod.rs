@@ -10,6 +10,7 @@ pub mod download_cookie;
 pub mod download_engine;
 pub mod download_progress;
 pub mod http_segment_downloader;
+pub mod http_tail_reclaim;
 pub mod http_tracker_client;
 pub mod mirror_coordinator;
 #[cfg(feature = "bittorrent")]

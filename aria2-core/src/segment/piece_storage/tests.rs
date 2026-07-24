@@ -229,23 +229,22 @@ fn test_advertise_piece_and_get_advertised() {
     storage.advertise_piece(1, 0); // CUID 1 completed piece 0 (have_index=1)
     storage.advertise_piece(2, 1); // CUID 2 completed piece 1 (have_index=2)
 
-    // CUID 1 asks with last_have_index=0: have_index > 0 matches both
-    // -> CUID 1's own entry (have_index=1, piece 0) is skipped (same CUID)
-    // -> CUID 2's entry (have_index=2, piece 1) qualifies
+    // C++ does NOT filter by myCuid — all entries with haveIndex > lastHaveIndex are returned.
+    // CUID 1 asks with last_have_index=0: have_index > 0 matches both entries
+    // -> returns indexes [0, 1], new_last = last entry's have_index = 2
     let (indexes, new_last) = storage.get_advertised_piece_indexes(1, 0);
-    assert_eq!(indexes, vec![1]);
-    assert_eq!(new_last, 3); // last have_index + 1
+    assert_eq!(indexes, vec![0, 1]);
+    assert_eq!(new_last, 2); // C++ returns last entry's haveIndex (not +1)
 
-    // CUID 2 asks with last_have_index=0: have_index > 0 matches both
-    // -> CUID 1's entry (have_index=1, piece 0) qualifies
-    // -> CUID 2's own entry (have_index=2, piece 1) is skipped (same CUID)
+    // CUID 2 asks with last_have_index=0: same result — CUID filtering is NOT done here
     let (indexes2, _) = storage.get_advertised_piece_indexes(2, 0);
-    assert_eq!(indexes2, vec![0]);
+    assert_eq!(indexes2, vec![0, 1]);
 
     // CUID 1 asks with last_have_index=2: only have_index > 2 matches
-    // -> nothing new since last_have_index
-    let (indexes3, _) = storage.get_advertised_piece_indexes(1, 2);
+    // -> nothing new since last_have_index, returns lastHaveIndex unchanged
+    let (indexes3, new_last3) = storage.get_advertised_piece_indexes(1, 2);
     assert!(indexes3.is_empty());
+    assert_eq!(new_last3, 2); // C++ returns lastHaveIndex when no entries match after it
 }
 
 #[test]
