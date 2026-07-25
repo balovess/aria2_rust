@@ -49,39 +49,44 @@ impl DeflateDecoder {
         }
     }
 
-    /// Try decompressing with zlib format
-    fn try_decompress(&mut self, data: &[u8], zlib: bool) -> Result<Vec<u8>> {
+    /// Try decompressing with the given format (zlib or raw deflate).
+    ///
+    /// Creates a new `Decompress` instance, feeds `data`, and stores the
+    /// decompressor in `self.decompress` for subsequent incremental calls.
+    /// Returns the output and whether the stream ended.
+    fn try_new_decompress(&mut self, data: &[u8], zlib: bool) -> Result<(Vec<u8>, bool)> {
         let mut decompress = flate2::Decompress::new(zlib);
         let mut output = Vec::with_capacity(data.len().saturating_mul(3).max(256));
+
+        let total_in_before = decompress.total_in() as usize;
 
         match decompress.decompress_vec(data, &mut output, flate2::FlushDecompress::None) {
             Ok(flate2::Status::Ok) => {
                 // Partial decompression succeeded — keep the decompressor
-                self.decompress = Some(decompress);
-                // Track unconsumed input
-                let consumed = decompress.total_in() as usize;
+                let consumed = decompress.total_in() as usize - total_in_before;
                 if consumed < data.len() {
                     self.input_buffer = data[consumed..].to_vec();
                 } else {
                     self.input_buffer.clear();
                 }
-                Ok(output)
+                self.decompress = Some(decompress);
+                Ok((output, false))
             }
             Ok(flate2::Status::StreamEnd) => {
-                self.finished = true;
-                let consumed = decompress.total_in() as usize;
+                let consumed = decompress.total_in() as usize - total_in_before;
                 if consumed < data.len() {
                     self.input_buffer = data[consumed..].to_vec();
                 } else {
                     self.input_buffer.clear();
                 }
-                Ok(output)
+                self.decompress = Some(decompress);
+                Ok((output, true))
             }
             Ok(flate2::Status::BufError) => {
                 // Need more data
-                self.decompress = Some(decompress);
                 self.input_buffer.clear();
-                Ok(output)
+                self.decompress = Some(decompress);
+                Ok((output, false))
             }
             Err(_) => Err(Aria2Error::Io("Decompression failed".to_string())),
         }
@@ -147,17 +152,22 @@ impl StreamFilter for DeflateDecoder {
             }
         } else if !self.tried_zlib {
             // First attempt: try zlib format
-            match self.try_decompress(&data, true) {
-                Ok(output) => {
-                    self.tried_zlib = true;
+            self.tried_zlib = true;
+            match self.try_new_decompress(&data, true) {
+                Ok((output, stream_end)) => {
+                    if stream_end {
+                        self.finished = true;
+                    }
                     Ok(output)
                 }
                 Err(_) => {
                     // Zlib failed, try raw deflate
-                    self.tried_zlib = true;
-                    match self.try_decompress(&data, false) {
-                        Ok(output) => {
+                    match self.try_new_decompress(&data, false) {
+                        Ok((output, stream_end)) => {
                             self.using_raw = true;
+                            if stream_end {
+                                self.finished = true;
+                            }
                             Ok(output)
                         }
                         Err(e) => {
@@ -172,9 +182,12 @@ impl StreamFilter for DeflateDecoder {
             }
         } else {
             // Already determined we need raw deflate
-            match self.try_decompress(&data, false) {
-                Ok(output) => {
+            match self.try_new_decompress(&data, false) {
+                Ok((output, stream_end)) => {
                     self.using_raw = true;
+                    if stream_end {
+                        self.finished = true;
+                    }
                     Ok(output)
                 }
                 Err(_) => {
@@ -200,13 +213,21 @@ impl StreamFilter for DeflateDecoder {
                 flate2::FlushDecompress::Finish,
             );
             self.input_buffer.clear();
-        } else if !self.tried_zlib {
-            let _ = self.try_decompress(&self.input_buffer, true);
-            self.tried_zlib = true;
-        }
-
-        if !self.using_raw && self.decompress.is_none() {
-            let _ = self.try_decompress(&self.input_buffer, false);
+        } else {
+            // No active decompressor — try zlib then raw deflate
+            let data = std::mem::take(&mut self.input_buffer);
+            if !self.tried_zlib {
+                self.tried_zlib = true;
+                if let Ok((out, _)) = self.try_new_decompress(&data, true) {
+                    output = out;
+                } else if let Ok((out, _)) = self.try_new_decompress(&data, false) {
+                    self.using_raw = true;
+                    output = out;
+                }
+            } else if let Ok((out, _)) = self.try_new_decompress(&data, false) {
+                self.using_raw = true;
+                output = out;
+            }
         }
 
         self.finished = true;

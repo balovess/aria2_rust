@@ -266,15 +266,15 @@ async fn test_connection_pool_reuse() {
     let _conn1_id = conn1.id;
     assert_eq!(manager.active_count(), 1);
 
-    // Return the connection
-    manager.release(conn1.id).await;
+    // Return the connection (move ownership)
+    manager.release(conn1).await;
 
     // Second connection acquisition (should succeed)
     let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should succeed");
     assert!(manager.active_count() >= 1); // Connection count should be >= 1
 
     // Cleanup
-    manager.release(conn2.id).await;
+    manager.release(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -445,12 +445,12 @@ async fn test_max_connections_limit() {
     }
 
     // After returning one connection, should be able to acquire again (if pool reuse works)
-    manager.release(conn1.id).await;
+    manager.release(conn1).await;
     // Note: since the connection may still be counted in the pool, we only verify no panic
     match manager.acquire(&url, None).await {
         Ok(conn3) => {
             println!("Successfully acquired new connection after release: id={}", conn3.id);
-            manager.release(conn3.id).await;
+            manager.release(conn3).await;
         }
         Err(e) => {
             println!("Acquisition failed after release (may be connection reuse limit): {}", e);
@@ -458,7 +458,7 @@ async fn test_max_connections_limit() {
         }
     }
 
-    manager.release(conn2.id).await;
+    manager.release(conn2).await;
     manager.cleanup().await;
 }
 

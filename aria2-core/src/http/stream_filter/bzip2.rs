@@ -4,7 +4,9 @@
 //! Supports true streaming/incremental decompression where data can
 //! be fed in arbitrary chunks.
 
+use std::cell::Cell;
 use std::io::Read;
+use std::rc::Rc;
 
 use crate::error::{Aria2Error, Result};
 use crate::http::stream_filter::types::StreamFilter;
@@ -27,6 +29,11 @@ pub struct BZip2Decoder {
     finished: bool,
     /// Buffered input that hasn't been consumed yet
     input_buffer: Vec<u8>,
+    /// Number of bytes consumed in the last filter() call
+    bytes_processed: usize,
+    /// Length of the input buffer before the last decompression attempt.
+    /// Used to detect whether the decoder made any progress (avoid infinite loops).
+    last_attempt_len: usize,
 }
 
 impl std::fmt::Debug for BZip2Decoder {
@@ -44,13 +51,55 @@ impl BZip2Decoder {
         BZip2Decoder {
             finished: false,
             input_buffer: Vec::new(),
+            bytes_processed: 0,
+            last_attempt_len: 0,
         }
+    }
+
+    /// Number of input bytes consumed in the last `filter()` call.
+    pub fn bytes_processed(&self) -> usize {
+        self.bytes_processed
     }
 }
 
 impl Default for BZip2Decoder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A `Read` wrapper that tracks how many bytes have been consumed
+/// from the underlying slice via a shared `Rc<Cell<usize>>`.
+struct TrackingReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    consumed: Rc<Cell<usize>>,
+}
+
+impl<'a> TrackingReader<'a> {
+    fn new(data: &'a [u8], consumed: Rc<Cell<usize>>) -> Self {
+        Self {
+            data,
+            pos: 0,
+            consumed,
+        }
+    }
+}
+
+impl<'a> Read for TrackingReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = &self.data[self.pos..];
+        let to_read = buf.len().min(remaining.len());
+        buf[..to_read].copy_from_slice(&remaining[..to_read]);
+        self.pos += to_read;
+        self.consumed.set(self.pos);
+        if to_read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "end of buffered input",
+            ));
+        }
+        Ok(to_read)
     }
 }
 
@@ -72,19 +121,30 @@ impl StreamFilter for BZip2Decoder {
 
         // Buffer incoming data
         self.input_buffer.extend_from_slice(input);
+        self.bytes_processed = 0;
 
-        // Try to decompress with the current buffer
-        let cursor = std::io::Cursor::new(&self.input_buffer[..]);
-        let mut decoder = bzip2_rs::DecoderReader::new(cursor);
+        // Skip decompression if the buffer hasn't grown since last attempt
+        // (prevents infinite loops on incomplete data)
+        if self.input_buffer.len() == self.last_attempt_len {
+            return Ok(Vec::new());
+        }
+
+        let buf_len_before = self.input_buffer.len();
+
+        // Create a shared counter for tracking consumed bytes
+        let consumed = Rc::new(Cell::new(0usize));
+        let tracking = TrackingReader::new(&self.input_buffer, consumed.clone());
+        let mut decoder = bzip2_rs::DecoderReader::new(tracking);
 
         let mut output = Vec::with_capacity(self.input_buffer.len().saturating_mul(3).max(256));
 
         match decoder.read_to_end(&mut output) {
             Ok(_) => {
-                // Successfully decompressed all available data
-                // Check if the stream is complete
-                let consumed = decoder.get_ref().position() as usize;
-                self.input_buffer = self.input_buffer[consumed..].to_vec();
+                // Successfully decompressed all available data.
+                let n = consumed.get();
+                self.bytes_processed = n;
+                self.input_buffer = self.input_buffer[n..].to_vec();
+                self.last_attempt_len = self.input_buffer.len();
 
                 if self.input_buffer.is_empty() {
                     self.finished = true;
@@ -92,12 +152,28 @@ impl StreamFilter for BZip2Decoder {
                 Ok(output)
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // Incomplete stream — need more data
-                // Return any partial output we got
-                let consumed = decoder.get_ref().position() as usize;
-                if consumed > 0 {
-                    self.input_buffer = self.input_buffer[consumed..].to_vec();
+                // Incomplete stream — need more data.
+                // Return any partial output we got.
+                let n = consumed.get();
+                self.bytes_processed = n;
+                if n > 0 {
+                    self.input_buffer = self.input_buffer[n..].to_vec();
                 }
+                self.last_attempt_len = self.input_buffer.len();
+                Ok(output)
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::Other
+                    && self.input_buffer.len() > buf_len_before =>
+            {
+                // bzip2-rs may return ErrorKind::Other for partial data.
+                // Try to check if the decoder made progress.
+                let n = consumed.get();
+                self.bytes_processed = n;
+                if n > 0 {
+                    self.input_buffer = self.input_buffer[n..].to_vec();
+                }
+                self.last_attempt_len = self.input_buffer.len();
                 Ok(output)
             }
             Err(e) => Err(Aria2Error::Io(format!(
@@ -116,8 +192,9 @@ impl StreamFilter for BZip2Decoder {
         let mut output = Vec::new();
 
         if !self.input_buffer.is_empty() {
-            let cursor = std::io::Cursor::new(&self.input_buffer[..]);
-            let mut decoder = bzip2_rs::DecoderReader::new(cursor);
+            let consumed = Rc::new(Cell::new(0usize));
+            let tracking = TrackingReader::new(&self.input_buffer, consumed);
+            let mut decoder = bzip2_rs::DecoderReader::new(tracking);
             let _ = decoder.read_to_end(&mut output);
             self.input_buffer.clear();
         }

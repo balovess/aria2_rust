@@ -85,15 +85,17 @@ async fn test_connection_pool_reuse() {
     assert_eq!(manager.active_count(), 1);
     println!("First connection acquired: id={}", conn1_id);
 
-    // Release connection
-    manager.release(conn1_id).await;
-    assert_eq!(manager.active_count(), 1); // Connection still in pool
+    // Release connection (move ownership back to the manager)
+    manager.release(conn1).await;
+    assert_eq!(manager.active_count(), 1); // Connection still managed
+    assert_eq!(manager.pool_size(), 1); // One idle connection in pool
     println!("Connection returned to pool");
 
-    // Second connection acquisition (should reuse)
+    // Second connection acquisition (should reuse the released connection)
     let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should reuse connection");
     assert_eq!(conn2.id, conn1_id); // Should be the same connection ID
     assert_eq!(manager.active_count(), 1); // Should not create new connection
+    assert_eq!(manager.pool_size(), 0); // Checked out, not idle
     println!("Connection pool reuse successful: id={}", conn2.id);
 
     // Cleanup
@@ -264,7 +266,7 @@ async fn test_timeout_on_slow_server() {
             if let Ok(conn) = conn_result {
                 println!("Local connection succeeded (expected behavior), verifying timeout config...");
                 assert_eq!(manager.max_connections(), 2);
-                manager.release(conn.id).await;
+                manager.release(conn).await;
             } else {
                 // If failed, verify it is a timeout error
                 println!("Connection failed (possibly timeout): {:?}", conn_result.err());
@@ -348,7 +350,7 @@ async fn test_max_connections_limit() {
     assert_eq!(manager.active_count(), 2, "Active connections should not exceed max limit");
 
     // After releasing one connection, should be able to acquire again
-    manager.release(conn1.id).await;
+    manager.release(conn1).await;
     println!("Released connection 1, trying to acquire again...");
 
     let conn3 = manager.acquire(&url, None).await.expect("Should be able to acquire new connection after release");
@@ -356,8 +358,8 @@ async fn test_max_connections_limit() {
     assert_eq!(manager.active_count(), 2);
 
     // Cleanup
-    manager.release(conn2.id).await;
-    manager.release(conn3.id).await;
+    manager.release(conn2).await;
+    manager.release(conn3).await;
     manager.cleanup().await;
 
     println!("Test passed: Max connections limit enforced correctly");
@@ -395,7 +397,7 @@ async fn test_lru_eviction_strategy() {
         let conn = manager.acquire(&url, None).await.unwrap();
         println!("Created connection {}: id={}", i + 1, conn.id);
         conn_ids.push(conn.id);
-        manager.release(conn.id).await;
+        manager.release(conn).await;
     }
 
     assert_eq!(manager.pool_size(), 3, "Should have 3 idle connections");
@@ -411,7 +413,7 @@ async fn test_lru_eviction_strategy() {
 
     // Verify old connections have been cleaned up
     // Note: Since acquire internally tries to reuse first, expired connections will be cleaned
-    manager.release(new_conn.id).await;
+    manager.release(new_conn).await;
     manager.cleanup().await;
 
     println!("Test passed: LRU eviction strategy basically works");
@@ -452,7 +454,7 @@ async fn test_concurrent_connection_access() {
                 Ok(conn) => {
                     println!("Task {} acquired connection: id={}", i, conn.id);
                     sleep(Duration::from_millis(50)).await;
-                    m.release(conn.id).await;
+                    m.release(conn).await;
                     Ok(i)
                 }
                 Err(e) => {

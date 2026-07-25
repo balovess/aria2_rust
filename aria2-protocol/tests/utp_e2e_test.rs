@@ -82,7 +82,7 @@ fn send_raw(socket: &UdpSocket, data: &[u8], addr: std::net::SocketAddr) -> bool
 #[test]
 fn test_utp_packet_syn_serialization() {
     // Create SYN packet for connection initiation
-    let syn = UtpPacket::syn(12345, 1);
+    let syn = UtpPacket::syn(12345, 1, 0, 0);
 
     // Serialize to bytes
     let bytes = syn.to_bytes();
@@ -103,7 +103,7 @@ fn test_utp_packet_syn_serialization() {
 fn test_utp_packet_data_serialization() {
     // Create DATA packet with payload
     let payload = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    let data = UtpPacket::data(12345, 2, 1, payload.clone());
+    let data = UtpPacket::data(12345, 2, 1, 0, payload.clone());
 
     // Serialize
     let bytes = data.to_bytes();
@@ -139,7 +139,7 @@ fn test_utp_packet_ack_serialization() {
 #[test]
 fn test_utp_packet_fin_serialization() {
     // Create FIN packet for graceful close
-    let fin = UtpPacket::fin(12345, 10, 9);
+    let fin = UtpPacket::fin(12345, 10, 9, 0);
 
     let bytes = fin.to_bytes();
     assert_eq!(bytes.len(), 20);
@@ -195,7 +195,7 @@ fn test_utp_connection_accept_syn() {
     let mut server_conn = UtpConnection::new();
 
     // Create SYN packet from client
-    let syn = UtpPacket::syn(12345, 1);
+    let syn = UtpPacket::syn(12345, 1, 0, 0);
 
     let client_addr = std::net::SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
@@ -206,7 +206,7 @@ fn test_utp_connection_accept_syn() {
     let result = server_conn.accept(&syn, client_addr);
 
     assert!(result.is_ok());
-    assert_eq!(server_conn.state(), ConnectionState::Connected);
+    assert_eq!(server_conn.state(), ConnectionState::Established);
     assert!(server_conn.is_established());
 }
 
@@ -227,7 +227,7 @@ fn test_utp_connection_full_handshake() {
 
     // Server accepts
     let mut server_conn = UtpConnection::new();
-    let syn = UtpPacket::syn(client_conn.local_connection_id(), 1);
+    let syn = UtpPacket::syn(client_conn.local_connection_id(), 1, 0, 0);
 
     server_conn
         .accept(
@@ -239,17 +239,17 @@ fn test_utp_connection_full_handshake() {
         )
         .expect("Server accept failed");
 
-    assert_eq!(server_conn.state(), ConnectionState::Connected);
+    assert_eq!(server_conn.state(), ConnectionState::Established);
 
     // Client receives SYN-ACK (simulated)
-    let syn_ack = UtpPacket::syn(server_conn.remote_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(server_conn.remote_connection_id(), 1, 0, 0);
 
     // Client handles the response
     client_conn
         .on_packet_received(&syn_ack)
         .expect("Client handle SYN-ACK failed");
 
-    assert_eq!(client_conn.state(), ConnectionState::Connected);
+    assert_eq!(client_conn.state(), ConnectionState::Established);
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn test_utp_connection_graceful_close() {
     .expect("Connect failed");
 
     // Simulate SYN-ACK received
-    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1, 0, 0);
     conn.on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
 
@@ -286,8 +286,9 @@ fn test_utp_connection_reset() {
     ))
     .expect("Connect failed");
 
-    // Force reset
-    conn.reset();
+    // Force reset — simulate receiving a RESET packet
+    let reset = UtpPacket::reset(conn.local_connection_id());
+    let _ = conn.on_packet_received(&reset);
 
     assert_eq!(conn.state(), ConnectionState::Closed);
 }
@@ -303,7 +304,7 @@ fn test_utp_connection_handle_reset_packet() {
     ))
     .expect("Connect failed");
 
-    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1, 0, 0);
     conn.on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
 
@@ -333,7 +334,7 @@ fn test_utp_connection_send_data() {
     ))
     .expect("Connect failed");
 
-    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1, 0, 0);
     conn.on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
 
@@ -356,13 +357,13 @@ fn test_utp_connection_receive_data() {
     ))
     .expect("Connect failed");
 
-    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1, 0, 0);
     conn.on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
 
     // Receive DATA packet - seq_nr must match expected_recv_seq (1)
     let payload = vec![10, 20, 30, 40, 50];
-    let data_packet = UtpPacket::data(conn.local_connection_id(), 1, 1, payload.clone());
+    let data_packet = UtpPacket::data(conn.local_connection_id(), 1, 1, 0, payload.clone());
 
     conn.on_packet_received(&data_packet)
         .expect("Handle DATA failed");
@@ -383,7 +384,7 @@ fn test_utp_connection_ack_handling() {
     ))
     .expect("Connect failed");
 
-    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1, 0, 0);
     conn.on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
 
@@ -647,7 +648,7 @@ fn test_utp_real_udp_syn_exchange() {
     let client_addr = get_addr(&client);
 
     // Client creates SYN packet
-    let syn = UtpPacket::syn(12345, 1);
+    let syn = UtpPacket::syn(12345, 1, 0, 0);
     let syn_bytes = syn.to_bytes();
 
     // Send SYN to server
@@ -663,7 +664,7 @@ fn test_utp_real_udp_syn_exchange() {
     assert_eq!(from_addr, client_addr);
 
     // Server sends SYN-ACK
-    let syn_ack = UtpPacket::syn(parsed.connection_id, 1);
+    let syn_ack = UtpPacket::syn(parsed.connection_id, 1, 0, 0);
     let syn_ack_bytes = syn_ack.to_bytes();
 
     assert!(send_raw(&server, &syn_ack_bytes, client_addr));
@@ -686,7 +687,7 @@ fn test_utp_real_udp_data_exchange() {
 
     // Client sends DATA packet
     let payload = vec![1, 2, 3, 4, 5, 6, 7, 8];
-    let data = UtpPacket::data(conn_id, 2, 1, payload.clone());
+    let data = UtpPacket::data(conn_id, 2, 1, 0, payload.clone());
     let data_bytes = data.to_bytes();
 
     assert!(send_raw(&client, &data_bytes, server_addr));
@@ -723,7 +724,7 @@ fn test_utp_real_udp_fin_exchange() {
     let conn_id = 12345;
 
     // Client sends FIN to close connection
-    let fin = UtpPacket::fin(conn_id, 10, 9);
+    let fin = UtpPacket::fin(conn_id, 10, 9, 0);
     let fin_bytes = fin.to_bytes();
 
     assert!(send_raw(&client, &fin_bytes, server_addr));
@@ -735,7 +736,7 @@ fn test_utp_real_udp_fin_exchange() {
     assert_eq!(parsed.packet_type().unwrap(), PacketType::StFin);
 
     // Server sends FIN-ACK
-    let fin_ack = UtpPacket::fin(conn_id, 9, 10);
+    let fin_ack = UtpPacket::fin(conn_id, 9, 10, 0);
     let fin_ack_bytes = fin_ack.to_bytes();
 
     assert!(send_raw(&server, &fin_ack_bytes, client_addr));
@@ -777,7 +778,7 @@ fn test_utp_real_udp_multiple_packets() {
     // Send multiple DATA packets
     for i in 1..=5 {
         let payload = vec![(i % 256) as u8; 100];
-        let data = UtpPacket::data(conn_id, i + 1, i, payload);
+        let data = UtpPacket::data(conn_id, i + 1, i, 0, payload);
         let data_bytes = data.to_bytes();
 
         assert!(send_raw(&client, &data_bytes, server_addr));
@@ -805,7 +806,7 @@ fn test_utp_real_udp_sequence_numbers() {
     // Send packets with increasing sequence numbers
     for (expected_seq, i) in (2..).zip(0..3) {
         let payload = vec![i as u8; 50];
-        let data = UtpPacket::data(conn_id, expected_seq, expected_seq - 1, payload);
+        let data = UtpPacket::data(conn_id, expected_seq, expected_seq - 1, 0, payload);
         let data_bytes = data.to_bytes();
 
         assert!(send_raw(&client, &data_bytes, server_addr));
@@ -835,7 +836,7 @@ fn test_utp_invalid_packet_handling() {
 #[test]
 fn test_utp_truncated_packet_handling() {
     // Create valid packet then truncate
-    let syn = UtpPacket::syn(12345, 1);
+    let syn = UtpPacket::syn(12345, 1, 0, 0);
     let bytes = syn.to_bytes();
 
     // Truncate to less than header size
@@ -912,7 +913,7 @@ fn test_utp_high_frequency_packets() {
     // Send 100 packets rapidly
     for i in 1..=100 {
         let payload = vec![(i % 256) as u8; 100];
-        let data = UtpPacket::data(conn_id, i + 1, i, payload);
+        let data = UtpPacket::data(conn_id, i + 1, i, 0, payload);
         let data_bytes = data.to_bytes();
 
         send_raw(&client, &data_bytes, server_addr);
@@ -943,7 +944,7 @@ fn test_utp_large_payload() {
 
     // Create large payload (but within UDP limits)
     let payload: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-    let data = UtpPacket::data(conn_id, 2, 1, payload.clone());
+    let data = UtpPacket::data(conn_id, 2, 1, 0, payload.clone());
     let data_bytes = data.to_bytes();
 
     // Verify size
@@ -1003,7 +1004,7 @@ fn test_utp_packet_bit_torrent_context() {
     let conn_id = 12345;
 
     for (seq, chunk) in (2..).zip(piece_data.chunks(chunk_size)) {
-        let packet = UtpPacket::data(conn_id, seq, seq - 1, chunk.to_vec());
+        let packet = UtpPacket::data(conn_id, seq, seq - 1, 0, chunk.to_vec());
 
         // Verify packet creation
         let bytes = packet.to_bytes();
@@ -1026,7 +1027,7 @@ fn test_utp_connection_bit_torrent_handshake() {
         .expect("Connect failed");
 
     // Simulate SYN-ACK
-    let syn_ack = UtpPacket::syn(client_conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(client_conn.local_connection_id(), 1, 0, 0);
     client_conn
         .on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
@@ -1067,7 +1068,7 @@ fn test_utp_connection_bit_torrent_piece_request() {
     ))
     .expect("Connect failed");
 
-    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1, 0, 0);
     conn.on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
 
@@ -1097,7 +1098,7 @@ fn test_utp_connection_bit_torrent_piece_data() {
     ))
     .expect("Connect failed");
 
-    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1);
+    let syn_ack = UtpPacket::syn(conn.local_connection_id(), 1, 0, 0);
     conn.on_packet_received(&syn_ack)
         .expect("Handle SYN-ACK failed");
 
@@ -1110,7 +1111,7 @@ fn test_utp_connection_bit_torrent_piece_data() {
     ];
 
     // Simulate receiving header - seq_nr must match expected_recv_seq (1)
-    let data_packet = UtpPacket::data(conn.local_connection_id(), 1, 1, piece_data_header.clone());
+    let data_packet = UtpPacket::data(conn.local_connection_id(), 1, 1, 0, piece_data_header.clone());
 
     conn.on_packet_received(&data_packet)
         .expect("Handle piece header failed");
@@ -1136,14 +1137,14 @@ fn test_utp_full_connection_lifecycle() {
     let conn_id = 12345;
 
     // Client sends SYN
-    let syn = UtpPacket::syn(conn_id, 1);
+    let syn = UtpPacket::syn(conn_id, 1, 0, 0);
     send_raw(&client, &syn.to_bytes(), server_addr);
 
     // Server receives SYN and sends SYN-ACK
     let (syn_received, _) = recv_with_timeout(&server, 1000).expect("Server receive SYN");
     let parsed_syn = UtpPacket::from_bytes(&syn_received).expect("Parse SYN");
 
-    let syn_ack = UtpPacket::syn(parsed_syn.connection_id, 1);
+    let syn_ack = UtpPacket::syn(parsed_syn.connection_id, 1, 0, 0);
     send_raw(&server, &syn_ack.to_bytes(), client_addr);
 
     // Client receives SYN-ACK
@@ -1151,7 +1152,7 @@ fn test_utp_full_connection_lifecycle() {
 
     // Phase 2: Data transfer
     let payload = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    let data = UtpPacket::data(conn_id, 2, 1, payload.clone());
+    let data = UtpPacket::data(conn_id, 2, 1, 0, payload.clone());
     send_raw(&client, &data.to_bytes(), server_addr);
 
     // Server receives DATA and sends ACK
@@ -1166,13 +1167,13 @@ fn test_utp_full_connection_lifecycle() {
     recv_with_timeout(&client, 1000).expect("Client receive ACK");
 
     // Phase 3: Connection teardown
-    let fin = UtpPacket::fin(conn_id, 3, 2);
+    let fin = UtpPacket::fin(conn_id, 3, 2, 0);
     send_raw(&client, &fin.to_bytes(), server_addr);
 
     // Server receives FIN and sends FIN-ACK
     recv_with_timeout(&server, 1000).expect("Server receive FIN");
 
-    let fin_ack = UtpPacket::fin(conn_id, 2, 3);
+    let fin_ack = UtpPacket::fin(conn_id, 2, 3, 0);
     send_raw(&server, &fin_ack.to_bytes(), client_addr);
 
     // Client receives FIN-ACK
@@ -1193,7 +1194,7 @@ fn test_utp_bidirectional_data_transfer() {
 
     // Client -> Server: Data 1
     let data1 = vec![1, 2, 3];
-    let packet1 = UtpPacket::data(conn_id, 2, 1, data1.clone());
+    let packet1 = UtpPacket::data(conn_id, 2, 1, 0, data1.clone());
     send_raw(&client, &packet1.to_bytes(), server_addr);
 
     let (recv1, _) = recv_with_timeout(&server, 500).expect("Server receive data1");
@@ -1202,7 +1203,7 @@ fn test_utp_bidirectional_data_transfer() {
 
     // Server -> Client: Data 2
     let data2 = vec![4, 5, 6];
-    let packet2 = UtpPacket::data(conn_id, 2, 1, data2.clone());
+    let packet2 = UtpPacket::data(conn_id, 2, 1, 0, data2.clone());
     send_raw(&server, &packet2.to_bytes(), client_addr);
 
     let (recv2, _) = recv_with_timeout(&client, 500).expect("Client receive data2");
