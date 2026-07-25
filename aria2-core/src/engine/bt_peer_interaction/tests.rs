@@ -758,7 +758,7 @@ fn test_check_have_with_callback_updates_last_have_index() {
 fn test_post_handshake_processing_defaults() {
     let info_hash = [0u8; 20];
     let interactive = BtPeerInteractive::new(info_hash, 100);
-    let actions = interactive.post_handshake_processing();
+    let actions = interactive.post_handshake_processing(None);
     assert!(actions.send_bitfield);
     assert!(actions.send_extension_handshake);
     assert!(!actions.send_dht_port);
@@ -770,8 +770,22 @@ fn test_post_handshake_processing_with_dht() {
     let info_hash = [0u8; 20];
     let mut interactive = BtPeerInteractive::new(info_hash, 100);
     interactive.set_dht_enabled(true);
-    let actions = interactive.post_handshake_processing();
+    let actions = interactive.post_handshake_processing(None);
     assert!(actions.send_dht_port);
+}
+
+#[test]
+fn test_post_handshake_processing_computes_fast_set() {
+    let mut info_hash = [0u8; 20];
+    info_hash[0] = 0xFF;
+    let interactive = BtPeerInteractive::new(info_hash, 1000);
+    let actions = interactive.post_handshake_processing(Some("192.168.0.1"));
+    // C++ test vector: should produce the BEP 6 fast set
+    assert!(!actions.allowed_fast_pieces.is_empty());
+    assert!(actions.allowed_fast_pieces.len() <= 10);
+    for &idx in &actions.allowed_fast_pieces {
+        assert!(idx < 1000);
+    }
 }
 
 // ── dispatch_message tests (no connection I/O) ─────────────────────

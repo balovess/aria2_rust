@@ -238,20 +238,35 @@ impl BtPeerInteractive {
     /// - Allowed-fast set messages (BEP 6) if fast extension is enabled
     /// - Port message (BEP 5) if DHT is enabled
     ///
-    /// For now this is a stub — the actual message sending is done by
-    /// the caller using the connection. This method returns a summary
-    /// of what should be sent so the caller can decide.
+    /// The actual message sending is done by the caller using the connection.
+    /// This method returns a summary of what should be sent so the caller
+    /// can decide.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_ip` — The peer's IP address, used to compute the BEP 6
+    ///   allowed-fast set. Pass `None` if the IP is unavailable (fast set
+    ///   will be empty).
     ///
     /// # Returns
     ///
     /// A [`PostHandshakeActions`] describing what messages should be sent.
-    pub fn post_handshake_processing(&self) -> PostHandshakeActions {
+    pub fn post_handshake_processing(&self, peer_ip: Option<&str>) -> PostHandshakeActions {
+        let allowed_fast_pieces = match peer_ip {
+            Some(ip) => aria2_protocol::bittorrent::fast_set::compute_fast_set(
+                ip,
+                self.num_pieces,
+                &self.info_hash,
+                self.allowed_fast_set_size,
+            ),
+            None => Vec::new(),
+        };
         PostHandshakeActions {
             send_bitfield: true,
             // Send extension handshake if we have local extensions configured
             send_extension_handshake: true,
             send_dht_port: self.dht_enabled,
-            allowed_fast_pieces: Vec::new(), // TODO: compute allowed-fast set
+            allowed_fast_pieces,
         }
     }
 }

@@ -10,9 +10,19 @@ pub struct PexAddedPeer {
     pub flags: u8,
 }
 
+/// BEP 11 Peer Exchange message.
+///
+/// Carries both newly connected peers (`added`) and disconnected peers
+/// (`dropped`). The full BEP 11 protocol requires both fields so that
+/// peers can learn about peers that have left the swarm.
 #[derive(Debug, Clone)]
 pub enum PexMessage {
-    Added { peers: Vec<PexAddedPeer> },
+    /// Standard PEX message with both added and dropped peers.
+    Added {
+        peers: Vec<PexAddedPeer>,
+        dropped: Vec<PeerAddr>,
+    },
+    /// Legacy message with only dropped peers (rare in practice).
     Removed(Vec<PeerAddr>),
 }
 
@@ -43,12 +53,23 @@ impl PexHandler {
             flags = flags_data.to_vec();
         }
 
-        let _removed_peers =
+        let mut dropped_peers =
             if let Some(dropped_data) = value.dict_get("dropped").and_then(|v| v.as_bytes()) {
                 decode_compact_peers(dropped_data)?
             } else {
                 Vec::new()
             };
+
+        // BEP 11 also supports dropped6 for IPv6 dropped peers
+        let mut dropped6_peers =
+            if let Some(dropped6_data) = value.dict_get("dropped6").and_then(|v| v.as_bytes()) {
+                decode_compact_peers(dropped6_data)?
+            } else {
+                Vec::new()
+            };
+
+        // Merge IPv6 dropped peers into the combined list
+        dropped_peers.append(&mut dropped6_peers);
 
         let peers_with_flags: Vec<PexAddedPeer> = added_peers
             .into_iter()
@@ -61,6 +82,7 @@ impl PexHandler {
 
         Ok(PexMessage::Added {
             peers: peers_with_flags,
+            dropped: dropped_peers,
         })
     }
 
@@ -108,15 +130,21 @@ impl PexHandler {
         let msg = Self::parse_pex_data(data)?;
 
         match msg {
-            PexMessage::Added { peers } => {
+            PexMessage::Added { peers, dropped } => {
                 let added: Vec<PeerAddr> = peers
                     .into_iter()
                     .map(|p| p.addr)
                     .filter(|addr| addr != local_addr)
                     .collect();
 
+                let dropped_filtered: Vec<PeerAddr> = dropped
+                    .into_iter()
+                    .filter(|addr| addr != local_addr)
+                    .collect();
+
                 let added_deduped = deduplicate_peers(&added);
-                Ok((added_deduped, vec![]))
+                let dropped_deduped = deduplicate_peers(&dropped_filtered);
+                Ok((added_deduped, dropped_deduped))
             }
             PexMessage::Removed(peers) => {
                 let filtered: Vec<PeerAddr> = peers
@@ -302,6 +330,7 @@ mod tests {
         match parsed {
             PexMessage::Added {
                 peers: parsed_peers,
+                ..
             } => {
                 assert_eq!(parsed_peers.len(), 3);
                 assert_eq!(parsed_peers[0].addr.ip, "192.168.1.1");
@@ -337,7 +366,7 @@ mod tests {
 
         let parsed = PexHandler::parse_pex_data(&encoded).unwrap();
         match parsed {
-            PexMessage::Added { peers } => {
+            PexMessage::Added { peers, .. } => {
                 assert_eq!(peers.len(), original_peers.len());
                 for (i, original) in original_peers.iter().enumerate() {
                     assert_eq!(peers[i].addr.ip, original.ip);
@@ -468,7 +497,7 @@ mod tests {
 
         let parsed = PexHandler::parse_pex_data(&encoded).unwrap();
         match parsed {
-            PexMessage::Added { peers } => {
+            PexMessage::Added { peers, .. } => {
                 assert_eq!(peers.len(), 2);
                 assert_eq!(peers[0].flags, 0x03);
                 assert_eq!(peers[1].flags, 0x01);
@@ -486,7 +515,7 @@ mod tests {
 
         let parsed = PexHandler::parse_pex_data(&encoded).unwrap();
         match parsed {
-            PexMessage::Added { peers } => {
+            PexMessage::Added { peers, .. } => {
                 assert!(peers.is_empty());
             }
             _ => panic!("Expected Added message"),
@@ -509,7 +538,7 @@ mod tests {
 
         let parsed = PexHandler::parse_pex_data(&encoded).unwrap();
         match parsed {
-            PexMessage::Added { peers } => {
+            PexMessage::Added { peers, .. } => {
                 assert_eq!(
                     peers.len(),
                     3,
@@ -545,7 +574,7 @@ mod tests {
 
         let parsed_v4 = PexHandler::parse_pex_data(&encoded_v4).unwrap();
         match parsed_v4 {
-            PexMessage::Added { peers } => {
+            PexMessage::Added { peers, .. } => {
                 assert_eq!(peers.len(), 2, "Should have 2 IPv4 peers");
                 let has_ipv4 = peers.iter().all(|p| p.addr.ip.contains('.'));
                 assert!(has_ipv4, "All should be IPv4");
@@ -704,7 +733,7 @@ mod tests {
 
         let parsed = PexHandler::parse_pex_data(&encoded).unwrap();
         match parsed {
-            PexMessage::Added { peers } => {
+            PexMessage::Added { peers, .. } => {
                 assert_eq!(peers.len(), 3, "Should have 3 peers with flags");
 
                 assert_eq!(

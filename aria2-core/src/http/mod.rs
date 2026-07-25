@@ -62,6 +62,6 @@ pub use auth::{
 // Re-export response processor types for convenient access
 pub use response_processor::{
     HttpResponseProcessor, ResponseProcessResult, ResponseProcessorConfig,
-    determine_filename, should_inflate_content_encoding, supports_persistent_connection,
-    validate_response_range,
+    ValidateRequestContext, determine_filename, should_inflate_content_encoding,
+    supports_persistent_connection, validate_response, validate_response_range,
 };

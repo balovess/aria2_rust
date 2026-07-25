@@ -18,6 +18,7 @@ use super::conversion;
 use super::filename::determine_filename;
 use super::range::{self, validate_response_range};
 use super::types::{ResponseProcessResult, ResponseProcessorConfig};
+use super::validate::{ValidateRequestContext, validate_response};
 
 /// Processes HTTP response headers and determines the next download action.
 ///
@@ -32,7 +33,7 @@ use super::types::{ResponseProcessResult, ResponseProcessorConfig};
 /// use aria2_core::http::header_processor::HttpResponseHead;
 ///
 /// let processor = HttpResponseProcessor::new(ResponseProcessorConfig::default());
-/// let result = processor.process(&response_head, HttpMethod::Get, &request_url, None, true)?;
+/// let result = processor.process(&response_head, HttpMethod::Get, &request_url, None, true, false, true, false)?;
 /// match result {
 ///     ResponseProcessResult::DownloadReady { filename, .. } => { /* start download */ }
 ///     ResponseProcessResult::Redirect(info) => { /* follow redirect */ }
@@ -68,6 +69,8 @@ impl HttpResponseProcessor {
     /// * `piece_storage_initialized` - Whether piece storage has already been set up.
     /// * `is_unique_protocol` - Whether all URIs use the same protocol.
     /// * `accept_metalink` - Whether Metalink/HTTP processing is enabled.
+    /// * `conditional_request` - Whether the request included conditional GET
+    ///   headers (`If-Modified-Since` or `If-None-Match`).
     ///
     /// # Returns
     ///
@@ -81,7 +84,15 @@ impl HttpResponseProcessor {
         piece_storage_initialized: bool,
         is_unique_protocol: bool,
         accept_metalink: bool,
+        conditional_request: bool,
     ) -> Result<ResponseProcessResult> {
+        // --- Protocol validation (mirrors C++ HttpResponse::validateResponse()) ---
+        let validate_ctx = ValidateRequestContext {
+            conditional_request,
+            requested_range,
+        };
+        validate_response(response_head, &validate_ctx)?;
+
         let status_code = response_head.status_code;
 
         // --- Connection persistence ---

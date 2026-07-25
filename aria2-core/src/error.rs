@@ -76,6 +76,9 @@ pub enum RecoverableError {
 
     #[error("FTP protocol error: {message}")]
     FtpProtocolError { message: String },
+
+    #[error("HTTP protocol error: {message}")]
+    HttpProtocolError { message: String },
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]

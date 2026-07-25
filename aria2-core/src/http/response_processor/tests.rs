@@ -32,6 +32,7 @@ fn test_200_ok_basic() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -73,6 +74,7 @@ fn test_200_ok_with_content_type() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -99,6 +101,7 @@ fn test_206_partial_content_with_range() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -130,6 +133,7 @@ fn test_206_range_mismatch_cannot_resume() {
         false,
         false,
         true,
+        false,
     );
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -141,9 +145,10 @@ fn test_206_range_mismatch_cannot_resume() {
 // ==================== 304 Not Modified ====================
 
 #[test]
-fn test_304_not_modified() {
+fn test_304_not_modified_with_conditional() {
     let head = parse_head(b"HTTP/1.1 304 Not Modified\r\n\r\n");
     let processor = HttpResponseProcessor::with_defaults();
+    // conditional_request = true: request had If-Modified-Since
     let result = processor
         .process(
             &head,
@@ -152,6 +157,7 @@ fn test_304_not_modified() {
             None,
             false,
             false,
+            true,
             true,
         )
         .unwrap();
@@ -165,7 +171,32 @@ fn test_304_not_modified() {
 }
 
 #[test]
-fn test_304_not_modified_with_length() {
+fn test_304_not_modified_without_conditional_rejected() {
+    let head = parse_head(b"HTTP/1.1 304 Not Modified\r\n\r\n");
+    let processor = HttpResponseProcessor::with_defaults();
+    // conditional_request = false: no conditional headers sent
+    let result = processor.process(
+        &head,
+        HttpMethod::Get,
+        "http://example.com/file.bin",
+        None,
+        false,
+        false,
+        true,
+        false,
+    );
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message }) => {
+            assert!(message.contains("304"));
+            assert!(message.contains("If-Modified-Since"));
+        }
+        other => panic!("Expected HttpProtocolError, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_304_not_modified_with_length_and_conditional() {
     let head = parse_head(b"HTTP/1.1 304 Not Modified\r\nContent-Length: 2048\r\n\r\n");
     let processor = HttpResponseProcessor::with_defaults();
     let result = processor
@@ -176,6 +207,7 @@ fn test_304_not_modified_with_length() {
             None,
             false,
             false,
+            true,
             true,
         )
         .unwrap();
@@ -204,6 +236,7 @@ fn test_gzip_disables_segmented_download() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -232,6 +265,7 @@ fn test_head_method_switch() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -262,6 +296,7 @@ fn test_metalink_link_headers() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -288,6 +323,7 @@ fn test_metalink_disabled_after_first_response() {
             "http://example.com/file.bin",
             None,
             true,
+            false,
             false,
             false,
         )
@@ -317,6 +353,7 @@ fn test_digest_header() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -347,6 +384,7 @@ fn test_301_redirect_delegation() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -373,6 +411,7 @@ fn test_401_auth_challenge_delegation() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -401,6 +440,7 @@ fn test_404_error_delegation() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -427,6 +467,7 @@ fn test_http10_response() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -456,6 +497,7 @@ fn test_zero_length_file() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -490,6 +532,7 @@ fn test_last_modified_extracted_from_response() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -517,6 +560,7 @@ fn test_last_modified_absent() {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -525,5 +569,76 @@ fn test_last_modified_absent() {
             assert!(last_modified.is_none());
         }
         _ => panic!("Expected DownloadReady"),
+    }
+}
+
+// ==================== validate_response integration ====================
+
+#[test]
+fn test_redirect_without_location_rejected() {
+    let head = parse_head(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n");
+    let processor = HttpResponseProcessor::with_defaults();
+    let result = processor.process(
+        &head,
+        HttpMethod::Get,
+        "http://example.com/old",
+        None,
+        false,
+        false,
+        true,
+        false,
+    );
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message }) => {
+            assert!(message.contains("Location"));
+        }
+        other => panic!("Expected HttpProtocolError, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_206_chunked_without_content_range_cannot_resume() {
+    let head = parse_head(
+        b"HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+    let processor = HttpResponseProcessor::with_defaults();
+    let result = processor.process(
+        &head,
+        HttpMethod::Get,
+        "http://example.com/file.bin",
+        None,
+        false,
+        false,
+        true,
+        false,
+    );
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        Aria2Error::Recoverable(RecoverableError::CannotResume) => {}
+        other => panic!("Expected CannotResume, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_1xx_unexpected_rejected() {
+    let head = parse_head(b"HTTP/1.1 100 Continue\r\n\r\n");
+    let processor = HttpResponseProcessor::with_defaults();
+    let result = processor.process(
+        &head,
+        HttpMethod::Get,
+        "http://example.com/file.bin",
+        None,
+        false,
+        false,
+        true,
+        false,
+    );
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message }) => {
+            assert!(message.contains("100"));
+        }
+        other => panic!("Expected HttpProtocolError, got {:?}", other),
     }
 }

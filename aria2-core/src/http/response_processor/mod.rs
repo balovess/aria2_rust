@@ -4,6 +4,7 @@
 //! for the download engine. This is the Rust equivalent of C++ aria2's
 //! `HttpResponseCommand::executeInternal()`, covering:
 //!
+//! - **Protocol validation** (mirrors C++ `HttpResponse::validateResponse()`)
 //! - 304 Not Modified handling (mark all pieces done)
 //! - Metalink/HTTP Link header processing (alternate URIs)
 //! - Digest header processing (checksum verification)
@@ -27,6 +28,7 @@
 //!
 //! - [`types`]      -- `ResponseProcessResult` and `ResponseProcessorConfig`
 //! - [`processor`]   -- `HttpResponseProcessor` (main entry point)
+//! - [`validate`]    -- `validate_response()` (protocol-level validation)
 //! - [`connection`]  -- Keep-alive and content-encoding helpers
 //! - [`filename`]    -- Filename determination from Content-Disposition / URL
 //! - [`range`]       -- Range validation and Content-Range parsing
@@ -38,6 +40,7 @@ pub mod filename;
 pub mod processor;
 pub mod range;
 pub mod types;
+pub mod validate;
 
 #[cfg(test)]
 mod tests;
@@ -50,3 +53,4 @@ pub use filename::determine_filename;
 pub use processor::HttpResponseProcessor;
 pub use range::validate_response_range;
 pub use types::{ResponseProcessResult, ResponseProcessorConfig};
+pub use validate::{ValidateRequestContext, validate_response};
