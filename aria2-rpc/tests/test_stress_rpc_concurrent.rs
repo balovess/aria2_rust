@@ -235,8 +235,7 @@ async fn test_stress_websocket_event_publisher() {
         let publisher_clone = publisher.clone();
 
         publish_handles.push(tokio::spawn(async move {
-            let event =
-                DownloadEvent::download_start(format!("gid-{}", i));
+            let event = DownloadEvent::download_start(format!("gid-{}", i));
 
             publisher_clone.publish_event(event).unwrap_or_else(|e| {
                 eprintln!("Publish error: {}", e);
@@ -681,9 +680,7 @@ async fn test_stress_event_publish_subscribe_mixed() {
         let publisher_clone = publisher.clone();
 
         pub_handles.push(tokio::spawn(async move {
-            let event = DownloadEvent::download_complete(
-                format!("event-gid-{}", i),
-            );
+            let event = DownloadEvent::download_complete(format!("event-gid-{}", i));
 
             publisher_clone.publish_event(event).ok();
 

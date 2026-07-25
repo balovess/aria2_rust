@@ -283,15 +283,23 @@ impl App {
                 ),
                 #[cfg(not(feature = "sftp"))]
                 InputType::SftpUrl => {
-                    return Err("SFTP support not enabled (compile with --features sftp)".to_string());
+                    return Err(
+                        "SFTP support not enabled (compile with --features sftp)".to_string()
+                    );
                 }
                 #[cfg(not(feature = "bittorrent"))]
                 InputType::TorrentFile | InputType::MagnetLink => {
-                    return Err("BitTorrent support not enabled (compile with --features bittorrent)".to_string());
+                    return Err(
+                        "BitTorrent support not enabled (compile with --features bittorrent)"
+                            .to_string(),
+                    );
                 }
                 #[cfg(not(feature = "metalink"))]
                 InputType::MetalinkFile => {
-                    return Err("Metalink support not enabled (compile with --features metalink)".to_string());
+                    return Err(
+                        "Metalink support not enabled (compile with --features metalink)"
+                            .to_string(),
+                    );
                 }
             };
 

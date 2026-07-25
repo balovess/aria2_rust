@@ -241,7 +241,10 @@ fn bench_lpd_manager_handle_packet(c: &mut Criterion) {
         .map(|b| format!("{:02x}", b))
         .collect();
     rt.block_on(async {
-        manager.register_torrent(&test_hash_hex, false).await.unwrap();
+        manager
+            .register_torrent(&test_hash_hex, false)
+            .await
+            .unwrap();
         // Give time for async registration
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     });

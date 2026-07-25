@@ -1,14 +1,13 @@
-//! Deflate (RFC 1951) / Zlib (RFC 1950) decompressor
+//! Deflate (RFC 1951) / Zlib (RFC 1950) decompressor with streaming support
 //!
 //! Implements deflate content-encoding decompression using the flate2 library.
-//! Supports both raw deflate and zlib-wrapped deflate streams.
+//! Supports both raw deflate and zlib-wrapped deflate streams with true
+//! incremental processing — data can be fed in arbitrary chunks.
 
 use crate::error::{Aria2Error, Result};
 use crate::http::stream_filter::types::StreamFilter;
-use flate2::read::ZlibDecoder;
-use std::io::{Cursor, Read};
 
-/// Deflate/Zlib format decompressor
+/// Deflate/Zlib format decompressor with streaming support
 ///
 /// Decompresses data encoded with Content-Encoding: deflate.
 /// Per RFC 7230 Section 4.2, "deflate" means zlib format (RFC 1950)
@@ -16,50 +15,76 @@ use std::io::{Cursor, Read};
 ///
 /// Some servers incorrectly send raw deflate without the zlib wrapper.
 /// This decoder tries zlib first, and falls back to raw deflate on failure.
+///
+/// # Streaming Model
+///
+/// Uses `flate2::Decompress` for incremental processing:
+/// 1. Each `filter()` call feeds input to the decompressor
+/// 2. Output is produced immediately when decompressed data is available
+/// 3. Unconsumed input is buffered for the next call
+/// 4. The decompressor retains state between calls
 #[derive(Debug)]
 pub struct DeflateDecoder {
-    /// Internal ZlibDecoder instance
-    inner: Option<ZlibDecoder<Cursor<Vec<u8>>>>,
+    /// Active zlib decompressor
+    decompress: Option<flate2::Decompress>,
     /// Whether decompression is complete
     finished: bool,
     /// Whether we've tried zlib mode and need to fall back to raw deflate
     tried_zlib: bool,
-    /// Buffered raw data for retry with raw deflate
-    raw_buffer: Vec<u8>,
+    /// Whether we've confirmed raw deflate works
+    using_raw: bool,
+    /// Buffered input that hasn't been consumed yet
+    input_buffer: Vec<u8>,
 }
 
 impl DeflateDecoder {
     /// Create a new Deflate decoder instance
     pub fn new() -> Self {
         DeflateDecoder {
-            inner: None,
+            decompress: None,
             finished: false,
             tried_zlib: false,
-            raw_buffer: Vec::new(),
+            using_raw: false,
+            input_buffer: Vec::new(),
         }
     }
 
-    /// Try to decompress data using zlib format
-    fn try_zlib(data: &[u8]) -> Result<Vec<u8>> {
-        let cursor = Cursor::new(data.to_vec());
-        let mut decoder = ZlibDecoder::new(cursor);
+    /// Try decompressing with zlib format
+    fn try_decompress(&mut self, data: &[u8], zlib: bool) -> Result<Vec<u8>> {
+        let mut decompress = flate2::Decompress::new(zlib);
         let mut output = Vec::with_capacity(data.len().saturating_mul(3).max(256));
-        decoder
-            .read_to_end(&mut output)
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
-        Ok(output)
-    }
 
-    /// Try to decompress data using raw deflate format (no zlib header)
-    fn try_raw_deflate(data: &[u8]) -> Result<Vec<u8>> {
-        use flate2::read::DeflateDecoder as RawDeflateDecoder;
-        let cursor = Cursor::new(data.to_vec());
-        let mut decoder = RawDeflateDecoder::new(cursor);
-        let mut output = Vec::with_capacity(data.len().saturating_mul(3).max(256));
-        decoder
-            .read_to_end(&mut output)
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
-        Ok(output)
+        match decompress.decompress_vec(data, &mut output, flate2::FlushDecompress::None) {
+            Ok(flate2::Status::Ok) => {
+                // Partial decompression succeeded — keep the decompressor
+                self.decompress = Some(decompress);
+                // Track unconsumed input
+                let consumed = decompress.total_in() as usize;
+                if consumed < data.len() {
+                    self.input_buffer = data[consumed..].to_vec();
+                } else {
+                    self.input_buffer.clear();
+                }
+                Ok(output)
+            }
+            Ok(flate2::Status::StreamEnd) => {
+                self.finished = true;
+                let consumed = decompress.total_in() as usize;
+                if consumed < data.len() {
+                    self.input_buffer = data[consumed..].to_vec();
+                } else {
+                    self.input_buffer.clear();
+                }
+                Ok(output)
+            }
+            Ok(flate2::Status::BufError) => {
+                // Need more data
+                self.decompress = Some(decompress);
+                self.input_buffer.clear();
+                Ok(output)
+            }
+            Err(_) => Err(Aria2Error::Io("Decompression failed".to_string())),
+        }
     }
 }
 
@@ -70,7 +95,7 @@ impl Default for DeflateDecoder {
 }
 
 impl StreamFilter for DeflateDecoder {
-    /// Process deflate/zlib compressed data
+    /// Process deflate/zlib compressed data incrementally.
     ///
     /// Tries zlib format first (standard per RFC 7230), then falls back
     /// to raw deflate if zlib decoding fails. This handles servers that
@@ -86,77 +111,106 @@ impl StreamFilter for DeflateDecoder {
             return Ok(Vec::new());
         }
 
-        // Buffer all incoming data for potential retry
-        self.raw_buffer.extend_from_slice(input);
+        // Buffer incoming data
+        self.input_buffer.extend_from_slice(input);
+        let data = std::mem::take(&mut self.input_buffer);
 
-        if self.inner.is_none() && !self.tried_zlib {
-            // First attempt: try zlib format (RFC 1950 - the correct one per HTTP spec)
-            match Self::try_zlib(&self.raw_buffer) {
-                Ok(output) => {
+        if let Some(ref mut decompress) = self.decompress {
+            // We already have an active decompressor — continue feeding
+            let total_in_before = decompress.total_in() as usize;
+            let mut output = Vec::with_capacity(data.len().saturating_mul(3).max(256));
+
+            match decompress.decompress_vec(&data, &mut output, flate2::FlushDecompress::None) {
+                Ok(flate2::Status::Ok) => {
+                    let consumed = decompress.total_in() as usize - total_in_before;
+                    if consumed < data.len() {
+                        self.input_buffer.extend_from_slice(&data[consumed..]);
+                    }
+                    Ok(output)
+                }
+                Ok(flate2::Status::StreamEnd) => {
                     self.finished = true;
-                    return Ok(output);
+                    let consumed = decompress.total_in() as usize - total_in_before;
+                    if consumed < data.len() {
+                        self.input_buffer.extend_from_slice(&data[consumed..]);
+                    }
+                    Ok(output)
+                }
+                Ok(flate2::Status::BufError) => {
+                    self.input_buffer = data;
+                    Ok(output)
+                }
+                Err(e) => {
+                    self.input_buffer = data;
+                    Err(Aria2Error::Io(format!("Deflate decompression failed: {}", e)))
+                }
+            }
+        } else if !self.tried_zlib {
+            // First attempt: try zlib format
+            match self.try_decompress(&data, true) {
+                Ok(output) => {
+                    self.tried_zlib = true;
+                    Ok(output)
                 }
                 Err(_) => {
-                    // Zlib failed, try raw deflate (some servers send this incorrectly)
-                    tracing::debug!("Zlib decode failed, trying raw deflate fallback");
+                    // Zlib failed, try raw deflate
                     self.tried_zlib = true;
-                    match Self::try_raw_deflate(&self.raw_buffer) {
+                    match self.try_decompress(&data, false) {
                         Ok(output) => {
-                            self.finished = true;
-                            return Ok(output);
+                            self.using_raw = true;
+                            Ok(output)
                         }
                         Err(e) => {
-                            // Both failed - return error
-                            return Err(Aria2Error::Io(format!(
+                            self.input_buffer = data;
+                            Err(Aria2Error::Io(format!(
                                 "Deflate decompression failed (tried both zlib and raw): {}",
                                 e
-                            )));
+                            )))
                         }
                     }
                 }
             }
-        } else if self.tried_zlib && !self.finished {
-            // Already determined we need raw deflate, try again with accumulated data
-            match Self::try_raw_deflate(&self.raw_buffer) {
+        } else {
+            // Already determined we need raw deflate
+            match self.try_decompress(&data, false) {
                 Ok(output) => {
-                    self.finished = true;
+                    self.using_raw = true;
                     Ok(output)
                 }
                 Err(_) => {
-                    // Not enough data yet, need more input
+                    self.input_buffer = data;
                     Ok(Vec::new())
                 }
             }
-        } else {
-            Ok(Vec::new())
         }
     }
 
     /// Flush the decoder buffer
     fn flush(&mut self) -> Result<Vec<u8>> {
-        if self.finished || self.raw_buffer.is_empty() {
+        if self.finished || self.input_buffer.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Try one last time to decompress whatever we have
-        if !self.tried_zlib {
-            if let Ok(output) = Self::try_zlib(&self.raw_buffer) {
-                self.finished = true;
-                return Ok(output);
-            }
+        let mut output = Vec::new();
+
+        if let Some(ref mut decompress) = self.decompress {
+            let _ = decompress.decompress_vec(
+                &self.input_buffer,
+                &mut output,
+                flate2::FlushDecompress::Finish,
+            );
+            self.input_buffer.clear();
+        } else if !self.tried_zlib {
+            let _ = self.try_decompress(&self.input_buffer, true);
             self.tried_zlib = true;
         }
 
-        match Self::try_raw_deflate(&self.raw_buffer) {
-            Ok(output) => {
-                self.finished = true;
-                Ok(output)
-            }
-            Err(e) => {
-                tracing::warn!("Deflate flush failed: {}", e);
-                Ok(Vec::new())
-            }
+        if !self.using_raw && self.decompress.is_none() {
+            let _ = self.try_decompress(&self.input_buffer, false);
         }
+
+        self.finished = true;
+        Ok(output)
     }
 
     /// Returns "deflate"
@@ -182,7 +236,7 @@ mod tests {
         let decoder = DeflateDecoder::new();
         assert!(!decoder.finished);
         assert!(!decoder.tried_zlib);
-        assert!(decoder.raw_buffer.is_empty());
+        assert!(decoder.input_buffer.is_empty());
     }
 
     #[test]
@@ -233,7 +287,6 @@ mod tests {
 
         let mut decoder = DeflateDecoder::new();
         decoder.filter(&compressed).unwrap();
-
         let result = decoder.filter(&[1, 2, 3]);
         assert!(result.is_err());
     }
@@ -269,7 +322,6 @@ mod tests {
     #[test]
     fn test_deflate_invalid_data() {
         let mut decoder = DeflateDecoder::new();
-        // Random bytes are very unlikely to be valid deflate
         let result = decoder.filter(&[0xFF, 0xFE, 0xFD, 0xFC]);
         assert!(result.is_err());
     }

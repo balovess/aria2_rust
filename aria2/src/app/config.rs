@@ -130,7 +130,10 @@ impl App {
         set_bool_true!("realtime-chunk-checksum", g.realtime_chunk_checksum);
         set_str!("download-result", g.download_result);
         set_bool_true!("human-readable", g.human_readable);
-        set_bool_true!("keep-unfinished-download-result", g.keep_unfinished_download_result);
+        set_bool_true!(
+            "keep-unfinished-download-result",
+            g.keep_unfinished_download_result
+        );
         set_bool_true!("truncate-console-readout", g.truncate_console_readout);
         set_bool_true!("stderr", g.stderr);
         set_u64!("max-download-result", g.max_download_result);
@@ -195,7 +198,10 @@ impl App {
         set_bool_true!("http-accept-gzip", h.http_accept_gzip);
         set_bool_true!("http-auth-challenge", h.http_auth_challenge);
         set_bool_true!("http-no-cache", h.http_no_cache);
-        set_bool_true!("content-disposition-default-utf8", h.content_disposition_default_utf8);
+        set_bool_true!(
+            "content-disposition-default-utf8",
+            h.content_disposition_default_utf8
+        );
         set_bool_true!("use-head", h.use_head);
         set_bool_true!("no-want-digest-header", h.no_want_digest_header);
         set_str!("http-user", h.http_user);
@@ -238,7 +244,10 @@ impl App {
         set_bool_true!("enable-utp", b.enable_utp);
         set_u64!("utp-listen-port", b.utp_listen_port);
         set_bool_true!("bt-detach-seed-only", b.bt_detach_seed_only);
-        set_bool_true!("bt-enable-hook-after-hash-check", b.bt_enable_hook_after_hash_check);
+        set_bool_true!(
+            "bt-enable-hook-after-hash-check",
+            b.bt_enable_hook_after_hash_check
+        );
         set_str!("bt-exclude-tracker", b.bt_exclude_tracker);
         set_str!("bt-external-ip", b.bt_external_ip);
         set_bool_true!("bt-hash-check-seed", b.bt_hash_check_seed);

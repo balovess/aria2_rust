@@ -131,7 +131,10 @@ async fn regression_remove_returns_gid_array() {
     assert_success(&remove_resp);
     // C++ aria2 returns the GID string directly (not an array)
     let result: String = serde_json::from_value(remove_resp.result.unwrap()).unwrap();
-    assert_eq!(result, gid, "aria2.remove should return the GID (C++ aria2 behavior)");
+    assert_eq!(
+        result, gid,
+        "aria2.remove should return the GID (C++ aria2 behavior)"
+    );
 }
 
 /// Test: aria2.remove with nonexistent GID returns error.
@@ -163,7 +166,10 @@ async fn regression_force_remove_returns_ok() {
     assert_success(&resp);
     // C++ aria2 returns the GID string (not "OK") — see RpcMethodImpl.cc:removeDownload
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, gid, "aria2.forceRemove should return the GID (C++ aria2 behavior)");
+    assert_eq!(
+        result, gid,
+        "aria2.forceRemove should return the GID (C++ aria2 behavior)"
+    );
 }
 
 /// Test: aria2.pause changes status to Paused.
@@ -208,7 +214,10 @@ async fn regression_force_pause_returns_ok() {
     assert_success(&resp);
     // C++ aria2 returns the GID string (not "OK") — see RpcMethodImpl.cc:pauseDownload
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, gid, "aria2.forcePause should return the GID (C++ aria2 behavior)");
+    assert_eq!(
+        result, gid,
+        "aria2.forcePause should return the GID (C++ aria2 behavior)"
+    );
 }
 
 /// Test: aria2.unpause changes status back to Active.
@@ -602,8 +611,7 @@ async fn regression_pause_all_format() {
     // Verify all tasks are paused
     let tell_req = make_request("aria2.tellActive", serde_json::json!([]));
     let tell_resp = engine.handle_request(&tell_req).await;
-    let active: Vec<serde_json::Value> =
-        serde_json::from_value(tell_resp.result.unwrap()).unwrap();
+    let active: Vec<serde_json::Value> = serde_json::from_value(tell_resp.result.unwrap()).unwrap();
     assert_eq!(active.len(), 0, "No tasks should be active after pauseAll");
 }
 
@@ -716,12 +724,18 @@ async fn regression_change_position_modifies_position() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let req = make_request("aria2.changePosition", serde_json::json!([gid, 2, "POS_SET"]));
+    let req = make_request(
+        "aria2.changePosition",
+        serde_json::json!([gid, 2, "POS_SET"]),
+    );
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "2", "Should return the new absolute position as string");
+    assert_eq!(
+        result, "2",
+        "Should return the new absolute position as string"
+    );
 }
 
 // =========================================================================

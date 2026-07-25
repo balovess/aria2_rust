@@ -1631,8 +1631,9 @@ mod regression_tests {
         #[cfg(feature = "bittorrent")]
         {
             let result = measure_repeated("bt_piece_state_create", &config, || {
-                let _ =
-                    aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
+                let _ = aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(
+                    0, 262144, 16384,
+                );
             });
             if result.mean.as_micros() as u64 > baselines.bt_piece_state_create_us * 2 {
                 regressions.push(format!(
@@ -1700,8 +1701,9 @@ mod regression_tests {
         #[cfg(feature = "bittorrent")]
         {
             let result = measure_repeated("bt_piece_state", &config, || {
-                let _ =
-                    aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(0, 262144, 16384);
+                let _ = aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(
+                    0, 262144, 16384,
+                );
             });
             monitor.record_metric(
                 "bt",

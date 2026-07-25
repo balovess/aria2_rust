@@ -110,7 +110,9 @@ impl RpcEngine {
             for (gid, group_lock) in man.all_groups() {
                 let g = group_lock.recover();
                 match g.status() {
-                    DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed => {
+                    DownloadStatus::Complete
+                    | DownloadStatus::Error(_)
+                    | DownloadStatus::Removed => {
                         let gid_hex = gid.to_hex_string();
                         result.push(Self::build_status_from_group(&g, &gid_hex));
                     }

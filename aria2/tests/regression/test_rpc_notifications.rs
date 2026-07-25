@@ -38,13 +38,10 @@ async fn notification_add_uri_fires_download_start() {
     assert_success(&resp);
 
     // Should receive a DownloadStart event
-    let (event_type, _event) = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        rx.recv(),
-    )
-    .await
-    .expect("Should receive notification within timeout")
-    .expect("Should receive valid event");
+    let (event_type, _event) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("Should receive notification within timeout")
+        .expect("Should receive valid event");
 
     assert_eq!(event_type, EventType::DownloadStart);
 }
@@ -72,13 +69,10 @@ async fn notification_pause_fires_download_pause() {
     assert_success(&pause_resp);
 
     // Should receive a DownloadPause event
-    let (event_type, _event) = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        rx.recv(),
-    )
-    .await
-    .expect("Should receive notification within timeout")
-    .expect("Should receive valid event");
+    let (event_type, _event) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("Should receive notification within timeout")
+        .expect("Should receive valid event");
 
     assert_eq!(event_type, EventType::DownloadPause);
 }
@@ -106,13 +100,10 @@ async fn notification_remove_fires_download_stop() {
     assert_success(&remove_resp);
 
     // Should receive a DownloadStop event
-    let (event_type, _event) = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        rx.recv(),
-    )
-    .await
-    .expect("Should receive notification within timeout")
-    .expect("Should receive valid event");
+    let (event_type, _event) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("Should receive notification within timeout")
+        .expect("Should receive valid event");
 
     assert_eq!(event_type, EventType::DownloadStop);
 }
@@ -145,13 +136,10 @@ async fn notification_unpause_fires_download_start() {
     assert_success(&unpause_resp);
 
     // C++ aria2 fires onDownloadStart when a download is unpaused
-    let (event_type, _event) = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        rx.recv(),
-    )
-    .await
-    .expect("Should receive notification within timeout")
-    .expect("Should receive valid event");
+    let (event_type, _event) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("Should receive notification within timeout")
+        .expect("Should receive valid event");
 
     assert_eq!(event_type, EventType::DownloadStart);
 }
@@ -196,13 +184,10 @@ async fn notification_force_remove_fires_download_stop() {
     let force_resp = engine.handle_request(&force_req).await;
     assert_success(&force_resp);
 
-    let (event_type, _event) = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        rx.recv(),
-    )
-    .await
-    .expect("Should receive notification within timeout")
-    .expect("Should receive valid event");
+    let (event_type, _event) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("Should receive notification within timeout")
+        .expect("Should receive valid event");
 
     assert_eq!(event_type, EventType::DownloadStop);
 }
@@ -234,10 +219,9 @@ async fn notification_pause_all_fires_pause_for_each_task() {
     // Should receive 3 DownloadPause events
     let mut pause_count = 0;
     for _ in 1..=3 {
-        if let Ok(Ok((event_type, _))) = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            rx.recv(),
-        ).await {
+        if let Ok(Ok((event_type, _))) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await
+        {
             if event_type == EventType::DownloadPause {
                 pause_count += 1;
             }

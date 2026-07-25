@@ -31,6 +31,6 @@ mod types;
 mod tests;
 
 // Re-export all public types to preserve the public API
-pub use active_connection::ActiveConnection;
+pub use active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
 pub use manager::HttpConnectionManager;
 pub use types::{ConnectionState, HttpConfig, HttpResponse};

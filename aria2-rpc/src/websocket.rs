@@ -467,7 +467,10 @@ mod tests {
         assert!(json.contains("\"method\":\"aria2.onDownloadError\""));
         // C++ format: params only contains {"gid": "..."}, no errorCode
         assert!(json.contains("\"gid\":\"def456\""));
-        assert!(!json.contains("errorCode"), "C++ notification should not contain errorCode");
+        assert!(
+            !json.contains("errorCode"),
+            "C++ notification should not contain errorCode"
+        );
     }
 
     #[test]
@@ -509,12 +512,36 @@ mod tests {
     #[test]
     fn test_cpp_compatible_notification_format() {
         let test_cases: Vec<(EventType, &str, &str)> = vec![
-            (EventType::DownloadStart, "aria2.onDownloadStart", "2089b05ecca3d829"),
-            (EventType::DownloadPause, "aria2.onDownloadPause", "a2bc3d4e5f6a7b8c"),
-            (EventType::DownloadStop, "aria2.onDownloadStop", "deadbeef12345678"),
-            (EventType::DownloadComplete, "aria2.onDownloadComplete", "c0ffee0000000001"),
-            (EventType::DownloadError, "aria2.onDownloadError", "bada5590abcdef01"),
-            (EventType::BtDownloadComplete, "aria2.onBtDownloadComplete", "1a2b3c4d5e6f7a8b"),
+            (
+                EventType::DownloadStart,
+                "aria2.onDownloadStart",
+                "2089b05ecca3d829",
+            ),
+            (
+                EventType::DownloadPause,
+                "aria2.onDownloadPause",
+                "a2bc3d4e5f6a7b8c",
+            ),
+            (
+                EventType::DownloadStop,
+                "aria2.onDownloadStop",
+                "deadbeef12345678",
+            ),
+            (
+                EventType::DownloadComplete,
+                "aria2.onDownloadComplete",
+                "c0ffee0000000001",
+            ),
+            (
+                EventType::DownloadError,
+                "aria2.onDownloadError",
+                "bada5590abcdef01",
+            ),
+            (
+                EventType::BtDownloadComplete,
+                "aria2.onBtDownloadComplete",
+                "1a2b3c4d5e6f7a8b",
+            ),
         ];
 
         for (event_type, expected_method, gid) in &test_cases {
@@ -532,34 +559,57 @@ mod tests {
                 serde_json::from_str(&json_str).expect("should parse back");
 
             // Verify jsonrpc version
-            assert_eq!(parsed["jsonrpc"], "2.0", "jsonrpc version mismatch for {}", expected_method);
+            assert_eq!(
+                parsed["jsonrpc"], "2.0",
+                "jsonrpc version mismatch for {}",
+                expected_method
+            );
 
             // Verify method name
             assert_eq!(parsed["method"], *expected_method, "method mismatch");
 
             // Verify params structure: must be an array with exactly 1 element
             let params = parsed["params"].as_array().expect("params should be array");
-            assert_eq!(params.len(), 1, "params should have exactly 1 element for {}", expected_method);
+            assert_eq!(
+                params.len(),
+                1,
+                "params should have exactly 1 element for {}",
+                expected_method
+            );
 
             // The single param must be an object containing ONLY "gid"
             let param_obj = params[0].as_object().expect("param[0] should be object");
-            assert_eq!(param_obj.len(), 1, "param[0] should contain only 'gid' for {}", expected_method);
-            assert_eq!(param_obj["gid"], *gid, "gid mismatch for {}", expected_method);
+            assert_eq!(
+                param_obj.len(),
+                1,
+                "param[0] should contain only 'gid' for {}",
+                expected_method
+            );
+            assert_eq!(
+                param_obj["gid"], *gid,
+                "gid mismatch for {}",
+                expected_method
+            );
 
             // Verify no extra fields (files, errorCode, etc.)
             assert!(
                 !param_obj.contains_key("files"),
-                "C++ notification should NOT contain 'files' for {}", expected_method
+                "C++ notification should NOT contain 'files' for {}",
+                expected_method
             );
             assert!(
                 !param_obj.contains_key("errorCode"),
-                "C++ notification should NOT contain 'errorCode' for {}", expected_method
+                "C++ notification should NOT contain 'errorCode' for {}",
+                expected_method
             );
 
             // Also verify the exact expected JSON string for one case
             if *expected_method == "aria2.onDownloadStart" {
                 let expected = r#"{"jsonrpc":"2.0","method":"aria2.onDownloadStart","params":[{"gid":"2089b05ecca3d829"}]}"#;
-                assert_eq!(json_str, expected, "exact C++ format mismatch for onDownloadStart");
+                assert_eq!(
+                    json_str, expected,
+                    "exact C++ format mismatch for onDownloadStart"
+                );
             }
         }
     }
@@ -575,7 +625,11 @@ mod tests {
             EventType::DownloadError.method_name(),
             EventType::BtDownloadComplete.method_name(),
         ];
-        assert_eq!(all_methods.len(), 6, "Should have exactly 6 event types matching C++");
+        assert_eq!(
+            all_methods.len(),
+            6,
+            "Should have exactly 6 event types matching C++"
+        );
     }
 
     // =========================================================================
@@ -767,9 +821,7 @@ mod tests {
 
         // Push some events
         for i in 0..5 {
-            batcher.push(DownloadEvent::download_complete(
-                format!("gid-timer-{}", i),
-            ));
+            batcher.push(DownloadEvent::download_complete(format!("gid-timer-{}", i)));
         }
         assert_eq!(batcher.pending_count(), 5);
 

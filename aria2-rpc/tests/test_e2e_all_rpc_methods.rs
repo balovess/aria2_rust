@@ -20,7 +20,7 @@ mod common;
 use common::start_test_server;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,12 +37,7 @@ fn rpc_body(method: &str, params: Value) -> Value {
 }
 
 /// Send a JSON-RPC request, assert 200, return the JSON response.
-async fn rpc_call(
-    client: &Client,
-    base_url: &str,
-    method: &str,
-    params: Value,
-) -> Value {
+async fn rpc_call(client: &Client, base_url: &str, method: &str, params: Value) -> Value {
     let resp = client
         .post(format!("{base_url}/jsonrpc"))
         .json(&rpc_body(method, params))
@@ -85,10 +80,7 @@ fn assert_error_code(resp: &Value, code: i64) {
 /// Assert the response follows JSON-RPC 2.0 format: jsonrpc "2.0", matching id.
 fn assert_jsonrpc_format(resp: &Value, expected_id: &str) {
     assert_eq!(resp["jsonrpc"], "2.0", "jsonrpc must be '2.0'");
-    assert_eq!(
-        resp["id"], expected_id,
-        "response id must match request id"
-    );
+    assert_eq!(resp["id"], expected_id, "response id must match request id");
 }
 
 /// Parse the GID from an addUri/pause/remove result.
@@ -290,7 +282,13 @@ async fn e2e_tell_status_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.tellStatus", json![["nonexistentgid1234"]]).await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.tellStatus",
+        json![["nonexistentgid1234"]],
+    )
+    .await;
     assert_error_code(&resp, -32601);
 }
 
@@ -388,7 +386,9 @@ async fn e2e_change_uri_returns_counts() {
     assert_jsonrpc_format(&resp, "aria2-changeUri");
     assert_success(&resp);
     // Returns [delCount, addCount] — wire format converts numbers to strings
-    let result = resp["result"].as_array().expect("changeUri should return array");
+    let result = resp["result"]
+        .as_array()
+        .expect("changeUri should return array");
     assert_eq!(result.len(), 2, "changeUri result should have 2 elements");
     // addCount should be 1 (we added 1 URI) — may be number or string in wire format
     let add_count = result[1]
@@ -564,7 +564,13 @@ async fn e2e_get_peers_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getPeers", json![["deadbeefdeadbeef"]]).await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.getPeers",
+        json![["deadbeefdeadbeef"]],
+    )
+    .await;
     assert_error_code(&resp, -32601);
 }
 
@@ -611,7 +617,10 @@ async fn e2e_get_files_returns_array() {
         "getFiles result should be an array"
     );
     let files = resp["result"].as_array().unwrap();
-    assert!(!files.is_empty(), "getFiles should return at least one file entry");
+    assert!(
+        !files.is_empty(),
+        "getFiles should return at least one file entry"
+    );
 }
 
 #[tokio::test]
@@ -619,7 +628,13 @@ async fn e2e_get_files_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getFiles", json![["deadbeefdeadbeef"]]).await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.getFiles",
+        json![["deadbeefdeadbeef"]],
+    )
+    .await;
     assert_error_code(&resp, -32601);
 }
 
@@ -644,7 +659,13 @@ async fn e2e_get_servers_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getServers", json![["deadbeefdeadbeef"]]).await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.getServers",
+        json![["deadbeefdeadbeef"]],
+    )
+    .await;
     assert_error_code(&resp, -32601);
 }
 
@@ -815,7 +836,10 @@ async fn e2e_get_global_stat_returns_stats() {
     assert_success(&resp);
 
     let result = &resp["result"];
-    assert!(result.is_object(), "getGlobalStat result should be an object");
+    assert!(
+        result.is_object(),
+        "getGlobalStat result should be an object"
+    );
     // Wire format converts numbers to strings
     assert!(
         result.get("downloadSpeed").is_some(),
@@ -825,18 +849,9 @@ async fn e2e_get_global_stat_returns_stats() {
         result.get("uploadSpeed").is_some(),
         "should have uploadSpeed"
     );
-    assert!(
-        result.get("numActive").is_some(),
-        "should have numActive"
-    );
-    assert!(
-        result.get("numWaiting").is_some(),
-        "should have numWaiting"
-    );
-    assert!(
-        result.get("numStopped").is_some(),
-        "should have numStopped"
-    );
+    assert!(result.get("numActive").is_some(), "should have numActive");
+    assert!(result.get("numWaiting").is_some(), "should have numWaiting");
+    assert!(result.get("numStopped").is_some(), "should have numStopped");
 }
 
 #[tokio::test]
@@ -944,13 +959,7 @@ async fn e2e_remove_download_result_returns_ok() {
     let gid = add_uri(&client, &base, "http://127.0.0.1:1/remove-result").await;
     let _ = rpc_call(&client, &base, "aria2.remove", json![[&gid]]).await;
 
-    let resp = rpc_call(
-        &client,
-        &base,
-        "aria2.removeDownloadResult",
-        json![[&gid]],
-    )
-    .await;
+    let resp = rpc_call(&client, &base, "aria2.removeDownloadResult", json![[&gid]]).await;
 
     assert_jsonrpc_format(&resp, "aria2-removeDownloadResult");
     assert_success(&resp);
@@ -1129,7 +1138,13 @@ async fn e2e_get_option_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getOption", json![["deadbeefdeadbeef"]]).await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.getOption",
+        json![["deadbeefdeadbeef"]],
+    )
+    .await;
     assert_error_code(&resp, -32601);
 }
 

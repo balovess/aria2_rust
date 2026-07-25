@@ -49,6 +49,7 @@ impl FtpClient {
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             read_timeout: Self::DEFAULT_READ_TIMEOUT,
             base_working_dir: "/".to_string(),
+            features: None,
         };
 
         // Read welcome message
@@ -240,8 +241,15 @@ impl FtpClient {
             .local_addr()
             .map_err(|e| Aria2Error::Network(format!("Failed to get local address: {}", e)))?;
 
-        // Listen on port 0 (system auto-assigns an available port)
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+        let local_ip = local_addr.ip();
+
+        // Bind listener on the appropriate wildcard address for the address family
+        // IPv4 -> 0.0.0.0:0, IPv6 -> [::]:0
+        let bind_addr = match local_ip {
+            std::net::IpAddr::V4(_) => "0.0.0.0:0",
+            std::net::IpAddr::V6(_) => "[::]:0",
+        };
+        let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
             .map_err(|e| Aria2Error::Network(format!("Failed to bind data port: {}", e)))?;
         let data_port = listener
@@ -249,10 +257,12 @@ impl FtpClient {
             .map_err(|e| Aria2Error::Network(format!("Failed to get listen port: {}", e)))?
             .port();
 
-        let local_ip = local_addr.ip();
-
-        // Try EPRT (extended active mode)
-        let eprt_cmd = format!("EPRT |1|{}|{}|", local_ip, data_port);
+        // EPRT protocol number: |1| for IPv4, |2| for IPv6 (RFC 2428)
+        let proto_num = match local_ip {
+            std::net::IpAddr::V4(_) => 1,
+            std::net::IpAddr::V6(_) => 2,
+        };
+        let eprt_cmd = format!("EPRT |{}|{}|{}|", proto_num, local_ip, data_port);
         debug!("Sending EPRT command: {}", eprt_cmd);
         self.send_command(&eprt_cmd).await?;
         let resp = self.read_response().await?;

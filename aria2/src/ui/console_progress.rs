@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
 use tokio::sync::RwLock;
+use tokio::sync::oneshot;
 use tokio::time::sleep;
 
 use crate::ui::progress_bar::{ProgressBar, TaskProgress, TaskStatus};
@@ -193,10 +193,7 @@ mod tests {
 
     #[test]
     fn test_extract_filename_http() {
-        assert_eq!(
-            extract_filename("http://example.com/file.iso"),
-            "file.iso"
-        );
+        assert_eq!(extract_filename("http://example.com/file.iso"), "file.iso");
     }
 
     #[test]

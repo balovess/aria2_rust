@@ -32,9 +32,10 @@ impl RpcEngine {
             ));
         };
         let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-        let position: Option<usize> = req.get_param::<i64>(2).ok().and_then(|p| {
-            if p >= 0 { Some(p as usize) } else { None }
-        });
+        let position: Option<usize> = req
+            .get_param::<i64>(2)
+            .ok()
+            .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
         let gid = self.add_task(uris, opts).await?;
         if let Some(pos) = position {
             let pos_req = JsonRpcRequest::new(
@@ -72,17 +73,19 @@ impl RpcEngine {
             Ok(uris) => {
                 // 4-parameter signature: [torrent, uris, opts, pos]
                 let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(2);
-                let position: Option<usize> = req.get_param::<i64>(3).ok().and_then(|p| {
-                    if p >= 0 { Some(p as usize) } else { None }
-                });
+                let position: Option<usize> = req
+                    .get_param::<i64>(3)
+                    .ok()
+                    .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
                 (uris, opts, position)
             }
             Err(_) => {
                 // Backward compatible: param[1] is opts, param[2] is pos
                 let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-                let position: Option<usize> = req.get_param::<i64>(2).ok().and_then(|p| {
-                    if p >= 0 { Some(p as usize) } else { None }
-                });
+                let position: Option<usize> = req
+                    .get_param::<i64>(2)
+                    .ok()
+                    .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
                 (vec![], opts, position)
             }
         };
@@ -151,9 +154,10 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let metalink_data: String = req.get_param(0)?;
         let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-        let position: Option<usize> = req.get_param::<i64>(2).ok().and_then(|p| {
-            if p >= 0 { Some(p as usize) } else { None }
-        });
+        let position: Option<usize> = req
+            .get_param::<i64>(2)
+            .ok()
+            .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
 
         let decoded_bytes = if metalink_data.starts_with("data:") {
             base64::Engine::decode(
@@ -241,15 +245,14 @@ impl RpcEngine {
                 let mut stopped = self.stopped_tasks.write().await;
                 stopped.push(state.status.clone());
 
-                let _ = self.event_publisher.publish(
-                    EventType::DownloadStop,
-                    DownloadEvent::download_stop(&gid),
-                );
+                let _ = self
+                    .event_publisher
+                    .publish(EventType::DownloadStop, DownloadEvent::download_stop(&gid));
                 Ok(JsonRpcResponse::success(
                     req.id.clone().unwrap_or_default(),
                     serde_json::json!(gid),
                 ))
-            },
+            }
             None => Err(JsonRpcError::MethodNotFound(format!(
                 "GID {} not found",
                 gid
@@ -474,17 +477,17 @@ impl RpcEngine {
             }
         }
 
-        self.num_stopped_total.fetch_add(actually_removed, Ordering::Relaxed);
+        self.num_stopped_total
+            .fetch_add(actually_removed, Ordering::Relaxed);
 
         // Push removed tasks into stopped_tasks and publish events
         {
             let mut stopped = self.stopped_tasks.write().await;
             for (gid, status, _uris) in &removed_statuses {
                 stopped.push(status.clone());
-                let _ = self.event_publisher.publish(
-                    EventType::DownloadStop,
-                    DownloadEvent::download_stop(gid),
-                );
+                let _ = self
+                    .event_publisher
+                    .publish(EventType::DownloadStop, DownloadEvent::download_stop(gid));
             }
         }
 
@@ -635,10 +638,7 @@ impl RpcEngine {
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::Value::String(format!(
-                "OK. {} active downloads paused.",
-                active_count
-            )),
+            serde_json::Value::String(format!("OK. {} active downloads paused.", active_count)),
         ))
     }
 
@@ -776,9 +776,11 @@ impl RpcEngine {
 
         // Build file entries matching original createFileEntry:
         // index (1-based), path, selected, length, completedLength, uris
-        let files = vec![FileInfo::new(first_uri, total)
-            .with_completed(completed)
-            .with_index(1)];
+        let files = vec![
+            FileInfo::new(first_uri, total)
+                .with_completed(completed)
+                .with_index(1),
+        ];
 
         let connections = g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16;
 
@@ -793,7 +795,8 @@ impl RpcEngine {
             bt_num_pieces = Some(np);
             bt_piece_length = Some(g.get_bt_piece_length() as u64);
             if np > 0 {
-                bt_bitfield = g.get_bt_bitfield()
+                bt_bitfield = g
+                    .get_bt_bitfield()
                     .map(|bf| bf.iter().map(|b| format!("{:02x}", b)).collect::<String>());
             }
         }

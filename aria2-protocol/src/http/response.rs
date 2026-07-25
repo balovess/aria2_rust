@@ -23,7 +23,10 @@ impl HttpResponse {
     }
 
     pub fn is_redirect(&self) -> bool {
-        [301, 302, 303, 307, 308].contains(&self.status_code)
+        // 300 Multiple Choices is also a redirect per RFC 7231 Section 6.4.1
+        // when a Location header is present. Per C++ aria2 behavior, 300
+        // with Location is treated as a redirect.
+        [300, 301, 302, 303, 307, 308].contains(&self.status_code)
     }
 
     pub fn is_partial_content(&self) -> bool {

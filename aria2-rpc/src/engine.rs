@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -469,7 +469,11 @@ impl RpcEngine {
                 .handle_list_notifications(dispatch_req)
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
-            _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", dispatch_req.method)),
+            _ => JsonRpcResponse::error(
+                id,
+                -32601,
+                format!("Method not found: {}", dispatch_req.method),
+            ),
         };
         // Apply aria2 wire format: convert all numbers to strings and booleans to
         // "true"/"false" strings, matching the original aria2 JSON-RPC response format.
@@ -572,10 +576,12 @@ mod tests {
                 .and_then(|s| s.cancel_token.clone())
                 .expect("TaskState should have a cancel_token")
         };
-        assert!(!cancel_token.is_cancelled(), "token should not be cancelled before remove");
+        assert!(
+            !cancel_token.is_cancelled(),
+            "token should not be cancelled before remove"
+        );
 
-        let remove_req =
-            JsonRpcRequest::new("aria2.remove", serde_json::json!([gid])).with_id(2);
+        let remove_req = JsonRpcRequest::new("aria2.remove", serde_json::json!([gid])).with_id(2);
         let remove_resp = engine.handle_request(&remove_req).await;
         assert!(remove_resp.is_success(), "aria2.remove should succeed");
 
@@ -583,7 +589,11 @@ mod tests {
             cancel_token.is_cancelled(),
             "CancellationToken must be cancelled after aria2.remove so the running DownloadCommand can stop"
         );
-        assert_eq!(engine.task_count().await, 0, "task should be removed from the map");
+        assert_eq!(
+            engine.task_count().await,
+            0,
+            "task should be removed from the map"
+        );
     }
 
     /// Verify that `aria2.forceRemove` cancels the task's `CancellationToken`.
@@ -606,7 +616,10 @@ mod tests {
                 .and_then(|s| s.cancel_token.clone())
                 .expect("TaskState should have a cancel_token")
         };
-        assert!(!cancel_token.is_cancelled(), "token should not be cancelled before forceRemove");
+        assert!(
+            !cancel_token.is_cancelled(),
+            "token should not be cancelled before forceRemove"
+        );
 
         let remove_req =
             JsonRpcRequest::new("aria2.forceRemove", serde_json::json!([gid])).with_id(2);

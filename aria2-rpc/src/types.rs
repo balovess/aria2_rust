@@ -15,10 +15,7 @@ fn serialize_u64_as_string<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Err
 }
 
 /// Serialize an `Option<u64>` as a string or skip if None.
-fn serialize_opt_u64_as_string<S: Serializer>(
-    v: &Option<u64>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
+fn serialize_opt_u64_as_string<S: Serializer>(v: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
     match v {
         Some(n) => s.serialize_str(&n.to_string()),
         None => s.serialize_none(),
@@ -26,10 +23,7 @@ fn serialize_opt_u64_as_string<S: Serializer>(
 }
 
 /// Serialize an `Option<u32>` as a string or skip if None.
-fn serialize_opt_u32_as_string<S: Serializer>(
-    v: &Option<u32>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
+fn serialize_opt_u32_as_string<S: Serializer>(v: &Option<u32>, s: S) -> Result<S::Ok, S::Error> {
     match v {
         Some(n) => s.serialize_str(&n.to_string()),
         None => s.serialize_none(),
@@ -37,10 +31,7 @@ fn serialize_opt_u32_as_string<S: Serializer>(
 }
 
 /// Serialize an `Option<u16>` as a string or skip if None.
-fn serialize_opt_u16_as_string<S: Serializer>(
-    v: &Option<u16>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
+fn serialize_opt_u16_as_string<S: Serializer>(v: &Option<u16>, s: S) -> Result<S::Ok, S::Error> {
     match v {
         Some(n) => s.serialize_str(&n.to_string()),
         None => s.serialize_none(),
@@ -456,9 +447,15 @@ pub struct FileInfo {
     #[serde(serialize_with = "serialize_usize_as_string")]
     pub index: usize,
     pub path: String,
-    #[serde(serialize_with = "serialize_u64_as_string", deserialize_with = "deserialize_u64_from_string_or_num")]
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string_or_num"
+    )]
     pub length: u64,
-    #[serde(serialize_with = "serialize_u64_as_string", deserialize_with = "deserialize_u64_from_string_or_num")]
+    #[serde(
+        serialize_with = "serialize_u64_as_string",
+        deserialize_with = "deserialize_u64_from_string_or_num"
+    )]
     pub completed_length: u64,
     /// Whether this file is selected for download.
     /// Original aria2c serializes as "true"/"false" string.
@@ -868,8 +865,8 @@ mod tests {
 
         let info_dict = ben_dict(&[
             (ben_str("name"), ben_str("test-file.iso")),
-            (ben_str("length"), ben_int(1048576)),          // 1 MiB
-            (ben_str("piece length"), ben_int(262144)),      // 256 KiB
+            (ben_str("length"), ben_int(1048576)),      // 1 MiB
+            (ben_str("piece length"), ben_int(262144)), // 256 KiB
             (ben_str("pieces"), ben_bytes(&pieces)),
         ]);
 
@@ -882,9 +879,15 @@ mod tests {
         let announce_list = ben_list(&[tier1, tier2]);
 
         let torrent = ben_dict(&[
-            (ben_str("announce"), ben_str("http://tracker.example.com:80/announce")),
+            (
+                ben_str("announce"),
+                ben_str("http://tracker.example.com:80/announce"),
+            ),
             (ben_str("announce-list"), announce_list),
-            (ben_str("comment"), ben_str("Aria2 Rust mock torrent for testing")),
+            (
+                ben_str("comment"),
+                ben_str("Aria2 Rust mock torrent for testing"),
+            ),
             (ben_str("creation date"), ben_int(1700000000)),
             (ben_str("created by"), ben_str("aria2-rust-test/0.2.4")),
             (ben_str("info"), info_dict),
@@ -899,17 +902,17 @@ mod tests {
 
         let file1_dict = ben_dict(&[
             (ben_str("length"), ben_int(500)),
-            (ben_str("path"), ben_list(&[
-                ben_str("dir1"),
-                ben_str("file1.txt"),
-            ])),
+            (
+                ben_str("path"),
+                ben_list(&[ben_str("dir1"), ben_str("file1.txt")]),
+            ),
         ]);
         let file2_dict = ben_dict(&[
             (ben_str("length"), ben_int(524)),
-            (ben_str("path"), ben_list(&[
-                ben_str("dir2"),
-                ben_str("file2.dat"),
-            ])),
+            (
+                ben_str("path"),
+                ben_list(&[ben_str("dir2"), ben_str("file2.dat")]),
+            ),
         ]);
 
         let info_dict = ben_dict(&[
@@ -919,14 +922,18 @@ mod tests {
             (ben_str("pieces"), ben_bytes(&pieces)),
         ]);
 
-        let announce_list = ben_list(&[
-            ben_list(&[ben_str("udp://tracker.multi.com:80")]),
-        ]);
+        let announce_list = ben_list(&[ben_list(&[ben_str("udp://tracker.multi.com:80")])]);
 
         let torrent = ben_dict(&[
-            (ben_str("announce"), ben_str("http://tracker.multi.com:80/announce")),
+            (
+                ben_str("announce"),
+                ben_str("http://tracker.multi.com:80/announce"),
+            ),
             (ben_str("announce-list"), announce_list),
-            (ben_str("comment"), ben_str("Multi-file torrent for testing")),
+            (
+                ben_str("comment"),
+                ben_str("Multi-file torrent for testing"),
+            ),
             (ben_str("creation date"), ben_int(1800000000)),
             (ben_str("created by"), ben_str("aria2-rust-test")),
             (ben_str("info"), info_dict),
@@ -1199,8 +1206,7 @@ mod tests {
 
     #[test]
     fn test_status_info_following_field() {
-        let info = StatusInfo::new("gid-test".to_string())
-            .with_following("gid-following-001");
+        let info = StatusInfo::new("gid-test".to_string()).with_following("gid-following-001");
         let serialized = serde_json::to_value(&info).unwrap();
         assert_eq!(
             serialized.get("following").unwrap().as_str().unwrap(),
@@ -1399,10 +1405,7 @@ mod tests {
         // Verify nested bittorrent object
         let bt_json = json.get("bittorrent").unwrap();
         assert_eq!(bt_json["announceList"][0][0], "udp://tracker.aria2.org:80");
-        assert_eq!(
-            bt_json["comment"],
-            "Aria2 Rust mock torrent for testing"
-        );
+        assert_eq!(bt_json["comment"], "Aria2 Rust mock torrent for testing");
         assert_eq!(bt_json["creationDate"], 1700000000);
         assert_eq!(bt_json["mode"], "single");
         assert_eq!(bt_json["info"]["name"], "test-file.iso");
@@ -1451,10 +1454,7 @@ mod tests {
             as_text.contains("13:announce-list"),
             "Should contain announce-list key"
         );
-        assert!(
-            as_text.contains("7:comment"),
-            "Should contain comment key"
-        );
+        assert!(as_text.contains("7:comment"), "Should contain comment key");
         assert!(
             as_text.contains("13:creation date"),
             "Should contain creation date key"
@@ -1467,7 +1467,10 @@ mod tests {
             extract_bencode_str(&torrent_bytes, "comment"),
             Some("Aria2 Rust mock torrent for testing".to_string())
         );
-        assert_eq!(extract_bencode_int(&torrent_bytes, "creation date"), Some(1700000000));
+        assert_eq!(
+            extract_bencode_int(&torrent_bytes, "creation date"),
+            Some(1700000000)
+        );
         assert_eq!(
             extract_bencode_str(&torrent_bytes, "name"),
             Some("test-file.iso".to_string())
@@ -1514,7 +1517,10 @@ mod tests {
             "BittorrentInfo.announce_list should be empty"
         );
         assert!(bt_info.comment.is_none(), "comment should be None");
-        assert!(bt_info.creation_date.is_none(), "creationDate should be None");
+        assert!(
+            bt_info.creation_date.is_none(),
+            "creationDate should be None"
+        );
         assert_eq!(
             bt_info.mode.as_deref(),
             Some("single"),

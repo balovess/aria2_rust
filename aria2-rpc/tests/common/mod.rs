@@ -43,8 +43,7 @@ pub async fn start_test_server(token: Option<&str>) -> (String, TestServerHandle
     // Install the ring crypto provider before any reqwest::Client is built.
     ensure_crypto_provider();
     // Find a random available port via a pre-bind probe.
-    let listener =
-        StdTcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
     let port = listener.local_addr().unwrap().port();
     drop(listener); // release so the RPC server can claim it
 
@@ -60,8 +59,7 @@ pub async fn start_test_server(token: Option<&str>) -> (String, TestServerHandle
         Arc::new(RpcEngine::new())
     };
 
-    let server = RpcServer::new_with_engine(config, engine)
-        .expect("Failed to create RpcServer");
+    let server = RpcServer::new_with_engine(config, engine).expect("Failed to create RpcServer");
     let base_url = format!("http://127.0.0.1:{}", port);
 
     let handle = tokio::spawn(async move {
@@ -73,7 +71,12 @@ pub async fn start_test_server(token: Option<&str>) -> (String, TestServerHandle
     // Poll the root endpoint until the server is ready (≤ 2 s).
     wait_for_server_ready(&base_url).await;
 
-    (base_url, TestServerHandle { inner: Some(handle) })
+    (
+        base_url,
+        TestServerHandle {
+            inner: Some(handle),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -97,9 +100,7 @@ async fn wait_for_server_ready(base_url: &str) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!(
-        "Server at {base_url} did not become ready within 5 s (last error: {last_err})"
-    );
+    panic!("Server at {base_url} did not become ready within 5 s (last error: {last_err})");
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@
 
 mod commands;
 mod connector;
+mod feat;
 mod ftp_finish;
 mod negotiation;
 mod parser;
@@ -16,10 +17,10 @@ mod types;
 mod tests;
 
 // Re-export all public types to preserve the original API
-pub use types::{FtpClient, FtpFileInfo, FtpMode, FtpResponse};
+pub use types::{FtpClient, FtpFileInfo, FtpFeatures, FtpMode, FtpResponse};
 
 // Re-export negotiation types
-pub use negotiation::{FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator, RawFtpControl};
+pub use negotiation::{FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator, RawFtpControl, ServerCapabilities};
 
 // Re-export finish handler types
 pub use ftp_finish::{FtpFinishConfig, FtpFinishHandler, FtpFinishResult, PooledFtpControl};

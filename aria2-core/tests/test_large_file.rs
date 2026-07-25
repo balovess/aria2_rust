@@ -1,6 +1,6 @@
-use aria2_core::segment::Segment;
 #[cfg(feature = "bittorrent")]
 use aria2_core::segment::Bitfield;
+use aria2_core::segment::Segment;
 use aria2_core::ui::ProgressBar;
 
 #[test]

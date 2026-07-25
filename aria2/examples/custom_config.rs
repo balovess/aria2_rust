@@ -78,7 +78,10 @@ fn main() {
             .unwrap();
 
         if let Ok(event) = subscriber.try_recv() {
-            println!("Received change event: {} → {:?}", event.key, event.new_value);
+            println!(
+                "Received change event: {} → {:?}",
+                event.key, event.new_value
+            );
         }
 
         println!("\n--- 5. JSON export ---");
@@ -88,6 +91,9 @@ fn main() {
             serde_json::to_string_pretty(&json).unwrap_or_default()
         );
 
-        println!("\n{} Custom configuration example complete!", "✓".green().bold());
+        println!(
+            "\n{} Custom configuration example complete!",
+            "✓".green().bold()
+        );
     });
 }

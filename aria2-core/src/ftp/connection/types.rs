@@ -107,4 +107,11 @@ pub struct FtpClient {
     /// Used for connection pooling: a pooled connection must have
     /// the same base_working_dir to be reused for the same host.
     pub(crate) base_working_dir: String,
+    /// Server features detected from FEAT command response.
+    /// Populated after `send_feat()` is called; None until then.
+    pub(crate) features: Option<super::feat::FtpFeatures>,
 }
+
+// Re-export FtpFeatures from the feat module so public API stays accessible
+// via `ftp::connection::FtpFeatures`.
+pub use super::feat::FtpFeatures;

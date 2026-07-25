@@ -35,7 +35,7 @@ use url::Url;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::cookie_storage::{CookieJar, JarCookie};
 
-use super::active_connection::ActiveConnection;
+use super::active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
 use super::types::{HttpConfig, HttpResponse};
 
 /// HTTP connection manager
@@ -83,8 +83,10 @@ pub struct HttpConnectionManager {
     config: HttpConfig,
     /// Connection pool: conn_id -> ActiveConnection
     pool: HashMap<u64, ActiveConnection>,
-    /// Host-to-connection-ID mapping (for fast lookup of reusable connections)
-    host_connections: HashMap<String, Vec<u64>>,
+    /// Pool-key-to-connection-ID mapping (for fast lookup of reusable connections).
+    /// Keyed by `ConnectionPoolKey` (target + proxy) so that direct and proxied
+    /// connections are never confused — matching the C++ `poolSocket(req, proxyReq, sock)` API.
+    key_connections: HashMap<ConnectionPoolKey, Vec<u64>>,
     /// Current active connection count
     active_count: usize,
     /// Connection ID generator
@@ -131,7 +133,7 @@ impl HttpConnectionManager {
         Self {
             config: config.clone(),
             pool: HashMap::new(),
-            host_connections: HashMap::new(),
+            key_connections: HashMap::new(),
             active_count: 0,
             id_counter: AtomicU64::new(1),
             max_redirects: crate::constants::HTTP_DEFAULT_MAX_REDIRECTS as u32,
@@ -197,12 +199,16 @@ impl HttpConnectionManager {
     ///     }
     /// }
     /// ```
-    pub async fn acquire(&mut self, url: &Url) -> Result<ActiveConnection> {
+    pub async fn acquire(&mut self, url: &Url, proxy: Option<&ProxyInfo>) -> Result<ActiveConnection> {
         let host = Self::extract_host(url);
+        let pool_key = ConnectionPoolKey {
+            target: host.clone(),
+            proxy: proxy.cloned(),
+        };
 
         // Try to reuse an idle connection from the pool
-        if let Some(conn) = self.try_reuse_connection(&host)? {
-            tracing::debug!("Reused connection: id={}, host={}", conn.id, host);
+        if let Some(conn) = self.try_reuse_connection(&pool_key)? {
+            tracing::debug!("Reused connection: id={}, key={:?}", conn.id, pool_key);
             return Ok(conn);
         }
 
@@ -215,8 +221,8 @@ impl HttpConnectionManager {
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
                         message: format!(
-                            "Max connection limit reached: {} (host={})",
-                            self.config.max_connections, host
+                            "Max connection limit reached: {} (key={:?})",
+                            self.config.max_connections, pool_key
                         ),
                     },
                 ));
@@ -224,7 +230,7 @@ impl HttpConnectionManager {
         }
 
         // Create a new connection
-        self.create_new_connection(url, &host).await
+        self.create_new_connection(url, &host, pool_key).await
     }
 
     /// Return a connection to the connection pool
@@ -265,7 +271,7 @@ impl HttpConnectionManager {
             if !conn.is_valid() {
                 tracing::debug!("Connection no longer valid, removing: id={}", conn_id);
                 self.active_count = self.active_count.saturating_sub(1);
-                self.remove_from_host_map(&conn.host, conn_id);
+                self.remove_from_key_map(&conn.pool_key, conn_id);
                 return;
             }
 
@@ -292,8 +298,8 @@ impl HttpConnectionManager {
     ///
     /// # Errors
     ///
-    /// * [`Aria1Error::Parse`] - When Location header format is invalid or URL parsing fails
-    /// * [`Aria1Error::Network`] - When circular redirect is detected or max hops exceeded
+    /// * [`Aria2Error::Parse`] - When Location header format is invalid or URL parsing fails
+    /// * [`Aria2Error::Network`] - When circular redirect is detected or max hops exceeded
     ///
     /// # Returns
     ///
@@ -596,7 +602,7 @@ impl HttpConnectionManager {
         for (_, mut conn) in self.pool.drain() {
             let _ = conn.shutdown().await;
         }
-        self.host_connections.clear();
+        self.key_connections.clear();
         self.active_count = 0;
 
         tracing::info!("Connection pool cleaned up");
@@ -612,9 +618,10 @@ impl HttpConnectionManager {
     /// * `conn_id` - The ID of the connection to close
     pub async fn close_connection(&mut self, conn_id: u64) {
         if let Some(mut conn) = self.pool.remove(&conn_id) {
+            let pool_key = conn.pool_key.clone();
             let _ = conn.shutdown().await;
             self.active_count = self.active_count.saturating_sub(1);
-            self.remove_from_host_map(&conn.host, conn_id);
+            self.remove_from_key_map(&pool_key, conn_id);
             tracing::debug!("Force closed connection: id={}", conn_id);
         }
     }
@@ -765,9 +772,9 @@ impl HttpConnectionManager {
         }
     }
 
-    /// Try to reuse a connection from the pool
-    fn try_reuse_connection(&mut self, host: &str) -> Result<Option<ActiveConnection>> {
-        let conn_ids = match self.host_connections.get(host) {
+    /// Try to reuse a connection from the pool matching the given pool key
+    fn try_reuse_connection(&mut self, pool_key: &ConnectionPoolKey) -> Result<Option<ActiveConnection>> {
+        let conn_ids = match self.key_connections.get(pool_key) {
             Some(ids) => ids.clone(),
             None => return Ok(None),
         };
@@ -779,7 +786,7 @@ impl HttpConnectionManager {
                 if conn.is_valid() {
                     conn.touch();
 
-                    // Check Keep-Alive status (simplified: only check time)
+                    // Check idle timeout
                     let idle_time = conn.last_used.elapsed();
                     if idle_time < self.config.idle_timeout {
                         tracing::debug!(
@@ -805,14 +812,19 @@ impl HttpConnectionManager {
             }
         }
 
-        // Clean up all invalid connection records for this host
-        self.cleanup_invalid_connections(host);
+        // Clean up all invalid connection records for this pool key
+        self.cleanup_invalid_connections(pool_key);
 
         Ok(None)
     }
 
     /// Create a new TCP connection
-    async fn create_new_connection(&mut self, url: &Url, host: &str) -> Result<ActiveConnection> {
+    async fn create_new_connection(
+        &mut self,
+        url: &Url,
+        host: &str,
+        pool_key: ConnectionPoolKey,
+    ) -> Result<ActiveConnection> {
         // Resolve address
         let addr = Self::resolve_address(url)?;
 
@@ -830,7 +842,6 @@ impl HttpConnectionManager {
         if let Err(e) = stream.set_nodelay(true) {
             tracing::warn!("Failed to set nodelay: {}", e);
         }
-        // Note: tokio TcpStream does not directly support set_keepalive; use socket2 or ignore
 
         // Generate connection ID
         let conn_id = self.id_counter.fetch_add(1, Ordering::SeqCst);
@@ -840,12 +851,13 @@ impl HttpConnectionManager {
             stream,
             host: host.to_string(),
             last_used: Instant::now(),
+            pool_key: pool_key.clone(),
         };
 
         // Update connection pool state
         self.active_count += 1;
-        self.host_connections
-            .entry(host.to_string())
+        self.key_connections
+            .entry(pool_key)
             .or_default()
             .push(conn_id);
 
@@ -885,17 +897,17 @@ impl HttpConnectionManager {
 
         for (&conn_id, conn) in &self.pool {
             if now.duration_since(conn.last_used) > self.config.idle_timeout {
-                evicted.push((conn_id, conn.host.clone()));
+                evicted.push((conn_id, conn.pool_key.clone()));
             }
         }
 
         let evict_count = evicted.len();
-        for (conn_id, host) in evicted {
+        for (conn_id, pool_key) in evicted {
             if let Some(mut conn) = self.pool.remove(&conn_id) {
                 std::mem::drop(conn.shutdown());
                 self.active_count = self.active_count.saturating_sub(1);
-                self.remove_from_host_map(&host, conn_id);
-                tracing::debug!("LRU evicted expired connection: id={}, host={}", conn_id, host);
+                self.remove_from_key_map(&pool_key, conn_id);
+                tracing::debug!("LRU evicted expired connection: id={}", conn_id);
             }
         }
 
@@ -904,22 +916,22 @@ impl HttpConnectionManager {
         }
     }
 
-    /// Clean up invalid connection records for a specific host
-    fn cleanup_invalid_connections(&mut self, host: &str) {
-        if let Some(ids) = self.host_connections.get_mut(host) {
+    /// Clean up invalid connection records for a specific pool key
+    fn cleanup_invalid_connections(&mut self, pool_key: &ConnectionPoolKey) {
+        if let Some(ids) = self.key_connections.get_mut(pool_key) {
             ids.retain(|&id| self.pool.contains_key(&id));
             if ids.is_empty() {
-                self.host_connections.remove(host);
+                self.key_connections.remove(pool_key);
             }
         }
     }
 
-    /// Remove a connection ID from the host mapping
-    fn remove_from_host_map(&mut self, host: &str, conn_id: u64) {
-        if let Some(ids) = self.host_connections.get_mut(host) {
+    /// Remove a connection ID from the pool-key mapping
+    fn remove_from_key_map(&mut self, pool_key: &ConnectionPoolKey, conn_id: u64) {
+        if let Some(ids) = self.key_connections.get_mut(pool_key) {
             ids.retain(|&id| id != conn_id);
             if ids.is_empty() {
-                self.host_connections.remove(host);
+                self.key_connections.remove(pool_key);
             }
         }
     }
@@ -932,7 +944,7 @@ impl Drop for HttpConnectionManager {
             // TcpStream's drop will automatically close
             drop(conn);
         }
-        self.host_connections.clear();
+        self.key_connections.clear();
     }
 }
 

@@ -51,22 +51,20 @@ fn test_gzip_decompress_small_file() {
 #[test]
 fn test_gzip_invalid_header_error() {
     // Non-GZip data (missing magic number)
+    // With the new auto-detection decoder, data that doesn't start with
+    // gzip (0x1f 0x8b) or zlib (0x78) magic bytes is treated as raw
+    // deflate. Since "This is not gzip data" is not valid deflate either,
+    // decompression fails with an Io error (not a Parse error about the
+    // magic number, which was the old batch-only behavior).
     let invalid_data = b"This is not gzip data";
 
     let mut decoder = GZipDecoder::new();
     let result = decoder.filter(invalid_data);
 
-    // Should return error
-    assert!(result.is_err(), "Should fail with invalid GZip data");
-    match result.unwrap_err() {
-        Aria2Error::Parse(msg) => {
-            assert!(
-                msg.contains("Invalid GZip magic number"),
-                "Error message should mention invalid magic number"
-            );
-        }
-        other => panic!("Expected Parse error, got: {:?}", other),
-    }
+    // Should return error (either Parse for format detection or Io for
+    // decompression failure — the exact error type depends on which
+    // decoder path is taken)
+    assert!(result.is_err(), "Should fail with invalid compressed data");
 }
 
 #[test]

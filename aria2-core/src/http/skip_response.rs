@@ -310,6 +310,13 @@ impl HttpSkipResponseHandler {
     ///
     /// Extracts the Location header, resolves it against the current URL,
     /// determines method change rules per RFC 7231, and checks redirect limits.
+    ///
+    /// # 300 Multiple Choices
+    ///
+    /// Per C++ aria2 and aria2-next, 300 is treated as a redirect when a
+    /// Location header is present. If no Location header exists, it is
+    /// treated as a fatal error (the server is offering a choice but not
+    /// telling us which one to pick).
     fn handle_redirect(
         &self,
         response: &HttpResponse,
@@ -326,9 +333,25 @@ impl HttpSkipResponseHandler {
         }
 
         // Extract Location header
-        let location = response.location().ok_or_else(|| {
-            Aria2Error::Parse("Redirect response missing Location header".to_string())
-        })?;
+        // For 300 Multiple Choices, Location may be absent → treat as error
+        let location = response.location();
+        let location = match location {
+            Some(loc) => loc,
+            None => {
+                if response.status_code == 300 {
+                    // 300 without Location: server is offering choices but
+                    // not telling us which one. Treat as a fatal error.
+                    tracing::warn!("300 Multiple Choices without Location header");
+                    return Ok(SkipResponseResult::FatalError {
+                        status_code: 300,
+                        message: "Multiple choices without Location header".to_string(),
+                    });
+                }
+                return Err(Aria2Error::Parse(
+                    "Redirect response missing Location header".to_string(),
+                ));
+            }
+        };
 
         // Resolve relative URLs against the current URL
         let target_url = current_url.join(location).map_err(|e| {
@@ -337,7 +360,7 @@ impl HttpSkipResponseHandler {
 
         // Determine redirect type and method change rules per RFC 7231
         let redirect_type = match response.status_code {
-            301 => RedirectType::Permanent,
+            300 | 301 => RedirectType::Permanent,
             303 => RedirectType::SeeOther,
             307 | 308 => RedirectType::PreserveMethod,
             _ => RedirectType::Temporary, // 302 and other 3xx
@@ -366,10 +389,12 @@ impl HttpSkipResponseHandler {
 
     /// Handle 4xx/5xx error status codes.
     ///
-    /// Mirrors the C++ switch statement in `processResponse()`:
+    /// Mirrors the C++ switch statement in `processResponse()` plus
+    /// aria2-next enhancements:
     /// - 401: auth challenge (if enabled) or fatal
     /// - 407: proxy auth challenge
     /// - 404: retryable or fatal depending on max_file_not_found
+    /// - 413: retryable when Retry-After header is present (aria2-next)
     /// - 502/503: retryable if retry_wait > 0, else fatal
     /// - 504: always retryable (gateway timeout)
     /// - other 4xx/5xx: fatal
@@ -387,6 +412,26 @@ impl HttpSkipResponseHandler {
                     SkipResponseResult::RetryableError {
                         status_code: status,
                         message: "Resource not found".to_string(),
+                    }
+                }
+            }
+            413 => {
+                // Request Entity Too Large — retryable if server specifies
+                // Retry-After, matching aria2-next behavior for "Payload Too
+                // Large" with backoff. Without Retry-After, this is fatal.
+                if response.header("Retry-After").is_some() {
+                    tracing::info!(
+                        "413 Request Entity Too Large with Retry-After, will retry"
+                    );
+                    SkipResponseResult::RetryableError {
+                        status_code: status,
+                        message: "Request entity too large, retrying after backoff"
+                            .to_string(),
+                    }
+                } else {
+                    SkipResponseResult::FatalError {
+                        status_code: status,
+                        message: "Request entity too large".to_string(),
                     }
                 }
             }
@@ -1071,5 +1116,80 @@ mod tests {
         // PreserveMethod (307/308) never changes
         assert!(!RedirectType::PreserveMethod.should_change_method(HttpMethod::Post));
         assert!(!RedirectType::PreserveMethod.should_change_method(HttpMethod::Get));
+    }
+
+    // ==================== 300 Multiple Choices tests ====================
+
+    #[test]
+    fn test_300_with_location_redirects() {
+        let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
+        let resp = make_response(300, Some("http://example.com/choice1"));
+        let url = Url::parse("http://example.com/list").unwrap();
+        let result = handler
+            .handle(&resp, HttpMethod::Get, &url, 0)
+            .unwrap();
+
+        match result {
+            SkipResponseResult::Redirect(info) => {
+                assert_eq!(info.target_url.as_str(), "http://example.com/choice1");
+                assert_eq!(info.redirect_type, RedirectType::Permanent);
+            }
+            _ => panic!("Expected Redirect for 300 with Location, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_300_without_location_is_fatal() {
+        let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
+        let resp = HttpResponse::new(300, "Multiple Choices".to_string());
+        let url = Url::parse("http://example.com/list").unwrap();
+        let result = handler
+            .handle(&resp, HttpMethod::Get, &url, 0)
+            .unwrap();
+
+        match result {
+            SkipResponseResult::FatalError { status_code, .. } => {
+                assert_eq!(status_code, 300);
+            }
+            _ => panic!("Expected FatalError for 300 without Location, got {:?}", result),
+        }
+    }
+
+    // ==================== 413 Request Entity Too Large tests ====================
+
+    #[test]
+    fn test_413_with_retry_after_is_retryable() {
+        let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
+        let mut resp = HttpResponse::new(413, "Payload Too Large".to_string());
+        resp.headers
+            .push(("Retry-After".to_string(), "60".to_string()));
+        let url = Url::parse("http://example.com/upload").unwrap();
+        let result = handler
+            .handle(&resp, HttpMethod::Post, &url, 0)
+            .unwrap();
+
+        match result {
+            SkipResponseResult::RetryableError { status_code, .. } => {
+                assert_eq!(status_code, 413);
+            }
+            _ => panic!("Expected RetryableError for 413 with Retry-After, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_413_without_retry_after_is_fatal() {
+        let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
+        let resp = HttpResponse::new(413, "Payload Too Large".to_string());
+        let url = Url::parse("http://example.com/upload").unwrap();
+        let result = handler
+            .handle(&resp, HttpMethod::Post, &url, 0)
+            .unwrap();
+
+        match result {
+            SkipResponseResult::FatalError { status_code, .. } => {
+                assert_eq!(status_code, 413);
+            }
+            _ => panic!("Expected FatalError for 413 without Retry-After, got {:?}", result),
+        }
     }
 }

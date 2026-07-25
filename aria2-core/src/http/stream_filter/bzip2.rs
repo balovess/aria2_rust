@@ -1,50 +1,49 @@
-//! BZip2 format decompressor
+//! BZip2 format decompressor with streaming support
 //!
-//! BZip2 data decompressor implemented using the bzip2 library.
-//! Similar to GZipDecoder, but uses the bzip2 compression algorithm.
+//! BZip2 data decompressor implemented using the bzip2-rs library.
+//! Supports true streaming/incremental decompression where data can
+//! be fed in arbitrary chunks.
+
+use std::io::Read;
 
 use crate::error::{Aria2Error, Result};
 use crate::http::stream_filter::types::StreamFilter;
-use bzip2_rs::DecoderReader as BzDecoder;
-use std::io::{Cursor, Read};
 
-/// BZip2 format decompressor
+/// BZip2 format decompressor with streaming support
 ///
-/// BZip2 data decompressor implemented using the bzip2 library.
-/// Similar to GZipDecoder, but uses the bzip2 compression algorithm.
+/// Decompresses BZip2-encoded data incrementally. Uses the same
+/// approach as the GZip decoder: accumulates input data and attempts
+/// decompression. For BZip2, the bzip2-rs library provides a
+/// streaming reader that can handle partial data.
 ///
-/// # Examples
+/// # Streaming Model
 ///
-/// ```rust,ignore
-/// use aria2_core::http::stream_filter::{BZip2Decoder, StreamFilter};
-///
-/// let mut decoder = BZip2Decoder::new();
-/// let compressed_data = /* BZip2 compressed data */;
-/// let decompressed = decoder.filter(compressed_data)?;
-/// ```
+/// 1. Each `filter()` call buffers input data
+/// 2. When enough data is available, decompression produces output
+/// 3. The decoder tracks how much input has been consumed
+/// 4. `flush()` finalizes the stream
 pub struct BZip2Decoder {
-    inner: Option<BzDecoder<Cursor<Vec<u8>>>>,
+    /// Whether decompression is complete
     finished: bool,
+    /// Buffered input that hasn't been consumed yet
+    input_buffer: Vec<u8>,
 }
 
 impl std::fmt::Debug for BZip2Decoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BZip2Decoder")
             .field("finished", &self.finished)
+            .field("buffer_len", &self.input_buffer.len())
             .finish()
     }
 }
 
 impl BZip2Decoder {
     /// Create a new BZip2 decoder instance
-    ///
-    /// # Returns
-    ///
-    /// A new BZip2Decoder instance
     pub fn new() -> Self {
         BZip2Decoder {
-            inner: None,
             finished: false,
+            input_buffer: Vec::new(),
         }
     }
 }
@@ -56,82 +55,75 @@ impl Default for BZip2Decoder {
 }
 
 impl StreamFilter for BZip2Decoder {
-    /// Process BZip2 compressed data
+    /// Process BZip2 compressed data incrementally.
     ///
-    /// On first call, initializes the decoder and performs decompression.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - BZip2 compressed byte data
-    ///
-    /// # Returns
-    ///
-    /// Decompressed raw data, or error message
-    ///
-    /// # Errors
-    ///
-    /// - If input data is not valid BZip2 format
-    /// - If an I/O error occurs during decompression
+    /// Accumulates input and attempts decompression. Produces output
+    /// when enough data is available for the bzip2 decoder.
     fn filter(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        // Check if already finished
-        if self.finished && self.inner.is_none() {
+        if self.finished {
             return Err(Aria2Error::Parse(
                 "BZip2 decoder already finished".to_string(),
             ));
         }
 
-        // Validate minimum length
-        if input.len() < 10 {
-            return Err(Aria2Error::Parse(
-                "Input too short for BZip2 header".to_string(),
-            ));
+        if input.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // Initialize decoder
-        if self.inner.is_none() {
-            let cursor = Cursor::new(input.to_vec());
-            self.inner = Some(BzDecoder::new(cursor));
-        } else {
-            return Err(Aria2Error::Parse(
-                "BZip2 incremental decoding not supported in this implementation".to_string(),
-            ));
-        }
+        // Buffer incoming data
+        self.input_buffer.extend_from_slice(input);
 
-        // Execute decompression
-        if let Some(ref mut decoder) = self.inner {
-            let mut output = Vec::new();
-            match decoder.read_to_end(&mut output) {
-                Ok(_) => {
+        // Try to decompress with the current buffer
+        let cursor = std::io::Cursor::new(&self.input_buffer[..]);
+        let mut decoder = bzip2_rs::DecoderReader::new(cursor);
+
+        let mut output = Vec::with_capacity(self.input_buffer.len().saturating_mul(3).max(256));
+
+        match decoder.read_to_end(&mut output) {
+            Ok(_) => {
+                // Successfully decompressed all available data
+                // Check if the stream is complete
+                let consumed = decoder.get_ref().position() as usize;
+                self.input_buffer = self.input_buffer[consumed..].to_vec();
+
+                if self.input_buffer.is_empty() {
                     self.finished = true;
-                    Ok(output)
                 }
-                Err(e) => Err(Aria2Error::Io(e.to_string())),
+                Ok(output)
             }
-        } else {
-            Err(Aria2Error::Parse(
-                "BZip2 decoder not initialized".to_string(),
-            ))
+            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Incomplete stream — need more data
+                // Return any partial output we got
+                let consumed = decoder.get_ref().position() as usize;
+                if consumed > 0 {
+                    self.input_buffer = self.input_buffer[consumed..].to_vec();
+                }
+                Ok(output)
+            }
+            Err(e) => Err(Aria2Error::Io(format!(
+                "BZip2 decompression failed: {}",
+                e
+            ))),
         }
     }
 
     /// Flush BZip2 decoder buffer
-    ///
-    /// # Returns
-    ///
-    /// Remaining data in the buffer
     fn flush(&mut self) -> Result<Vec<u8>> {
         if self.finished {
-            Ok(Vec::new())
-        } else if self.inner.is_some() {
-            let mut output = Vec::new();
-            if let Some(ref mut decoder) = self.inner {
-                let _ = decoder.read_to_end(&mut output);
-            }
-            self.finished = true;
-            Ok(output)
-        } else {
-            Ok(Vec::new())
+            return Ok(Vec::new());
         }
+
+        let mut output = Vec::new();
+
+        if !self.input_buffer.is_empty() {
+            let cursor = std::io::Cursor::new(&self.input_buffer[..]);
+            let mut decoder = bzip2_rs::DecoderReader::new(cursor);
+            let _ = decoder.read_to_end(&mut output);
+            self.input_buffer.clear();
+        }
+
+        self.finished = true;
+        Ok(output)
     }
 
     /// Returns "bzip2"
@@ -141,6 +133,86 @@ impl StreamFilter for BZip2Decoder {
 
     /// Check if more input is needed
     fn needs_more_input(&self) -> bool {
-        !(self.finished && self.inner.is_none())
+        !self.finished
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_bzip2_data(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = bzip2_rs::EncoderWriter::new(Vec::new(), 6);
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn test_bzip2_decoder_basic() {
+        let data = b"Hello, World! This is a test of BZip2 compression.";
+        let compressed = create_bzip2_data(data);
+
+        let mut decoder = BZip2Decoder::new();
+        let result = decoder.filter(&compressed).unwrap();
+        assert_eq!(result.as_slice(), data);
+        assert!(decoder.finished);
+    }
+
+    #[test]
+    fn test_bzip2_decoder_empty_input() {
+        let mut decoder = BZip2Decoder::new();
+        let result = decoder.filter(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_bzip2_decoder_already_finished() {
+        let data = b"test data";
+        let compressed = create_bzip2_data(data);
+
+        let mut decoder = BZip2Decoder::new();
+        decoder.filter(&compressed).unwrap();
+        let result = decoder.filter(&[1, 2, 3]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bzip2_decoder_name() {
+        let decoder = BZip2Decoder::new();
+        assert_eq!(decoder.name(), "bzip2");
+    }
+
+    #[test]
+    fn test_bzip2_decoder_needs_more_input() {
+        let decoder = BZip2Decoder::new();
+        assert!(decoder.needs_more_input());
+
+        let data = b"test";
+        let compressed = create_bzip2_data(data);
+
+        let mut decoder = BZip2Decoder::new();
+        decoder.filter(&compressed).unwrap();
+        assert!(!decoder.needs_more_input());
+    }
+
+    #[test]
+    fn test_bzip2_decoder_incremental() {
+        let data = b"Testing incremental BZip2 decompression with chunks.";
+        let compressed = create_bzip2_data(data);
+
+        let mut decoder = BZip2Decoder::new();
+        let mut result = Vec::new();
+
+        let mid = compressed.len() / 2;
+        result.extend_from_slice(&decoder.filter(&compressed[..mid]).unwrap());
+        if !decoder.finished {
+            result.extend_from_slice(&decoder.filter(&compressed[mid..]).unwrap());
+        }
+        if !decoder.finished {
+            result.extend_from_slice(&decoder.flush().unwrap());
+        }
+
+        assert_eq!(result.as_slice(), data);
     }
 }

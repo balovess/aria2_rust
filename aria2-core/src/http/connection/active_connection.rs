@@ -9,6 +9,32 @@ use tokio::time::timeout;
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 
+/// Proxy configuration for a pooled connection.
+///
+/// Matches the C++ `createProxyRequest()` concept: connections through
+/// different proxies cannot be reused for direct or different-proxy requests.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProxyInfo {
+    /// Proxy hostname
+    pub host: String,
+    /// Proxy port
+    pub port: u16,
+}
+
+/// A key that uniquely identifies a reusable connection in the pool.
+///
+/// Two connections are interchangeable only when they share the same
+/// `ConnectionPoolKey`.  This mirrors the C++ `poolSocket(request,
+/// proxyRequest, socket)` call where both the target *and* the proxy
+/// are part of the pool identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConnectionPoolKey {
+    /// Target host:port (e.g. "cdn.example.com:443")
+    pub target: String,
+    /// None = direct connection; Some = connection through this proxy
+    pub proxy: Option<ProxyInfo>,
+}
+
 /// Active connection information
 #[derive(Debug)]
 pub struct ActiveConnection {
@@ -16,16 +42,23 @@ pub struct ActiveConnection {
     pub id: u64,
     /// TCP stream
     pub stream: TcpStream,
-    /// Target host
+    /// Target host (host:port)
     pub host: String,
     /// Last used timestamp
     pub last_used: Instant,
+    /// Pool key (target + proxy identity)
+    pub pool_key: ConnectionPoolKey,
 }
 
 impl ActiveConnection {
-    /// Check if the connection is still valid
+    /// Check if the connection is still valid for reuse.
+    ///
+    /// Uses a non-blocking probe via `peer_addr()` to catch clearly
+    /// broken sockets.  For a more thorough check (detecting half-closed
+    /// connections where the peer sent FIN), the caller should attempt
+    /// a `read_with_timeout` with a zero-length deadline after acquiring
+    /// from the pool — matching the C++ `socket->isReadable(0)` pattern.
     pub fn is_valid(&self) -> bool {
-        // Check if the connection has been closed or errored
         self.stream.peer_addr().is_ok()
     }
 

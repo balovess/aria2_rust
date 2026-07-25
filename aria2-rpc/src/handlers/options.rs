@@ -144,10 +144,7 @@ impl RpcEngine {
         if let Some(map) = value.as_object_mut() {
             map.remove("rpc-secret");
         }
-        JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
-            value,
-        )
+        JsonRpcResponse::success(req.id.clone().unwrap_or_default(), value)
     }
 
     /// Handle `aria2.changeGlobalOption` - Modify global configuration options.

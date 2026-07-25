@@ -113,16 +113,16 @@ pub fn to_aria2_wire_format(value: serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(new_map)
         }
         serde_json::Value::Array(arr) => {
-            let new_arr: Vec<serde_json::Value> = arr
-                .into_iter()
-                .map(to_aria2_wire_format)
-                .collect();
+            let new_arr: Vec<serde_json::Value> =
+                arr.into_iter().map(to_aria2_wire_format).collect();
             serde_json::Value::Array(new_arr)
         }
         serde_json::Value::Number(n) => serde_json::Value::String(n.to_string()),
-        serde_json::Value::Bool(b) => {
-            serde_json::Value::String(if b { "true".to_string() } else { "false".to_string() })
-        }
+        serde_json::Value::Bool(b) => serde_json::Value::String(if b {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
         serde_json::Value::String(_) | serde_json::Value::Null => value,
     }
 }
@@ -216,7 +216,10 @@ mod tests {
     fn test_to_aria2_wire_format_native_numeric() {
         let input = serde_json::json!({"creationDate": 1700000000, "other": 42});
         let output = to_aria2_wire_format(input);
-        assert!(output["creationDate"].is_number(), "creationDate should remain a number");
+        assert!(
+            output["creationDate"].is_number(),
+            "creationDate should remain a number"
+        );
         assert_eq!(output["other"].as_str(), Some("42"));
     }
 

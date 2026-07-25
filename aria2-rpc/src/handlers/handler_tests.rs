@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
 use crate::types::{
-    DownloadStatus, PeerInfo, SessionInfo, StatusInfo, UriInfo,
-    UriStatus, VersionInfo,
+    DownloadStatus, PeerInfo, SessionInfo, StatusInfo, UriInfo, UriStatus, VersionInfo,
 };
 use crate::websocket::{DownloadEvent, EventType};
 
@@ -54,7 +53,10 @@ async fn test_handle_add_metalink() {
         "addMetalink should succeed for valid Metalink XML"
     );
     let gid_list: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(!gid_list.is_empty(), "addMetalink should return non-empty GID array");
+    assert!(
+        !gid_list.is_empty(),
+        "addMetalink should return non-empty GID array"
+    );
     assert_eq!(engine.task_count().await, 1);
 }
 
@@ -252,10 +254,7 @@ async fn test_get_peers_returns_peer_list() {
         Some("true"),
         "booleans should be 'true' string"
     );
-    assert_eq!(
-        peers_array[0]["downloadSpeed"].as_str(),
-        Some("100000")
-    );
+    assert_eq!(peers_array[0]["downloadSpeed"].as_str(), Some("100000"));
 }
 
 #[tokio::test]
@@ -598,7 +597,9 @@ async fn test_multicall_preserves_order() {
 
     // Per C++ aria2 spec, each successful result is wrapped in [[result]]
     let version_inner = results[0].as_array().unwrap().first().unwrap();
-    assert!(version_inner.get("version").is_some() || version_inner.get("enabledFeatures").is_some());
+    assert!(
+        version_inner.get("version").is_some() || version_inner.get("enabledFeatures").is_some()
+    );
     let active_inner = results[1].as_array().unwrap().first().unwrap();
     let active = active_inner
         .as_array()
@@ -654,7 +655,9 @@ async fn test_multicall_with_add_uri_and_status() {
     assert_eq!(results.len(), 2);
 
     // Per C++ aria2 spec, each successful result is wrapped in [[result]]
-    let add_uri_inner = results[0].as_array().expect("addUri result should be wrapped in array");
+    let add_uri_inner = results[0]
+        .as_array()
+        .expect("addUri result should be wrapped in array");
     assert!(!add_uri_inner.is_empty(), "addUri should return a value");
     let stat_inner = results[1].as_array().unwrap().first().unwrap();
     assert!(
@@ -702,7 +705,10 @@ async fn test_save_session_empty_dir_defaults() {
 
     let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([""])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success(), "Empty dir should default to '.' and succeed");
+    assert!(
+        resp.is_success(),
+        "Empty dir should default to '.' and succeed"
+    );
 }
 
 #[tokio::test]
@@ -714,9 +720,11 @@ async fn test_change_position_move_uri() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let change_req =
-        JsonRpcRequest::new("aria2.changePosition", serde_json::json!([gid, 0, "POS_SET"]))
-            .with_id(2);
+    let change_req = JsonRpcRequest::new(
+        "aria2.changePosition",
+        serde_json::json!([gid, 0, "POS_SET"]),
+    )
+    .with_id(2);
     let change_resp = engine.handle_request(&change_req).await;
     assert!(
         change_resp.is_success(),
@@ -933,7 +941,10 @@ async fn test_get_files_valid_gid_returns_file_list() {
     assert!(resp.is_success(), "getFiles should succeed for valid GID");
 
     let files = resp.result.unwrap();
-    eprintln!("DEBUG get_files response: {}", serde_json::to_string_pretty(&files).unwrap());
+    eprintln!(
+        "DEBUG get_files response: {}",
+        serde_json::to_string_pretty(&files).unwrap()
+    );
     assert!(
         files.as_array().map_or(false, |a| !a.is_empty()),
         "Should return at least one file"

@@ -18,8 +18,6 @@
 //! - **Forward**: Absolute-URI forwarding — `GET http://target/path HTTP/1.1`
 //!   for plain HTTP through a proxy.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -96,6 +94,7 @@ impl Default for HttpProxyTunnelConfig {
 // ---------------------------------------------------------------------------
 
 /// Result of successfully establishing a proxy connection.
+#[derive(Debug)]
 pub struct HttpProxyTunnelResult {
     /// The TCP stream (tunneled or connected through the proxy)
     pub stream: TcpStream,
@@ -187,83 +186,66 @@ impl HttpProxyTunnel {
         Ok(stream)
     }
 
+    /// Perform the CONNECT handshake with proxy auth retry logic.
+    ///
+    /// Uses a loop instead of recursion to avoid `Pin<Box<dyn Future>>`
+    /// lifetime issues. Max auth retries bounded by `MAX_AUTH_RETRIES`.
     async fn tunnel_handshake(
-        mut stream: TcpStream, config: &HttpProxyTunnelConfig, auth_retry: u32,
+        mut stream: TcpStream, config: &HttpProxyTunnelConfig, _auth_retry: u32,
     ) -> Result<TcpStream> {
         let auth_header = Self::maybe_preemptive_basic_auth(config);
         let request = Self::build_connect_request(config, auth_header.as_deref());
         Self::send_request(&mut stream, &request, config.write_timeout).await?;
-        let response = Self::read_proxy_response(&mut stream, config.read_timeout).await?;
-        match response.status_code {
-            200 => Ok(stream),
-            // C++ AbstractProxyResponseCommand: non-200 => DL_RETRY_EX PROXY_CONNECTION_FAILED
-            407 if auth_retry < Self::MAX_AUTH_RETRIES => {
-                Self::handle_proxy_auth(stream, config, &response, auth_retry).await
-            }
-            407 => Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Proxy auth failed for {}:{} (max retries)", config.proxy_host, config.proxy_port),
-            })),
-            status => Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Proxy {}:{} rejected CONNECT to {}:{}: {} {}",
-                    config.proxy_host, config.proxy_port,
-                    config.target_host, config.target_port, status, response.reason_phrase),
-            })),
-        }
-    }
 
-    /// Handle 407 Proxy Authentication Required.
-    ///
-    /// Uses `Pin<Box<dyn Future>>` for the recursive async call to avoid
-    /// infinite future size (max depth bounded by `MAX_AUTH_RETRIES`).
-    fn handle_proxy_auth(
-        stream: TcpStream, config: &HttpProxyTunnelConfig, response: &ProxyResponse, auth_retry: u32,
-    ) -> Pin<Box<dyn Future<Output = Result<TcpStream>> + Send>> {
-        Box::pin(async move {
-            let has_creds = config.username.as_ref().is_some_and(|u| !u.is_empty());
-            if !has_creds {
-                return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Proxy {}:{} requires auth but no credentials provided",
-                        config.proxy_host, config.proxy_port),
-                }));
-            }
-            let mut stream = stream;
-            Self::consume_response_body(&mut stream, config.read_timeout).await?;
-            let proxy_authenticate = response.headers.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("proxy-authenticate"))
-                .map(|(_, v)| v.as_str()).unwrap_or("");
-            let username = config.username.as_deref().unwrap_or("");
-            let password = config.password.as_deref().unwrap_or("");
-            let uri = format!("{}:{}", config.target_host, config.target_port);
-            let auth_header = if proxy_authenticate.starts_with("Digest") {
-                Self::build_digest_auth_header(username, password, proxy_authenticate, &uri)
-            } else if proxy_authenticate.starts_with("Basic") {
-                basic_auth(username, password)
-            } else {
-                warn!("Unsupported proxy auth scheme: {}", proxy_authenticate);
-                return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Unsupported proxy auth: {}", proxy_authenticate),
-                }));
-            };
-            let request = Self::build_connect_request(config, Some(&auth_header));
-            Self::send_request(&mut stream, &request, config.write_timeout).await?;
-            let retry_response = Self::read_proxy_response(&mut stream, config.read_timeout).await?;
-            match retry_response.status_code {
-                200 => {
-                    info!("Proxy tunnel established with auth: {}:{} -> {}:{}",
-                        config.proxy_host, config.proxy_port, config.target_host, config.target_port);
-                    Ok(stream)
+        let mut remaining_retries = Self::MAX_AUTH_RETRIES;
+        loop {
+            let response = Self::read_proxy_response(&mut stream, config.read_timeout).await?;
+            match response.status_code {
+                200 => return Ok(stream),
+                407 if remaining_retries > 0 => {
+                    remaining_retries -= 1;
+                    let has_creds = config.username.as_ref().is_some_and(|u| !u.is_empty());
+                    if !has_creds {
+                        return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                            message: format!("Proxy {}:{} requires auth but no credentials provided",
+                                config.proxy_host, config.proxy_port),
+                        }));
+                    }
+                    Self::consume_response_body(&mut stream, config.read_timeout).await?;
+                    let proxy_authenticate = response.headers.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("proxy-authenticate"))
+                        .map(|(_, v)| v.as_str()).unwrap_or("");
+                    let username = config.username.as_deref().unwrap_or("");
+                    let password = config.password.as_deref().unwrap_or("");
+                    let uri = format!("{}:{}", config.target_host, config.target_port);
+                    let auth_header = if proxy_authenticate.starts_with("Digest") {
+                        Self::build_digest_auth_header(username, password, proxy_authenticate, &uri)
+                    } else if proxy_authenticate.starts_with("Basic") {
+                        basic_auth(username, password)
+                    } else {
+                        warn!("Unsupported proxy auth scheme: {}", proxy_authenticate);
+                        return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                            message: format!("Unsupported proxy auth: {}", proxy_authenticate),
+                        }));
+                    };
+                    let request = Self::build_connect_request(config, Some(&auth_header));
+                    Self::send_request(&mut stream, &request, config.write_timeout).await?;
+                    // Loop back to read the response to the auth'd request
                 }
-                407 if auth_retry + 1 < Self::MAX_AUTH_RETRIES => {
-                    Self::handle_proxy_auth(stream, config, &retry_response, auth_retry + 1).await
+                407 => {
+                    return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("Proxy auth failed for {}:{}", config.proxy_host, config.proxy_port),
+                    }));
                 }
-                407 => Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Proxy auth failed for {}:{}", config.proxy_host, config.proxy_port),
-                })),
-                status => Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Proxy rejected CONNECT after auth: {} {}", status, retry_response.reason_phrase),
-                })),
+                status => {
+                    return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("Proxy {}:{} rejected CONNECT to {}:{}: {} {}",
+                            config.proxy_host, config.proxy_port,
+                            config.target_host, config.target_port, status, response.reason_phrase),
+                    }));
+                }
             }
-        })
+        }
     }
 
     // -- Request building ------------------------------------------------------

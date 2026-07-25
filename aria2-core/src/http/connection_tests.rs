@@ -7,13 +7,13 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, timeout};
 
 use crate::error::Aria2Error;
 use crate::http::connection::{
-    ActiveConnection, HttpConfig, HttpConnectionManager,
+    HttpConfig, HttpConnectionManager,
 };
 use crate::http::connection::HttpResponse;
 
@@ -80,7 +80,7 @@ async fn test_connection_pool_reuse() {
     let url = url::Url::parse(&format!("http://{}", addr)).unwrap();
 
     // First connection acquisition
-    let conn1 = manager.acquire(&url).await.expect("First connection acquisition should succeed");
+    let conn1 = manager.acquire(&url, None).await.expect("First connection acquisition should succeed");
     let conn1_id = conn1.id;
     assert_eq!(manager.active_count(), 1);
     println!("First connection acquired: id={}", conn1_id);
@@ -91,7 +91,7 @@ async fn test_connection_pool_reuse() {
     println!("Connection returned to pool");
 
     // Second connection acquisition (should reuse)
-    let conn2 = manager.acquire(&url).await.expect("Second acquisition should reuse connection");
+    let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should reuse connection");
     assert_eq!(conn2.id, conn1_id); // Should be the same connection ID
     assert_eq!(manager.active_count(), 1); // Should not create new connection
     println!("Connection pool reuse successful: id={}", conn2.id);
@@ -256,7 +256,7 @@ async fn test_timeout_on_slow_server() {
     // Note: Since this is a localhost connection, TCP connection may be established quickly
     // Timeout mainly applies to subsequent I/O operations
     let start = Instant::now();
-    let result = timeout(config.connect_timeout + Duration::from_millis(50), manager.acquire(&url)).await;
+    let result = timeout(config.connect_timeout + Duration::from_millis(50), manager.acquire(&url, None)).await;
 
     match result {
         Ok(conn_result) => {
@@ -319,17 +319,17 @@ async fn test_max_connections_limit() {
     let url = url::Url::parse(&format!("http://{}", addr)).unwrap();
 
     // Acquire first connection
-    let conn1 = manager.acquire(&url).await.expect("First connection should succeed");
+    let conn1 = manager.acquire(&url, None).await.expect("First connection should succeed");
     println!("Connection 1: id={}, active={}/{}", conn1.id, manager.active_count(), manager.max_connections());
     assert_eq!(manager.active_count(), 1);
 
     // Acquire second connection
-    let conn2 = manager.acquire(&url).await.expect("Second connection should succeed");
+    let conn2 = manager.acquire(&url, None).await.expect("Second connection should succeed");
     println!("Connection 2: id={}, active={}/{}", conn2.id, manager.active_count(), manager.max_connections());
     assert_eq!(manager.active_count(), 2);
 
     // Try to acquire third connection (should fail)
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
     assert!(result.is_err(), "Should return error when max connection limit is exceeded");
 
     match result.unwrap_err() {
@@ -351,7 +351,7 @@ async fn test_max_connections_limit() {
     manager.release(conn1.id).await;
     println!("Released connection 1, trying to acquire again...");
 
-    let conn3 = manager.acquire(&url).await.expect("Should be able to acquire new connection after release");
+    let conn3 = manager.acquire(&url, None).await.expect("Should be able to acquire new connection after release");
     println!("New connection acquired after release: id={}", conn3.id);
     assert_eq!(manager.active_count(), 2);
 
@@ -392,7 +392,7 @@ async fn test_lru_eviction_strategy() {
     // Create multiple connections and release immediately
     let mut conn_ids = Vec::new();
     for i in 0..3 {
-        let conn = manager.acquire(&url).await.unwrap();
+        let conn = manager.acquire(&url, None).await.unwrap();
         println!("Created connection {}: id={}", i + 1, conn.id);
         conn_ids.push(conn.id);
         manager.release(conn.id).await;
@@ -406,7 +406,7 @@ async fn test_lru_eviction_strategy() {
     println!("Waited {:.2}ms for connections to expire...", 150.0);
 
     // Try to acquire new connection (should trigger LRU eviction)
-    let new_conn = manager.acquire(&url).await.unwrap();
+    let new_conn = manager.acquire(&url, None).await.unwrap();
     println!("New connection created (may have triggered LRU eviction): id={}", new_conn.id);
 
     // Verify old connections have been cleaned up
@@ -448,7 +448,7 @@ async fn test_concurrent_connection_access() {
 
         let handle = tokio::spawn(async move {
             let mut m = mgr.lock().await;
-            match m.acquire(&url_clone).await {
+            match m.acquire(&url_clone, None).await {
                 Ok(conn) => {
                     println!("Task {} acquired connection: id={}", i, conn.id);
                     sleep(Duration::from_millis(50)).await;

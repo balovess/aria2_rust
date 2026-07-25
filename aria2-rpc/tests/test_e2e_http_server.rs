@@ -15,9 +15,9 @@ mod common;
 
 use common::start_test_server;
 
-use reqwest::Client;
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use reqwest::Client;
+use serde_json::{Value, json};
 use tokio_tungstenite::connect_async;
 
 // ---------------------------------------------------------------------------
@@ -53,12 +53,7 @@ async fn rpc_call_with_status(
 }
 
 /// Send a JSON-RPC request, assert 200, return the JSON response.
-async fn rpc_call(
-    client: &Client,
-    base_url: &str,
-    method: &str,
-    params: Value,
-) -> Value {
+async fn rpc_call(client: &Client, base_url: &str, method: &str, params: Value) -> Value {
     let (status, body) = rpc_call_with_status(client, base_url, method, params).await;
     assert_eq!(
         status, 200,
@@ -140,8 +135,13 @@ async fn e2e_add_uri_via_post() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.addUri", json![["http://127.0.0.1:1/test"]])
-        .await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.addUri",
+        json![["http://127.0.0.1:1/test"]],
+    )
+    .await;
 
     // The download will fail because the URL is unreachable, but a GID
     // should still be returned (the download is created immediately).
@@ -239,7 +239,13 @@ async fn e2e_auth_valid_token() {
     let (base, _guard) = start_test_server(Some(TEST_TOKEN)).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getVersion", json![["token:my-secret-token"]]).await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.getVersion",
+        json![["token:my-secret-token"]],
+    )
+    .await;
     assert_result(&resp);
 }
 
@@ -248,7 +254,13 @@ async fn e2e_auth_wrong_token() {
     let (base, _guard) = start_test_server(Some(TEST_TOKEN)).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getVersion", json![["token:wrong-token"]]).await;
+    let resp = rpc_call(
+        &client,
+        &base,
+        "aria2.getVersion",
+        json![["token:wrong-token"]],
+    )
+    .await;
     assert_error_code(&resp, -32001);
 }
 
@@ -287,10 +299,7 @@ async fn e2e_cors_preflight() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(resp
-        .headers()
-        .get("access-control-allow-origin")
-        .is_some());
+    assert!(resp.headers().get("access-control-allow-origin").is_some());
 }
 
 #[tokio::test]
@@ -306,10 +315,7 @@ async fn e2e_cors_allowed_origin() {
         .await
         .unwrap();
     assert!(resp.status().is_success());
-    assert!(resp
-        .headers()
-        .get("access-control-allow-origin")
-        .is_some());
+    assert!(resp.headers().get("access-control-allow-origin").is_some());
 }
 
 #[tokio::test]
@@ -530,12 +536,18 @@ async fn e2e_ws_jsonrpc_batch_request() {
         .expect("WS message error");
 
     let text = msg.into_text().expect("expected text message");
-    let resp: Vec<Value> = serde_json::from_str(&text)
-        .expect("batch response should be a JSON array");
+    let resp: Vec<Value> =
+        serde_json::from_str(&text).expect("batch response should be a JSON array");
 
     assert_eq!(resp.len(), 2, "batch response should contain 2 items");
-    assert!(resp[0]["result"].is_object(), "first result should be an object");
-    assert!(resp[1]["result"].is_object(), "second result should be an object");
+    assert!(
+        resp[0]["result"].is_object(),
+        "first result should be an object"
+    );
+    assert!(
+        resp[1]["result"].is_object(),
+        "second result should be an object"
+    );
     assert_eq!(resp[0]["id"], "b1");
     assert_eq!(resp[1]["id"], "b2");
 }
@@ -720,7 +732,9 @@ async fn e2e_full_lifecycle() {
     // 3. Pause — result is [gid]
     let pause = rpc_call(&client, &base, "aria2.pause", json![[&gid]]).await;
     assert_result(&pause);
-    let pause_result = pause["result"].as_array().expect("pause result should be an array");
+    let pause_result = pause["result"]
+        .as_array()
+        .expect("pause result should be an array");
     assert_eq!(
         pause_result.first().and_then(|v| v.as_str()),
         Some(gid.as_str()),

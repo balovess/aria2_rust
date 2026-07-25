@@ -12,7 +12,9 @@
 #![cfg(feature = "bittorrent")]
 
 mod fixtures;
-use fixtures::mock_lpd_peer::{MockLpdPeer, MockLpdServer, make_test_info_hash, build_bep14_announcement};
+use fixtures::mock_lpd_peer::{
+    MockLpdPeer, MockLpdServer, build_bep14_announcement, make_test_info_hash,
+};
 
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::Duration;
@@ -93,7 +95,10 @@ fn test_lpd_announcement_format_spec_compliance() {
     assert!(parsed_port > 0, "Port must be valid");
 
     // 5. Message must end with double CRLF
-    assert!(msg.ends_with("\r\n\r\n"), "Announcement must end with double CRLF");
+    assert!(
+        msg.ends_with("\r\n\r\n"),
+        "Announcement must end with double CRLF"
+    );
 }
 
 /// Test announcement format with uppercase hash (should be normalized)
@@ -145,7 +150,10 @@ fn test_lpd_announcement_format_invalid_rejected() {
     let sender_ip = test_ip();
 
     // Missing Infohash (only Port)
-    assert!(parse_lpd_announcement(b"BT-SEARCH * HTTP/1.1\r\nPort: 6881\r\n\r\n\r\n", sender_ip).is_none());
+    assert!(
+        parse_lpd_announcement(b"BT-SEARCH * HTTP/1.1\r\nPort: 6881\r\n\r\n\r\n", sender_ip)
+            .is_none()
+    );
 
     // Missing Port (only Infohash)
     assert!(
@@ -218,7 +226,10 @@ fn test_lpd_announcement_legacy_format_accepted() {
         b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: abcdef01\n",
         sender_ip,
     );
-    assert!(result.is_some(), "Legacy format should be accepted for backward compat");
+    assert!(
+        result.is_some(),
+        "Legacy format should be accepted for backward compat"
+    );
 
     let peer = result.unwrap();
     assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
@@ -229,7 +240,10 @@ fn test_lpd_announcement_legacy_format_accepted() {
         b"Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n",
         sender_ip,
     );
-    assert!(result2.is_some(), "Legacy format without Token should be accepted");
+    assert!(
+        result2.is_some(),
+        "Legacy format without Token should be accepted"
+    );
 }
 
 /// Test LPD constants are correct per BEP-14
@@ -767,11 +781,8 @@ async fn test_lpd_bittorrent_peer_simulation() {
         .expect("Failed to register");
 
     // Simulate LPD discovering a peer that has the torrent
-    let discovered_peer = LpdPeer::new(
-        &info_hash,
-        6881,
-        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
-    );
+    let discovered_peer =
+        LpdPeer::new(&info_hash, 6881, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)));
 
     // Update peer registry
     manager
@@ -938,13 +949,19 @@ async fn test_lpd_manager_receive_loop_lifecycle() {
     let mut manager = LpdManager::default();
 
     // Initially not running
-    assert!(!manager.is_receive_loop_running(), "Receive loop should not be running initially");
+    assert!(
+        !manager.is_receive_loop_running(),
+        "Receive loop should not be running initially"
+    );
 
     // Start the receive loop (may fail in CI environments without multicast)
     let result = manager.start_receive_loop();
 
     if result.is_ok() {
-        assert!(manager.is_receive_loop_running(), "Receive loop should be running after start");
+        assert!(
+            manager.is_receive_loop_running(),
+            "Receive loop should be running after start"
+        );
 
         // Stop the receive loop
         manager.stop_receive_loop().await;
@@ -963,11 +980,17 @@ async fn test_lpd_manager_receive_loop_cancellation_token() {
 
     if result.is_ok() {
         let token = manager.receive_loop_cancellation_token();
-        assert!(!token.is_cancelled(), "Token should not be cancelled initially");
+        assert!(
+            !token.is_cancelled(),
+            "Token should not be cancelled initially"
+        );
 
         // Cancel via token
         token.cancel();
-        assert!(token.is_cancelled(), "Token should be cancelled after cancel()");
+        assert!(
+            token.is_cancelled(),
+            "Token should be cancelled after cancel()"
+        );
 
         // Wait for task to notice
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1067,7 +1090,11 @@ async fn test_lpd_manager_receive_loop_peer_management_independent() {
 
     // Peers should still be accessible
     let peers = manager.get_peers_for(test_info_hash()).await;
-    assert_eq!(peers.len(), 1, "Peers should still be accessible while receive loop runs");
+    assert_eq!(
+        peers.len(),
+        1,
+        "Peers should still be accessible while receive loop runs"
+    );
 
     manager.stop_receive_loop().await;
 

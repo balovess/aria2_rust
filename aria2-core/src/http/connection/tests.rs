@@ -262,7 +262,7 @@ async fn test_connection_pool_reuse() {
     let url = Url::parse(&format!("http://{}", addr)).unwrap();
 
     // First connection acquisition
-    let conn1 = manager.acquire(&url).await.expect("First acquisition should succeed");
+    let conn1 = manager.acquire(&url, None).await.expect("First acquisition should succeed");
     let _conn1_id = conn1.id;
     assert_eq!(manager.active_count(), 1);
 
@@ -270,7 +270,7 @@ async fn test_connection_pool_reuse() {
     manager.release(conn1.id).await;
 
     // Second connection acquisition (should succeed)
-    let conn2 = manager.acquire(&url).await.expect("Second acquisition should succeed");
+    let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should succeed");
     assert!(manager.active_count() >= 1); // Connection count should be >= 1
 
     // Cleanup
@@ -387,7 +387,7 @@ async fn test_timeout_on_slow_server() {
 
     let _result = timeout(
         config.connect_timeout + Duration::from_millis(50),
-        manager.acquire(&url),
+        manager.acquire(&url, None),
     )
     .await;
     let elapsed = start.elapsed();
@@ -426,14 +426,14 @@ async fn test_max_connections_limit() {
 
     let url = Url::parse(&format!("http://{}", addr)).unwrap();
 
-    let conn1 = manager.acquire(&url).await.unwrap();
+    let conn1 = manager.acquire(&url, None).await.unwrap();
     assert!(manager.active_count() >= 1);
 
-    let conn2 = manager.acquire(&url).await.unwrap();
+    let conn2 = manager.acquire(&url, None).await.unwrap();
     assert!(manager.active_count() >= 2);
 
     // Attempt to acquire a third connection (should fail due to limit)
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
     assert!(result.is_err(), "Should return error when max connection limit exceeded");
 
     // Verify error type
@@ -447,7 +447,7 @@ async fn test_max_connections_limit() {
     // After returning one connection, should be able to acquire again (if pool reuse works)
     manager.release(conn1.id).await;
     // Note: since the connection may still be counted in the pool, we only verify no panic
-    match manager.acquire(&url).await {
+    match manager.acquire(&url, None).await {
         Ok(conn3) => {
             println!("Successfully acquired new connection after release: id={}", conn3.id);
             manager.release(conn3.id).await;

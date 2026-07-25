@@ -136,97 +136,96 @@ fn test_serialization_performance() {
         use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
         use std::collections::BTreeMap;
 
-    // Small dict
-    let mut dict_small = BTreeMap::new();
-    for i in 0..10 {
-        dict_small.insert(
-            format!("key{}", i).into_bytes(),
-            BencodeValue::Int(i as i64),
+        // Small dict
+        let mut dict_small = BTreeMap::new();
+        for i in 0..10 {
+            dict_small.insert(
+                format!("key{}", i).into_bytes(),
+                BencodeValue::Int(i as i64),
+            );
+        }
+        let bencode_small = BencodeValue::Dict(dict_small);
+
+        let time = measure("bencode_encode_small", 10000, || {
+            let _ = bencode_small.encode().len();
+        });
+        println!(
+            "  Small dict (10 keys): {} for 10,000 iterations",
+            format_duration(time)
         );
-    }
-    let bencode_small = BencodeValue::Dict(dict_small);
+        println!("    Per operation: {:?}", time / 10000);
 
-    let time = measure("bencode_encode_small", 10000, || {
-        let _ = bencode_small.encode().len();
-    });
-    println!(
-        "  Small dict (10 keys): {} for 10,000 iterations",
-        format_duration(time)
-    );
-    println!("    Per operation: {:?}", time / 10000);
+        // Medium dict
+        let mut dict_medium = BTreeMap::new();
+        for i in 0..50 {
+            dict_medium.insert(
+                format!("key{}", i).into_bytes(),
+                BencodeValue::Int(i as i64),
+            );
+        }
+        let bencode_medium = BencodeValue::Dict(dict_medium);
 
-    // Medium dict
-    let mut dict_medium = BTreeMap::new();
-    for i in 0..50 {
-        dict_medium.insert(
-            format!("key{}", i).into_bytes(),
-            BencodeValue::Int(i as i64),
+        let time = measure("bencode_encode_medium", 10000, || {
+            let _ = bencode_medium.encode().len();
+        });
+        println!(
+            "  Medium dict (50 keys): {} for 10,000 iterations",
+            format_duration(time)
         );
-    }
-    let bencode_medium = BencodeValue::Dict(dict_medium);
+        println!("    Per operation: {:?}", time / 10000);
 
-    let time = measure("bencode_encode_medium", 10000, || {
-        let _ = bencode_medium.encode().len();
-    });
-    println!(
-        "  Medium dict (50 keys): {} for 10,000 iterations",
-        format_duration(time)
-    );
-    println!("    Per operation: {:?}", time / 10000);
+        // Large dict
+        let mut dict_large = BTreeMap::new();
+        for i in 0..200 {
+            dict_large.insert(
+                format!("key{}", i).into_bytes(),
+                BencodeValue::Int(i as i64),
+            );
+        }
+        let bencode_large = BencodeValue::Dict(dict_large);
 
-    // Large dict
-    let mut dict_large = BTreeMap::new();
-    for i in 0..200 {
-        dict_large.insert(
-            format!("key{}", i).into_bytes(),
-            BencodeValue::Int(i as i64),
+        let time = measure("bencode_encode_large", 1000, || {
+            let _ = bencode_large.encode().len();
+        });
+        println!(
+            "  Large dict (200 keys): {} for 1,000 iterations",
+            format_duration(time)
         );
-    }
-    let bencode_large = BencodeValue::Dict(dict_large);
+        println!("    Per operation: {:?}", time / 1000);
 
-    let time = measure("bencode_encode_large", 1000, || {
-        let _ = bencode_large.encode().len();
-    });
-    println!(
-        "  Large dict (200 keys): {} for 1,000 iterations",
-        format_duration(time)
-    );
-    println!("    Per operation: {:?}", time / 1000);
+        // Test Bencode decoding
+        println!("\n4. Bencode Decoding Performance");
+        println!("---------------------------------");
 
-    // Test Bencode decoding
-    println!("\n4. Bencode Decoding Performance");
-    println!("---------------------------------");
+        let encoded_small = bencode_small.encode();
+        let time = measure("bencode_decode_small", 10000, || {
+            let _ = BencodeValue::decode(&encoded_small);
+        });
+        println!(
+            "  Small dict: {} for 10,000 iterations",
+            format_duration(time)
+        );
+        println!("    Per operation: {:?}", time / 10000);
 
-    let encoded_small = bencode_small.encode();
-    let time = measure("bencode_decode_small", 10000, || {
-        let _ = BencodeValue::decode(&encoded_small);
-    });
-    println!(
-        "  Small dict: {} for 10,000 iterations",
-        format_duration(time)
-    );
-    println!("    Per operation: {:?}", time / 10000);
+        let encoded_medium = bencode_medium.encode();
+        let time = measure("bencode_decode_medium", 10000, || {
+            let _ = BencodeValue::decode(&encoded_medium);
+        });
+        println!(
+            "  Medium dict: {} for 10,000 iterations",
+            format_duration(time)
+        );
+        println!("    Per operation: {:?}", time / 10000);
 
-    let encoded_medium = bencode_medium.encode();
-    let time = measure("bencode_decode_medium", 10000, || {
-        let _ = BencodeValue::decode(&encoded_medium);
-    });
-    println!(
-        "  Medium dict: {} for 10,000 iterations",
-        format_duration(time)
-    );
-    println!("    Per operation: {:?}", time / 10000);
-
-    let encoded_large = bencode_large.encode();
-    let time = measure("bencode_decode_large", 1000, || {
-        let _ = BencodeValue::decode(&encoded_large);
-    });
-    println!(
-        "  Large dict: {} for 1,000 iterations",
-        format_duration(time)
-    );
-    println!("    Per operation: {:?}", time / 1000);
-
+        let encoded_large = bencode_large.encode();
+        let time = measure("bencode_decode_large", 1000, || {
+            let _ = BencodeValue::decode(&encoded_large);
+        });
+        println!(
+            "  Large dict: {} for 1,000 iterations",
+            format_duration(time)
+        );
+        println!("    Per operation: {:?}", time / 1000);
     } // end #[cfg(feature = "bittorrent")]
 
     // Test Config parsing

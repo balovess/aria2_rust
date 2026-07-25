@@ -128,7 +128,11 @@ async fn bt_progress_save_load_roundtrip() {
 
     // C++ binary format does NOT persist the peer list — peers are populated
     // from PeerStorage after loading, not from the .aria2 file.
-    assert_eq!(loaded.peers.len(), 0, "Peers are NOT stored in binary format");
+    assert_eq!(
+        loaded.peers.len(),
+        0,
+        "Peers are NOT stored in binary format"
+    );
 
     // C++ binary format stores uploadLength but NOT downloaded_bytes separately.
     // downloaded_bytes is derived from the bitfield, not persisted.
@@ -830,7 +834,10 @@ async fn bt_lpd_peer_discovery_roundtrip() {
     assert!(ports.contains(&6991), "Should contain port 6991");
 
     // Both peers from 10.x.x.x should be detected as local
-    assert!(discovered.iter().all(|p| p.is_local), "10.x.x.x peers should be local");
+    assert!(
+        discovered.iter().all(|p| p.is_local),
+        "10.x.x.x peers should be local"
+    );
 
     // Adding same peer again should dedup (LpdPeer Hash uses info_hash + addr)
     manager.update_peers(info_hex, vec![peer1.clone()]).await;
