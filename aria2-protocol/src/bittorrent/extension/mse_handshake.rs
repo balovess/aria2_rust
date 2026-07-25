@@ -200,8 +200,21 @@ impl MseHandshake {
         }
     }
 
+    /// Determine whether MSE (Message Stream Encryption) should be negotiated.
+    ///
+    /// MSE is negotiated when the remote peer sets the encryption bit in the
+    /// reserved field. There is no formal BEP for MSE, but the common
+    /// convention (used by libtorrent and C++ aria2) is `reserved[7] & 0x01`.
+    ///
+    /// NOTE: This bit overlaps with DHT (BEP 5), which also uses
+    /// `reserved[7] & 0x01`. In practice this is not an issue because
+    /// the MSE handshake detection is performed *before* the BT handshake
+    /// is processed, using a different detection mechanism (the first byte
+    /// of the stream is checked to see if it's a valid pstrlen=19).
     pub fn should_negotiate(local_supports_mse: bool, remote_reserved: &[u8]) -> bool {
-        local_supports_mse && !remote_reserved.is_empty() && (remote_reserved[0] & 0x01) != 0
+        local_supports_mse
+            && remote_reserved.len() >= 8
+            && (remote_reserved[7] & 0x01) != 0
     }
 
     pub fn phase(&self) -> &MseHandshakePhase {
@@ -260,11 +273,20 @@ mod tests {
 
     #[test]
     fn test_should_negotiate_combinations() {
-        assert!(!MseHandshake::should_negotiate(true, &[0x00]));
-        assert!(MseHandshake::should_negotiate(true, &[0x01]));
-        assert!(!MseHandshake::should_negotiate(false, &[0x01]));
-        assert!(MseHandshake::should_negotiate(true, &[0xFF]));
+        // reserved field is 8 bytes; MSE bit is reserved[7] bit 0
+        let reserved_all_zero = [0u8; 8];
+        let mut reserved_mse_set = [0u8; 8];
+        reserved_mse_set[7] = 0x01;
+        let mut reserved_all_set = [0u8; 8];
+        reserved_all_set[7] = 0xFF;
+
+        assert!(!MseHandshake::should_negotiate(true, &reserved_all_zero));
+        assert!(MseHandshake::should_negotiate(true, &reserved_mse_set));
+        assert!(!MseHandshake::should_negotiate(false, &reserved_mse_set));
+        assert!(MseHandshake::should_negotiate(true, &reserved_all_set));
         assert!(!MseHandshake::should_negotiate(true, &[]));
+        // Short array (< 8 bytes) should return false
+        assert!(!MseHandshake::should_negotiate(true, &[0x01]));
     }
 
     #[test]

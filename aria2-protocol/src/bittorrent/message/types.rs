@@ -15,11 +15,13 @@ pub enum MessageType {
     Piece = 7,
     Cancel = 8,
     Port = 9,
-    AllowedFast = 11,
-    Suggest = 12,
-    Reject = 13,
+    // BEP 6 Fast Extension IDs — must match the standard wire protocol:
+    //   Suggest=13, HaveAll=14, HaveNone=15, Reject=16, AllowedFast=17
+    Suggest = 13,
     HaveAll = 14,
     HaveNone = 15,
+    Reject = 16,
+    AllowedFast = 17,
     /// BEP 10: Extension Protocol. ID = 20.
     /// Used for ut_metadata, ut_pex, and other extensions.
     Extended = 20,
@@ -39,11 +41,11 @@ impl TryFrom<u8> for MessageType {
             7 => Ok(MessageType::Piece),
             8 => Ok(MessageType::Cancel),
             9 => Ok(MessageType::Port),
-            11 => Ok(MessageType::AllowedFast),
-            12 => Ok(MessageType::Suggest),
-            13 => Ok(MessageType::Reject),
+            13 => Ok(MessageType::Suggest),
             14 => Ok(MessageType::HaveAll),
             15 => Ok(MessageType::HaveNone),
+            16 => Ok(MessageType::Reject),
+            17 => Ok(MessageType::AllowedFast),
             20 => Ok(MessageType::Extended),
             n => Err(format!("Invalid message ID: {}", n)),
         }
@@ -148,11 +150,11 @@ impl BtMessage {
             BtMessage::Piece { .. } => Some(7),
             BtMessage::Cancel { .. } => Some(8),
             BtMessage::Port { .. } => Some(9),
-            BtMessage::AllowedFast { .. } => Some(11),
-            BtMessage::Reject { .. } => Some(13),
-            BtMessage::Suggest { .. } => Some(12),
+            BtMessage::Suggest { .. } => Some(13),
             BtMessage::HaveAll => Some(14),
             BtMessage::HaveNone => Some(15),
+            BtMessage::Reject { .. } => Some(16),
+            BtMessage::AllowedFast { .. } => Some(17),
             BtMessage::Extended { .. } => Some(20),
         }
     }

@@ -374,18 +374,19 @@ async fn test_change_option_rejects_startup_only_with_group_man() {
     let (man, gid_hex) = setup_group_man_with_group().await;
     let engine = RpcEngine::new().with_group_man(man);
 
-    // `dir` is a known option (in VALID_OPTION_KEYS) but startup-only, so
-    // changeOption must reject it with InvalidParams even when a running
-    // group exists.
+    // `enable-rpc` is NOT in either RUNTIME_CHANGEABLE_OPTIONS or
+    // RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS (it has no setChangeOption
+    // or setChangeOptionForReserved in C++), so changeOption must reject
+    // it with InvalidParams even when a running group exists.
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
-        serde_json::json!([gid_hex, {"dir": "/tmp/downloads"}]),
+        serde_json::json!([gid_hex, {"enable-rpc": "true"}]),
     )
     .with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(
         resp.is_error(),
-        "changeOption with a startup-only key should fail"
+        "changeOption with a non-changeable key should fail"
     );
     assert_eq!(
         resp.error.unwrap().code,

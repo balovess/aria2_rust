@@ -105,7 +105,10 @@ pub mod validation;
 // This avoids forcing consumers to depend on internal module paths.
 #[cfg(feature = "bittorrent")]
 pub use engine::multi_file_layout::TorrentFileEntry;
-pub use request::request_group::{DownloadStatus, RUNTIME_CHANGEABLE_OPTIONS};
+pub use request::request_group::{
+    ChangeableKind, DownloadStatus, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
+    RUNTIME_CHANGEABLE_OPTIONS, is_option_changeable,
+};
 
 #[cfg(test)]
 mod integration_tests_j2_j5;

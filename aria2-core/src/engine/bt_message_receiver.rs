@@ -533,8 +533,8 @@ mod tests {
         let info_hash = [0x99; 20];
         let peer_id = [0xAA; 20];
 
-        // Create handshake with MSE extension enabled
-        let handshake = Handshake::new(&info_hash, &peer_id).with_extensions(true);
+        // Create handshake with DHT extension enabled
+        let handshake = Handshake::new(&info_hash, &peer_id).with_dht(true);
         let bytes = handshake.to_bytes();
 
         let mut receiver = BtMessageReceiver::new(info_hash);
@@ -542,10 +542,12 @@ mod tests {
 
         match result {
             HandshakeResult::Completed { reserved_bytes, .. } => {
-                // MSE bit should be set in reserved[0]
-                assert_ne!(reserved_bytes[0] & 0x01, 0);
-                // DHT bit should be set in reserved[5]
-                assert_ne!(reserved_bytes[5] & 0x02, 0);
+                // Fast Extension bit should be set in reserved[7] (bit 2)
+                assert_ne!(reserved_bytes[7] & 0x04, 0);
+                // Extended Messaging bit should be set in reserved[5] (bit 4)
+                assert_ne!(reserved_bytes[5] & 0x10, 0);
+                // DHT bit should be set in reserved[7] (bit 0)
+                assert_ne!(reserved_bytes[7] & 0x01, 0);
             }
             _ => panic!("Expected Completed, got {:?}", result),
         }

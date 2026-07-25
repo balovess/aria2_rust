@@ -398,12 +398,15 @@ async fn test_change_option_accepts_valid_keys() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    // Only runtime-changeable options are accepted by changeOption; startup-
-    // only options like `split` and `dir` are rejected with InvalidParams.
+    // Only the 7 options with setChangeOption(true) in C++ are accepted
+    // for immediate change on active downloads. These are: force-save,
+    // save-not-found, max-download-limit, bt-max-peers,
+    // bt-remove-unselected-file, bt-request-peer-speed-limit,
+    // max-upload-limit.
     let valid_changes = serde_json::json!({
         "max-download-limit": 1048576,
         "max-upload-limit": 512000,
-        "max-retries": 5
+        "bt-max-peers": 60
     });
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
@@ -430,8 +433,8 @@ async fn test_change_option_accepts_valid_keys() {
         "max-upload-limit should be stored"
     );
     assert!(
-        opts.contains_key("max-retries"),
-        "max-retries should be stored"
+        opts.contains_key("bt-max-peers"),
+        "bt-max-peers should be stored"
     );
 }
 

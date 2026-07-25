@@ -430,9 +430,13 @@ impl BtPeerInteractive {
                 offset,
                 length,
             } => {
-                // BEP 6: peer rejected our request
-                // Remove the matching outstanding request slot
-                self.handler.on_piece_received(index, offset, length);
+                // BEP 6: peer rejected our request.
+                // Remove the matching outstanding request slot — do NOT treat
+                // this like a Piece message (the data was NOT received).
+                // Mirrors C++ `BtRejectMessage::doReceivedAction()`.
+                if let Err(e) = self.handler.on_reject_received(index, offset, length) {
+                    debug!("Reject handler error: {}", e);
+                }
                 trace!(
                     "Dispatched Reject(piece={}, offset={}, len={})",
                     index, offset, length
@@ -449,7 +453,13 @@ impl BtPeerInteractive {
                 trace!("Dispatched HaveAll message");
             }
             BtMessage::HaveNone => {
-                // BEP 6: peer has no pieces
+                // BEP 6: peer has no pieces.
+                // Clear the peer's bitfield to reflect this.
+                // Mirrors C++ `BtHaveNoneMessage::doReceivedAction()`.
+                if let Some(ref mut res) = conn.session_resource {
+                    res.clear_bitfield();
+                }
+                conn.seeder = false;
                 trace!("Dispatched HaveNone message");
             }
             BtMessage::Extended { ext_id, ref payload } => {

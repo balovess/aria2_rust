@@ -144,6 +144,17 @@ impl PeerSessionResource {
         self.set_all_bitfield();
     }
 
+    /// Clear the entire bitfield (peer has no pieces).
+    ///
+    /// Used after receiving a HaveNone message (BEP 6) to reset the
+    /// peer's piece availability.
+    /// Mirrors C++ `BtHaveNoneMessage::doReceivedAction()`.
+    pub fn clear_bitfield(&mut self) {
+        for byte in &mut self.bitfield {
+            *byte = 0;
+        }
+    }
+
     /// Check whether the peer is a seeder (has all pieces).
     pub fn is_seeder(&self) -> bool {
         // Count set bits and compare with num_pieces

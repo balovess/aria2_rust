@@ -401,7 +401,8 @@ mod tests {
 
     #[test]
     fn test_a6_06_parse_allowed_fast_dispatch_correct_fields() {
-        let mut data = vec![0, 0, 0, 5, 11];
+        // BEP 6: AllowedFast has wire ID 17
+        let mut data = vec![0, 0, 0, 5, 17];
         data.extend_from_slice(&(99u32).to_be_bytes());
         let msg = parse_message(&data).unwrap().unwrap();
         assert!(matches!(msg, BtMessage::AllowedFast { .. }));
@@ -412,7 +413,8 @@ mod tests {
 
     #[test]
     fn test_a6_07_parse_reject_dispatch_correct_fields() {
-        let mut data = vec![0, 0, 0, 13, 13];
+        // BEP 6: Reject has wire ID 16
+        let mut data = vec![0, 0, 0, 13, 16];
         data.extend_from_slice(&(5u32).to_be_bytes());
         data.extend_from_slice(&(200u32).to_be_bytes());
         data.extend_from_slice(&(8192u32).to_be_bytes());

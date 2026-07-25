@@ -32,7 +32,7 @@ impl EncryptedConnection {
         .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
         let my_peer_id = crate::bittorrent::peer::id::generate_peer_id();
-        let handshake = Handshake::new(info_hash, &my_peer_id).with_extensions(true);
+        let handshake = Handshake::new(info_hash, &my_peer_id).with_dht(true);
         let handshake_bytes = handshake.to_bytes();
 
         stream
@@ -290,10 +290,17 @@ mod tests {
 
     #[test]
     fn test_should_negotiate_all_combos() {
-        assert!(!MseHandshake::should_negotiate(true, &[0x00]));
-        assert!(MseHandshake::should_negotiate(true, &[0x01]));
-        assert!(MseHandshake::should_negotiate(true, &[0xFF]));
-        assert!(!MseHandshake::should_negotiate(false, &[0x01]));
+        // MSE reserved bit is at reserved[7] bit 0
+        let reserved_zero = [0u8; 8];
+        let mut reserved_mse = [0u8; 8];
+        reserved_mse[7] = 0x01;
+        let mut reserved_ff = [0u8; 8];
+        reserved_ff[7] = 0xFF;
+
+        assert!(!MseHandshake::should_negotiate(true, &reserved_zero));
+        assert!(MseHandshake::should_negotiate(true, &reserved_mse));
+        assert!(MseHandshake::should_negotiate(true, &reserved_ff));
+        assert!(!MseHandshake::should_negotiate(false, &reserved_mse));
         assert!(!MseHandshake::should_negotiate(true, &[]));
     }
 

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use aria2_core::RUNTIME_CHANGEABLE_OPTIONS;
+use aria2_core::request::request_group::{is_option_changeable, ChangeableKind};
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
@@ -229,15 +229,14 @@ impl RpcEngine {
 
     /// Handle `aria2.changeOption` - Modify per-task options.
     ///
-    /// Only runtime-changeable options (see [`RUNTIME_CHANGEABLE_OPTIONS`])
-    /// may be modified via this method; startup-only options are rejected
-    /// with `InvalidParams`. Accepted changes are:
-    ///
-    /// 1. Propagated to the running `RequestGroup` via `RequestGroupMan`
-    ///    (when the engine is wired to a live download engine), so they take
-    ///    effect immediately on the in-flight download.
-    /// 2. Stored in `task_opts` so `aria2.getOption` returns the current
-    ///    values and so they persist across session reloads.
+    /// Matches C++ `ChangeOptionRpcMethod::process()`:
+    /// - For **active** downloads: only options with `setChangeOption(true)`
+    ///   take effect immediately. Options with `setChangeOptionForReserved(true)`
+    ///   are stored as "pending" and applied when the download is paused/restarted.
+    ///   Other options are rejected with `InvalidParams`.
+    /// - For **reserved/waiting** downloads: options with
+    ///   `setChangeOptionForReserved(true)` take effect immediately.
+    ///   Other options are rejected with `InvalidParams`.
     pub async fn handle_change_option(
         &self,
         req: &JsonRpcRequest,
@@ -245,40 +244,70 @@ impl RpcEngine {
         let gid: String = req.get_param(0)?;
         let changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
 
-        // Validate: only runtime-changeable options are accepted.
-        for key in changes.keys() {
-            if !RUNTIME_CHANGEABLE_OPTIONS.contains(&key.as_str()) {
-                return Err(JsonRpcError::InvalidParams(format!(
-                    "Option '{}' cannot be changed at runtime",
-                    key
-                )));
-            }
-        }
-
-        // Propagate to the running RequestGroup (if any). The GID may
-        // not be known to RequestGroupMan yet (e.g., the task was added via
-        // RPC but the download has not started); in that case we still store
-        // the change in task_opts so it applies when the task starts.
-        // `changes` is cloned because we also consume it for task_opts below.
-        if let Some(ref group_man) = self.group_man {
+        // Determine whether the download is active. If we can't find it in
+        // group_man, assume it's reserved (not yet started) — this is safe
+        // because options for reserved downloads are a superset.
+        let is_active = if let Some(ref group_man) = self.group_man {
             let gm = group_man.read().await;
-            if let Err(e) = gm.update_group_options(&gid, changes.clone()) {
-                // "not found" means the task isn't registered in group_man yet
-                // — that's acceptable, the change will apply from task_opts on
-                // start. Any other error is propagated as InvalidParams.
-                if !e.contains("not found") {
-                    return Err(JsonRpcError::InvalidParams(e));
+            gm.is_group_active(&gid).unwrap_or(false)
+        } else {
+            false
+        };
+
+        // Classify each option key and partition into immediate/pending.
+        let mut immediate = HashMap::new();
+        let mut pending = HashMap::new();
+        for (key, value) in &changes {
+            match is_option_changeable(key.as_str(), is_active) {
+                ChangeableKind::Immediate => {
+                    immediate.insert(key.clone(), value.clone());
                 }
-                tracing::debug!(
-                    "changeOption for GID {} not applied to a running group (not registered yet); storing in task_opts only",
-                    gid
-                );
+                ChangeableKind::Pending => {
+                    pending.insert(key.clone(), value.clone());
+                }
+                ChangeableKind::NotChangeable => {
+                    return Err(JsonRpcError::InvalidParams(format!(
+                        "Option '{}' cannot be changed via changeOption",
+                        key
+                    )));
+                }
             }
         }
 
-        // Persist in task_opts for getOption retrieval and session
-        // reload. This runs after propagation so a failed propagate (non-
-        // not-found error) returns early without mutating task_opts.
+        // Apply immediate options to the running RequestGroup.
+        if !immediate.is_empty() {
+            if let Some(ref group_man) = self.group_man {
+                let gm = group_man.read().await;
+                if let Err(e) = gm.update_group_options(&gid, immediate.clone()) {
+                    if !e.contains("not found") {
+                        return Err(JsonRpcError::InvalidParams(e));
+                    }
+                    tracing::debug!(
+                        "changeOption for GID {} not applied to a running group (not registered yet); storing in task_opts only",
+                        gid
+                    );
+                }
+            }
+        }
+
+        // Store pending options (to be applied on next pause/restart).
+        // In C++ aria2, these trigger a pause + restart cycle.
+        if !pending.is_empty() {
+            tracing::info!(
+                "GID {}: {} options stored as pending (applied on pause/restart): {:?}",
+                gid,
+                pending.len(),
+                pending.keys().collect::<Vec<_>>()
+            );
+            // TODO: Implement pause + restart mechanism matching C++:
+            //   group->setPendingOption(pendingOption);
+            //   if (pauseRequestGroup(group, false, false)) {
+            //       group->setRestartRequested(true);
+            //   }
+        }
+
+        // Persist all changes in task_opts for getOption retrieval and
+        // session reload.
         let mut task_opts = self.task_opts.write().await;
         let entry = task_opts.entry(gid).or_insert_with(HashMap::new);
         for (k, v) in changes {

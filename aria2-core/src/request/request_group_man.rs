@@ -168,6 +168,20 @@ impl RequestGroupMan {
         self.groups.get(&gid).map(|v| v.clone())
     }
 
+    /// Check whether a group is currently in active state.
+    ///
+    /// Used by the RPC `changeOption` handler to determine which option
+    /// change policy applies (C++ distinguishes between
+    /// `gatherChangeableOption` for active downloads and
+    /// `gatherChangeableOptionForReserved` for waiting/reserved ones).
+    pub fn is_group_active(&self, gid_hex: &str) -> std::result::Result<bool, String> {
+        let group = self
+            .group_by_hex(gid_hex)
+            .ok_or_else(|| format!("GID {} not found", gid_hex))?;
+        let g = group.recover();
+        Ok(g.status().is_active())
+    }
+
     pub fn list_groups(&self) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
         self.groups.iter().map(|v| v.clone()).collect()
     }
