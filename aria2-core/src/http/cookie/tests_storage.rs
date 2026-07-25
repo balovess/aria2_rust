@@ -1,8 +1,7 @@
 //! Tests for CookieStorage.
 
 use std::fs;
-use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use super::storage::CookieStorage;
 use super::Cookie;

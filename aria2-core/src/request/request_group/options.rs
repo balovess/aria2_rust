@@ -2,15 +2,18 @@
 ///
 /// Matches the original C++ aria2 behaviour: almost all options are
 /// runtime-changeable except a short exclusion list (dry-run,
-/// parameterized-uri, pause, piece-length, rpc-save-upload-metadata).
+/// enable-rpc, parameterized-uri, pause, rpc-save-upload-metadata).
 /// Keep in sync with [`RequestGroup::update_option`].
 pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     // Connection / parallelism
     "split",
     "max-connection-per-server",
+    // Connection timeout
+    "connect-timeout",
     // Speed limits (take effect immediately)
     "max-download-limit",
     "max-upload-limit",
+    "lowest-speed-limit",
     // Retry
     "max-retries",
     "retry-wait",
@@ -35,6 +38,10 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     "https-proxy",
     "ftp-proxy",
     "no-proxy",
+    // FTP
+    "ftp-pasv",
+    "ftp-reuse-connection",
+    "remote-time",
     // BitTorrent
     "bt-force-encrypt",
     "bt-require-crypto",
@@ -46,6 +53,10 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-prioritize-piece",
     "seed-time",
     "seed-ratio",
+    "bt-stop-timeout",
+    "disable-ipv6",
+    "listen-port",
+    "bt-enable-lpd",
     // DHT
     "enable-dht",
     "dht-listen-port",
@@ -55,6 +66,14 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     // uTP
     "enable-utp",
     "utp-listen-port",
+    // Metalink
+    "metalink-location",
+    "metalink-preferred-protocol",
+    "select-file",
+    "piece-length",
+    "metalink-enable-unique-protocol",
+    // Chunk checksum
+    "realtime-chunk-checksum",
 ];
 
 #[derive(Debug, Clone)]
@@ -77,7 +96,9 @@ pub struct DownloadOptions {
     /// Has no effect on Linux. Defaults to `false` (matches
     /// `constants::DEFAULT_SECURE_FALLOC`).
     pub secure_falloc: bool,
-    pub seed_time: Option<u64>,
+    /// Seeding time in seconds. C++ aria2 stores this as a float (minutes x 60).
+    pub seed_time: Option<f64>,
+    /// Seeding ratio threshold. Default: 1.0 (matches C++ PREF_SEED_RATIO default).
     pub seed_ratio: Option<f64>,
     pub checksum: Option<(String, String)>,
     pub cookie_file: Option<String>,
@@ -145,6 +166,85 @@ pub struct DownloadOptions {
     /// Override `Referer` header. Also injected into the `header` list by
     /// [`DownloadOptions::parsed_headers`] when set.
     pub referer: Option<String>,
+
+    // ------------------------------------------------------------------
+    // Metalink options (C++ PREF_METALINK_*)
+    // ------------------------------------------------------------------
+    /// Preferred download location (e.g. "JP") from metalink:resources.
+    /// Maps to C++ `PREF_METALINK_LOCATION`.
+    pub metalink_location: Option<String>,
+    /// Preferred protocol for metalink downloads: "http", "https", "ftp", or "none".
+    /// Maps to C++ `PREF_METALINK_PREFERRED_PROTOCOL`.
+    pub metalink_preferred_protocol: Option<String>,
+    /// Select specific files from a metalink by segment index (e.g. "1-3,5").
+    /// Maps to C++ `PREF_SELECT_FILE`.
+    pub select_file: Option<String>,
+    /// Piece length in bytes for metalink downloads. Default: 1 MiB (1_048_576).
+    /// Maps to C++ `PREF_PIECE_LENGTH`.
+    pub piece_length: Option<u64>,
+    /// Whether to use only the unique protocol per host when selecting mirrors
+    /// from a metalink file. Default: `true`.
+    /// Maps to C++ `PREF_METALINK_ENABLE_UNIQUE_PROTOCOL`.
+    pub metalink_enable_unique_protocol: bool,
+
+    // ------------------------------------------------------------------
+    // FTP options (C++ PREF_* for FTP connections)
+    // ------------------------------------------------------------------
+    /// TCP connection timeout in seconds. Default: 60.
+    /// Maps to C++ `PREF_CONNECT_TIMEOUT`.
+    pub connect_timeout: Option<u64>,
+    /// Idle time in seconds before the first byte is received. Default: 10.
+    /// Maps to C++ `PREF_STARTUP_IDLE_TIME`.
+    pub startup_idle_time: Option<u64>,
+    /// Lowest download speed limit in bytes/sec. Downloads slower than this
+    /// for `connect_timeout` seconds are aborted. Default: 0 (no limit).
+    /// Maps to C++ `PREF_LOWEST_SPEED_LIMIT`.
+    pub lowest_speed_limit: Option<u64>,
+    /// Use passive mode for FTP. Default: `true`.
+    /// Maps to C++ `PREF_FTP_PASV`.
+    pub ftp_pasv: bool,
+    /// Apply the remote file's timestamp to the local file. Default: `false`.
+    /// Maps to C++ `PREF_REMOTE_TIME`.
+    pub remote_time: bool,
+    /// Dry-run mode: only probe and report, do not actually download. Default: `false`.
+    /// Maps to C++ `PREF_DRY_RUN`.
+    pub dry_run: bool,
+    /// Reuse existing FTP connections. Default: `true`.
+    /// Maps to C++ `PREF_FTP_REUSE_CONNECTION`.
+    pub ftp_reuse_connection: bool,
+
+    // ------------------------------------------------------------------
+    // Download options (C++ PREF_* for download behaviour)
+    // ------------------------------------------------------------------
+    /// Verify piece checksums in real time as data arrives. Default: `true`.
+    /// Maps to C++ `PREF_REALTIME_CHUNK_CHECKSUM`.
+    pub realtime_chunk_checksum: bool,
+    /// Timeout in seconds after which a BitTorrent download with zero peer
+    /// count is stopped. Default: 0 (disabled).
+    /// Maps to C++ `PREF_BT_STOP_TIMEOUT`.
+    pub bt_stop_timeout: Option<u64>,
+
+    // ------------------------------------------------------------------
+    // BitTorrent extended options (C++ PREF_BT_* / PREF_*)
+    // ------------------------------------------------------------------
+    /// Disable IPv6 for BitTorrent connections. Default: `false`.
+    /// Maps to C++ `PREF_DISABLE_IPV6`.
+    pub disable_ipv6: bool,
+    /// Port range for incoming BitTorrent connections (e.g. "6881-6999").
+    /// Maps to C++ `PREF_LISTEN_PORT`.
+    pub listen_port: Option<String>,
+    /// Enable Local Peer Discovery (LPD) for BitTorrent. Default: `false`.
+    /// Maps to C++ `PREF_BT_ENABLE_LPD`.
+    pub bt_enable_lpd: bool,
+    /// Network interface for LPD announcements. Default: none (auto-detect).
+    /// Maps to C++ `PREF_BT_LPD_INTERFACE`.
+    pub bt_lpd_interface: Option<String>,
+    /// Enable JSON-RPC/XML-RPC server. Default: `false`.
+    /// Maps to C++ `PREF_ENABLE_RPC`.
+    pub enable_rpc: bool,
+    /// Start downloads in a paused state. Default: `false`.
+    /// Maps to C++ `PREF_PAUSE`.
+    pub pause: bool,
 }
 
 // Manual Default impl: `enable_dht` and `enable_public_trackers` default to
@@ -163,7 +263,7 @@ impl Default for DownloadOptions {
             mmap_threshold: None,
             secure_falloc: false,
             seed_time: None,
-            seed_ratio: None,
+            seed_ratio: Some(1.0),
             checksum: None,
             cookie_file: None,
             cookies: None,
@@ -192,6 +292,30 @@ impl Default for DownloadOptions {
             header: Vec::new(),
             user_agent: None,
             referer: None,
+            // Metalink
+            metalink_location: None,
+            metalink_preferred_protocol: None,
+            select_file: None,
+            piece_length: None,
+            metalink_enable_unique_protocol: true,
+            // FTP
+            connect_timeout: None,
+            startup_idle_time: None,
+            lowest_speed_limit: None,
+            ftp_pasv: true,
+            remote_time: false,
+            dry_run: false,
+            ftp_reuse_connection: true,
+            // Download
+            realtime_chunk_checksum: true,
+            bt_stop_timeout: None,
+            // BitTorrent extended
+            disable_ipv6: false,
+            listen_port: None,
+            bt_enable_lpd: false,
+            bt_lpd_interface: None,
+            enable_rpc: false,
+            pause: false,
         }
     }
 }

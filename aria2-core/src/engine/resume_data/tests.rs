@@ -1461,7 +1461,7 @@ async fn test_integration_bt_request_group_extraction() {
         ],
         {
             DownloadOptions {
-                seed_time: Some(3600),
+                seed_time: Some(3600.0),
                 seed_ratio: Some(1.5),
                 enable_dht: true,
                 ..DownloadOptions::default()

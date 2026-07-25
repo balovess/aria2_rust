@@ -1,4 +1,4 @@
-﻿//! HTTP proxy support (CONNECT tunnel and forward proxy)
+//! HTTP proxy support (CONNECT tunnel and forward proxy)
 //!
 //! Implements HTTP proxy functionality matching the C++ aria2
 //! AbstractProxyRequestCommand, AbstractProxyResponseCommand,
@@ -29,7 +29,7 @@ pub mod tunnel;
 mod tests;
 
 // Re-export key types for convenient access
-pub use config::HttpProxyConfig;
+pub use config::{HttpProxyConfig, ProxyType};
 pub use forward::{HttpProxyForward, forward_get_with_auth};
 pub use response::ProxyResponse;
 pub use tunnel::HttpProxyTunnel;

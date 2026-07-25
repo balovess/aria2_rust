@@ -21,11 +21,10 @@
 //! | `BtProgress` | State persisted by `DefaultBtProgressInfoFile::save()` |
 //! | `DownloadStats` | Fields in `DownloadContext` / `BtRuntime` |
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::error::{Aria2Error, Result};
 
@@ -261,16 +260,10 @@ impl BtProgressManager {
         // Atomic write: write to temp file, then rename
         let temp_path = path.with_extension("aria2.tmp");
         std::fs::write(&temp_path, &data).map_err(|e| {
-            Aria2Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to write temp progress file: {}", e),
-            ))
+            Aria2Error::Io(format!("Failed to write temp progress file: {}", e))
         })?;
         std::fs::rename(&temp_path, &path).map_err(|e| {
-            Aria2Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to rename temp progress file: {}", e),
-            ))
+            Aria2Error::Io(format!("Failed to rename temp progress file: {}", e))
         })?;
 
         debug!(
@@ -320,10 +313,7 @@ impl BtProgressManager {
         }
 
         let data = std::fs::read(&path).map_err(|e| {
-            Aria2Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to read progress file: {}", e),
-            ))
+            Aria2Error::Io(format!("Failed to read progress file: {}", e))
         })?;
 
         if data.is_empty() {
@@ -351,10 +341,7 @@ impl BtProgressManager {
         let path = self.get_progress_file_path(info_hash);
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| {
-                Aria2Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to remove progress file: {}", e),
-                ))
+                Aria2Error::Io(format!("Failed to remove progress file: {}", e))
             })?;
         }
         Ok(())

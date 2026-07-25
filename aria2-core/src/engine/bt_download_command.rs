@@ -205,10 +205,10 @@ impl BtDownloadCommand {
         }
 
         let seed_time = options.seed_time.and_then(|t| {
-            if t == 0 {
+            if t == 0.0 {
                 None
             } else {
-                Some(std::time::Duration::from_secs(t))
+                Some(std::time::Duration::from_secs_f64(t))
             }
         });
         let seed_ratio = options.seed_ratio.filter(|&r| r > 0.0);
@@ -305,7 +305,7 @@ impl BtDownloadCommand {
             started: false,
             completed_bytes: 0,
             torrent_data: torrent_bytes.to_vec(),
-            seed_enabled: options.seed_time.unwrap_or(0) > 0
+            seed_enabled: options.seed_time.unwrap_or(0.0) > 0.0
                 || options.seed_ratio.unwrap_or(0.0) > 0.0,
             seed_time,
             seed_ratio,
@@ -396,7 +396,7 @@ impl BtDownloadCommand {
     }
 
     pub fn on_piece_received(&mut self, peer_idx: usize, bytes: u64) {
-        on_piece_received(&mut self.choking_algo, peer_idx, bytes);
+        on_piece_received(&mut self.choking_algo, peer_idx, bytes as u32);
     }
 
     /// Explicitly mark a peer as snubbed (algorithm-level snubbing).

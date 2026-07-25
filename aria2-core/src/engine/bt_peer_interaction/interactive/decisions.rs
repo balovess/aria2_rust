@@ -8,7 +8,6 @@ use aria2_protocol::bittorrent::message::types::BtMessage;
 use crate::engine::bt_message_dispatcher::InactiveReason;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_request_factory::{BtRequestFactory, PieceBlockRequest};
-use crate::engine::extension_registry::ExtensionRegistry;
 use tracing::{debug, trace, warn};
 
 use super::super::piece_provider::PieceProvider;

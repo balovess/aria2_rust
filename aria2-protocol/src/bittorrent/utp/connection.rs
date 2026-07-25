@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::packet::{PacketType, UtpPacket, UtpPacketError};
-use super::timer::TimerType;
 
 /// Connection state in the uTP state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +63,8 @@ pub enum ConnectionError {
 }
 
 /// Maximum number of retries for connection establishment
+/// TODO: will be used once connection retry logic is implemented
+#[allow(dead_code)]
 const MAX_CONNECT_RETRIES: u32 = 3;
 
 /// Default initial congestion window
@@ -108,6 +109,8 @@ pub struct UtpConnection {
     srtt: Duration,
 
     /// Round-trip time variation
+    // TODO: will be used for RTT variance calculation in RTO update (RFC 6298)
+    #[allow(dead_code)]
     rtt_var: Duration,
 
     /// Retransmission timeout
@@ -123,6 +126,8 @@ pub struct UtpConnection {
     last_activity: Instant,
 
     /// Number of connection retries
+    // TODO: will be used once connection retry logic is implemented
+    #[allow(dead_code)]
     connect_retries: u32,
 
     /// Receive window size

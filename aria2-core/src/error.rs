@@ -20,6 +20,9 @@ pub enum Aria2Error {
     #[error("Recoverable error: {0}")]
     Recoverable(#[from] RecoverableError),
 
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("Fatal error: {0}")]
     Fatal(#[from] FatalError),
 }
@@ -70,6 +73,9 @@ pub enum RecoverableError {
 
     #[error("FTP server does not support resuming (CANNOT_RESUME)")]
     CannotResume,
+
+    #[error("FTP protocol error: {message}")]
+    FtpProtocolError { message: String },
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]

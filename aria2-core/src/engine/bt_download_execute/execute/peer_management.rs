@@ -86,7 +86,7 @@ impl BtDownloadCommand {
 
             let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
                 port: dht_port.unwrap_or(0),
-                dht_file_path,
+                dht_file_path: dht_file_path.map(std::path::PathBuf::from),
                 ..Default::default()
             };
 
@@ -95,12 +95,7 @@ impl BtDownloadCommand {
                     // Add custom bootstrap nodes to routing table
                     if !bootstrap_nodes.is_empty() {
                         for addr in &bootstrap_nodes {
-                            use aria2_protocol::bittorrent::dht::node::DhtNode;
-                            use rand::RngCore;
-                            let mut id = [0u8; 20];
-                            rand::thread_rng().fill_bytes(&mut id);
-                            let node = DhtNode::new(id, *addr);
-                            engine.add_node(node).await;
+                            engine.add_node(*addr).await;
                         }
                         tracing::info!(
                             "[BT] Added {} custom DHT bootstrap nodes",
@@ -121,30 +116,31 @@ impl BtDownloadCommand {
         }
 
         if let Some(ref engine) = self.dht_engine {
-            let result = engine.find_peers(info_hash_raw).await;
-            if !result.peers.is_empty() {
-                let before = peer_addrs.len();
-                for addr in &result.peers {
-                    let ip_str = addr.ip().to_string();
-                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                        &ip_str,
-                        addr.port(),
-                    );
-                    if !peer_addrs
-                        .iter()
-                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
-                    {
-                        peer_addrs.push(paddr);
+            if let Ok(result) = engine.find_peers(info_hash_raw).await {
+                if !result.peers.is_empty() {
+                    let before = peer_addrs.len();
+                    for addr in &result.peers {
+                        let ip_str = addr.ip().to_string();
+                        let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                            &ip_str,
+                            addr.port(),
+                        );
+                        if !peer_addrs
+                            .iter()
+                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                        {
+                            peer_addrs.push(paddr);
+                        }
                     }
+                    tracing::info!(
+                        "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
+                        peer_addrs.len() - before,
+                        peer_addrs.len(),
+                        result.nodes_contacted
+                    );
+                } else {
+                    debug!("[BT] DHT find_peers returned no peers");
                 }
-                tracing::info!(
-                    "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
-                    peer_addrs.len() - before,
-                    peer_addrs.len(),
-                    result.nodes_contacted
-                );
-            } else {
-                debug!("[BT] DHT find_peers returned no peers");
             }
         }
 

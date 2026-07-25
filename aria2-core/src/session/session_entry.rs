@@ -862,7 +862,7 @@ http://example.com/file
             max_upload_limit: Some(51200),
             dir: Some("/downloads".to_string()),
             out: Some("file.bin".to_string()),
-            seed_time: Some(3600),
+            seed_time: Some(3600.0),
             seed_ratio: Some(2.0),
             // File allocation
             file_allocation: Some("trunc".to_string()),
@@ -903,6 +903,30 @@ http://example.com/file
             header: vec!["X-Custom: foo".to_string(), "X-Other: bar".to_string()],
             user_agent: Some("aria2-rust/1.0".to_string()),
             referer: Some("http://example.com".to_string()),
+            // Metalink
+            metalink_location: None,
+            metalink_preferred_protocol: None,
+            select_file: None,
+            piece_length: None,
+            metalink_enable_unique_protocol: true,
+            // FTP
+            connect_timeout: None,
+            startup_idle_time: None,
+            lowest_speed_limit: None,
+            ftp_pasv: true,
+            remote_time: false,
+            dry_run: false,
+            ftp_reuse_connection: true,
+            // Download
+            realtime_chunk_checksum: true,
+            bt_stop_timeout: None,
+            // BitTorrent extended
+            disable_ipv6: false,
+            listen_port: None,
+            bt_enable_lpd: false,
+            bt_lpd_interface: None,
+            enable_rpc: false,
+            pause: false,
         };
 
         let map = download_options_to_map(&opts);

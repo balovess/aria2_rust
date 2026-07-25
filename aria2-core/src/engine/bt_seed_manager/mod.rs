@@ -30,11 +30,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
-use tracing::{debug, info, warn};
+use tracing::info;
 
-use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
-use crate::engine::bt_upload_session::BtSeedingConfig;
+use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
 use crate::engine::choking_algorithm::ChokingAlgorithm;
 
 // ===========================================================================
@@ -56,8 +55,12 @@ pub struct BtSeedManager {
     /// Active upload sessions (one per connected peer)
     sessions: Vec<UploadSession>,
     /// Piece data provider for reading completed pieces from disk
-    piece_provider: Option<Arc<FileBackedPieceProvider>>,
+    /// TODO: will be used when piece request handling is implemented in run_seeding_loop
+    #[allow(dead_code)]
+    piece_provider: Option<Arc<dyn PieceDataProvider>>,
     /// Seeding configuration (rate limits, unchoke settings)
+    /// TODO: will be used when upload rate limiting and unchoke logic are implemented
+    #[allow(dead_code)]
     config: BtSeedingConfig,
     /// Exit condition (ratio/time/infinite)
     exit_condition: SeedExitCondition,
@@ -70,6 +73,8 @@ pub struct BtSeedManager {
     /// Whether seeding is currently active
     is_active: bool,
     /// Choking algorithm (optional, for advanced choke management)
+    // TODO: will be used when choking algorithm execution is implemented in run_seeding_loop
+    #[allow(dead_code)]
     choking_algo: Option<ChokingAlgorithm>,
 }
 
@@ -81,8 +86,8 @@ impl BtSeedManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_info_hash(
         info_hash: [u8; 20],
-        connections: Vec<BtPeerConn>,
-        piece_provider: Arc<FileBackedPieceProvider>,
+        connections: Vec<PeerConnection>,
+        piece_provider: Arc<dyn PieceDataProvider>,
         config: BtSeedingConfig,
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
@@ -188,6 +193,23 @@ impl BtSeedManager {
     /// Return total bytes uploaded during seeding.
     pub fn total_uploaded(&self) -> u64 {
         self.total_uploaded
+    }
+
+    /// Return total bytes downloaded (used for seed ratio calculation).
+    pub fn total_downloaded(&self) -> u64 {
+        self.total_downloaded
+    }
+
+    /// Return upload statistics: (total_uploaded, upload_speed).
+    pub fn get_upload_stats(&self) -> (u64, u64) {
+        // Approximate upload speed from elapsed time
+        let elapsed_secs = self.seeding_started_at.elapsed().as_secs();
+        let upload_speed = if elapsed_secs > 0 {
+            self.total_uploaded / elapsed_secs
+        } else {
+            0
+        };
+        (self.total_uploaded, upload_speed)
     }
 
     /// Return the duration of the seeding phase.

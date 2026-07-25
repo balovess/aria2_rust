@@ -156,13 +156,21 @@ impl HttpResponse {
             .and_then(|v| v.parse::<u64>().ok())
     }
 
-    /// Check if this is a redirect response (3xx)
+    /// Check if this is a redirect response (3xx) with a Location header.
+    ///
+    /// Matches C++ `HttpResponse::isRedirect()` which returns `true` ONLY when
+    /// the status code is one of 300/301/302/303/307/308 AND the Location
+    /// header is present. A 3xx response without a Location header is NOT
+    /// considered a valid redirect.
     ///
     /// # Returns
     ///
-    /// true if the status code is in the 300-399 range
+    /// true if the status code is a recognized redirect code AND Location exists
     pub fn is_redirect(&self) -> bool {
-        (300..400).contains(&self.status_code)
+        matches!(
+            self.status_code,
+            300 | 301 | 302 | 303 | 307 | 308
+        ) && self.header("Location").is_some()
     }
 
     /// Get the Location header and parse it as a URL

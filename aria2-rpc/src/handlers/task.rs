@@ -949,7 +949,7 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         max_upload_limit: get_u64("max-upload-limit"),
         dir: get_str("dir"),
         out: get_str("out"),
-        seed_time: get_u64("seed-time"),
+        seed_time: get_f64("seed-time"),
         seed_ratio: get_f64("seed-ratio"),
         // File allocation
         file_allocation: get_str("file-allocation"),
@@ -996,5 +996,38 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         header,
         user_agent: get_str("user-agent"),
         referer: get_str("referer"),
+        // Metalink
+        metalink_location: get_str("metalink-location"),
+        metalink_preferred_protocol: get_str("metalink-preferred-protocol"),
+        select_file: get_str("select-file"),
+        piece_length: get_u64("piece-length"),
+        metalink_enable_unique_protocol: opts
+            .get("metalink-enable-unique-protocol")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        // FTP
+        connect_timeout: get_u64("connect-timeout"),
+        startup_idle_time: get_u64("startup-idle-time"),
+        lowest_speed_limit: get_u64("lowest-speed-limit"),
+        ftp_pasv: opts.get("ftp-pasv").and_then(|v| v.as_bool()).unwrap_or(true),
+        remote_time: opts.get("remote-time").and_then(|v| v.as_bool()).unwrap_or(false),
+        dry_run: opts.get("dry-run").and_then(|v| v.as_bool()).unwrap_or(false),
+        ftp_reuse_connection: opts
+            .get("ftp-reuse-connection")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        // Download
+        realtime_chunk_checksum: opts
+            .get("realtime-chunk-checksum")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        bt_stop_timeout: get_u64("bt-stop-timeout"),
+        // BitTorrent extended
+        disable_ipv6: opts.get("disable-ipv6").and_then(|v| v.as_bool()).unwrap_or(false),
+        listen_port: get_str("listen-port"),
+        bt_enable_lpd: opts.get("bt-enable-lpd").and_then(|v| v.as_bool()).unwrap_or(false),
+        bt_lpd_interface: get_str("bt-lpd-interface"),
+        enable_rpc: opts.get("enable-rpc").and_then(|v| v.as_bool()).unwrap_or(false),
+        pause: opts.get("pause").and_then(|v| v.as_bool()).unwrap_or(false),
     }
 }

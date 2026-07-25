@@ -612,7 +612,7 @@ impl LpdManager {
     ///
     /// Returns `Err` if the UDP socket cannot be bound (e.g., port
     /// already in use, multicast unavailable in this environment).
-    pub fn start_receive_loop(&mut self) -> Result<(), String> {
+    pub async fn start_receive_loop(&mut self) -> Result<(), String> {
         if !self.announcer.is_enabled() {
             debug!("LPD is disabled, not starting receive loop");
             return Ok(());
@@ -620,6 +620,7 @@ impl LpdManager {
 
         self.receive_loop
             .start(Arc::clone(&self.peers), Arc::clone(&self.active_hashes))
+            .await
     }
 
     /// Stop the background LPD receive loop gracefully.

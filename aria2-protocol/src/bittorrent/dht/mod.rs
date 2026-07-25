@@ -11,5 +11,5 @@ pub mod socket;
 pub mod token_tracker;
 pub mod transaction;
 
-pub use engine::{DhtEngine, DhtEngineConfig, DhtEngineEvent, DhtEngineState};
+pub use engine::{DhtEngine, DhtEngineConfig, DhtEngineEvent, DhtEngineState, FindPeersResult};
 pub use peer_storage::DhtPeerStorage;

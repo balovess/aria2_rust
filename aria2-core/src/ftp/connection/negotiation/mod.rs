@@ -10,13 +10,15 @@
 //! 3. FEAT - query server capabilities
 //! 4. OPTS UTF8 ON (if FEAT reports UTF8 support)
 //! 5. SYST - query server system type (for VMS path handling)
-//! 6. Set TYPE (binary)
+//! 6. Set TYPE (binary or ASCII, per config)
 //! 7. PWD to get baseWorkingDir
 //! 8. CWD traversal (split path, CWD each directory component)
 //! 9. MDTM (if remote-time option is enabled)
 //! 10. SIZE
 //! 11. Choose data connection mode (EPSV/PASV or EPRT/PORT)
+//!     - If proxy is configured for PASV, tunnel the data connection
 //! 12. REST (after data connection established, per C++ ordering)
+//!     - Verify data connection is alive before REST (C++ sendRestPasv)
 //! 13. RETR
 //!
 //! After data transfer completes, call `finish_download()` to read the
@@ -42,9 +44,9 @@ mod tests;
 use std::time::SystemTime;
 
 use tokio::time::Duration;
-use tracing::info;
+use tracing::{debug, info, warn};
 
-use crate::error::{Aria2Error, Result};
+use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::connection::negotiation::control::PooledControl;
 use crate::ftp::connection::types::FtpMode;
 use crate::ftp::connection::negotiation::parsing::{
@@ -55,6 +57,36 @@ use crate::ftp::connection::negotiation::parsing::{
 // Re-export public types from submodules
 pub use capabilities::ServerCapabilities;
 pub use control::RawFtpControl;
+
+/// FTP transfer type, matching C++ `PREF_FTP_TYPE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FtpTransferType {
+    /// Binary (Image) mode - TYPE I. Default for most file transfers.
+    #[default]
+    Binary,
+    /// ASCII mode - TYPE A. Used for text file transfers with line ending conversion.
+    Ascii,
+}
+
+/// Configuration for proxying the PASV data channel through an HTTP CONNECT tunnel.
+///
+/// Matches the C++ `FtpNegotiationCommand::resolveProxy()` +
+/// `sendTunnelRequest()` + `recvTunnelResponse()` flow.
+/// When set, the PASV data connection is established by tunneling through
+/// the HTTP proxy instead of connecting directly to the server's data port.
+#[derive(Debug, Clone)]
+pub struct FtpDataProxyConfig {
+    /// Proxy server hostname
+    pub proxy_host: String,
+    /// Proxy server port
+    pub proxy_port: u16,
+    /// Proxy authentication username (empty if no auth)
+    pub proxy_username: String,
+    /// Proxy authentication password (empty if no auth)
+    pub proxy_password: String,
+    /// User-Agent header for proxy requests
+    pub user_agent: String,
+}
 
 /// Result of a successful FTP negotiation.
 ///
@@ -90,6 +122,9 @@ pub struct FtpNegotiationConfig {
     pub remote_path: String,
     /// Data connection mode (passive or active)
     pub mode: FtpMode,
+    /// Transfer type: binary (TYPE I) or ASCII (TYPE A).
+    /// Matches C++ `PREF_FTP_TYPE` option. Default: Binary.
+    pub transfer_type: FtpTransferType,
     /// Resume offset in bytes (0 = no resume)
     pub resume_offset: u64,
     /// Whether to send MDTM for remote time
@@ -102,6 +137,35 @@ pub struct FtpNegotiationConfig {
     pub is_pooled: bool,
     /// Base working directory for pooled connections (must match)
     pub pooled_base_working_dir: Option<String>,
+    /// Proxy configuration for PASV data channel tunneling.
+    ///
+    /// When set, PASV data connections are established through an HTTP CONNECT
+    /// tunnel via the proxy server. This matches the C++ flow where
+    /// `SEQ_RESOLVE_PROXY` -> `SEQ_SEND_TUNNEL_REQUEST` ->
+    /// `SEQ_RECV_TUNNEL_RESPONSE` replaces a direct PASV data connection.
+    /// Only applies when `mode` is `FtpMode::Passive`.
+    pub data_proxy: Option<FtpDataProxyConfig>,
+}
+
+impl Default for FtpNegotiationConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 21,
+            username: String::new(),
+            password: String::new(),
+            remote_path: String::new(),
+            mode: FtpMode::Passive,
+            transfer_type: FtpTransferType::Binary,
+            resume_offset: 0,
+            remote_time: false,
+            connect_timeout: Duration::from_secs(30),
+            command_timeout: Duration::from_secs(60),
+            is_pooled: false,
+            pooled_base_working_dir: None,
+            data_proxy: None,
+        }
+    }
 }
 
 /// FTP negotiation orchestrator.
@@ -122,13 +186,13 @@ impl FtpNegotiator {
     /// 3. FEAT -> detect capabilities
     /// 4. OPTS UTF8 ON (if FEAT reports UTF8)
     /// 5. SYST -> detect server type
-    /// 6. TYPE I (binary)
+    /// 6. TYPE I/A (per transfer_type config)
     /// 7. PWD -> baseWorkingDir
     /// 8. CWD traversal (each directory component separately)
     /// 9. MDTM (if remote_time enabled)
     /// 10. SIZE
-    /// 11. Data connection (EPSV/PASV or EPRT/PORT)
-    /// 12. REST (after data connection established)
+    /// 11. Data connection (EPSV/PASV or EPRT/PORT, with optional proxy tunnel)
+    /// 12. REST (after data connection established, with verification)
     /// 13. RETR
     pub async fn negotiate(config: FtpNegotiationConfig) -> Result<FtpNegotiationResult> {
         let FtpNegotiationConfig {
@@ -138,12 +202,14 @@ impl FtpNegotiator {
             password,
             remote_path,
             mode,
+            transfer_type,
             resume_offset,
             remote_time,
             connect_timeout,
             command_timeout,
             is_pooled,
             pooled_base_working_dir: _,
+            data_proxy,
         } = config;
 
         // Step 1-2: Connect + authenticate (or skip if pooled)
@@ -170,8 +236,9 @@ impl FtpNegotiator {
         // Step 5: SYST - query server system type
         capabilities.syst = capabilities::query_syst(&mut ctrl).await?;
 
-        // Step 6: TYPE I (binary)
-        parsing::set_binary_mode(&mut ctrl).await?;
+        // Step 6: TYPE (binary or ASCII, per config)
+        let is_binary = transfer_type == FtpTransferType::Binary;
+        parsing::set_transfer_mode(&mut ctrl, is_binary).await?;
 
         // Step 7: PWD -> baseWorkingDir
         let base_working_dir = parsing::query_pwd(&mut ctrl).await?;
@@ -196,7 +263,31 @@ impl FtpNegotiator {
         // Step 11: Data connection
         let data_stream = match mode {
             FtpMode::Passive => {
-                Self::enter_passive_mode(&mut ctrl, &host, connect_timeout, &capabilities).await?
+                // Get the PASV port first
+                let pasv_result = Self::enter_passive_mode_get_port(
+                    &mut ctrl, &host, connect_timeout, &capabilities,
+                )
+                .await?;
+
+                let data_stream = if let Some(proxy) = &data_proxy {
+                    // C++ SEQ_RESOLVE_PROXY + SEQ_SEND_TUNNEL_REQUEST +
+                    // SEQ_RECV_TUNNEL_RESPONSE: tunnel the PASV data
+                    // connection through the HTTP proxy via CONNECT.
+                    Self::establish_pasv_data_via_proxy(
+                        proxy, &host, pasv_result.port, connect_timeout,
+                    )
+                    .await?
+                } else {
+                    pasv_result.stream.unwrap()
+                };
+
+                // C++ SEQ_SEND_REST_PASV: verify data connection before REST.
+                // The C++ checks dataSocket_->isReadable(0) to detect
+                // connection errors. In async Rust, we do a non-blocking
+                // readiness check on the data stream.
+                Self::verify_data_connection(&data_stream)?;
+
+                data_stream
             }
             FtpMode::Active => {
                 Self::enter_active_mode(&mut ctrl, connect_timeout, &capabilities).await?
@@ -204,9 +295,9 @@ impl FtpNegotiator {
         };
 
         // Step 12: REST (after data connection established, per C++ ordering)
-        if resume_offset > 0 {
-            parsing::send_rest(&mut ctrl, resume_offset).await?;
-        }
+        // C++ always sends REST, even REST 0 (FtpConnection.cc:234-245).
+        // The send_rest function handles REST 0 rejection gracefully.
+        parsing::send_rest(&mut ctrl, resume_offset).await?;
 
         // Step 13: RETR
         parsing::send_retr(&mut ctrl, &file_part).await?;
@@ -240,12 +331,14 @@ impl FtpNegotiator {
             password: _,
             remote_path,
             mode,
+            transfer_type: _,
             resume_offset,
             remote_time,
             connect_timeout,
             command_timeout,
             is_pooled: _,
             pooled_base_working_dir,
+            data_proxy,
         } = config;
 
         let mut ctrl = PooledControl {
@@ -278,8 +371,22 @@ impl FtpNegotiator {
         // Step 11: Data connection
         let data_stream = match mode {
             FtpMode::Passive => {
-                Self::enter_passive_mode_pooled(&mut ctrl, &host, connect_timeout, &capabilities)
+                let pasv_result = Self::enter_passive_mode_pooled_get_port(
+                    &mut ctrl, &host, connect_timeout, &capabilities,
+                )
+                .await?;
+
+                let data_stream = if let Some(proxy) = &data_proxy {
+                    Self::establish_pasv_data_via_proxy(
+                        proxy, &host, pasv_result.port, connect_timeout,
+                    )
                     .await?
+                } else {
+                    pasv_result.stream.unwrap()
+                };
+
+                Self::verify_data_connection(&data_stream)?;
+                data_stream
             }
             FtpMode::Active => {
                 Self::enter_active_mode_pooled(&mut ctrl, connect_timeout, &capabilities).await?
@@ -287,9 +394,8 @@ impl FtpNegotiator {
         };
 
         // Step 12: REST
-        if resume_offset > 0 {
-            send_rest_pooled(&mut ctrl, resume_offset).await?;
-        }
+        // C++ always sends REST, even REST 0 (FtpConnection.cc:234-245).
+        send_rest_pooled(&mut ctrl, resume_offset).await?;
 
         // Step 13: RETR
         send_retr_pooled(&mut ctrl, &file_part).await?;
@@ -337,4 +443,89 @@ impl FtpNegotiator {
         // the finish completed (data was already received)
         Some(())
     }
+
+    // =========================================================================
+    // Data connection verification (C++ sendRestPasv check)
+    // =========================================================================
+
+    /// Verify the data connection is alive before sending REST.
+    ///
+    /// Matches the C++ `FtpNegotiationCommand::sendRestPasv` which checks
+    /// `dataSocket_->isReadable(0)` to detect connection errors. If the
+    /// socket is readable with zero bytes, it means the connection failed.
+    fn verify_data_connection(data_stream: &tokio::net::TcpStream) -> Result<()> {
+        // Non-blocking check: if the stream is readable but has no data,
+        // it means the connection was refused or reset.
+        match data_stream.try_read(&mut [0u8; 0]) {
+            Ok(0) => {
+                // Connection closed by peer (0 bytes read, no error)
+                warn!("Data connection closed by peer before REST command");
+                Err(Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+                    message: "Data connection establishment failed (peer closed)".into(),
+                }))
+            }
+            Ok(_) => Ok(()),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // WouldBlock is expected: connection is alive and waiting for data
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Data connection error before REST: {}", e);
+                Err(Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+                    message: format!("Data connection error: {}", e),
+                }))
+            }
+        }
+    }
+
+    // =========================================================================
+    // PASV data channel proxy tunnel (C++ SEQ_RESOLVE_PROXY etc.)
+    // =========================================================================
+
+    /// Establish a PASV data connection through an HTTP proxy via CONNECT.
+    ///
+    /// Matches the C++ `FtpNegotiationCommand` flow:
+    /// - `SEQ_RESOLVE_PROXY`: resolve proxy hostname
+    /// - `SEQ_SEND_TUNNEL_REQUEST`: send CONNECT host:port to proxy
+    /// - `SEQ_RECV_TUNNEL_RESPONSE`: read 200 Connection Established
+    ///
+    /// The `target_port` is the port obtained from the EPSV/PASV response.
+    /// The tunnel target is `host:target_port` (not the FTP control port).
+    async fn establish_pasv_data_via_proxy(
+        proxy: &FtpDataProxyConfig,
+        target_host: &str,
+        target_port: u16,
+        connect_timeout: Duration,
+    ) -> Result<tokio::net::TcpStream> {
+        use crate::ftp::connection::proxy_tunnel::{FtpProxyTunnel, FtpProxyTunnelConfig};
+
+        debug!(
+            "Establishing PASV data tunnel via proxy {}:{} to {}:{}",
+            proxy.proxy_host, proxy.proxy_port, target_host, target_port
+        );
+
+        let tunnel_config = FtpProxyTunnelConfig {
+            proxy_host: proxy.proxy_host.clone(),
+            proxy_port: proxy.proxy_port,
+            target_host: target_host.to_string(),
+            target_port,
+            proxy_username: proxy.proxy_username.clone(),
+            proxy_password: proxy.proxy_password.clone(),
+            connect_timeout,
+            read_timeout: connect_timeout,
+            user_agent: proxy.user_agent.clone(),
+        };
+
+        let result = FtpProxyTunnel::establish(&tunnel_config).await?;
+        Ok(result)
+    }
+}
+
+/// Intermediate result from PASV negotiation that separates port resolution
+/// from stream creation, enabling the proxy tunnel flow.
+struct PasvResult {
+    /// The resolved data port from EPSV/PASV response.
+    port: u16,
+    /// The direct data stream (None if using proxy tunnel).
+    stream: Option<tokio::net::TcpStream>,
 }

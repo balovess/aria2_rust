@@ -191,7 +191,7 @@ impl App {
                 .and_then(|v| v.parse::<u64>().ok()),
             dir: options.get("dir").cloned(),
             out: options.get("out").cloned(),
-            seed_time: options.get("seed-time").and_then(|v| v.parse::<u64>().ok()),
+            seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
             seed_ratio: options
                 .get("seed-ratio")
                 .and_then(|v| v.parse::<f64>().ok()),
@@ -297,6 +297,70 @@ impl App {
                 .and_then(|v| v.parse::<u64>().ok()),
             secure_falloc: options
                 .get("secure-falloc")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            // Metalink
+            metalink_location: options.get("metalink-location").cloned(),
+            metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),
+            select_file: options.get("select-file").cloned(),
+            piece_length: options
+                .get("piece-length")
+                .and_then(|v| v.parse::<u64>().ok()),
+            metalink_enable_unique_protocol: options
+                .get("metalink-enable-unique-protocol")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            // FTP
+            connect_timeout: options
+                .get("connect-timeout")
+                .and_then(|v| v.parse::<u64>().ok()),
+            startup_idle_time: options
+                .get("startup-idle-time")
+                .and_then(|v| v.parse::<u64>().ok()),
+            lowest_speed_limit: options
+                .get("lowest-speed-limit")
+                .and_then(|v| v.parse::<u64>().ok()),
+            ftp_pasv: options
+                .get("ftp-pasv")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            remote_time: options
+                .get("remote-time")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            dry_run: options
+                .get("dry-run")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            ftp_reuse_connection: options
+                .get("ftp-reuse-connection")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            // Download
+            realtime_chunk_checksum: options
+                .get("realtime-chunk-checksum")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            bt_stop_timeout: options
+                .get("bt-stop-timeout")
+                .and_then(|v| v.parse::<u64>().ok()),
+            // BitTorrent extended
+            disable_ipv6: options
+                .get("disable-ipv6")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            listen_port: options.get("listen-port").cloned(),
+            bt_enable_lpd: options
+                .get("bt-enable-lpd")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            bt_lpd_interface: options.get("bt-lpd-interface").cloned(),
+            enable_rpc: options
+                .get("enable-rpc")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            pause: options
+                .get("pause")
                 .map(|v| v == "true")
                 .unwrap_or(false),
         }

@@ -22,8 +22,10 @@
 //! | `shared_ptr<BtProgressInfoFile>` | `Option<Arc<BtProgressManager>>` | Rust equivalent with modern async API |
 //! | `shared_ptr<LpdMessageReceiver>` | `Option<u64>` ID-based reference | Type not yet implemented |
 //! | `shared_ptr<UDPTrackerClient>` | `Option<u64>` ID-based reference | Type not yet implemented |
+//! | `shared_ptr<DHT::DhtNodeLookup>` | `Option<Arc<DhtEngine>>` | Direct Arc reference; DhtEngine is already shared |
 //! | `getNull<T>()` for missing entries | `Option<T>` | Rust-idiomatic null handling |
 //! | `OutputIterator` for getAllDownloadContext | `Vec<Arc<DownloadContext>>` | Simpler, Rust-idiomatic API |
+//! | Linear scan for info_hash lookup | `HashMap<String, u64>` secondary index | O(1) instead of O(n) |
 
 use std::collections::HashMap;
 use std::fmt;
@@ -226,8 +228,8 @@ impl BtObjectBuilder {
 /// Global registry for BitTorrent-related components.
 ///
 /// Maps GID (download ID) to [`BtObject`]. Also holds global BT settings
-/// like TCP/UDP listen ports and references to singleton services
-/// (LPD message receiver, UDP tracker client).
+/// like TCP/UDP listen ports, the shared DHT engine, and references to
+/// singleton services (LPD message receiver, UDP tracker client).
 ///
 /// # Thread Safety
 ///
@@ -244,6 +246,16 @@ pub struct BtRegistry {
     /// `std::map<a2_gid_t, std::unique_ptr<BtObject>>`. Here we own
     /// BtObject directly in the HashMap value, avoiding heap indirection.
     pool: HashMap<u64, BtObject>,
+
+    /// Secondary index: info_hash hex string -> GID for O(1) lookup.
+    /// C++ performs a linear scan over all entries; this index avoids that.
+    info_hash_index: HashMap<String, u64>,
+
+    /// Shared DHT engine for all torrents in this session.
+    /// In C++ aria2, the DHT node is a process-level singleton accessed
+    /// via `DHT::getInstance()`. Here we store it as an `Arc<DhtEngine>`
+    /// owned by the registry.
+    dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
 
     /// TCP listen port for incoming BitTorrent connections.
     tcp_port: u16,
@@ -272,10 +284,12 @@ impl BtRegistry {
     ///
     /// - `tcp_port` = 0 (not assigned)
     /// - `udp_port` = 0 (not assigned)
-    /// - Empty pool, no LPD receiver, no UDP tracker client.
+    /// - Empty pool, no DHT engine, no LPD receiver, no UDP tracker client.
     pub fn new() -> Self {
         Self {
             pool: HashMap::new(),
+            info_hash_index: HashMap::new(),
+            dht_engine: None,
             tcp_port: 0,
             udp_port: 0,
             lpd_message_receiver_id: None,
@@ -301,8 +315,9 @@ impl BtRegistry {
 
     /// Get the `DownloadContext` by torrent info hash.
     ///
-    /// Performs a linear scan of all registered `BtObject`s, checking
-    /// the info hash stored in each `DownloadContext`'s BT metadata.
+    /// Uses the secondary index for O(1) lookup. Falls back to a linear
+    /// scan of all entries if the index has no entry for the given hash
+    /// (covers entries registered before the index was populated).
     ///
     /// Equivalent to C++ `BtRegistry::getDownloadContext(const string&)`.
     ///
@@ -310,10 +325,22 @@ impl BtRegistry {
     ///
     /// C++ uses `bittorrent::getTorrentAttrs(ctx)->infoHash` to access the
     /// info hash from the `DownloadContext`'s `BitTorrent` attribute.
-    /// Rust stores the info hash in the `DownloadContext`'s `bt_info_hash_hex`
-    /// field for simplicity, since we don't have a full `TorrentAttribute`
-    /// type system yet.
+    /// Rust uses a secondary `HashMap<String, u64>` index for O(1) lookup
+    /// instead of the C++ linear scan.
     pub fn get_download_context_by_info_hash(&self, info_hash: &str) -> Option<Arc<DownloadContext>> {
+        // Try the secondary index first (O(1))
+        if let Some(&gid) = self.info_hash_index.get(info_hash) {
+            if let Some(obj) = self.pool.get(&gid) {
+                if let Some(ref ctx) = obj.download_context {
+                    // Verify the index is still consistent
+                    if ctx.get_bt_info_hash_hex().as_deref() == Some(info_hash) {
+                        return Some(Arc::clone(ctx));
+                    }
+                }
+            }
+        }
+
+        // Fallback: linear scan for entries whose index was never populated
         for obj in self.pool.values() {
             if let Some(ref ctx) = obj.download_context {
                 if ctx.get_bt_info_hash_hex().as_deref() == Some(info_hash) {
@@ -330,10 +357,25 @@ impl BtRegistry {
 
     /// Insert a `BtObject` for the given GID, replacing any existing entry.
     ///
+    /// If the `BtObject` has a `download_context` with a BitTorrent attribute
+    /// containing an info hash, the secondary index is updated automatically.
+    ///
     /// Equivalent to C++ `BtRegistry::put(a2_gid_t, unique_ptr<BtObject>)`.
     pub fn put(&mut self, gid: u64, obj: BtObject) {
         trace!(gid, "BtRegistry::put");
-        self.pool.insert(gid, obj);
+
+        // Update secondary index if the new object has an info hash
+        if let Some(ref ctx) = obj.download_context {
+            if let Some(hash) = ctx.get_bt_info_hash_hex() {
+                trace!(gid, info_hash = %hash, "BtRegistry::put: updating info_hash index");
+                self.info_hash_index.insert(hash, gid);
+            }
+        }
+
+        // If replacing an existing entry, clean up its stale info_hash index
+        if let Some(old) = self.pool.insert(gid, obj) {
+            self.cleanup_info_hash_index(gid, &old);
+        }
     }
 
     /// Get a reference to the `BtObject` for the given GID.
@@ -345,7 +387,7 @@ impl BtRegistry {
 
     /// Get a mutable reference to the `BtObject` for the given GID.
     ///
-    /// This is a Rust addition — C++ aria2 exposes mutable access through
+    /// This is a Rust addition -- C++ aria2 exposes mutable access through
     /// the `unique_ptr<BtObject>` directly.
     pub fn get_mut(&mut self, gid: u64) -> Option<&mut BtObject> {
         self.pool.get_mut(&gid)
@@ -364,17 +406,21 @@ impl BtRegistry {
 
     /// Remove the `BtObject` for the given GID.
     ///
+    /// Also removes the corresponding entry from the info_hash secondary
+    /// index if present.
+    ///
     /// Returns `true` if the entry existed and was removed, `false` otherwise.
     ///
     /// Equivalent to C++ `BtRegistry::remove(a2_gid_t)`.
     pub fn remove(&mut self, gid: u64) -> bool {
-        let removed = self.pool.remove(&gid).is_some();
-        if removed {
+        if let Some(old) = self.pool.remove(&gid) {
+            self.cleanup_info_hash_index(gid, &old);
             trace!(gid, "BtRegistry::remove: entry removed");
+            true
         } else {
             trace!(gid, "BtRegistry::remove: entry not found");
+            false
         }
-        removed
     }
 
     /// Remove all entries from the registry.
@@ -383,6 +429,177 @@ impl BtRegistry {
     pub fn remove_all(&mut self) {
         trace!("BtRegistry::remove_all: clearing {} entries", self.pool.len());
         self.pool.clear();
+        self.info_hash_index.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-torrent component accessors (convenience)
+    // -----------------------------------------------------------------------
+
+    /// Get the `PieceStorage` for the given GID.
+    ///
+    /// Convenience method that avoids two-level `Option` unwrapping.
+    /// Returns `None` if the GID is not registered or has no piece storage.
+    pub fn get_piece_storage(&self, gid: u64) -> Option<Arc<dyn PieceStorage>> {
+        self.pool.get(&gid).and_then(|obj| obj.piece_storage.clone())
+    }
+
+    /// Get the `PieceStorage` by info hash.
+    ///
+    /// Combines info_hash secondary index lookup with piece_storage retrieval.
+    pub fn get_piece_storage_by_info_hash(&self, info_hash: &str) -> Option<Arc<dyn PieceStorage>> {
+        let gid = self.info_hash_index.get(info_hash)?;
+        self.pool.get(gid).and_then(|obj| obj.piece_storage.clone())
+    }
+
+    /// Get the `PeerStorage` for the given GID.
+    ///
+    /// Convenience method that avoids two-level `Option` unwrapping.
+    /// Returns `None` if the GID is not registered or has no peer storage.
+    pub fn get_peer_storage(&self, gid: u64) -> Option<Arc<dyn PeerStorage>> {
+        self.pool.get(&gid).and_then(|obj| obj.peer_storage.clone())
+    }
+
+    /// Get the `PeerStorage` by info hash.
+    ///
+    /// Combines info_hash secondary index lookup with peer_storage retrieval.
+    pub fn get_peer_storage_by_info_hash(&self, info_hash: &str) -> Option<Arc<dyn PeerStorage>> {
+        let gid = self.info_hash_index.get(info_hash)?;
+        self.pool.get(gid).and_then(|obj| obj.peer_storage.clone())
+    }
+
+    /// Get the `BtRuntime` for the given GID.
+    ///
+    /// Returns `None` if the GID is not registered or has no runtime.
+    pub fn get_bt_runtime(&self, gid: u64) -> Option<Arc<BtRuntime>> {
+        self.pool.get(&gid).and_then(|obj| obj.bt_runtime.clone())
+    }
+
+    /// Get the `BtAnnounce` for the given GID.
+    ///
+    /// Returns `None` if the GID is not registered or has no announce handler.
+    pub fn get_bt_announce(&self, gid: u64) -> Option<Arc<BtAnnounce>> {
+        self.pool.get(&gid).and_then(|obj| obj.bt_announce.clone())
+    }
+
+    /// Get the `BtProgressManager` for the given GID.
+    ///
+    /// Returns `None` if the GID is not registered or has no progress manager.
+    pub fn get_bt_progress_manager(&self, gid: u64) -> Option<Arc<BtProgressManager>> {
+        self.pool.get(&gid).and_then(|obj| obj.bt_progress_manager.clone())
+    }
+
+    // -----------------------------------------------------------------------
+    // DHT engine management
+    // -----------------------------------------------------------------------
+
+    /// Set the shared DHT engine for this session.
+    ///
+    /// In C++ aria2, the DHT node is a process-level singleton accessed
+    /// via `DHT::getInstance()`. Here the engine is explicitly set on the
+    /// registry, making it testable and lifecycle-managed.
+    pub fn set_dht_engine(&mut self, engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>) {
+        trace!("BtRegistry::set_dht_engine");
+        self.dht_engine = Some(engine);
+    }
+
+    /// Get a reference to the shared DHT engine.
+    ///
+    /// Returns `None` if no DHT engine has been set.
+    pub fn get_dht_engine(&self) -> Option<&Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        self.dht_engine.as_ref()
+    }
+
+    /// Remove the DHT engine reference.
+    ///
+    /// Called during shutdown to release the engine.
+    pub fn clear_dht_engine(&mut self) {
+        trace!("BtRegistry::clear_dht_engine");
+        self.dht_engine = None;
+    }
+
+    // -----------------------------------------------------------------------
+    // Download completion status
+    // -----------------------------------------------------------------------
+
+    /// Check whether all registered downloads are finished.
+    ///
+    /// A download is considered finished if its `PieceStorage` reports
+    /// `is_finished() == true`. Downloads without a `PieceStorage` are
+    /// treated as not finished (conservative default).
+    ///
+    /// Returns `true` if the registry is empty or all downloads are finished.
+    ///
+    /// This is a Rust addition -- C++ aria2 checks this condition at the
+    /// `DownloadEngine` level via `RequestGroupMan::downloadFinished()`.
+    /// Here we provide a BT-specific equivalent that checks piece completion
+    /// directly from the registry.
+    pub fn all_download_finished(&self) -> bool {
+        if self.pool.is_empty() {
+            return true;
+        }
+        self.pool.values().all(|obj| {
+            obj.piece_storage
+                .as_ref()
+                .map(|ps| ps.download_finished())
+                .unwrap_or(false)
+        })
+    }
+
+    /// Count how many registered downloads are finished.
+    ///
+    /// A download is considered finished if its `PieceStorage` reports
+    /// `is_finished() == true`.
+    pub fn finished_count(&self) -> usize {
+        self.pool
+            .values()
+            .filter(|obj| {
+                obj.piece_storage
+                    .as_ref()
+                    .map(|ps| ps.download_finished())
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    // -----------------------------------------------------------------------
+    // Torrent attribute convenience methods
+    // -----------------------------------------------------------------------
+
+    /// Check whether the torrent identified by `gid` is a private torrent.
+    ///
+    /// Private torrents disable DHT, PEX, and LPD per BEP 0027.
+    /// Returns `false` if the GID is not registered, has no DownloadContext,
+    /// or has no BitTorrent attribute.
+    pub fn is_private_torrent(&self, gid: u64) -> bool {
+        self.pool
+            .get(&gid)
+            .and_then(|obj| obj.download_context.as_ref())
+            .map(|ctx| {
+                use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
+                ctx.get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|attr| attr.downcast_ref::<TorrentAttribute>())
+                    .map(|ta| ta.private_torrent)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Get the torrent name for the given GID.
+    ///
+    /// Returns `None` if the GID is not registered, has no DownloadContext,
+    /// or has no BitTorrent attribute with a name.
+    pub fn get_torrent_name(&self, gid: u64) -> Option<String> {
+        self.pool
+            .get(&gid)?
+            .download_context
+            .as_ref()
+            .and_then(|ctx| {
+                use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
+                ctx.get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|attr| attr.downcast_ref::<TorrentAttribute>())
+                    .map(|ta| ta.name.clone())
+            })
     }
 
     // -----------------------------------------------------------------------
@@ -462,6 +679,50 @@ impl BtRegistry {
         self.peer_blocklist.contains(addr)
     }
 
+    // -----------------------------------------------------------------------
+    // Info hash index maintenance (internal)
+    // -----------------------------------------------------------------------
+
+    /// Remove the info_hash index entry associated with `gid` if it still
+    /// points to this GID. This prevents stale index entries when a GID is
+    /// replaced or removed.
+    fn cleanup_info_hash_index(&mut self, gid: u64, old_obj: &BtObject) {
+        if let Some(ref ctx) = old_obj.download_context {
+            if let Some(hash) = ctx.get_bt_info_hash_hex() {
+                // Only remove if the index still maps to this GID;
+                // a newer put() may have already updated the mapping.
+                if self.info_hash_index.get(&hash) == Some(&gid) {
+                    self.info_hash_index.remove(&hash);
+                }
+            }
+        }
+    }
+
+    /// Rebuild the info_hash secondary index from scratch by scanning all
+    /// pool entries. Useful after batch operations that bypass `put()`.
+    pub fn rebuild_info_hash_index(&mut self) {
+        self.info_hash_index.clear();
+        for (&gid, obj) in &self.pool {
+            if let Some(ref ctx) = obj.download_context {
+                if let Some(hash) = ctx.get_bt_info_hash_hex() {
+                    self.info_hash_index.insert(hash, gid);
+                }
+            }
+        }
+        trace!(
+            index_len = self.info_hash_index.len(),
+            pool_len = self.pool.len(),
+            "BtRegistry::rebuild_info_hash_index"
+        );
+    }
+
+    /// Return the number of entries in the info_hash secondary index.
+    ///
+    /// May differ from `len()` if some BtObjects lack a TorrentAttribute.
+    pub fn info_hash_index_len(&self) -> usize {
+        self.info_hash_index.len()
+    }
+
     /// Return the number of registered BtObjects.
     pub fn len(&self) -> usize {
         self.pool.len()
@@ -483,6 +744,8 @@ impl fmt::Debug for BtRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BtRegistry")
             .field("pool_len", &self.pool.len())
+            .field("info_hash_index_len", &self.info_hash_index.len())
+            .field("has_dht_engine", &self.dht_engine.is_some())
             .field("tcp_port", &self.tcp_port)
             .field("udp_port", &self.udp_port)
             .field("lpd_message_receiver_id", &self.lpd_message_receiver_id)
@@ -503,6 +766,29 @@ mod tests {
     /// Helper: create a BtObject with only a DownloadContext.
     fn make_bt_object_with_ctx(piece_length: u32, total_length: u64, path: &str) -> BtObject {
         let ctx = Arc::new(DownloadContext::new(piece_length, total_length, path.to_string()));
+        BtObject {
+            download_context: Some(ctx),
+            ..BtObject::new()
+        }
+    }
+
+    /// Helper: create a BtObject with DownloadContext and TorrentAttribute.
+    fn make_bt_object_with_info_hash(
+        piece_length: u32,
+        total_length: u64,
+        path: &str,
+        info_hash: &str,
+        private: bool,
+    ) -> BtObject {
+        use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+
+        let mut ctx = DownloadContext::new(piece_length, total_length, path.to_string());
+        let mut ta = TorrentAttribute::new(info_hash.to_string());
+        ta.private_torrent = private;
+        ta.name = format!("torrent_{}", info_hash);
+        ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(ta));
+        let ctx = Arc::new(ctx);
+
         BtObject {
             download_context: Some(ctx),
             ..BtObject::new()
@@ -536,7 +822,7 @@ mod tests {
         let obj = make_bt_object_with_ctx(1024, 4096, "/tmp/file.bin");
         registry.put(1, obj);
 
-        // Mutate through get_mut — set peer_storage to a real DefaultPeerStorage
+        // Mutate through get_mut -- set peer_storage to a real DefaultPeerStorage
         let obj_mut = registry.get_mut(1).unwrap();
         let ps = Arc::new(crate::engine::bt_peer_storage::DefaultPeerStorage::new());
         obj_mut.peer_storage = Some(ps);
@@ -609,7 +895,7 @@ mod tests {
         registry.put(1, BtObject::new());
         assert!(registry.get_download_context(1).is_none());
 
-        // GID exists with download_context — verify Arc identity
+        // GID exists with download_context -- verify Arc identity
         let ctx = Arc::new(DownloadContext::new(1024, 4096, "/tmp/file.bin".into()));
         let mut obj = BtObject::new();
         obj.download_context = Some(Arc::clone(&ctx));
@@ -764,12 +1050,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 13. get_download_context_by_info_hash placeholder
+    // 13. get_download_context_by_info_hash with secondary index
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_get_download_context_by_info_hash_returns_none() {
-        // No TorrentAttribute set → returns None
+    fn test_get_download_context_by_info_hash_returns_none_without_attribute() {
         let mut registry = BtRegistry::new();
         let obj = make_bt_object_with_ctx(1024, 4096, "/tmp/file.bin");
         registry.put(1, obj);
@@ -779,28 +1064,21 @@ mod tests {
 
     #[test]
     fn test_get_download_context_by_info_hash_with_torrent_attribute() {
-        use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
-
         let info_hash = "0123456789abcdef0123456789abcdef01234567";
-        let ta = TorrentAttribute::new(info_hash.to_string());
-
-        // Create a DownloadContext with TorrentAttribute set
-        let mut ctx = DownloadContext::new(1024, 4096, "/tmp/file.bin".to_string());
-        ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(ta));
-        let ctx = Arc::new(ctx);
+        let obj = make_bt_object_with_info_hash(1024, 4096, "/tmp/file.bin", info_hash, false);
 
         let mut registry = BtRegistry::new();
-        let obj = BtObject::builder()
-            .download_context(Arc::clone(&ctx))
-            .build();
         registry.put(1, obj);
 
-        // Lookup by info_hash should find the context
+        // Lookup by info_hash should find the context via the index
         let found = registry.get_download_context_by_info_hash(info_hash);
         assert!(found.is_some());
 
         // Wrong hash should not find it
         assert!(registry.get_download_context_by_info_hash("wrong_hash").is_none());
+
+        // Secondary index should be populated
+        assert_eq!(registry.info_hash_index_len(), 1);
     }
 
     // -----------------------------------------------------------------------
@@ -877,5 +1155,387 @@ mod tests {
         // Mutable accessor
         registry.peer_blocklist_mut().clear();
         assert_eq!(registry.peer_blocklist().count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. DHT engine management
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dht_engine_default_none() {
+        let registry = BtRegistry::new();
+        assert!(registry.get_dht_engine().is_none());
+    }
+
+    #[test]
+    fn test_dht_engine_set_and_get() {
+        use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let engine = rt.block_on(async {
+            DhtEngine::start(DhtEngineConfig::default()).await.unwrap()
+        });
+
+        let mut registry = BtRegistry::new();
+        registry.set_dht_engine(engine);
+
+        assert!(registry.get_dht_engine().is_some());
+    }
+
+    #[test]
+    fn test_dht_engine_clear() {
+        use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let engine = rt.block_on(async {
+            DhtEngine::start(DhtEngineConfig::default()).await.unwrap()
+        });
+
+        let mut registry = BtRegistry::new();
+        registry.set_dht_engine(engine);
+        assert!(registry.get_dht_engine().is_some());
+
+        registry.clear_dht_engine();
+        assert!(registry.get_dht_engine().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. Info hash secondary index
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_info_hash_index_populated_on_put() {
+        let hash1 = "aaa1111111111111111111111111111111111111";
+        let hash2 = "bbb2222222222222222222222222222222222222";
+
+        let mut registry = BtRegistry::new();
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash1, false);
+        let obj2 = make_bt_object_with_info_hash(2048, 8192, "/tmp/b.bin", hash2, false);
+
+        registry.put(1, obj1);
+        registry.put(2, obj2);
+
+        assert_eq!(registry.info_hash_index_len(), 2);
+
+        // Lookup by hash1 finds GID 1
+        let ctx = registry.get_download_context_by_info_hash(hash1);
+        assert!(ctx.is_some());
+
+        // Lookup by hash2 finds GID 2
+        let ctx = registry.get_download_context_by_info_hash(hash2);
+        assert!(ctx.is_some());
+    }
+
+    #[test]
+    fn test_info_hash_index_cleaned_on_remove() {
+        let hash1 = "aaa1111111111111111111111111111111111111";
+        let mut registry = BtRegistry::new();
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash1, false);
+        registry.put(1, obj1);
+
+        assert_eq!(registry.info_hash_index_len(), 1);
+        assert!(registry.remove(1));
+        assert_eq!(registry.info_hash_index_len(), 0);
+
+        // Lookup should now fail
+        assert!(registry.get_download_context_by_info_hash(hash1).is_none());
+    }
+
+    #[test]
+    fn test_info_hash_index_cleaned_on_overwrite() {
+        let hash1 = "aaa1111111111111111111111111111111111111";
+        let hash2 = "bbb2222222222222222222222222222222222222";
+
+        let mut registry = BtRegistry::new();
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash1, false);
+        registry.put(1, obj1);
+        assert_eq!(registry.info_hash_index_len(), 1);
+
+        // Overwrite GID 1 with a different info_hash
+        let obj2 = make_bt_object_with_info_hash(2048, 8192, "/tmp/b.bin", hash2, false);
+        registry.put(1, obj2);
+
+        // hash1 should be gone, hash2 should be present
+        assert_eq!(registry.info_hash_index_len(), 1);
+        assert!(registry.get_download_context_by_info_hash(hash1).is_none());
+        assert!(registry.get_download_context_by_info_hash(hash2).is_some());
+    }
+
+    #[test]
+    fn test_info_hash_index_cleared_on_remove_all() {
+        let hash1 = "aaa1111111111111111111111111111111111111";
+        let mut registry = BtRegistry::new();
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash1, false);
+        registry.put(1, obj1);
+
+        assert_eq!(registry.info_hash_index_len(), 1);
+        registry.remove_all();
+        assert_eq!(registry.info_hash_index_len(), 0);
+    }
+
+    #[test]
+    fn test_rebuild_info_hash_index() {
+        let mut registry = BtRegistry::new();
+        // Directly insert into pool (bypassing put) -- index stays empty
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin",
+            "aaa1111111111111111111111111111111111111", false);
+        registry.pool.insert(1, obj1);
+
+        assert_eq!(registry.info_hash_index_len(), 0);
+
+        // Rebuild the index
+        registry.rebuild_info_hash_index();
+        assert_eq!(registry.info_hash_index_len(), 1);
+        assert!(registry.get_download_context_by_info_hash("aaa1111111111111111111111111111111111111").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. Per-torrent convenience accessors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_piece_storage() {
+        let mut registry = BtRegistry::new();
+        let mut obj = BtObject::new();
+        let ps: Arc<dyn PieceStorage> = Arc::new(
+            crate::segment::piece_storage::DefaultPieceStorage::new(1024, 4096),
+        );
+        obj.piece_storage = Some(ps);
+        registry.put(1, obj);
+
+        assert!(registry.get_piece_storage(1).is_some());
+        assert!(registry.get_piece_storage(999).is_none());
+
+        // Entry without piece_storage
+        registry.put(2, BtObject::new());
+        assert!(registry.get_piece_storage(2).is_none());
+    }
+
+    #[test]
+    fn test_get_peer_storage() {
+        let mut registry = BtRegistry::new();
+        let mut obj = BtObject::new();
+        let ps: Arc<dyn PeerStorage> = Arc::new(
+            crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
+        );
+        obj.peer_storage = Some(ps);
+        registry.put(1, obj);
+
+        assert!(registry.get_peer_storage(1).is_some());
+        assert!(registry.get_peer_storage(999).is_none());
+    }
+
+    #[test]
+    fn test_get_bt_runtime() {
+        let mut registry = BtRegistry::new();
+        let mut obj = BtObject::new();
+        obj.bt_runtime = Some(Arc::new(BtRuntime::new()));
+        registry.put(1, obj);
+
+        assert!(registry.get_bt_runtime(1).is_some());
+        assert!(registry.get_bt_runtime(999).is_none());
+    }
+
+    #[test]
+    fn test_get_bt_announce() {
+        let mut registry = BtRegistry::new();
+        let mut obj = BtObject::new();
+        obj.bt_announce = Some(Arc::new(BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string()))));
+        registry.put(1, obj);
+
+        assert!(registry.get_bt_announce(1).is_some());
+        assert!(registry.get_bt_announce(999).is_none());
+    }
+
+    #[test]
+    fn test_get_piece_storage_by_info_hash() {
+        let hash1 = "aaa1111111111111111111111111111111111111";
+        let mut obj = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash1, false);
+        let ps: Arc<dyn PieceStorage> = Arc::new(
+            crate::segment::piece_storage::DefaultPieceStorage::new(1024, 4096),
+        );
+        obj.piece_storage = Some(ps);
+
+        let mut registry = BtRegistry::new();
+        registry.put(1, obj);
+
+        assert!(registry.get_piece_storage_by_info_hash(hash1).is_some());
+        assert!(registry.get_piece_storage_by_info_hash("wrong_hash").is_none());
+    }
+
+    #[test]
+    fn test_get_peer_storage_by_info_hash() {
+        let hash1 = "aaa1111111111111111111111111111111111111";
+        let mut obj = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash1, false);
+        let ps: Arc<dyn PeerStorage> = Arc::new(
+            crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
+        );
+        obj.peer_storage = Some(ps);
+
+        let mut registry = BtRegistry::new();
+        registry.put(1, obj);
+
+        assert!(registry.get_peer_storage_by_info_hash(hash1).is_some());
+        assert!(registry.get_peer_storage_by_info_hash("wrong_hash").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. all_download_finished
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_download_finished_empty_registry() {
+        let registry = BtRegistry::new();
+        assert!(registry.all_download_finished(), "empty registry should return true");
+    }
+
+    #[test]
+    fn test_all_download_finished_no_piece_storage() {
+        let mut registry = BtRegistry::new();
+        // Entries without piece_storage are treated as not finished
+        registry.put(1, BtObject::new());
+        assert!(!registry.all_download_finished());
+    }
+
+    #[test]
+    fn test_all_download_finished_with_finished_storage() {
+        use crate::segment::piece_storage::DefaultPieceStorage;
+
+        let mut registry = BtRegistry::new();
+        let mut obj = BtObject::new();
+
+        // DefaultPieceStorage with 0 total_length is "finished" (no pieces needed)
+        let ps: Arc<dyn PieceStorage> = Arc::new(DefaultPieceStorage::new(0, 0));
+        obj.piece_storage = Some(ps);
+        registry.put(1, obj);
+
+        assert!(registry.all_download_finished());
+    }
+
+    #[test]
+    fn test_all_download_finished_with_unfinished_storage() {
+        use crate::segment::piece_storage::DefaultPieceStorage;
+
+        let mut registry = BtRegistry::new();
+        let mut obj = BtObject::new();
+
+        // 4 pieces, none completed -> not finished
+        let ps: Arc<dyn PieceStorage> = Arc::new(DefaultPieceStorage::new(1024, 4096));
+        obj.piece_storage = Some(ps);
+        registry.put(1, obj);
+
+        assert!(!registry.all_download_finished());
+    }
+
+    #[test]
+    fn test_finished_count() {
+        use crate::segment::piece_storage::DefaultPieceStorage;
+
+        let mut registry = BtRegistry::new();
+
+        // Entry 1: finished (0-length)
+        let mut obj1 = BtObject::new();
+        obj1.piece_storage = Some(Arc::new(DefaultPieceStorage::new(0, 0)) as Arc<dyn PieceStorage>);
+        registry.put(1, obj1);
+
+        // Entry 2: not finished
+        let mut obj2 = BtObject::new();
+        obj2.piece_storage = Some(Arc::new(DefaultPieceStorage::new(1024, 4096)) as Arc<dyn PieceStorage>);
+        registry.put(2, obj2);
+
+        // Entry 3: no piece storage
+        registry.put(3, BtObject::new());
+
+        assert_eq!(registry.finished_count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // 21. Torrent attribute convenience methods
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_private_torrent() {
+        let mut registry = BtRegistry::new();
+
+        // Private torrent
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/private.bin",
+            "aaa1111111111111111111111111111111111111", true);
+        registry.put(1, obj1);
+
+        // Public torrent
+        let obj2 = make_bt_object_with_info_hash(1024, 4096, "/tmp/public.bin",
+            "bbb2222222222222222222222222222222222222", false);
+        registry.put(2, obj2);
+
+        // No torrent attribute
+        let obj3 = make_bt_object_with_ctx(1024, 4096, "/tmp/noattr.bin");
+        registry.put(3, obj3);
+
+        assert!(registry.is_private_torrent(1));
+        assert!(!registry.is_private_torrent(2));
+        assert!(!registry.is_private_torrent(3));
+        assert!(!registry.is_private_torrent(999)); // non-existent
+    }
+
+    #[test]
+    fn test_get_torrent_name() {
+        let mut registry = BtRegistry::new();
+
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin",
+            "aaa1111111111111111111111111111111111111", false);
+        registry.put(1, obj1);
+
+        let name = registry.get_torrent_name(1);
+        assert!(name.is_some());
+        assert!(name.unwrap().starts_with("torrent_"));
+
+        // No torrent attribute
+        let obj2 = make_bt_object_with_ctx(1024, 4096, "/tmp/noattr.bin");
+        registry.put(2, obj2);
+        assert!(registry.get_torrent_name(2).is_none());
+
+        // Non-existent
+        assert!(registry.get_torrent_name(999).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 22. Debug output includes new fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_debug_includes_dht_and_index() {
+        let registry = BtRegistry::new();
+        let debug_str = format!("{:?}", registry);
+        assert!(debug_str.contains("has_dht_engine: false"));
+        assert!(debug_str.contains("info_hash_index_len: 0"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 23. Multiple info_hash lookups with same hash (collision)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_info_hash_index_last_writer_wins() {
+        let hash = "aaa1111111111111111111111111111111111111";
+
+        let mut registry = BtRegistry::new();
+
+        // First put with GID 1
+        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash, false);
+        registry.put(1, obj1);
+        assert_eq!(registry.info_hash_index.get(hash), Some(&1));
+
+        // Second put with GID 2 using the SAME info_hash -- last writer wins
+        let obj2 = make_bt_object_with_info_hash(2048, 8192, "/tmp/b.bin", hash, false);
+        registry.put(2, obj2);
+        assert_eq!(registry.info_hash_index.get(hash), Some(&2));
+
+        // Lookup should return the GID 2 context
+        let ctx = registry.get_download_context_by_info_hash(hash);
+        assert!(ctx.is_some());
+        assert_eq!(ctx.unwrap().get_piece_length(), 2048);
+
+        // GID 1 is still in the pool but no longer indexed by hash
+        assert!(registry.get(1).is_some());
     }
 }

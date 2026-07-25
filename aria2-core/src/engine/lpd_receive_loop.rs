@@ -19,12 +19,15 @@
 //! | `LpdReceiveLoop` | `LpdReceiveMessageCommand` |
 //! | `run_receive_loop()` | `LpdReceiveMessageCommand::execute()` loop |
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+use crate::engine::lpd_manager::LpdPeer;
 
 // ===========================================================================
 // LpdReceiveLoop — background LPD receive task manager
@@ -66,10 +69,24 @@ impl LpdReceiveLoop {
     /// Start the background receive loop.
     ///
     /// If already running, this is a no-op.
-    pub async fn start(&mut self) {
+    ///
+    /// # Arguments
+    ///
+    /// * `peers` — Shared peer registry keyed by info_hash
+    /// * `active_hashes` — Set of info hashes currently being announced
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the UDP socket cannot be bound (e.g., port
+    /// already in use, multicast unavailable in this environment).
+    pub async fn start(
+        &mut self,
+        peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
+        active_hashes: Arc<RwLock<HashSet<String>>>,
+    ) -> Result<(), String> {
         if self.is_running {
             debug!("LPD receive loop already running");
-            return;
+            return Ok(());
         }
 
         // TODO: Implement the actual receive loop that:
@@ -78,9 +95,11 @@ impl LpdReceiveLoop {
         // 3. Continuously reads UDP datagrams
         // 4. Parses BEP 14 LPD announcement messages
         // 5. Feeds discovered peers back to LpdManager
+        let _ = (peers, active_hashes);
 
         info!("LPD receive loop started");
         self.is_running = true;
+        Ok(())
     }
 
     /// Stop the background receive loop gracefully.
@@ -116,6 +135,14 @@ impl LpdReceiveLoop {
     /// Check if the receive loop is currently running.
     pub fn is_running(&self) -> bool {
         self.is_running
+    }
+
+    /// Get a clone of the cancellation token.
+    ///
+    /// Allows external code to cancel the receive loop without holding
+    /// a mutable reference to `LpdReceiveLoop`.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 }
 

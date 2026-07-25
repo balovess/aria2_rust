@@ -25,7 +25,7 @@ async fn test_e2e_metalink_parse_and_validate() {
     let sha = compute_sha256(SMALL_CONTENT);
 
     let metalink_xml = build_metalink_v3("small.bin", 4, &[(url.clone(), 1)], &sha);
-    let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&metalink_xml).unwrap();
+    let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&metalink_xml, None).unwrap();
 
     assert_eq!(doc.files.len(), 1);
     assert_eq!(doc.files[0].name, "small.bin");

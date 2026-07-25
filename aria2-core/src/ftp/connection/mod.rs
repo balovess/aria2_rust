@@ -20,7 +20,10 @@ mod tests;
 pub use types::{FtpClient, FtpFileInfo, FtpFeatures, FtpMode, FtpResponse};
 
 // Re-export negotiation types
-pub use negotiation::{FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator, RawFtpControl, ServerCapabilities};
+pub use negotiation::{
+    FtpDataProxyConfig, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator,
+    FtpTransferType, RawFtpControl, ServerCapabilities,
+};
 
 // Re-export finish handler types
 pub use ftp_finish::{FtpFinishConfig, FtpFinishHandler, FtpFinishResult, PooledFtpControl};

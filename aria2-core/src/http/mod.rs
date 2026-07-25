@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod client_pool;
 pub mod conditional_get;
 pub mod connection;
@@ -21,6 +22,8 @@ pub mod splice_http;
 pub mod stream_filter;
 
 #[cfg(test)]
+mod auth_tests;
+#[cfg(test)]
 mod connection_tests;
 #[cfg(test)]
 mod request_tests;
@@ -41,12 +44,18 @@ pub use proxy_tunnel::{
 };
 
 // Re-export key types from proxy module for convenient access
-pub use proxy::{HttpProxyConfig, HttpProxyForward, HttpProxyTunnel as HttpConnectProxyTunnel, ProxyResponse};
+pub use proxy::{HttpProxyConfig, HttpProxyForward, HttpProxyTunnel as HttpConnectProxyTunnel, ProxyResponse, ProxyType};
 
 // Re-export key types from skip_response for convenient access
 pub use skip_response::{
     AuthScheme, HttpAuthChallenge, HttpRedirectInfo, HttpSkipResponseHandler, RedirectType,
     SkipResponseResult, MAX_REDIRECT_COUNT,
+};
+
+// Re-export key types from auth module for convenient access
+pub use auth::{
+    AuthConfig, AuthConfigFactory, AuthResolveOptions, BasicCred, NetrcEntry, NetrcStore,
+    erase_confidential_info,
 };
 
 // Re-export response processor types for convenient access

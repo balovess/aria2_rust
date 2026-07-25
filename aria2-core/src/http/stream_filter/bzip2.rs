@@ -220,7 +220,8 @@ mod tests {
 
     fn create_bzip2_data(data: &[u8]) -> Vec<u8> {
         use std::io::Write;
-        let mut encoder = bzip2_rs::EncoderWriter::new(Vec::new(), 6);
+        use bzip2_rs::write::BzEncoder;
+        let mut encoder = BzEncoder::new(Vec::new(), bzip2_rs::Compression::level(6));
         encoder.write_all(data).unwrap();
         encoder.finish().unwrap()
     }

@@ -553,7 +553,7 @@ async fn test_dht_engine_lifecycle() {
     let config = DhtEngineConfig {
         port: 0,
         self_id: custom_self_id,
-        dht_file_path: Some(dht_path.to_string_lossy().to_string()),
+        dht_file_path: Some(dht_path.clone()),
         ..Default::default()
     };
 

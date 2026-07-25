@@ -403,6 +403,9 @@ impl OptionHandler {
             let v = self.get(key).as_usize();
             if v > 0 { Some(v as u64) } else { None }
         };
+        let get_f64 = |key: &str| -> Option<f64> {
+            self.get(key).as_f64().filter(|&v| v > 0.0)
+        };
         let get_str = |key: &str| -> Option<String> {
             self.get(key)
                 .as_str()
@@ -417,7 +420,7 @@ impl OptionHandler {
             max_upload_limit: get_u64("max-upload-limit"),
             dir: get_str("dir"),
             out: get_str("out"),
-            seed_time: get_u64("seed-time"),
+            seed_time: get_f64("seed-time"),
             seed_ratio: {
                 let r = self.get("seed-ratio").as_f64().unwrap_or(0.0);
                 if r > 0.0 { Some(r) } else { None }
@@ -492,6 +495,36 @@ impl OptionHandler {
             file_allocation: get_str("file-allocation"),
             mmap_threshold: get_u64("mmap-threshold"),
             secure_falloc: self.get("secure-falloc").as_bool().unwrap_or(false),
+            // Metalink
+            metalink_location: get_str("metalink-location"),
+            metalink_preferred_protocol: get_str("metalink-preferred-protocol"),
+            select_file: get_str("select-file"),
+            piece_length: get_u64("piece-length"),
+            metalink_enable_unique_protocol: self
+                .get("metalink-enable-unique-protocol")
+                .as_bool()
+                .unwrap_or(true),
+            // FTP
+            connect_timeout: get_u64("connect-timeout"),
+            startup_idle_time: get_u64("startup-idle-time"),
+            lowest_speed_limit: get_u64("lowest-speed-limit"),
+            ftp_pasv: self.get("ftp-pasv").as_bool().unwrap_or(true),
+            remote_time: self.get("remote-time").as_bool().unwrap_or(false),
+            dry_run: self.get("dry-run").as_bool().unwrap_or(false),
+            ftp_reuse_connection: self.get("ftp-reuse-connection").as_bool().unwrap_or(true),
+            // Download
+            realtime_chunk_checksum: self
+                .get("realtime-chunk-checksum")
+                .as_bool()
+                .unwrap_or(true),
+            bt_stop_timeout: get_u64("bt-stop-timeout"),
+            // BitTorrent extended
+            disable_ipv6: self.get("disable-ipv6").as_bool().unwrap_or(false),
+            listen_port: get_str("listen-port"),
+            bt_enable_lpd: self.get("bt-enable-lpd").as_bool().unwrap_or(false),
+            bt_lpd_interface: get_str("bt-lpd-interface"),
+            enable_rpc: self.get("enable-rpc").as_bool().unwrap_or(false),
+            pause: self.get("pause").as_bool().unwrap_or(false),
         }
     }
 
@@ -730,7 +763,7 @@ quiet=false
         assert_eq!(opts.max_upload_limit, Some(51200));
         assert_eq!(opts.dir, Some("/data".to_string()));
         assert_eq!(opts.out, Some("output.bin".to_string()));
-        assert_eq!(opts.seed_time, Some(300));
+        assert_eq!(opts.seed_time, Some(300.0));
         assert_eq!(opts.seed_ratio, Some(2.0));
 
         // Default values (non-zero) should be preserved in DownloadOptions

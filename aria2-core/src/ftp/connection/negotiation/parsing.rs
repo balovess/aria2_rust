@@ -103,11 +103,38 @@ pub(super) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
 }
 
 /// Parse EPSV response to extract port.
+///
+/// Matches C++ `FtpConnection::receiveEpsvResponse()`: parses the
+/// `(|<net><proto><port>|)` format by splitting on `|` and expecting
+/// exactly 4 non-empty segments (net, proto, port, trailing). The port
+/// must be in range 1..=65535 (0 is rejected per C++).
 pub(super) fn parse_epsv_response(response: &str) -> Option<u16> {
-    let start = response.rfind('|')?;
-    let prev_pipe = response[..start].rfind('|')?;
-    let port_str = &response[prev_pipe + 1..start];
-    port_str.parse::<u16>().ok()
+    // Find the parenthesized portion: (|...|port|...)
+    let start = response.find('|')?;
+    let end = response.rfind('|')?;
+    if end <= start {
+        return None;
+    }
+
+    let inner = &response[start + 1..end];
+    let parts: Vec<&str> = inner.split('|').filter(|s| !s.is_empty()).collect();
+
+    // C++ expects exactly 3 parts after splitting by |: net, proto, port
+    // (The response format is (|1|1|port|) or (|||port|))
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // Port is the last non-empty part before the closing |
+    let port_str = parts.last()?;
+    let port: u16 = port_str.parse().ok()?;
+
+    // C++ validates 0 < port <= UINT16_MAX
+    if port == 0 {
+        return None;
+    }
+
+    Some(port)
 }
 
 /// Parse MDTM timestamp `YYYYMMDDhhmmss` to `SystemTime` (UTC).
@@ -157,6 +184,11 @@ pub(super) fn days_from_civil(year: i32, month: u32, day: u32) -> Option<u64> {
 // =============================================================================
 
 /// Send USER + PASS authentication sequence on a fresh control connection.
+///
+/// Error classification matches C++ aria2:
+/// - 530 on USER/PASS -> `FatalError::PermissionDenied`
+/// - Non-2xx/331/332 on USER -> `RecoverableError::FtpProtocolError`
+/// - Non-2xx on PASS -> `FatalError::PermissionDenied` (530) or `FtpProtocolError`
 pub(super) async fn authenticate(
     ctrl: &mut FreshControl,
     username: &str,
@@ -173,18 +205,29 @@ pub(super) async fn authenticate(
         331 | 332 => {
             debug!("Password required, sending PASS command");
             let pass_resp = ctrl.command(&format!("PASS {}", password)).await?;
+            if pass_resp.0 == 530 {
+                // C++ aria2: FTP_PROTOCOL_ERROR for bad login credentials
+                return Err(Aria2Error::Fatal(crate::error::FatalError::PermissionDenied {
+                    path: format!("FTP authentication failed: {} {}", pass_resp.0, pass_resp.1),
+                }));
+            }
             if !(200..300).contains(&pass_resp.0) {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
+                    RecoverableError::FtpProtocolError {
                         message: format!("Login failed: {} {}", pass_resp.0, pass_resp.1),
                     },
                 ));
             }
             info!("FTP login successful");
         }
+        530 => {
+            return Err(Aria2Error::Fatal(crate::error::FatalError::PermissionDenied {
+                path: format!("FTP USER rejected: {} {}", user_resp.0, user_resp.1),
+            }));
+        }
         _ => {
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!(
                         "Unexpected USER response: {} {}",
                         user_resp.0, user_resp.1
@@ -196,33 +239,50 @@ pub(super) async fn authenticate(
     Ok(())
 }
 
-/// Set binary transfer mode (TYPE I) on a fresh control connection.
-pub(super) async fn set_binary_mode(ctrl: &mut FreshControl) -> Result<()> {
+/// Set transfer mode (TYPE I or TYPE A) on a fresh control connection.
+///
+/// Matches C++ `FtpConnection::sendType` + `FtpNegotiationCommand::recvType`:
+/// - Non-200 response -> `FtpProtocolError` (C++ uses `FTP_PROTOCOL_ERROR`)
+pub(super) async fn set_transfer_mode(ctrl: &mut FreshControl, binary: bool) -> Result<()> {
     use tracing::debug;
 
-    debug!("Setting transfer mode to binary (TYPE I)");
-    let resp = ctrl.command("TYPE I").await?;
+    let type_cmd = if binary { "TYPE I" } else { "TYPE A" };
+    debug!("Setting transfer mode: {}", type_cmd);
+    let resp = ctrl.command(type_cmd).await?;
     if !(200..300).contains(&resp.0) {
+        // C++ aria2: EX_BAD_STATUS -> FTP_PROTOCOL_ERROR
         return Err(Aria2Error::Recoverable(
-            RecoverableError::TemporaryNetworkFailure {
-                message: format!("TYPE I failed: {} {}", resp.0, resp.1),
+            RecoverableError::FtpProtocolError {
+                message: format!("{} failed: {} {}", type_cmd, resp.0, resp.1),
             },
         ));
     }
     Ok(())
 }
 
+/// Set binary transfer mode (TYPE I) on a fresh control connection.
+///
+/// Convenience wrapper around [`set_transfer_mode`].
+#[allow(dead_code)] // Kept for backward compatibility; prefer set_transfer_mode
+pub(super) async fn set_binary_mode(ctrl: &mut FreshControl) -> Result<()> {
+    set_transfer_mode(ctrl, true).await
+}
+
 /// Query PWD to get the base working directory on a fresh control connection.
+///
+/// Matches C++ `FtpNegotiationCommand::recvPwd`:
+/// - Non-257 response -> `FtpProtocolError` (C++ uses `FTP_PROTOCOL_ERROR`)
 pub(super) async fn query_pwd(ctrl: &mut FreshControl) -> Result<String> {
     use tracing::debug;
 
     debug!("Sending PWD command");
     let resp = ctrl.command("PWD").await?;
     if resp.0 != 257 {
-        return Err(Aria2Error::DownloadFailed(format!(
-            "PWD command failed: {} {}",
-            resp.0, resp.1
-        )));
+        return Err(Aria2Error::Recoverable(
+            RecoverableError::FtpProtocolError {
+                message: format!("PWD failed: {} {}", resp.0, resp.1),
+            },
+        ));
     }
 
     // Parse 257 "/path" current directory
@@ -233,13 +293,22 @@ pub(super) async fn query_pwd(ctrl: &mut FreshControl) -> Result<String> {
     {
         Ok(msg[start + 1..end].to_string())
     } else {
-        Ok(msg.to_string())
+        // C++ throws FTP_PROTOCOL_ERROR if no quotes found
+        Err(Aria2Error::Recoverable(
+            RecoverableError::FtpProtocolError {
+                message: format!("PWD response missing quoted path: {}", msg),
+            },
+        ))
     }
 }
 
 /// CWD traversal on a fresh control connection.
 ///
 /// Matches the C++ `sendCwdPrep` + `sendCwd`/`recvCwd` loop.
+///
+/// Error classification matches C++:
+/// - 550 -> `FatalError::FileNotFound` (C++ uses `RESOURCE_NOT_FOUND`)
+/// - Non-250 (not 550) -> `FtpProtocolError` (C++ uses `FTP_PROTOCOL_ERROR`)
 pub(super) async fn cwd_traversal(
     ctrl: &mut FreshControl,
     base_working_dir: &str,
@@ -268,15 +337,18 @@ pub(super) async fn cwd_traversal(
         debug!("CWD {}", dir);
         let (code, msg) = ctrl.command(&format!("CWD {}", dir)).await?;
         if code == 550 {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::ServerError { code: 550 },
-            ));
+            // C++ aria2: RESOURCE_NOT_FOUND, increases file-not-found count
+            return Err(Aria2Error::Fatal(crate::error::FatalError::FileNotFound {
+                path: dir.to_string(),
+            }));
         }
         if code != 250 {
-            return Err(Aria2Error::DownloadFailed(format!(
-                "CWD {} failed: {} {}",
-                dir, code, msg
-            )));
+            // C++ aria2: EX_BAD_STATUS -> FTP_PROTOCOL_ERROR, pools connection first
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("CWD {} failed: {} {}", dir, code, msg),
+                },
+            ));
         }
     }
 
@@ -364,10 +436,15 @@ pub(super) async fn query_size(
 }
 
 /// Send REST command for resume offset on a fresh control connection.
+///
+/// Matches C++ `FtpConnection::sendRest()`: always sends REST even when
+/// offset is 0 (`REST 0`). Some servers require REST before RETR to
+/// properly set the file pointer, and `REST 0` explicitly resets it.
 pub(super) async fn send_rest(ctrl: &mut FreshControl, offset: u64) -> Result<()> {
     use tracing::{debug, warn};
 
     debug!("Setting resume offset: {} bytes", offset);
+    // C++ always sends REST, even REST 0 (FtpConnection.cc:234-245)
     let resp = ctrl.command(&format!("REST {}", offset)).await?;
     if resp.0 != 350 {
         warn!(
@@ -375,31 +452,43 @@ pub(super) async fn send_rest(ctrl: &mut FreshControl, offset: u64) -> Result<()
             resp.0, resp.1
         );
         // C++ aria2: CANNOT_RESUME if offset != 0 and server doesn't support REST
-        return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+        if offset > 0 {
+            return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+        }
+        // REST 0 failure is non-fatal: the file pointer is already at 0
+        debug!("REST 0 rejected, continuing (file pointer assumed at start)");
+    } else {
+        debug!("REST accepted by server");
     }
-    debug!("REST accepted by server");
     Ok(())
 }
 
 /// Send RETR command to start file transfer on a fresh control connection.
 ///
-/// The `file_path` is percent-decoded before sending, matching the C++
-/// `FtpConnection::sendRetr` which calls `util::percentDecode()`.
+/// The `file_path` is expected to already be percent-decoded (typically via
+/// `extract_file_part()`), matching the C++ flow where `Request::getFile()`
+/// returns a decoded path and `FtpConnection::sendRetr` applies
+/// `util::percentDecode()` once. We do NOT double-decode here.
+///
+/// Error classification matches C++ `FtpNegotiationCommand::recvRetr`:
+/// - 550 -> `FatalError::FileNotFound` (C++ uses `RESOURCE_NOT_FOUND`)
+/// - Non-150/125 (not 550) -> `FtpProtocolError` (C++ uses `FTP_PROTOCOL_ERROR`)
 pub(super) async fn send_retr(ctrl: &mut FreshControl, file_path: &str) -> Result<()> {
     use tracing::debug;
 
-    let decoded = percent_decode(file_path);
-    debug!("Initiating file retrieval: {}", decoded);
-    let resp = ctrl.command(&format!("RETR {}", decoded)).await?;
+    debug!("Initiating file retrieval: {}", file_path);
+    let resp = ctrl.command(&format!("RETR {}", file_path)).await?;
     if resp.0 == 150 || resp.0 == 125 {
         Ok(())
     } else if resp.0 == 550 {
-        Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-            code: 550,
+        // C++ aria2: RESOURCE_NOT_FOUND, increases file-not-found count
+        Err(Aria2Error::Fatal(crate::error::FatalError::FileNotFound {
+            path: file_path.to_string(),
         }))
     } else {
+        // C++ aria2: EX_BAD_STATUS -> FTP_PROTOCOL_ERROR
         Err(Aria2Error::Recoverable(
-            RecoverableError::TemporaryNetworkFailure {
+            RecoverableError::FtpProtocolError {
                 message: format!("RETR unexpected response: {} {}", resp.0, resp.1),
             },
         ))
@@ -412,8 +501,13 @@ pub(super) async fn send_retr(ctrl: &mut FreshControl, file_path: &str) -> Resul
 
 /// CWD traversal on a pooled control connection.
 ///
-/// Each directory component is percent-decoded before sending, matching
-/// the C++ `FtpConnection::sendCwd` which calls `util::percentDecode()`.
+/// The `dir_path` is expected to already be percent-decoded (typically via
+/// `extract_directory_part()`), matching the fresh-connection `cwd_traversal`
+/// behavior. We do NOT double-decode here.
+///
+/// Error classification matches C++:
+/// - 550 -> `FatalError::FileNotFound` (C++ uses `RESOURCE_NOT_FOUND`)
+/// - Non-250 (not 550) -> `FtpProtocolError` (C++ uses `FTP_PROTOCOL_ERROR`)
 pub(super) async fn cwd_traversal_pooled(
     ctrl: &mut PooledControl,
     base_working_dir: &str,
@@ -433,19 +527,19 @@ pub(super) async fn cwd_traversal_pooled(
 
     debug!("CWD traversal (pooled): {} directories", dirs.len());
     for dir in &dirs {
-        let decoded = percent_decode(dir);
-        debug!("CWD {}", decoded);
-        let (code, msg) = ctrl.command(&format!("CWD {}", decoded)).await?;
+        debug!("CWD {}", dir);
+        let (code, msg) = ctrl.command(&format!("CWD {}", dir)).await?;
         if code == 550 {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::ServerError { code: 550 },
-            ));
+            return Err(Aria2Error::Fatal(crate::error::FatalError::FileNotFound {
+                path: dir.to_string(),
+            }));
         }
         if code != 250 {
-            return Err(Aria2Error::DownloadFailed(format!(
-                "CWD {} failed: {} {}",
-                decoded, code, msg
-            )));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("CWD {} failed (pooled): {} {}", dir, code, msg),
+                },
+            ));
         }
     }
     info!("CWD traversal (pooled) completed successfully");
@@ -506,37 +600,49 @@ pub(super) async fn query_size_pooled(
 }
 
 /// Send REST command for resume offset on a pooled control connection.
+///
+/// Matches C++ `FtpConnection::sendRest()`: always sends REST even when
+/// offset is 0. REST 0 rejection is non-fatal (file pointer is already
+/// at position 0).
 pub(super) async fn send_rest_pooled(ctrl: &mut PooledControl, offset: u64) -> Result<()> {
     use tracing::debug;
 
     debug!("Setting resume offset (pooled): {} bytes", offset);
     let resp = ctrl.command(&format!("REST {}", offset)).await?;
     if resp.0 != 350 {
-        return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+        if offset > 0 {
+            return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+        }
+        // REST 0 rejection is non-fatal
+        debug!("REST 0 rejected (pooled), continuing");
     }
     Ok(())
 }
 
 /// Send RETR command on a pooled control connection.
 ///
-/// The `file_path` is percent-decoded before sending, matching the C++
-/// `FtpConnection::sendRetr` which calls `util::percentDecode()`.
+/// The `file_path` is expected to already be percent-decoded (typically via
+/// `extract_file_part()`), matching the fresh-connection `send_retr`
+/// behavior. We do NOT double-decode here.
+///
+/// Error classification matches C++:
+/// - 550 -> `FatalError::FileNotFound` (C++ uses `RESOURCE_NOT_FOUND`)
+/// - Non-150/125 (not 550) -> `FtpProtocolError` (C++ uses `FTP_PROTOCOL_ERROR`)
 pub(super) async fn send_retr_pooled(ctrl: &mut PooledControl, file_path: &str) -> Result<()> {
     use tracing::debug;
 
-    let decoded = percent_decode(file_path);
-    debug!("Initiating file retrieval (pooled): {}", decoded);
-    let resp = ctrl.command(&format!("RETR {}", decoded)).await?;
+    debug!("Initiating file retrieval (pooled): {}", file_path);
+    let resp = ctrl.command(&format!("RETR {}", file_path)).await?;
     if resp.0 == 150 || resp.0 == 125 {
         Ok(())
     } else if resp.0 == 550 {
-        Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-            code: 550,
+        Err(Aria2Error::Fatal(crate::error::FatalError::FileNotFound {
+            path: file_path.to_string(),
         }))
     } else {
         Err(Aria2Error::Recoverable(
-            RecoverableError::TemporaryNetworkFailure {
-                message: format!("RETR unexpected response: {} {}", resp.0, resp.1),
+            RecoverableError::FtpProtocolError {
+                message: format!("RETR unexpected response (pooled): {} {}", resp.0, resp.1),
             },
         ))
     }

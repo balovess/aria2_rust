@@ -428,7 +428,7 @@ fn test_update_option_new_runtime_changeable() {
         group
             .update_option("seed-time", serde_json::json!(3600))
     );
-    assert_eq!(group.options().seed_time, Some(3600));
+    assert_eq!(group.options().seed_time, Some(3600.0));
 
     // seed-ratio
     assert!(

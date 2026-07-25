@@ -6,41 +6,56 @@
 
 use crate::http::header_processor::HttpResponseHead;
 
-/// Validate that the server's Content-Range matches the requested range.
+/// Validate that the server's Content-Range satisfies the requested range.
 ///
-/// For resumable downloads, if we requested bytes `req_start..=req_end` and
-/// the server responds with `Content-Range: bytes resp_start-resp_end/total`,
-/// the ranges must match. A mismatch means the server's content changed or
-/// the server doesn't support range requests properly, so we cannot resume.
+/// Matches C++ `HttpRequest::isRangeSatisfied()` semantics:
+/// - If `req_end == 0` (no explicit end requested), only checks that
+///   `resp_start == req_start` (start must match exactly).
+/// - If `req_end > 0`, requires `resp_start == req_start` AND the server's
+///   end byte must be >= requested end byte (server may return a superset
+///   range, which is acceptable per HTTP/1.1 §14.16).
+///
+/// This is more lenient than strict equality: a server returning
+/// `Content-Range: bytes 0-999/5000` satisfies a request for `bytes 0-499`
+/// because the server's range covers what was requested.
 ///
 /// # Arguments
 ///
 /// * `req_start` - Start byte of the requested range (inclusive).
-/// * `req_end` - End byte of the requested range (inclusive).
+/// * `req_end` - End byte of the requested range (inclusive). 0 = no end.
 /// * `resp_start` - Start byte from Content-Range header (inclusive).
 /// * `resp_end` - End byte from Content-Range header (inclusive).
 ///
 /// # Returns
 ///
-/// `Ok(())` if ranges match, `Err` with description if they don't.
+/// `Ok(())` if ranges satisfy the request, `Err` with description if not.
 pub fn validate_response_range(
     req_start: u64,
     req_end: u64,
     resp_start: u64,
     resp_end: u64,
 ) -> std::result::Result<(), String> {
+    // Start byte must always match exactly
     if req_start != resp_start {
         return Err(format!(
             "Range start mismatch: requested={}, server={}",
             req_start, resp_start
         ));
     }
-    if req_end != resp_end {
+
+    // If no explicit end was requested, start match is sufficient
+    if req_end == 0 {
+        return Ok(());
+    }
+
+    // Server's end must cover at least what we requested
+    if resp_end < req_end {
         return Err(format!(
-            "Range end mismatch: requested={}, server={}",
+            "Range end insufficient: requested={}, server={}",
             req_end, resp_end
         ));
     }
+
     Ok(())
 }
 
@@ -152,6 +167,10 @@ mod tests {
     fn test_validate_response_range_match() {
         assert!(validate_response_range(0, 499, 0, 499).is_ok());
         assert!(validate_response_range(500, 999, 500, 999).is_ok());
+        // Server returning superset range is acceptable (C++ isRangeSatisfied)
+        assert!(validate_response_range(0, 499, 0, 999).is_ok());
+        // No explicit end requested (req_end=0): only start must match
+        assert!(validate_response_range(0, 0, 0, 999).is_ok());
     }
 
     #[test]
@@ -162,10 +181,18 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_response_range_end_mismatch() {
-        let result = validate_response_range(0, 499, 0, 599);
+    fn test_validate_response_range_end_insufficient() {
+        // Server returned fewer bytes than requested
+        let result = validate_response_range(0, 999, 0, 499);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("end mismatch"));
+        assert!(result.unwrap_err().contains("insufficient"));
+    }
+
+    #[test]
+    fn test_validate_response_range_no_end_requested() {
+        // req_end=0 means no explicit end, so any resp_end is fine
+        assert!(validate_response_range(100, 0, 100, 200).is_ok());
+        assert!(validate_response_range(100, 0, 100, 0).is_ok());
     }
 
     #[test]

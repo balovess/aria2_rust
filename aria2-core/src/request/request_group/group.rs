@@ -313,7 +313,7 @@ impl RequestGroup {
                 true
             }
             "seed-time" => {
-                if let Some(v) = value.as_u64() {
+                if let Some(v) = value.as_f64() {
                     opts.seed_time = Some(v);
                 }
                 true

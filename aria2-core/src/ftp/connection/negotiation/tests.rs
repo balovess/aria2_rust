@@ -7,7 +7,7 @@ use super::parsing::{
     days_from_civil, extract_directory_part, extract_file_part, parse_epsv_response,
     parse_mdtm_timestamp, parse_pasv_response, percent_decode,
 };
-use super::FtpNegotiationConfig;
+use super::{FtpNegotiationConfig, FtpTransferType};
 use crate::ftp::connection::types::FtpMode;
 
 #[test]
@@ -155,12 +155,14 @@ fn test_ftp_negotiation_config_defaults() {
         password: "aria2@".to_string(),
         remote_path: "/pub/file.txt".to_string(),
         mode: FtpMode::Passive,
+        transfer_type: FtpTransferType::Binary,
         resume_offset: 0,
         remote_time: false,
         connect_timeout: Duration::from_secs(30),
         command_timeout: Duration::from_secs(30),
         is_pooled: false,
         pooled_base_working_dir: None,
+        data_proxy: None,
     };
     assert_eq!(config.host, "example.com");
     assert_eq!(config.port, 21);

@@ -267,14 +267,15 @@ async fn test_connection_pool_reuse() {
     assert_eq!(manager.active_count(), 1);
 
     // Return the connection (move ownership)
-    manager.release(conn1).await;
+    manager.release(_conn1_id).await;
 
     // Second connection acquisition (should succeed)
     let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should succeed");
     assert!(manager.active_count() >= 1); // Connection count should be >= 1
 
     // Cleanup
-    manager.release(conn2).await;
+    let _conn2_id = conn2.id;
+    manager.release(_conn2_id).await;
     manager.cleanup().await;
     server_handle.abort();
 }

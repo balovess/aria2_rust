@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::resume_data::{ResumeData, UriState};
+use crate::engine::resume_data::ResumeData;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 

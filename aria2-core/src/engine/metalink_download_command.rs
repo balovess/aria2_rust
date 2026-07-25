@@ -70,7 +70,7 @@ impl MetalinkDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes)
+        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
                 Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
             })?;
@@ -172,7 +172,7 @@ impl MetalinkDownloadCommand {
         output_dir: Option<&str>,
         gid_start: u64,
     ) -> Result<Vec<MetalinkFileInfo>> {
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes)
+        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
                 Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
             })?;
@@ -215,7 +215,7 @@ impl MetalinkDownloadCommand {
 
             let file_info = FileDownloadInfo {
                 expected_size: file.size,
-                hash_entry: file.hashes.first().cloned(),
+                hash_entry: file.strongest_hash().cloned(),
                 sorted_urls,
             };
 
@@ -244,6 +244,93 @@ impl MetalinkDownloadCommand {
         }
 
         Ok(commands)
+    }
+
+    /// Create a `MetalinkDownloadCommand` from a pre-parsed, pre-sorted
+    /// `MetalinkFile` entry.
+    ///
+    /// This is used by `MetalinkToRequestGroup` which handles its own
+    /// parsing, filtering, and priority reordering. Unlike `create_multi_file`,
+    /// this method does not re-parse the XML.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - Pre-parsed Metalink file entry with sorted URLs
+    /// * `options` - Download options
+    /// * `output_dir` - Override output directory
+    /// * `gid_start` - Starting GID for this command
+    pub fn create_multi_file_for_single(
+        file: &aria2_protocol::metalink::parser::MetalinkFile,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        gid_start: u64,
+    ) -> Result<Vec<MetalinkFileInfo>> {
+        let dir = output_dir
+            .map(|d| d.to_string())
+            .or_else(|| options.dir.clone())
+            .unwrap_or_else(|| ".".to_string());
+
+        let client = build_http_client()?;
+
+        if file.urls.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let gid = GroupId::new(gid_start);
+        let path = std::path::PathBuf::from(&dir).join(&file.name);
+
+        let sorted_urls: Vec<UrlEntry> = file
+            .get_sorted_urls()
+            .iter()
+            .map(|u| (*u).clone())
+            .collect();
+
+        // Collect only non-P2P URLs (HTTP, HTTPS, FTP) for the URI list.
+        // BitTorrent URLs go through a separate dependency mechanism.
+        // Mirrors C++ AccumulateNonP2PUri.
+        let urls: Vec<String> = sorted_urls
+            .iter()
+            .filter(|u| u.is_non_p2p())
+            .map(|u| u.url.clone())
+            .collect();
+
+        if urls.is_empty() {
+            debug!(
+                name = %file.name,
+                "Skipping Metalink file with no non-P2P URLs"
+            );
+            return Ok(Vec::new());
+        }
+
+        let group = RequestGroup::new(gid, urls, options.clone());
+
+        let file_info = FileDownloadInfo {
+            expected_size: file.size,
+            hash_entry: file.strongest_hash().cloned(),
+            sorted_urls,
+        };
+
+        info!(
+            gid = gid.value(),
+            name = %file.name,
+            path = %path.display(),
+            mirrors = file.urls.len(),
+            "Created MetalinkDownloadCommand for single file"
+        );
+
+        Ok(vec![MetalinkFileInfo {
+            command: Self {
+                group: Arc::new(std::sync::RwLock::new(group)),
+                client,
+                output_path: path,
+                started: false,
+                completed: false,
+                completed_bytes: 0,
+                metalink_data: Vec::new(),
+                file_info: Some(file_info),
+            },
+            file_index: 0,
+        }])
     }
 
     /// Get the output path for this download.
@@ -295,7 +382,7 @@ impl Command for MetalinkDownloadCommand {
                 hash_entry_owned = info.hash_entry.clone();
             }
             None => {
-            let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data)
+            let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data, None)
                 .map_err(|e| {
                     Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
                 })?;

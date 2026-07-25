@@ -16,7 +16,7 @@ use crate::ftp::connection::negotiation::control::FreshControl;
 use crate::ftp::connection::negotiation::parsing::{
     parse_epsv_response, parse_pasv_response,
 };
-use crate::ftp::connection::negotiation::FtpNegotiator;
+use crate::ftp::connection::negotiation::{FtpNegotiator, PasvResult};
 
 impl FtpNegotiator {
     /// Connect to FTP server, read greeting, authenticate, and detect capabilities.
@@ -57,11 +57,16 @@ impl FtpNegotiator {
 
         // Read welcome message
         let welcome = ctrl.read_response(command_timeout).await?;
-        if !(200..300).contains(&welcome.0) && !(100..200).contains(&welcome.0) {
-            return Err(Aria2Error::DownloadFailed(format!(
-                "FTP server rejected connection: {} {}",
-                welcome.0, welcome.1
-            )));
+        if welcome.0 != 220 {
+            // C++ aria2: EX_CONNECTION_FAILED -> FTP_PROTOCOL_ERROR for non-220 greeting
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!(
+                        "FTP server rejected connection (expected 220): {} {}",
+                        welcome.0, welcome.1
+                    ),
+                },
+            ));
         }
         info!("Connected to FTP server {}:{}", host, port);
 
@@ -79,22 +84,23 @@ impl FtpNegotiator {
         Ok((ctrl, capabilities))
     }
 
-    /// Enter passive mode and connect to the data port on a fresh connection.
+    /// Enter passive mode and return the resolved port + optional direct data stream.
     ///
-    /// Uses server capabilities to decide the order:
-    /// - If FEAT reported EPSV support, try EPSV first (with PASV fallback)
-    /// - If FEAT did not report EPSV, still try EPSV first but fall back
-    ///   more aggressively on 5xx errors (server explicitly refuses EPSV)
-    pub(super) async fn enter_passive_mode(
+    /// This method separates port resolution from stream creation, enabling the
+    /// C++ `SEQ_RESOLVE_PROXY` flow where the PASV data connection may be
+    /// tunneled through an HTTP proxy instead of connected directly.
+    ///
+    /// When no proxy is configured, the direct `TcpStream` is included in the
+    /// result. When a proxy is configured, only the port is returned and the
+    /// caller must establish the tunnel separately.
+    pub(super) async fn enter_passive_mode_get_port(
         ctrl: &mut FreshControl,
         host: &str,
         connect_timeout: Duration,
         caps: &ServerCapabilities,
-    ) -> Result<TcpStream> {
+    ) -> Result<PasvResult> {
         // Try EPSV first (IPv6-friendly, RFC 2428)
         if caps.epsv || !caps.mlst_mlsd {
-            // If FEAT advertised EPSV, or we have no FEAT info at all,
-            // attempt EPSV first.
             debug!("Attempting extended passive mode (EPSV)");
             let epsv_resp = ctrl.command("EPSV").await;
 
@@ -119,21 +125,20 @@ impl FtpNegotiator {
                                     )
                                 })?;
                         let _ = data_stream.set_nodelay(true);
-                        return Ok(data_stream);
+                        return Ok(PasvResult {
+                            port,
+                            stream: Some(data_stream),
+                        });
                     }
                     warn!("Failed to parse EPSV response, falling back to PASV");
                 }
                 Ok(resp) if (500..600).contains(&resp.0) => {
-                    // 5xx response: server explicitly refuses EPSV.
-                    // This is the critical fallback case for servers that don't
-                    // support RFC 2428 at all.
                     debug!(
                         "EPSV rejected with {} (server does not support EPSV), falling back to PASV",
                         resp.0
                     );
                 }
                 Ok(resp) => {
-                    // Other non-229 response (e.g. 4xx temporary)
                     debug!("EPSV unexpected response: {} {}, trying PASV", resp.0, resp.1);
                 }
                 _ => {
@@ -147,7 +152,7 @@ impl FtpNegotiator {
         let pasv_resp = ctrl.command("PASV").await?;
         if pasv_resp.0 != 227 {
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!("PASV failed: {} {}", pasv_resp.0, pasv_resp.1),
                 },
             ));
@@ -168,14 +173,32 @@ impl FtpNegotiator {
                     })
                 })?;
                 let _ = data_stream.set_nodelay(true);
-                Ok(data_stream)
+                Ok(PasvResult {
+                    port: data_port,
+                    stream: Some(data_stream),
+                })
             }
             None => Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: "Cannot parse PASV response".into(),
                 },
             )),
         }
+    }
+
+    /// Enter passive mode and connect to the data port on a fresh connection.
+    ///
+    /// Convenience wrapper for `enter_passive_mode_get_port` that always
+    /// returns the direct stream (no proxy tunnel).
+    #[allow(dead_code)] // Kept for backward compatibility with tests
+    pub(super) async fn enter_passive_mode(
+        ctrl: &mut FreshControl,
+        host: &str,
+        connect_timeout: Duration,
+        caps: &ServerCapabilities,
+    ) -> Result<TcpStream> {
+        let result = Self::enter_passive_mode_get_port(ctrl, host, connect_timeout, caps).await?;
+        Ok(result.stream.unwrap())
     }
 
     /// Enter active mode and accept the server's data connection on a fresh connection.
@@ -183,6 +206,11 @@ impl FtpNegotiator {
     /// Uses server capabilities to decide EPRT vs PORT:
     /// - If FEAT reported EPRT support, try EPRT first
     /// - Fallback to PORT if EPRT fails
+    ///
+    /// Matches C++ `FtpNegotiationCommand`:
+    /// - `SEQ_PREPARE_PORT` -> `SEQ_PREPARE_SERVER_SOCKET_EPRT` or `SEQ_PREPARE_SERVER_SOCKET`
+    /// - `SEQ_SEND_EPRT`/`SEQ_RECV_EPRT` -> `SEQ_SEND_PORT`/`SEQ_RECV_PORT` fallback
+    /// - `SEQ_WAIT_CONNECTION` -> accept
     pub(super) async fn enter_active_mode(
         ctrl: &mut FreshControl,
         connect_timeout: Duration,
@@ -199,8 +227,15 @@ impl FtpNegotiator {
                 })
             })?;
 
-        // Bind a listener on port 0 (auto-assign)
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+        let local_ip = local_addr.ip();
+
+        // Bind listener on the appropriate wildcard address for the address family
+        // C++ uses socket->getAddressFamily() to decide; we match the control socket.
+        let bind_addr = match local_ip {
+            std::net::IpAddr::V4(_) => "0.0.0.0:0",
+            std::net::IpAddr::V6(_) => "[::]:0",
+        };
+        let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -216,33 +251,40 @@ impl FtpNegotiator {
             })?
             .port();
 
-        let local_ip = local_addr.ip();
-
-        // Try EPRT first
-        let eprt_cmd = format!("EPRT |1|{}|{}|", local_ip, data_port);
+        // C++ SEQ_PREPARE_SERVER_SOCKET_EPRT: try EPRT first
+        // EPRT protocol number: |1| for IPv4, |2| for IPv6 (RFC 2428)
+        let proto_num = match local_ip {
+            std::net::IpAddr::V4(_) => 1,
+            std::net::IpAddr::V6(_) => 2,
+        };
+        let eprt_cmd = format!("EPRT |{}|{}|{}|", proto_num, local_ip, data_port);
         debug!("Sending EPRT command");
         let eprt_resp = ctrl.command(&eprt_cmd).await?;
 
+        // C++ recvEprt: 200 -> SEQ_SEND_REST; else -> SEQ_PREPARE_SERVER_SOCKET (PORT fallback)
         if eprt_resp.0 != 200
             && eprt_resp.0 != 500
             && eprt_resp.0 != 501
             && eprt_resp.0 != 502
         {
-            return Err(Aria2Error::DownloadFailed(format!(
-                "EPRT command failed: {} {}",
-                eprt_resp.0, eprt_resp.1
-            )));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("EPRT command failed: {} {}", eprt_resp.0, eprt_resp.1),
+                },
+            ));
         }
 
         if !(200..300).contains(&eprt_resp.0) {
-            // EPRT failed, try PORT
+            // EPRT failed, try PORT (C++ SEQ_PREPARE_SERVER_SOCKET + SEQ_SEND_PORT)
             warn!("EPRT unavailable, falling back to PORT mode");
 
             let ipv4_addr = match local_ip {
                 std::net::IpAddr::V4(v4) => v4,
                 std::net::IpAddr::V6(_) => {
-                    return Err(Aria2Error::DownloadFailed(
-                        "IPv6 does not support active mode PORT command".into(),
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::FtpProtocolError {
+                            message: "IPv6 does not support PORT command, use passive mode".into(),
+                        },
                     ));
                 }
             };
@@ -255,14 +297,17 @@ impl FtpNegotiator {
             );
             debug!("Sending PORT command");
             let port_resp = ctrl.command(&port_cmd).await?;
+            // C++ recvPort: non-200 -> FTP_PROTOCOL_ERROR
             if !(200..300).contains(&port_resp.0) {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::ServerError { code: 425 },
+                    RecoverableError::FtpProtocolError {
+                        message: format!("PORT command failed: {} {}", port_resp.0, port_resp.1),
+                    },
                 ));
             }
         }
 
-        // Wait for server to connect
+        // C++ SEQ_WAIT_CONNECTION: wait for server to connect
         debug!("Waiting for server data connection on port: {}", data_port);
         let (data_stream, _addr) = timeout(connect_timeout, listener.accept())
             .await

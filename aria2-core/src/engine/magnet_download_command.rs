@@ -157,13 +157,20 @@ impl Command for MagnetDownloadCommand {
         }
 
         let discovered_peers = if let Some(ref engine) = self.dht_engine {
-            let result = engine.find_peers(&ml.info_hash).await;
-            info!(
-                "Magnet: DHT discovered {} peers (contacted {} nodes)",
-                result.peers.len(),
-                result.nodes_contacted
-            );
-            result.peers
+            match engine.find_peers(&ml.info_hash).await {
+                Ok(result) => {
+                    info!(
+                        "Magnet: DHT discovered {} peers (contacted {} nodes)",
+                        result.peers.len(),
+                        result.nodes_contacted
+                    );
+                    result.peers
+                }
+                Err(e) => {
+                    warn!("Magnet: DHT find_peers failed: {}", e);
+                    vec![]
+                }
+            }
         } else {
             warn!("Magnet: DHT disabled, no peers available");
             vec![]

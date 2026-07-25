@@ -11,9 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
-use crate::engine::bt_download_command::{
-    BtDownloadCommand, PUBLIC_TRACKER_PEER_THRESHOLD,
-};
+use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::util::rwlock_ext::RwLockRecover;

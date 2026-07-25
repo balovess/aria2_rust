@@ -25,6 +25,7 @@
 
 mod active_connection;
 mod manager;
+mod pipeline;
 mod types;
 
 #[cfg(test)]
@@ -33,4 +34,5 @@ mod tests;
 // Re-export all public types to preserve the public API
 pub use active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
 pub use manager::HttpConnectionManager;
+pub use pipeline::{HttpPipelineConnection, NtlmState, PendingRequest, PipelineResponse};
 pub use types::{ConnectionState, HttpConfig, HttpResponse};

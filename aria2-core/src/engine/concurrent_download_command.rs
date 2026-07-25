@@ -37,7 +37,7 @@ impl ConcurrentDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes)
+        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
                 Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
             })?;
@@ -126,7 +126,7 @@ impl Command for ConcurrentDownloadCommand {
             self.started = true;
         }
 
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data)
+        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data, None)
             .map_err(|e| {
                 Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
             })?;

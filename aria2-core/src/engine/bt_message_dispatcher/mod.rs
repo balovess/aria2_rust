@@ -226,6 +226,9 @@ pub struct ActiveInteractionChecker {
     mutual_uninterested_timeout: Duration,
     /// Total inactivity timeout (default 60s)
     inactivity_timeout: Duration,
+    /// Timestamp of the last data exchange (piece/unchoke received).
+    /// Reset by `record_data_exchange()`.
+    last_data_exchange: Instant,
 }
 
 impl ActiveInteractionChecker {
@@ -235,6 +238,7 @@ impl ActiveInteractionChecker {
             inactive_since: Instant::now(),
             mutual_uninterested_timeout: Duration::from_secs(30),
             inactivity_timeout: Duration::from_secs(60),
+            last_data_exchange: Instant::now(),
         }
     }
 
@@ -272,6 +276,12 @@ impl ActiveInteractionChecker {
     /// Reset the inactive timer (called when data is exchanged).
     pub fn reset_timer(&mut self) {
         self.inactive_since = Instant::now();
+    }
+
+    /// Record that a data exchange occurred (piece/unchoke received).
+    /// Resets the inactivity timer.
+    pub fn record_data_exchange(&mut self) {
+        self.last_data_exchange = Instant::now();
     }
 }
 

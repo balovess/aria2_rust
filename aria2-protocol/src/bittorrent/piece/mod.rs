@@ -4,6 +4,6 @@ pub mod peer_tracker;
 pub mod picker;
 
 pub use picker::{
-    PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode, PieceSelectionStrategy,
-    PickedPiece,
+    PieceInfo, PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode,
+    PieceSelectionStrategy, PickedPiece,
 };

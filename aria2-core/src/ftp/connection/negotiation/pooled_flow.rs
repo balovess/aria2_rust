@@ -13,19 +13,20 @@ use crate::ftp::connection::negotiation::control::PooledControl;
 use crate::ftp::connection::negotiation::parsing::{
     parse_epsv_response, parse_pasv_response,
 };
-use crate::ftp::connection::negotiation::FtpNegotiator;
+use crate::ftp::connection::negotiation::{FtpNegotiator, PasvResult};
 
 impl FtpNegotiator {
-    /// Enter passive mode on a pooled connection.
+    /// Enter passive mode on a pooled connection and return the resolved port + optional stream.
     ///
-    /// Uses server capabilities to decide EPSV vs PASV order.
-    /// When EPSV returns 5xx, falls back to PASV immediately.
-    pub(super) async fn enter_passive_mode_pooled(
+    /// This method separates port resolution from stream creation, enabling the
+    /// C++ `SEQ_RESOLVE_PROXY` flow where the PASV data connection may be
+    /// tunneled through an HTTP proxy instead of connected directly.
+    pub(super) async fn enter_passive_mode_pooled_get_port(
         ctrl: &mut PooledControl,
         host: &str,
         connect_timeout: Duration,
         caps: &ServerCapabilities,
-    ) -> Result<TcpStream> {
+    ) -> Result<PasvResult> {
         // Try EPSV first if capabilities suggest it or are unknown
         if caps.epsv || !caps.mlst_mlsd {
             debug!("Attempting EPSV (pooled)");
@@ -47,12 +48,14 @@ impl FtpNegotiator {
                                     )
                                 })?;
                         let _ = data_stream.set_nodelay(true);
-                        return Ok(data_stream);
+                        return Ok(PasvResult {
+                            port,
+                            stream: Some(data_stream),
+                        });
                     }
                     warn!("Failed to parse EPSV response, falling back to PASV");
                 }
                 Ok(resp) if (500..600).contains(&resp.0) => {
-                    // 5xx: server explicitly refuses EPSV, fallback to PASV
                     debug!(
                         "EPSV rejected with {} (pooled), falling back to PASV",
                         resp.0
@@ -67,8 +70,8 @@ impl FtpNegotiator {
         let pasv_resp = ctrl.command("PASV").await?;
         if pasv_resp.0 != 227 {
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: format!("PASV failed: {} {}", pasv_resp.0, pasv_resp.1),
+                RecoverableError::FtpProtocolError {
+                    message: format!("PASV failed (pooled): {} {}", pasv_resp.0, pasv_resp.1),
                 },
             ));
         }
@@ -88,19 +91,36 @@ impl FtpNegotiator {
                     })
                 })?;
                 let _ = data_stream.set_nodelay(true);
-                Ok(data_stream)
+                Ok(PasvResult {
+                    port: data_port,
+                    stream: Some(data_stream),
+                })
             }
             None => Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: "Cannot parse PASV response".into(),
+                RecoverableError::FtpProtocolError {
+                    message: "Cannot parse PASV response (pooled)".into(),
                 },
             )),
         }
     }
 
+    /// Enter passive mode on a pooled connection (convenience wrapper).
+    #[allow(dead_code)] // Kept for backward compatibility
+    pub(super) async fn enter_passive_mode_pooled(
+        ctrl: &mut PooledControl,
+        host: &str,
+        connect_timeout: Duration,
+        caps: &ServerCapabilities,
+    ) -> Result<TcpStream> {
+        let result =
+            Self::enter_passive_mode_pooled_get_port(ctrl, host, connect_timeout, caps).await?;
+        Ok(result.stream.unwrap())
+    }
+
     /// Enter active mode on a pooled connection.
     ///
     /// Uses server capabilities to decide EPRT vs PORT order.
+    /// Matches C++ `FtpNegotiationCommand` active mode flow.
     pub(super) async fn enter_active_mode_pooled(
         ctrl: &mut PooledControl,
         connect_timeout: Duration,
@@ -147,12 +167,15 @@ impl FtpNegotiator {
         let eprt_cmd = format!("EPRT |{}|{}|{}|", proto_num, local_ip, data_port);
         let eprt_resp = ctrl.command(&eprt_cmd).await?;
 
+        // C++ recvEprt: 200 -> proceed; else -> PORT fallback
         if !(200..300).contains(&eprt_resp.0) {
             let ipv4_addr = match local_ip {
                 std::net::IpAddr::V4(v4) => v4,
                 std::net::IpAddr::V6(_) => {
-                    return Err(Aria2Error::DownloadFailed(
-                        "IPv6 does not support PORT command".into(),
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::FtpProtocolError {
+                            message: "IPv6 does not support PORT command, use passive mode".into(),
+                        },
                     ));
                 }
             };
@@ -166,11 +189,17 @@ impl FtpNegotiator {
             let port_resp = ctrl.command(&port_cmd).await?;
             if !(200..300).contains(&port_resp.0) {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::ServerError { code: 425 },
+                    RecoverableError::FtpProtocolError {
+                        message: format!(
+                            "PORT command failed (pooled): {} {}",
+                            port_resp.0, port_resp.1
+                        ),
+                    },
                 ));
             }
         }
 
+        // C++ SEQ_WAIT_CONNECTION
         let (data_stream, _) = timeout(connect_timeout, listener.accept())
             .await
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?

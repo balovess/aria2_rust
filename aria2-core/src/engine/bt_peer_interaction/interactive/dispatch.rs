@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use aria2_protocol::bittorrent::message::types::BtMessage;
 
-use crate::engine::bt_message_dispatcher::InactiveReason;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::extension_registry;
+use crate::engine::extension_registry::ExtensionUpdate;
 use crate::error::Result;
 use tracing::{debug, trace, warn};
 
