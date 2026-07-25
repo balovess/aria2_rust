@@ -373,6 +373,43 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
 
+        // --- SSL/TLS Extended ---
+        self.register(OptionDef {
+            name: "certificate".into(),
+            opt_type: OptionType::Path,
+            description: "Client certificate file path (PEM format)".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "private-key".into(),
+            opt_type: OptionType::Path,
+            description: "Client private key file path (PEM format)".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "min-tls-version".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str("TLSv1.2".into()),
+            description: "Minimum TLS version (TLSv1.1/TLSv1.2/TLSv1.3)".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+
+        // --- HTTP Pipelining Extended ---
+        self.register(OptionDef {
+            name: "max-http-pipelining".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(2),
+            min: Some(1),
+            max: Some(8),
+            description: "Max pipelined HTTP requests per connection".into(),
+            category: OptionCategory::HttpFtp,
+            hidden: true,
+            ..Default::default()
+        });
+
         // --- FTP Settings ---
         self.register(OptionDef {
             name: "ftp-user".into(),
@@ -409,6 +446,15 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("binary".into()),
             description: "FTP transfer type (binary/ascii)".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+
+        // --- SSH / SFTP ---
+        self.register(OptionDef {
+            name: "ssh-host-key-md".into(),
+            opt_type: OptionType::String,
+            description: "SSH host key fingerprint (hashType=digest format, e.g. sha-1=..., md5=...)".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

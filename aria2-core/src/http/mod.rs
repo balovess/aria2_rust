@@ -20,6 +20,7 @@ pub mod skip_response;
 pub mod socks_connector;
 pub mod splice_http;
 pub mod stream_filter;
+pub mod tail_reclaim;
 
 #[cfg(test)]
 mod auth_tests;

@@ -333,8 +333,12 @@ impl HttpProxyTunnel {
     /// Read proxy response using streaming `HttpHeaderProcessor`.
     /// Skips 1xx informational responses (matching C++ behavior).
     async fn read_proxy_response(stream: &mut TcpStream, read_timeout: Duration) -> Result<ProxyResponse> {
+        // Carry over unconsumed bytes between 1xx skips so that when a
+        // 1xx and the final response arrive in the same TCP segment, the
+        // second response is not lost.
+        let mut leftover: Vec<u8> = Vec::new();
         loop {
-            let response = timeout(read_timeout, Self::parse_with_processor(stream))
+            let response = timeout(read_timeout, Self::parse_with_processor(stream, &mut leftover))
                 .await
                 .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))??;
             if (100..200).contains(&response.status_code) {
@@ -345,9 +349,25 @@ impl HttpProxyTunnel {
         }
     }
 
-    async fn parse_with_processor(stream: &mut TcpStream) -> Result<ProxyResponse> {
+    async fn parse_with_processor(stream: &mut TcpStream, leftover: &mut Vec<u8>) -> Result<ProxyResponse> {
         let mut processor = HttpHeaderProcessor::new();
         let mut buf = [0u8; 4096];
+
+        // Feed any leftover bytes from a previous read first
+        if !leftover.is_empty() {
+            let state = processor.feed(leftover);
+            if state.is_complete() {
+                let bytes_used = processor.last_bytes_processed();
+                let remaining = leftover[bytes_used..].to_vec();
+                *leftover = remaining;
+                let head = processor.get_result()?;
+                let headers: Vec<(String, String)> = head.iter_headers()
+                    .map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                return Ok(ProxyResponse { status_code: head.status_code, reason_phrase: head.reason_phrase, headers });
+            }
+            leftover.clear();
+        }
+
         loop {
             let n = stream.read(&mut buf).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -360,7 +380,14 @@ impl HttpProxyTunnel {
                 }));
             }
             let state = processor.feed(&buf[..n]);
-            if state.is_complete() { break; }
+            if state.is_complete() {
+                // Save any bytes beyond the header terminator for the next read
+                let bytes_used = processor.last_bytes_processed();
+                if bytes_used < n {
+                    *leftover = buf[bytes_used..n].to_vec();
+                }
+                break;
+            }
             if state.is_error() {
                 return Err(Aria2Error::Parse("Failed to parse proxy response".to_string()));
             }
@@ -685,6 +712,8 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 4096];
             let _ = AsyncReadExt::read(&mut sock, &mut buf).await;
+            // Send both responses; the client's read_proxy_response must
+            // handle them even if they arrive in the same TCP segment.
             AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 100 Continue\r\n\r\n").await.unwrap();
             AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
         });

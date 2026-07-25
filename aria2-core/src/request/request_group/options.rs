@@ -2,7 +2,11 @@
 ///
 /// Matches the original C++ aria2 behaviour: almost all options are
 /// runtime-changeable except a short exclusion list (dry-run,
-/// enable-rpc, parameterized-uri, pause, rpc-save-upload-metadata).
+/// enable-rpc, parameterized-uri, pause, rpc-save-upload-metadata)
+/// and options that are only changeable for reserved/waiting downloads
+/// or globally (e.g. `dir` is startup-only for `changeOption` — it
+/// only has `setChangeOptionForReserved(true)` and
+/// `setChangeGlobalOption(true)` in the C++ original).
 /// Keep in sync with [`RequestGroup::update_option`].
 pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     // Connection / parallelism
@@ -17,9 +21,10 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
     // Retry
     "max-retries",
     "retry-wait",
-    // Output paths
-    "dir",
-    "out",
+    // Output paths — note: "dir" and "out" are NOT runtime-changeable
+    // for `changeOption` per C++ aria2 (only setChangeOptionForReserved /
+    // setChangeGlobalOption). They are excluded from this list so that
+    // `changeOption` correctly rejects them with InvalidParams.
     // File allocation
     "file-allocation",
     "mmap-threshold",

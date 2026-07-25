@@ -272,8 +272,17 @@ impl UtpConnection {
 
         match packet.packet_type()? {
             PacketType::StSyn => {
-                // SYN received on existing connection - shouldn't happen normally
-                Err(ConnectionError::InvalidPacket("Unexpected SYN".to_string()))
+                // In BEP 29, the server's SYN-ACK is also a StSyn-type packet.
+                // When in SynSent state, receiving a SYN-ACK is the expected
+                // response that completes the handshake.
+                if self.state == ConnectionState::SynSent {
+                    self.remote_conn_id = packet.connection_id;
+                    self.ack_nr = packet.seq_nr;
+                    self.state = ConnectionState::Established;
+                    Ok(vec![])
+                } else {
+                    Err(ConnectionError::InvalidPacket("Unexpected SYN".to_string()))
+                }
             }
             PacketType::StData => {
                 self.handle_data_packet(packet)

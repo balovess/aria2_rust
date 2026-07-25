@@ -153,13 +153,9 @@ fn iso8859p1_to_utf8(src: &[u8]) -> Option<String> {
     let mut out = String::with_capacity(src.len() * 2);
     for &c in src {
         if c >= 0xa0 {
-            // Two-byte UTF-8 encoding for 0xA0..0xFF
-            if c <= 0xbf {
-                out.push(0xc2u8 as char);
-            } else {
-                out.push(0xc3u8 as char);
-            }
-            out.push((c & !0x40u8) as char);
+            // ISO-8859-1 bytes 0xA0..0xFF map 1:1 to Unicode codepoints U+00A0..U+00FF.
+            // Rust String::push handles the UTF-8 encoding automatically.
+            out.push(c as char);
         } else if (0x80..=0x9f).contains(&c) {
             // C1 control characters — invalid in ISO-8859-1 per C++ impl
             return None;
@@ -227,6 +223,9 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
     let mut mark_first: usize = 0;
     let mut mark_last: usize = 0;
 
+    // Separate tracking for disposition type span (mark_first is reused for parm names)
+    let mut disposition_type_start: usize = 0;
+
     let mut flags = Flags::default();
 
     let mut disposition_type_end: usize = 0;
@@ -264,7 +263,7 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                 if is_rfc2616_http_token(c) {
                     if !disposition_type_started {
                         disposition_type_started = true;
-                        mark_first = i;
+                        disposition_type_start = i;
                     }
                     state = ParseState::DispositionType;
                 } else if !is_lws(c) {
@@ -325,11 +324,12 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                             trace!("parse_raw: duplicate filename parameter");
                             return None;
                         }
-                        if !flags.ext_filename_found {
-                            in_file_parm = true;
-                            file_target = FileTarget::Filename;
-                            filename_bytes.clear();
-                        }
+                        // Always collect filename= bytes even when filename* was
+                        // already found, so that filename_ascii is available as a
+                        // fallback per RFC 6266.
+                        in_file_parm = true;
+                        file_target = FileTarget::Filename;
+                        filename_bytes.clear();
                         state = ParseState::BeforeValue;
                     } else if parm_name.last() == Some(&b'*') {
                         state = ParseState::BeforeExtValue;
@@ -525,8 +525,9 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
         | ParseState::AfterDispositionType
         | ParseState::DispositionType
         | ParseState::AfterValue
-        | ParseState::Token => {}
-        ParseState::ValueChars => {}
+        | ParseState::Token
+        | ParseState::ValueChars
+        | ParseState::BeforeParmName => {} // Trailing semicolons are valid
         _ => {
             trace!("parse_raw: unexpected end state {:?}", state);
             return None;
@@ -540,7 +541,7 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
     if disposition_type_end == 0 {
         disposition_type_end = input.len();
     }
-    let disposition_type = std::str::from_utf8(&input[mark_first..disposition_type_end])
+    let disposition_type = std::str::from_utf8(&input[disposition_type_start..disposition_type_end])
         .ok()?
         .to_owned();
 
@@ -1141,12 +1142,11 @@ mod tests {
 
     #[test]
     fn test_quoted_backslash_escape() {
+        // The parser correctly unescapes \\ to \ in quoted strings,
+        // but filenames containing backslashes are rejected by the
+        // directory-traversal check (is_dir_traversal rejects '\').
         let result = parse_content_disposition("attachment; filename=\"path\\\\to\\\\file.txt\"");
-        assert_eq!(result.filename.as_deref(), Some("path\\to\\file.txt"));
-        // Note: backslash in filename is actually rejected by dir traversal check
-        // since it contains '\\' — this tests the parser, not the traversal check.
-        // But since is_dir_traversal rejects backslash, the filename will be None.
-        // Let's test with a different escaped char instead.
+        assert_eq!(result.filename, None, "Backslash in filename should be rejected by dir traversal");
     }
 
     #[test]
@@ -1163,12 +1163,10 @@ mod tests {
         let result = parse_content_disposition(
             "attachment; filename*=UTF-8''star.txt; filename=plain.txt",
         );
-        // The C++ code does not collect filename= when ext is already found
-        // (in_file_parm is false in that case), so filename_ascii should be None
+        // RFC 6266: filename* takes priority for the `filename` field,
+        // but filename= is still collected as filename_ascii fallback.
         assert_eq!(result.filename.as_deref(), Some("star.txt"));
-        // The C++ parser sets in_file_parm=0 when ext_filename_found is already set,
-        // so it doesn't collect filename= at all.
-        assert!(result.filename_ascii.is_none());
+        assert_eq!(result.filename_ascii.as_deref(), Some("plain.txt"));
     }
 
     // -- Quoted string with space --

@@ -67,9 +67,9 @@ pub struct BtSeedManager {
     /// Total bytes downloaded (for ratio calculation)
     total_downloaded: u64,
     /// Total bytes uploaded during seeding
-    total_uploaded: u64,
+    pub total_uploaded: u64,
     /// When seeding started
-    seeding_started_at: Instant,
+    pub seeding_start_time: Instant,
     /// Whether seeding is currently active
     is_active: bool,
     /// Choking algorithm (optional, for advanced choke management)
@@ -79,6 +79,32 @@ pub struct BtSeedManager {
 }
 
 impl BtSeedManager {
+    /// Create a new seed manager with basic parameters.
+    ///
+    /// This is the simplest constructor, used by tests and simple seeding setups.
+    /// For full control, use `new_with_info_hash` or `new_with_choking_algo`.
+    pub fn new(
+        connections: Vec<PeerConnection>,
+        piece_provider: Arc<dyn PieceDataProvider>,
+        config: BtSeedingConfig,
+        exit_condition: SeedExitCondition,
+        total_downloaded: u64,
+    ) -> Self {
+        let sessions = Vec::with_capacity(connections.len());
+        Self {
+            info_hash: [0u8; 20],
+            sessions,
+            piece_provider: Some(piece_provider),
+            config,
+            exit_condition,
+            total_downloaded,
+            total_uploaded: 0,
+            seeding_start_time: Instant::now(),
+            is_active: true,
+            choking_algo: None,
+        }
+    }
+
     /// Create a new seed manager with an info hash.
     ///
     /// This is the constructor used by `BtDownloadCommand` when initializing
@@ -101,7 +127,7 @@ impl BtSeedManager {
             exit_condition,
             total_downloaded,
             total_uploaded: 0,
-            seeding_started_at: Instant::now(),
+            seeding_start_time: Instant::now(),
             is_active: true,
             choking_algo: None,
         }
@@ -128,7 +154,7 @@ impl BtSeedManager {
             exit_condition,
             total_downloaded,
             total_uploaded: 0,
-            seeding_started_at: Instant::now(),
+            seeding_start_time: Instant::now(),
             is_active: true,
             choking_algo,
         }
@@ -179,7 +205,7 @@ impl BtSeedManager {
         // Check seed time
         if let Some(time) = self.exit_condition.seed_time {
             if SeedExitCondition::check_seed_time(
-                self.seeding_started_at,
+                self.seeding_start_time,
                 time.as_secs(),
                 true,
             ) {
@@ -188,6 +214,11 @@ impl BtSeedManager {
         }
 
         false
+    }
+
+    /// Alias for `should_stop_seeding()`, matching C++ `shouldExit()` naming.
+    pub fn should_exit(&self) -> bool {
+        self.should_stop_seeding()
     }
 
     /// Return total bytes uploaded during seeding.
@@ -203,7 +234,7 @@ impl BtSeedManager {
     /// Return upload statistics: (total_uploaded, upload_speed).
     pub fn get_upload_stats(&self) -> (u64, u64) {
         // Approximate upload speed from elapsed time
-        let elapsed_secs = self.seeding_started_at.elapsed().as_secs();
+        let elapsed_secs = self.seeding_start_time.elapsed().as_secs();
         let upload_speed = if elapsed_secs > 0 {
             self.total_uploaded / elapsed_secs
         } else {
@@ -214,7 +245,7 @@ impl BtSeedManager {
 
     /// Return the duration of the seeding phase.
     pub fn seeding_duration(&self) -> Duration {
-        self.seeding_started_at.elapsed()
+        self.seeding_start_time.elapsed()
     }
 
     /// Return whether seeding is currently active.

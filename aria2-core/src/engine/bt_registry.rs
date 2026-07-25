@@ -780,7 +780,7 @@ mod tests {
         info_hash: &str,
         private: bool,
     ) -> BtObject {
-        use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+        use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
 
         let mut ctx = DownloadContext::new(piece_length, total_length, path.to_string());
         let mut ta = TorrentAttribute::new(info_hash.to_string());

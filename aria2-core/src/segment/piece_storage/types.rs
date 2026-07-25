@@ -53,6 +53,10 @@ pub(crate) struct HaveEntry {
     /// Monotonically increasing sequence number for ordering.
     pub have_index: u64,
     /// The CUID that completed the piece.
+    ///
+    /// Stored for audit/logging purposes. The C++ implementation also stores
+    /// this field but does not filter on it in `getAdvertisedPieceIndexes()`.
+    #[allow(dead_code)]
     pub cuid: u64,
     /// The piece index that was completed.
     pub index: usize,

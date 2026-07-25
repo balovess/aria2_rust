@@ -688,7 +688,7 @@ fn test_engine_uses_token_tracker() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result: Result<(), String> = rt.block_on(async {
-        let engine = DhtEngine::start(config).await?;
+        let engine = DhtEngine::start(config).await.map_err(|e| e.to_string())?;
         // Verify engine has a working token tracker by generating tokens
         let hash = [0xEEu8; 20];
         let _addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
@@ -861,7 +861,7 @@ fn test_concurrent_query_faster_than_sequential() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result: Result<(), String> = rt.block_on(async {
-        let engine = DhtEngine::start(config).await?;
+        let engine = DhtEngine::start(config).await.map_err(|e| e.to_string())?;
         let start = Instant::now();
 
         // Query with 8 concurrent targets — should complete in ~1 timeout (not 8)
@@ -901,7 +901,7 @@ fn test_concurrent_announce_multiple_nodes() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result: Result<(), String> = rt.block_on(async {
-        let engine = DhtEngine::start(config).await?;
+        let engine = DhtEngine::start(config).await.map_err(|e| e.to_string())?;
         let start = Instant::now();
 
         // announce_peer now uses join_all internally — should not hang or error

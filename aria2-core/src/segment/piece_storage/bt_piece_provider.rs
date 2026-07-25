@@ -95,16 +95,16 @@ impl PieceProvider for DefaultPieceStorage {
 
     fn get_advertised_piece_indexes_ext(
         &self,
-        my_cuid: u64,
+        _my_cuid: u64,
         last_have_index: u64,
     ) -> (Vec<usize>, u64) {
-        // Collect pieces advertised by other CUIDs since last_have_index.
-        // C++: iterate haveEntries_ with haveIndex > lastHaveIndex and
-        // cuid != my_cuid.
+        // C++ implementation (DefaultPieceStorage.cc line 731-733) does NOT
+        // filter by myCuid despite the header documentation. Only
+        // haveIndex > lastHaveIndex is checked.
         let mut indexes = Vec::new();
         let mut new_last = last_have_index;
         for entry in &self.haves {
-            if entry.have_index > last_have_index && entry.cuid != my_cuid {
+            if entry.have_index > last_have_index {
                 indexes.push(entry.index);
                 new_last = new_last.max(entry.have_index);
             }

@@ -511,10 +511,10 @@ impl PieceStorage for DefaultPieceStorage {
         last_have_index: u64,
     ) -> (Vec<usize>, u64) {
         let mut indexes = Vec::new();
-        // C++ uses upper_bound to find the first entry with haveIndex >
-        // lastHaveIndex, then iterates all entries from there. The myCuid
-        // parameter is accepted but NOT used for filtering in C++ — all
-        // matching entries are returned regardless of CUID.
+        // C++ header documentation states that indexes should be filtered
+        // by CUID, but the C++ implementation (DefaultPieceStorage.cc line 731-733)
+        // does NOT filter by myCuid — it only checks haveIndex > lastHaveIndex.
+        // We match the C++ implementation behavior exactly.
         for entry in &self.haves {
             if entry.have_index > last_have_index {
                 indexes.push(entry.index);

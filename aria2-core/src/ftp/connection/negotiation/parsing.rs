@@ -105,28 +105,32 @@ pub(super) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
 /// Parse EPSV response to extract port.
 ///
 /// Matches C++ `FtpConnection::receiveEpsvResponse()`: parses the
-/// `(|<net><proto><port>|)` format by splitting on `|` and expecting
-/// exactly 4 non-empty segments (net, proto, port, trailing). The port
-/// must be in range 1..=65535 (0 is rejected per C++).
+/// `(|<net>|<proto>|<port>|)` format by finding the parenthesized portion
+/// (or the raw `|||port|` pattern), splitting on `|`, and extracting the
+/// port from the 4th field. The port must be in range 1..=65535 (0 is
+/// rejected per C++).
 pub(super) fn parse_epsv_response(response: &str) -> Option<u16> {
-    // Find the parenthesized portion: (|...|port|...)
-    let start = response.find('|')?;
-    let end = response.rfind('|')?;
-    if end <= start {
+    // Try to find the parenthesized portion first: (|...|port|)
+    let epsv_part = if let Some(open) = response.find('(') {
+        let close = response.rfind(')').filter(|&c| c > open)?;
+        &response[open + 1..close]
+    } else {
+        // No parentheses — use the whole string (e.g., "|||60000|")
+        response
+    };
+
+    // Split on '|' keeping empty segments.
+    // Format: |net|proto|port| → ["", "net", "proto", "port", ""]
+    // Or:     |||port|       → ["", "", "", "port", ""]
+    let parts: Vec<&str> = epsv_part.split('|').collect();
+
+    // Need at least 5 segments: empty, net, proto, port, empty/trailing
+    if parts.len() < 5 {
         return None;
     }
 
-    let inner = &response[start + 1..end];
-    let parts: Vec<&str> = inner.split('|').filter(|s| !s.is_empty()).collect();
-
-    // C++ expects exactly 3 parts after splitting by |: net, proto, port
-    // (The response format is (|1|1|port|) or (|||port|))
-    if parts.len() < 3 {
-        return None;
-    }
-
-    // Port is the last non-empty part before the closing |
-    let port_str = parts.last()?;
+    // Port is the 4th segment (index 3)
+    let port_str = parts[3];
     let port: u16 = port_str.parse().ok()?;
 
     // C++ validates 0 < port <= UINT16_MAX

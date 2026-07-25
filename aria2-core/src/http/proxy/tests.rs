@@ -1,4 +1,4 @@
-﻿//! Tests for HTTP proxy module.
+//! Tests for HTTP proxy module.
 
 use std::time::Duration;
 
@@ -82,15 +82,18 @@ fn test_proxy_config_from_proxy_url_no_credentials() {
 }
 
 #[test]
-fn test_proxy_config_from_proxy_url_socks_rejected() {
+fn test_proxy_config_from_proxy_url_socks5_accepted() {
+    // SOCKS5 proxy URLs are now supported (via socks_connector)
     let result = HttpProxyConfig::from_proxy_url(
         "socks5://proxy.local:1080",
         "t".into(),
         80,
     );
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("http/https"));
+    assert!(result.is_ok(), "SOCKS5 proxy should be accepted: {:?}", result.err());
+    let config = result.unwrap();
+    assert_eq!(config.proxy_host, "proxy.local");
+    assert_eq!(config.proxy_port, 1080);
+    assert!(config.is_socks());
 }
 
 #[test]

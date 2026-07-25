@@ -73,7 +73,7 @@ use super::types::{HttpConfig, HttpResponse};
 ///
 ///     let conn = manager.acquire(&url).await?;
 ///     // Use the connection for HTTP requests...
-///     manager.release(conn).await;
+///     manager.release(conn.id).await;
 ///
 ///     Ok(())
 /// }
@@ -262,7 +262,7 @@ impl HttpConnectionManager {
     ///
     ///     let conn = manager.acquire(&url).await.unwrap();
     ///     // After using the connection for requests...
-    ///     manager.release(conn).await;
+    ///     manager.release(conn.id).await;
     /// }
     /// ```
     pub async fn release(&mut self, conn_id: u64) {

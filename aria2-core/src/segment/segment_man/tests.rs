@@ -505,18 +505,21 @@ fn test_advertise_piece_delegation() {
 
 #[cfg(feature = "bittorrent")]
 #[test]
-fn test_get_advertised_piece_indexes_excludes_own_cuid() {
+fn test_get_advertised_piece_indexes_no_cuid_filter() {
+    // C++ does NOT filter by myCuid despite the header documentation.
+    // The C++ implementation (DefaultPieceStorage.cc line 731-733) only
+    // checks haveIndex > lastHaveIndex and ignores myCuid.
     let mut man = create_segment_man(1024, 4096);
     man.recognize_segment_for(0, 4096);
 
     // CUID 1 completes piece 0
     man.advertise_piece(1, 0);
 
-    // CUID 1 querying should NOT see its own advertisement
+    // CUID 1 querying SHOULD see its own advertisement (matches C++)
     let (indexes, _) = man.get_advertised_piece_indexes(1, 0);
-    assert!(!indexes.contains(&0));
+    assert!(indexes.contains(&0));
 
-    // CUID 2 querying should see piece 0
+    // CUID 2 querying should also see piece 0
     let (indexes2, _) = man.get_advertised_piece_indexes(2, 0);
     assert!(indexes2.contains(&0));
 }

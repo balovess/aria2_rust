@@ -939,9 +939,14 @@ async fn regression_list_methods_returns_36_methods() {
     assert!(methods.contains(&"system.listNotifications".to_string()));
 }
 
-/// Test: system.listNotifications returns 7 notifications.
+/// Test: system.listNotifications returns 6 notifications.
+///
+/// C++ aria2 and aria2-next both define exactly 6 notifications:
+/// onDownloadStart, onDownloadPause, onDownloadStop, onDownloadComplete,
+/// onDownloadError, onBtDownloadComplete. See RpcMethodFactory.cc and
+/// WebSocketSessionMan.cc in the original source.
 #[tokio::test]
-async fn regression_list_notifications_returns_7() {
+async fn regression_list_notifications_returns_6() {
     let engine = RpcEngine::new();
 
     let req = make_request("system.listNotifications", serde_json::json!([]));
@@ -951,11 +956,11 @@ async fn regression_list_notifications_returns_7() {
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(
         notifications.len(),
-        7,
-        "Should return exactly 7 notifications"
+        6,
+        "Should return exactly 6 notifications (matching C++ aria2)"
     );
 
-    // Verify notification names
+    // Verify notification names match C++ aria2 exactly
     assert!(notifications.contains(&"aria2.onDownloadStart".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadPause".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadStop".to_string()));

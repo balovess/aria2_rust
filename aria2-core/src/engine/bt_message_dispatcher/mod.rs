@@ -134,8 +134,9 @@ pub struct FloodingStat {
     choke_unchoke_count: u32,
     /// Count of keepalive messages in the current window
     keepalive_count: u32,
-    /// Timestamp of the last flooding check/reset
-    last_check: Instant,
+    /// Timestamp of the last flooding check/reset.
+    /// Named `last_reset` in C++ aria2's FloodingStat.
+    pub(crate) last_reset: Instant,
     /// Flooding check interval (default 5 seconds, matching C++)
     check_interval: Duration,
     /// Threshold for choke/unchoke flooding (2 in C++)
@@ -150,7 +151,7 @@ impl FloodingStat {
         Self {
             choke_unchoke_count: 0,
             keepalive_count: 0,
-            last_check: Instant::now(),
+            last_reset: Instant::now(),
             check_interval: Duration::from_secs(5),
             choke_unchoke_threshold: 2,
             keepalive_threshold: 2,
@@ -171,16 +172,20 @@ impl FloodingStat {
     ///
     /// Returns `true` if flooding was detected (peer should be disconnected).
     /// Mirrors C++ `DefaultBtInteractive::detectMessageFlooding()`.
+    ///
+    /// Per C++ behavior, flooding is only detected at interval boundaries.
+    /// Within an interval, this always returns `false` — we must observe
+    /// the full window before concluding that the peer is flooding.
     pub fn check_and_reset(&mut self) -> bool {
-        if self.last_check.elapsed() >= self.check_interval {
+        if self.last_reset.elapsed() >= self.check_interval {
             let flooding = self.choke_unchoke_count >= self.choke_unchoke_threshold
                 || self.keepalive_count >= self.keepalive_threshold;
             self.reset();
             flooding
         } else {
-            // Within the same interval — just check, don't reset
-            self.choke_unchoke_count >= self.choke_unchoke_threshold
-                || self.keepalive_count >= self.keepalive_threshold
+            // Within the same interval — cannot determine flooding yet.
+            // C++ only checks at interval boundaries.
+            false
         }
     }
 
@@ -188,7 +193,7 @@ impl FloodingStat {
     pub fn reset(&mut self) {
         self.choke_unchoke_count = 0;
         self.keepalive_count = 0;
-        self.last_check = Instant::now();
+        self.last_reset = Instant::now();
     }
 
     /// Get current choke/unchoke count (for testing).
@@ -318,6 +323,35 @@ impl Default for SlotCheckResult {
 }
 
 // ===========================================================================
+// PendingMessage — tagged outgoing message
+// ===========================================================================
+
+/// A tagged outgoing message in the per-peer send queue.
+///
+/// The tag distinguishes upload (Piece) messages from control messages
+/// (Choke, Unchoke, Request, Cancel, etc.) so that:
+///
+/// - `do_choking_action()` can remove all upload messages when we choke the peer.
+/// - `do_cancel_sending_piece_action()` can remove a specific upload message.
+/// - `drain_sendable_messages()` can defer upload messages when upload speed
+///   is limited (mirroring C++ `sendMessagesInternal()` which checks
+///   `isUploading()` per message).
+///
+/// Mirrors C++ `BtMessage::isUploading()` which returns true for Piece messages.
+#[derive(Debug)]
+enum PendingMessage {
+    /// A non-upload control message (Choke, Unchoke, Request, Cancel, etc.)
+    Control(Vec<u8>),
+    /// A Piece upload message carrying data for the specified block.
+    Upload {
+        data: Vec<u8>,
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+}
+
+// ===========================================================================
 // BtMessageDispatcher — per-peer outgoing message queue + request slots
 // ===========================================================================
 
@@ -334,10 +368,11 @@ impl Default for SlotCheckResult {
 pub struct BtMessageDispatcher {
     /// Block size for computing block indices
     block_size: u32,
-    /// Outstanding request slots
-    request_slots: Vec<RequestSlot>,
-    /// Outgoing message queue (serialized message bytes)
-    message_queue: Vec<Vec<u8>>,
+    /// Outstanding request slots (pub(crate) for test access)
+    pub(crate) request_slots: Vec<RequestSlot>,
+    /// Outgoing message queue with upload/control tagging.
+    /// Mirrors C++ `messageQueue_` which holds `unique_ptr<BtMessage>`.
+    message_queue: Vec<PendingMessage>,
     /// Whether the global upload speed limit is exceeded
     upload_speed_exceeded: bool,
     /// Whether the per-group upload speed limit is exceeded
@@ -383,21 +418,27 @@ impl BtMessageDispatcher {
 
     /// Add a serialized Request message to the outgoing queue.
     pub fn add_request_message(&mut self, data: Vec<u8>, _index: u32, _begin: u32, _length: u32) {
-        self.message_queue.push(data);
+        self.message_queue.push(PendingMessage::Control(data));
     }
 
     /// Add a control message (non-upload) to the outgoing queue.
     pub fn add_control_message(&mut self, data: Vec<u8>) {
-        self.message_queue.push(data);
+        self.message_queue.push(PendingMessage::Control(data));
     }
 
     /// Add a Piece upload message to the outgoing queue.
-    pub fn add_upload_message(&mut self, data: Vec<u8>, _index: u32, _begin: u32, _length: u32) {
-        if !self.is_upload_limited() {
-            self.message_queue.push(data);
-        }
-        // If upload is limited, the message is silently dropped.
-        // In a full implementation, it would be deferred.
+    ///
+    /// Unlike the previous stub that silently dropped messages when upload
+    /// was limited, this always queues the message. Upload speed filtering
+    /// is applied at drain time, mirroring C++ `sendMessagesInternal()`
+    /// which defers upload messages when speed is exceeded.
+    pub fn add_upload_message(&mut self, data: Vec<u8>, index: u32, begin: u32, length: u32) {
+        self.message_queue.push(PendingMessage::Upload {
+            data,
+            index,
+            begin,
+            length,
+        });
     }
 
     /// Handle a Choke message received from the peer.
@@ -424,24 +465,32 @@ impl BtMessageDispatcher {
 
     /// Handle sending a Choke message to the peer.
     ///
-    /// Invalidates all queued Piece upload messages.
+    /// Removes all queued Piece upload messages since we are choking
+    /// the peer and should not send them data.
     ///
-    /// Mirrors C++ `DefaultBtMessageDispatcher::doChokingAction()`.
+    /// Mirrors C++ `DefaultBtMessageDispatcher::doChokingAction()` which
+    /// calls `onChokingEvent()` on each queued message. For Piece messages,
+    /// `onChokingEvent()` invalidates them (marks as not-to-send).
     pub fn do_choking_action(&mut self) {
-        // In a full implementation, this would invalidate queued Piece
-        // upload messages. For the stub, we simply clear the queue
-        // of upload-type messages (which we can't distinguish in the
-        // current Vec<Vec<u8>> representation).
+        self.message_queue.retain(|msg| !matches!(msg, PendingMessage::Upload { .. }));
     }
 
     /// Handle receiving a Cancel message from the peer.
     ///
-    /// Invalidates any queued Piece message that matches the specified block.
+    /// Removes any queued Piece upload message that matches the specified block.
     ///
-    /// Mirrors C++ `DefaultBtMessageDispatcher::doCancelSendingPieceAction()`.
-    pub fn do_cancel_sending_piece_action(&mut self, _index: u32, _begin: u32, _length: u32) {
-        // In a full implementation, this would search the message queue
-        // for a matching Piece message and invalidate it.
+    /// Mirrors C++ `DefaultBtMessageDispatcher::doCancelSendingPieceAction()`
+    /// which calls `onCancelSendingPieceEvent()` on each queued message.
+    /// For a matching Piece message, this invalidates it.
+    pub fn do_cancel_sending_piece_action(&mut self, index: u32, begin: u32, length: u32) {
+        self.message_queue.retain(|msg| {
+            !matches!(msg, PendingMessage::Upload {
+                index: idx,
+                begin: b,
+                length: l,
+                ..
+            } if *idx == index && *b == begin && *l == length)
+        });
     }
 
     /// Abort all outstanding requests for the given piece index.
@@ -511,9 +560,52 @@ impl BtMessageDispatcher {
             .any(|s| s.index == index && s.block_index == block_index)
     }
 
-    /// Drain all messages that are ready to be sent.
+    /// Drain messages that are ready to be sent.
+    ///
+    /// Upload (Piece) messages are deferred when upload speed limiting is
+    /// active; they remain in the queue for a later drain attempt.
+    /// Control messages are always drained.
+    ///
+    /// Mirrors C++ `sendMessagesInternal()` which checks `isUploading()`
+    /// per message and moves upload messages to `tempQueue` when speed
+    /// limits are exceeded, then re-inserts them at the front of the queue.
     pub fn drain_sendable_messages(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.message_queue)
+        let mut sendable = Vec::new();
+        let mut deferred = Vec::new();
+
+        // Cache the upload-limited flag before draining to avoid borrowing `self`
+        // while iterating over `self.message_queue`.
+        let upload_limited = self.is_upload_limited();
+
+        for msg in self.message_queue.drain(..) {
+            match msg {
+                PendingMessage::Control(data) => {
+                    sendable.push(data);
+                }
+                PendingMessage::Upload { data, index, begin, length } => {
+                    if upload_limited {
+                        // Defer: re-queue the upload message
+                        deferred.push(PendingMessage::Upload {
+                            data,
+                            index,
+                            begin,
+                            length,
+                        });
+                    } else {
+                        sendable.push(data);
+                    }
+                }
+            }
+        }
+
+        // Re-insert deferred upload messages (preserving order, matching C++
+        // which inserts tempQueue at the front of messageQueue_).
+        if !deferred.is_empty() {
+            deferred.extend(self.message_queue.drain(..));
+            self.message_queue = deferred;
+        }
+
+        sendable
     }
 
     /// Check if there are pending messages in the queue.

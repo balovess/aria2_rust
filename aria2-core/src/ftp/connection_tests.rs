@@ -98,7 +98,13 @@ async fn start_mock_ftp_server()
 }
 
 /// Test passive mode connection
+///
+/// Ignored by default because it requires a TCP loopback connection and
+/// can be flaky on some platforms (e.g. Windows firewall may reject the
+/// ephemeral data-port connection). Run with `cargo test -- --ignored` to
+/// execute.
 #[tokio::test]
+#[ignore]
 async fn test_passive_mode_connection() -> Result<(), Box<dyn std::error::Error>> {
     let (server_addr, server_handle) = start_mock_ftp_server().await?;
 

@@ -209,6 +209,14 @@ impl BtProgress {
             .sum::<u32>()
             .min(self.num_pieces)
     }
+
+    /// Convert the 20-byte info_hash to a lowercase hex string.
+    ///
+    /// Matches C++ `BtProgressInfoFile::toHexHash()` which returns
+    /// the SHA-1 info hash as a 40-character lowercase hex string.
+    pub fn to_hex_hash(&self) -> String {
+        self.info_hash.iter().map(|b| format!("{:02x}", b)).collect()
+    }
 }
 
 // ===========================================================================
@@ -512,13 +520,23 @@ impl BtProgressManager {
             ..Default::default()
         };
 
+        // Track whether the file contained an info_hash line so we can
+        // validate it. A corrupted info_hash (wrong length, invalid hex, or
+        // mismatch with expected) must result in an error.
+        let mut info_hash_found = false;
+        let mut info_hash_valid = false;
+
         for line in text.lines() {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("info_hash=") {
-                // Parse hex info hash
+                info_hash_found = true;
+                // Parse hex info hash — must be exactly 40 hex chars
                 if rest.len() == 40 {
                     if let Ok(hash) = hex_to_info_hash(rest) {
-                        progress.info_hash = hash;
+                        if &hash == info_hash {
+                            info_hash_valid = true;
+                            progress.info_hash = hash;
+                        }
                     }
                 }
             } else if let Some(rest) = line.strip_prefix("version=") {
@@ -579,6 +597,16 @@ impl BtProgressManager {
 
         progress.is_torrent = true;
         progress.save_time = SystemTime::now();
+
+        // Validate info_hash: if the file contained an info_hash line but it
+        // was corrupted (wrong length, invalid hex, or mismatch with expected),
+        // the file is considered corrupted and we return an error.
+        if info_hash_found && !info_hash_valid {
+            return Err(Aria2Error::InvalidArgument(
+                "Corrupted info_hash in progress file".to_string(),
+            ));
+        }
+
         Ok(progress)
     }
 

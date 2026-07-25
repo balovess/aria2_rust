@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use url::Url;
 
 use crate::error::{Aria2Error, Result};
+use crate::http::request::HttpMethod;
 
 /// HTTP response struct
 ///
@@ -173,6 +174,69 @@ impl HttpResponse {
         ) && self.header("Location").is_some()
     }
 
+    /// Determine the HTTP method to use when following this redirect.
+    ///
+    /// Matches C++ `HttpRequest::getRequestMethod()` + redirect method change
+    /// logic per RFC 7231 §6.4:
+    ///
+    /// - **303 See Other**: Always change to GET (C++ resets method to GET).
+    ///   This is the most common redirect type for form submissions.
+    /// - **301/302**: C++ aria2 changes POST→GET for 301/302 redirects,
+    ///   matching the historical browser behavior that the C++ code follows.
+    ///   Non-POST methods are preserved.
+    /// - **307/308**: Preserve the original method (RFC 7538 for 308,
+    ///   RFC 7231 §6.4.7 for 307). The request body is also preserved.
+    ///
+    /// # Arguments
+    ///
+    /// * `original_method` - The HTTP method of the original (pre-redirect) request
+    ///
+    /// # Returns
+    ///
+    /// The HTTP method to use for the redirected request
+    pub fn redirect_method(&self, original_method: &HttpMethod) -> HttpMethod {
+        match self.status_code {
+            // 303 See Other: always switch to GET (RFC 7231 §6.4.4)
+            303 => HttpMethod::Get,
+            // 301/302: change POST→GET to match historical browser behavior
+            // (C++ aria2 does this in HttpRequest state machine)
+            301 | 302 => {
+                if *original_method == HttpMethod::Post {
+                    HttpMethod::Get
+                } else {
+                    original_method.clone()
+                }
+            }
+            // 307 Temporary Redirect / 308 Permanent Redirect:
+            // preserve the original method per RFC 7538 and RFC 7231 §6.4.7
+            307 | 308 | _ => original_method.clone(),
+        }
+    }
+
+    /// Whether this redirect response requires preserving the request body.
+    ///
+    /// Per RFC 7231 §6.4, a redirect that preserves the method (307/308)
+    /// should also preserve the request body. A redirect that changes the
+    /// method to GET (301/302 from POST, 303) should drop the body.
+    ///
+    /// # Arguments
+    ///
+    /// * `original_method` - The HTTP method of the original request
+    ///
+    /// # Returns
+    ///
+    /// true if the request body should be forwarded to the redirect target
+    pub fn redirect_preserves_body(&self, original_method: &HttpMethod) -> bool {
+        match self.status_code {
+            // 303 always drops body (switches to GET)
+            303 => false,
+            // 301/302 from POST switches to GET → drops body
+            301 | 302 => *original_method != HttpMethod::Post,
+            // 307/308 preserve method → preserve body
+            307 | 308 | _ => true,
+        }
+    }
+
     /// Get the Location header and parse it as a URL
     ///
     /// Particularly useful for redirect responses. If it is a relative URL, it will be resolved based on the current request URL.
@@ -275,16 +339,24 @@ mod tests {
 
     #[test]
     fn test_response_is_redirect() {
-        // Redirect status codes
+        // Redirect status codes with Location header
         let redirect_resp = HttpResponse::from_bytes(
             "HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\n\r\n".as_bytes(),
         )
         .unwrap();
         assert!(redirect_resp.is_redirect());
 
-        let redirect_302 =
+        // 302 without Location header is NOT a valid redirect (C++ behavior)
+        let redirect_302_no_loc =
             HttpResponse::from_bytes("HTTP/1.1 302 Found\r\n\r\n".as_bytes()).unwrap();
-        assert!(redirect_302.is_redirect());
+        assert!(!redirect_302_no_loc.is_redirect());
+
+        // 302 WITH Location is a valid redirect
+        let redirect_302_with_loc = HttpResponse::from_bytes(
+            "HTTP/1.1 302 Found\r\nLocation: /other\r\n\r\n".as_bytes(),
+        )
+        .unwrap();
+        assert!(redirect_302_with_loc.is_redirect());
 
         // Non-redirect status codes
         let ok_resp = HttpResponse::from_bytes("HTTP/1.1 200 OK\r\n\r\n".as_bytes()).unwrap();
@@ -294,6 +366,60 @@ mod tests {
             HttpResponse::from_bytes("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes())
                 .unwrap();
         assert!(!error_resp.is_redirect());
+    }
+
+    #[test]
+    fn test_redirect_method_303_see_other() {
+        // 303 always changes method to GET
+        let resp = HttpResponse::from_bytes(
+            "HTTP/1.1 303 See Other\r\nLocation: /new\r\n\r\n".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resp.redirect_method(&HttpMethod::Post), HttpMethod::Get);
+        assert_eq!(resp.redirect_method(&HttpMethod::Put), HttpMethod::Get);
+        assert_eq!(resp.redirect_method(&HttpMethod::Get), HttpMethod::Get);
+        // 303 always drops body
+        assert!(!resp.redirect_preserves_body(&HttpMethod::Post));
+    }
+
+    #[test]
+    fn test_redirect_method_301_302_post_to_get() {
+        // 301/302 change POST→GET (C++ historical behavior)
+        let resp_301 = HttpResponse::from_bytes(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\n\r\n".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resp_301.redirect_method(&HttpMethod::Post), HttpMethod::Get);
+        assert!(!resp_301.redirect_preserves_body(&HttpMethod::Post));
+
+        let resp_302 = HttpResponse::from_bytes(
+            "HTTP/1.1 302 Found\r\nLocation: /new\r\n\r\n".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resp_302.redirect_method(&HttpMethod::Post), HttpMethod::Get);
+        // Non-POST methods preserved for 301/302
+        assert_eq!(resp_301.redirect_method(&HttpMethod::Get), HttpMethod::Get);
+        assert_eq!(resp_301.redirect_method(&HttpMethod::Head), HttpMethod::Head);
+        assert!(resp_301.redirect_preserves_body(&HttpMethod::Get));
+    }
+
+    #[test]
+    fn test_redirect_method_307_308_preserve() {
+        // 307/308 preserve original method (RFC 7538, RFC 7231 §6.4.7)
+        let resp_307 = HttpResponse::from_bytes(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: /new\r\n\r\n".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resp_307.redirect_method(&HttpMethod::Post), HttpMethod::Post);
+        assert!(resp_307.redirect_preserves_body(&HttpMethod::Post));
+
+        let resp_308 = HttpResponse::from_bytes(
+            "HTTP/1.1 308 Permanent Redirect\r\nLocation: /new\r\n\r\n".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(resp_308.redirect_method(&HttpMethod::Post), HttpMethod::Post);
+        assert_eq!(resp_308.redirect_method(&HttpMethod::Get), HttpMethod::Get);
+        assert!(resp_308.redirect_preserves_body(&HttpMethod::Post));
     }
 
     #[test]

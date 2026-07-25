@@ -454,5 +454,299 @@ impl crate::config::OptionRegistry {
             category: OptionCategory::General,
             ..Default::default()
         });
+        self.register(OptionDef {
+            name: "on-download-complete".into(),
+            opt_type: OptionType::Path,
+            description: "Command on download complete".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "on-download-error".into(),
+            opt_type: OptionType::Path,
+            description: "Command on download error".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- DNS & Async DNS ---
+        self.register(OptionDef {
+            name: "async-dns".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Enable asynchronous DNS resolution".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "async-dns-server".into(),
+            opt_type: OptionType::String,
+            description: "DNS server address for async resolver".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dns-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(30),
+            min: Some(1),
+            max: Some(60),
+            description: "DNS resolution timeout in seconds".into(),
+            category: OptionCategory::General,
+            hidden: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "enable-async-dns6".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Enable IPv6 async DNS resolution (deprecated)".into(),
+            category: OptionCategory::General,
+            deprecated: true,
+            ..Default::default()
+        });
+
+        // --- Concurrency & Optimization ---
+        self.register(OptionDef {
+            name: "max-downloads".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(0),
+            min: Some(0),
+            description: "Max number of downloads to start (0=unlimited)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "optimize-concurrent-downloads".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Optimize concurrent download count based on network conditions".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "optimize-concurrent-downloads-coeffa".into(),
+            opt_type: OptionType::Float,
+            default_value: OptionValue::Float(5.0),
+            description: "Coefficient A for optimize-concurrent-downloads (linear increasing factor)".into(),
+            category: OptionCategory::General,
+            hidden: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "optimize-concurrent-downloads-coeffb".into(),
+            opt_type: OptionType::Float,
+            default_value: OptionValue::Float(5.0),
+            description: "Coefficient B for optimize-concurrent-downloads (linear decreasing factor)".into(),
+            category: OptionCategory::General,
+            hidden: true,
+            ..Default::default()
+        });
+
+        // --- Network / Event Poll ---
+        self.register(OptionDef {
+            name: "event-poll".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str("select".into()),
+            description: "Event poll method (epoll/kqueue/port/poll/select)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Server Statistics ---
+        self.register(OptionDef {
+            name: "server-stat-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(86400),
+            min: Some(0),
+            description: "Server stat timeout in seconds (0=unlimited)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "server-stat-if".into(),
+            opt_type: OptionType::Path,
+            description: "Server performance statistics input file".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "server-stat-of".into(),
+            opt_type: OptionType::Path,
+            description: "Server performance statistics output file".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Mmap ---
+        self.register(OptionDef {
+            name: "enable-mmap".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Enable mmap for file allocation".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-mmap-limit".into(),
+            opt_type: OptionType::Size,
+            default_value: OptionValue::Int(i64::MAX),
+            min: Some(0),
+            description: "Max size limit for mmap (0=unlimited)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Metadata & Pause ---
+        self.register(OptionDef {
+            name: "pause-metadata".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(false),
+            description: "Pause downloads created from metadata".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Resource Limits ---
+        self.register(OptionDef {
+            name: "rlimit-nofile".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(1024),
+            min: Some(1),
+            description: "Set soft limit of resource limit RLIMIT_NOFILE (open files)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Hidden / Internal ---
+        self.register(OptionDef {
+            name: "select-least-used-host".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Select least used host for URI selection".into(),
+            category: OptionCategory::General,
+            hidden: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "startup-idle-time".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(10),
+            min: Some(1),
+            max: Some(60),
+            description: "Startup idle time in seconds".into(),
+            category: OptionCategory::General,
+            hidden: true,
+            ..Default::default()
+        });
+
+        // --- Netrc ---
+        self.register(OptionDef {
+            name: "netrc-path".into(),
+            opt_type: OptionType::Path,
+            default_value: OptionValue::Str("~/.netrc".into()),
+            description: "Path to .netrc file for authentication".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Show Files (BT/Metalink) ---
+        self.register(OptionDef {
+            name: "show-files".into(),
+            opt_type: OptionType::Boolean,
+            short_name: Some('S'),
+            default_value: OptionValue::Bool(false),
+            description: "Show file list for BitTorrent/Metalink".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Checksum ---
+        self.register(OptionDef {
+            name: "checksum".into(),
+            opt_type: OptionType::String,
+            description: "Checksum for verification (hashType=digest format)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Torrent & Metalink File Input ---
+        self.register(OptionDef {
+            name: "torrent-file".into(),
+            opt_type: OptionType::Path,
+            short_name: Some('T'),
+            description: "Path to .torrent file".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "metalink-file".into(),
+            opt_type: OptionType::Path,
+            description: "Path to Metalink file".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+
+        // --- Metalink Options ---
+        // Matches C++ PREF_METALINK_* options from prefs.h
+        self.register(OptionDef {
+            name: "metalink-version".into(),
+            opt_type: OptionType::String,
+            description: "Preferred Metalink file version".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "metalink-language".into(),
+            opt_type: OptionType::String,
+            description: "Preferred Metalink file language".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "metalink-os".into(),
+            opt_type: OptionType::String,
+            description: "Preferred Metalink file operating system".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "metalink-location".into(),
+            opt_type: OptionType::String,
+            description: "Preferred Metalink file location (e.g. jp, us)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "follow-metalink".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str("true".into()),
+            description: "Auto-handle Metalink files (true/false/mem)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "metalink-preferred-protocol".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str("none".into()),
+            description: "Preferred protocol for Metalink (http/https/ftp/none)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "metalink-enable-unique-protocol".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Use only unique protocols per Metalink file (skip duplicate protocols)".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "metalink-base-uri".into(),
+            opt_type: OptionType::String,
+            description: "Base URI for resolving relative Metalink URLs".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
     }
 }

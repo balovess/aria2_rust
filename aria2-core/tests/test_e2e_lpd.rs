@@ -955,7 +955,7 @@ async fn test_lpd_manager_receive_loop_lifecycle() {
     );
 
     // Start the receive loop (may fail in CI environments without multicast)
-    let result = manager.start_receive_loop();
+    let result = manager.start_receive_loop().await;
 
     if result.is_ok() {
         assert!(
@@ -976,7 +976,7 @@ async fn test_lpd_manager_receive_loop_lifecycle() {
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_cancellation_token() {
     let mut manager = LpdManager::default();
-    let result = manager.start_receive_loop();
+    let result = manager.start_receive_loop().await;
 
     if result.is_ok() {
         let token = manager.receive_loop_cancellation_token();
@@ -1012,7 +1012,7 @@ async fn test_lpd_manager_receive_loop_with_registered_torrents() {
         .await
         .expect("Failed to register torrent");
 
-    let result = manager.start_receive_loop();
+    let result = manager.start_receive_loop().await;
 
     if result.is_ok() {
         assert!(manager.is_receive_loop_running());
@@ -1033,7 +1033,7 @@ async fn test_lpd_manager_receive_loop_disabled() {
     // (in most environments, the manager is still available but
     // the multicast socket bind may fail)
     let mut manager = LpdManager::default();
-    let _ = manager.start_receive_loop();
+    let _ = manager.start_receive_loop().await;
     // Should not panic regardless of the result
 }
 
@@ -1043,7 +1043,7 @@ async fn test_lpd_manager_receive_loop_multiple_cycles() {
     let mut manager = LpdManager::default();
 
     for _ in 0..3 {
-        let result = manager.start_receive_loop();
+        let result = manager.start_receive_loop().await;
         if result.is_ok() {
             assert!(manager.is_receive_loop_running());
             manager.stop_receive_loop().await;
@@ -1059,7 +1059,7 @@ async fn test_lpd_manager_receive_loop_multiple_cycles() {
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_stop_idempotent() {
     let mut manager = LpdManager::default();
-    let result = manager.start_receive_loop();
+    let result = manager.start_receive_loop().await;
 
     if result.is_ok() {
         manager.stop_receive_loop().await;
@@ -1086,7 +1086,7 @@ async fn test_lpd_manager_receive_loop_peer_management_independent() {
     );
     manager.update_peers(test_info_hash(), vec![peer]).await;
 
-    let _ = manager.start_receive_loop();
+    let _ = manager.start_receive_loop().await;
 
     // Peers should still be accessible
     let peers = manager.get_peers_for(test_info_hash()).await;

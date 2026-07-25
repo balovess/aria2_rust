@@ -403,6 +403,24 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
 
+        // --- File Index Output Mapping ---
+        self.register(OptionDef {
+            name: "index-out".into(),
+            opt_type: OptionType::String,
+            description: "Set output filename for BT file index (INDEX=PATH format)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+
+        // --- Peer Blocklist (aria2-next) ---
+        self.register(OptionDef {
+            name: "bt-peer-blocklist".into(),
+            opt_type: OptionType::Path,
+            description: "Path to BT peer blocklist file (one IP/CIDR range per line)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+
         // --- uTP (UDP Transport Protocol - BEP 29) ---
         // Note: uTP is not implemented in the original C++ aria2. This is an experimental
         // feature in aria2-rust that implements BEP 29 (http://www.bittorrent.org/beps/bep_0029.html).
@@ -423,6 +441,110 @@ impl crate::config::OptionRegistry {
             max: Some(65535),
             description: "UDP port for uTP connections. 0 = auto-assign. Experimental feature not in original aria2".into(),
             category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+
+        // --- BT Timeouts (Internal) ---
+        self.register(OptionDef {
+            name: "bt-keep-alive-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(120),
+            min: Some(1),
+            max: Some(120),
+            description: "BT keep-alive interval in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            hidden: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(180),
+            min: Some(1),
+            max: Some(600),
+            description: "BT overall timeout in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            hidden: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-request-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(60),
+            min: Some(1),
+            max: Some(600),
+            description: "BT piece request timeout in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            hidden: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "peer-connection-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(20),
+            min: Some(1),
+            max: Some(600),
+            description: "Peer connection timeout in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            hidden: true,
+            ..Default::default()
+        });
+
+        // --- DHT Entry Points (Fine-Grained) ---
+        self.register(OptionDef {
+            name: "dht-entry-point-host".into(),
+            opt_type: OptionType::String,
+            description: "DHT bootstrap node hostname (IPv4)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-entry-point-port".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(0),
+            min: Some(0),
+            max: Some(65535),
+            description: "DHT bootstrap node port (IPv4)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-entry-point6".into(),
+            opt_type: OptionType::String,
+            description: "IPv6 DHT bootstrap node (hostname:port)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-entry-point-host6".into(),
+            opt_type: OptionType::String,
+            description: "IPv6 DHT bootstrap node hostname".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-entry-point-port6".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(0),
+            min: Some(0),
+            max: Some(65535),
+            description: "IPv6 DHT bootstrap node port".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-file-path6".into(),
+            opt_type: OptionType::Path,
+            description: "Path to IPv6 DHT routing table file".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-listen-addr".into(),
+            opt_type: OptionType::String,
+            description: "IPv4 DHT listen address".into(),
+            category: OptionCategory::BitTorrent,
+            hidden: true,
             ..Default::default()
         });
     }

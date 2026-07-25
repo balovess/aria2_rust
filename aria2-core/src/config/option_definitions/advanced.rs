@@ -187,5 +187,26 @@ impl crate::config::OptionRegistry {
             category: OptionCategory::Advanced,
             ..Default::default()
         });
+
+        // --- Log Rotation (aria2-next) ---
+        self.register(OptionDef {
+            name: "log-max-size".into(),
+            opt_type: OptionType::Size,
+            default_value: OptionValue::Int(10 * 1024 * 1024), // 10 MiB
+            min: Some(1024),                                     // 1 KiB
+            max: Some(1024 * 1024 * 1024),                      // 1 GiB
+            description: "Max log file size in bytes before rotation (default 10 MiB)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "log-max-files".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(4),
+            min: Some(1),
+            description: "Max number of rotated log files to keep (default 4)".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
     }
 }

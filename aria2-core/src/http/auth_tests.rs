@@ -1,4 +1,5 @@
 use super::auth::*;
+use url::Url;
 
 #[test]
 fn test_auth_config_new_returns_none_for_empty_user() {

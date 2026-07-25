@@ -156,14 +156,14 @@ async fn test_connection_timeout_slow_server() {
     let url = Url::parse(&format!("{}/slow.bin", server.base_url())).unwrap();
 
     // Acquire should timeout due to slow response
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
 
     // Either succeeds (connection established) or times out
     // The timeout behavior depends on whether the TCP handshake completes
     match result {
         Ok(conn) => {
             // Connection succeeded, but read might timeout
-            manager.release(conn).await;
+            manager.release(conn.id).await;
         }
         Err(Aria2Error::Recoverable(RecoverableError::Timeout)) => {
             // Expected: timeout occurred
@@ -485,18 +485,18 @@ async fn test_max_connections_limit_error() {
 
     // Acquire first connection
     let conn1 = manager
-        .acquire(&url)
+        .acquire(&url, None)
         .await
         .expect("First connection should succeed");
 
     // Acquire second connection
     let conn2 = manager
-        .acquire(&url)
+        .acquire(&url, None)
         .await
         .expect("Second connection should succeed");
 
     // Third connection should fail (max limit reached)
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
     assert!(result.is_err(), "Should fail when max connections reached");
 
     match result {
@@ -527,8 +527,8 @@ async fn test_max_connections_limit_error() {
     }
 
     // Cleanup
-    manager.release(conn1).await;
-    manager.release(conn2).await;
+    manager.release(conn1.id).await;
+    manager.release(conn2.id).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -550,7 +550,7 @@ async fn test_connection_cleanup_on_error() {
     // Use a valid IP format that won't respond
     let url = Url::parse("http://10.255.255.1:9999/unreachable").unwrap();
 
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
 
     // Connection may fail due to timeout or unreachable address
     // Either outcome is acceptable
@@ -566,7 +566,7 @@ async fn test_connection_cleanup_on_error() {
         }
         Ok(conn) => {
             // If connection somehow succeeded, release it
-            manager.release(conn).await;
+            manager.release(conn.id).await;
         }
     }
 

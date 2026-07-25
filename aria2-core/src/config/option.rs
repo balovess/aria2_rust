@@ -143,10 +143,11 @@ impl OptionValue {
         }
     }
     pub fn as_f64(&self) -> Option<f64> {
-        if let Self::Float(v) = self {
-            Some(*v)
-        } else {
-            None
+        match self {
+            Self::Float(v) => Some(*v),
+            Self::Usize(n) => Some(*n as f64),
+            Self::Int(n) => Some(*n as f64),
+            _ => None,
         }
     }
     pub fn as_bool(&self) -> Option<bool> {

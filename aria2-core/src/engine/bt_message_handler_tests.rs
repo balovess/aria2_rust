@@ -253,8 +253,8 @@ pub(crate) mod tests {
         assert!(!handler.is_peer_snubbing());
 
         // Manually set the slot's dispatched time to the past
-        if let Some(slot) = handler.dispatcher_mut().request_slots.front_mut() {
-            slot.dispatched_time = Instant::now() - Duration::from_secs(120);
+        if let Some(slot) = handler.dispatcher_mut().request_slots.first_mut() {
+            slot.dispatched_at = Instant::now() - Duration::from_secs(120);
         }
 
         let result = handler.check_request_slots(|_, _| false);
