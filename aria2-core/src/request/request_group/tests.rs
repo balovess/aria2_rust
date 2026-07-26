@@ -1,8 +1,13 @@
+#[allow(unused_imports)]
 use std::sync::Arc;
 
+#[allow(unused_imports)]
 use super::group::RequestGroup;
+#[allow(unused_imports)]
 use super::group_id::GroupId;
+#[allow(unused_imports)]
 use super::options::DownloadOptions;
+#[allow(unused_imports)]
 use crate::download::DownloadContext;
 
 #[test]

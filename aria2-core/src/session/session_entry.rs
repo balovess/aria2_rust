@@ -910,6 +910,7 @@ http://example.com/file
             piece_length: None,
             metalink_enable_unique_protocol: true,
             // FTP
+            timeout: None,
             connect_timeout: None,
             startup_idle_time: None,
             lowest_speed_limit: None,

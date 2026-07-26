@@ -121,60 +121,6 @@ impl Default for DownloadResultCode {
     }
 }
 
-/// Result of a completed download attempt.
-///
-/// Mirrors C++ `DownloadResult` which carries both the structured code
-/// and a human-readable message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadResult {
-    /// Structured result code.
-    pub code: DownloadResultCode,
-    /// Human-readable error / status message.
-    pub message: String,
-}
-
-impl DownloadResult {
-    /// Create a successful result.
-    pub fn finished() -> Self {
-        Self {
-            code: DownloadResultCode::Finished,
-            message: String::from("OK"),
-        }
-    }
-
-    /// Create a result for a user-removed download.
-    pub fn removed() -> Self {
-        Self {
-            code: DownloadResultCode::Removed,
-            message: String::from("Download removed by user"),
-        }
-    }
-
-    /// Create a result for an interrupted (shutdown) download.
-    pub fn in_progress() -> Self {
-        Self {
-            code: DownloadResultCode::InProgress,
-            message: String::from("Download interrupted by shutdown"),
-        }
-    }
-
-    /// Create a result for a paused download.
-    pub fn paused() -> Self {
-        Self {
-            code: DownloadResultCode::Paused,
-            message: String::from("Download paused"),
-        }
-    }
-
-    /// Create an error result with a specific code and message.
-    pub fn error(code: DownloadResultCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,23 +156,5 @@ mod tests {
         assert!(DownloadResultCode::Removed.is_user_stopped());
         assert!(DownloadResultCode::Paused.is_user_stopped());
         assert!(!DownloadResultCode::InProgress.is_user_stopped());
-    }
-
-    #[test]
-    fn test_download_result_finished() {
-        let r = DownloadResult::finished();
-        assert_eq!(r.code, DownloadResultCode::Finished);
-    }
-
-    #[test]
-    fn test_download_result_removed() {
-        let r = DownloadResult::removed();
-        assert_eq!(r.code, DownloadResultCode::Removed);
-    }
-
-    #[test]
-    fn test_download_result_in_progress() {
-        let r = DownloadResult::in_progress();
-        assert_eq!(r.code, DownloadResultCode::InProgress);
     }
 }

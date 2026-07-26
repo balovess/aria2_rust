@@ -53,6 +53,12 @@ pub struct DownloadControlFlags {
     force_pause_requested: AtomicBool,
     /// Restart requested: stop the current download and re-queue it.
     restart_requested: AtomicBool,
+    /// Close file requested: flush and close the output file handle.
+    close_file_requested: AtomicBool,
+    /// Save control file requested: persist .aria2 progress checkpoint.
+    save_control_requested: AtomicBool,
+    /// Remove control file requested: delete .aria2 progress checkpoint.
+    remove_control_requested: AtomicBool,
 }
 
 impl DownloadControlFlags {
@@ -64,6 +70,9 @@ impl DownloadControlFlags {
             pause_requested: AtomicBool::new(false),
             force_pause_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
+            close_file_requested: AtomicBool::new(false),
+            save_control_requested: AtomicBool::new(false),
+            remove_control_requested: AtomicBool::new(false),
         }
     }
 
@@ -164,11 +173,61 @@ impl DownloadControlFlags {
         self.pause_requested.store(false, Ordering::Release);
         self.force_pause_requested.store(false, Ordering::Release);
         self.restart_requested.store(false, Ordering::Release);
+        self.close_file_requested.store(false, Ordering::Release);
+        self.save_control_requested.store(false, Ordering::Release);
+        self.remove_control_requested.store(false, Ordering::Release);
     }
 
     /// Check whether any control flag is set (for quick early-exit checks).
     pub fn any_requested(&self) -> bool {
         self.is_halt_requested() || self.is_pause_requested() || self.is_restart_requested()
+    }
+
+    // ── File lifecycle ──────────────────────────────────────────────────
+
+    /// Request the download command to close its output file.
+    pub fn request_close_file(&self) {
+        self.close_file_requested.store(true, Ordering::Release);
+    }
+
+    /// Check whether a file close has been requested.
+    pub fn is_close_file_requested(&self) -> bool {
+        self.close_file_requested.load(Ordering::Acquire)
+    }
+
+    /// Clear the close file flag after processing.
+    pub fn clear_close_file(&self) {
+        self.close_file_requested.store(false, Ordering::Release);
+    }
+
+    /// Request saving the .aria2 control file.
+    pub fn request_save_control(&self) {
+        self.save_control_requested.store(true, Ordering::Release);
+    }
+
+    /// Check whether a control file save has been requested.
+    pub fn is_save_control_requested(&self) -> bool {
+        self.save_control_requested.load(Ordering::Acquire)
+    }
+
+    /// Clear the save control flag after processing.
+    pub fn clear_save_control(&self) {
+        self.save_control_requested.store(false, Ordering::Release);
+    }
+
+    /// Request removing the .aria2 control file.
+    pub fn request_remove_control(&self) {
+        self.remove_control_requested.store(true, Ordering::Release);
+    }
+
+    /// Check whether a control file removal has been requested.
+    pub fn is_remove_control_requested(&self) -> bool {
+        self.remove_control_requested.load(Ordering::Acquire)
+    }
+
+    /// Clear the remove control flag after processing.
+    pub fn clear_remove_control(&self) {
+        self.remove_control_requested.store(false, Ordering::Release);
     }
 }
 
@@ -186,6 +245,9 @@ impl std::fmt::Debug for DownloadControlFlags {
             .field("pause_requested", &self.is_pause_requested())
             .field("force_pause_requested", &self.is_force_pause_requested())
             .field("restart_requested", &self.is_restart_requested())
+            .field("close_file_requested", &self.is_close_file_requested())
+            .field("save_control_requested", &self.is_save_control_requested())
+            .field("remove_control_requested", &self.is_remove_control_requested())
             .finish()
     }
 }

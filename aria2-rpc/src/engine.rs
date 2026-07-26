@@ -45,6 +45,10 @@ pub struct RpcEngine {
     /// When set, `aria2.addUri` starts real downloads by sending a
     /// `DownloadCommand` through this channel.
     pub(crate) cmd_tx: Option<mpsc::UnboundedSender<Box<dyn Command>>>,
+    /// EngineCommand channel for structured download lifecycle commands.
+    /// When set, RPC handlers send `EngineCommand` variants (AddDownload,
+    /// RemoveDownload, Pause, etc.) to the v2 engine loop.
+    pub(crate) engine_cmd_tx: Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
     /// Cumulative count of stopped downloads since session start (atomic).
     pub(crate) num_stopped_total: AtomicUsize,
 }
@@ -174,6 +178,7 @@ impl RpcEngine {
             auth_middleware: RpcAuthMiddleware::default(),
             group_man: None,
             cmd_tx: None,
+            engine_cmd_tx: None,
             num_stopped_total: AtomicUsize::new(0),
         }
     }
@@ -210,6 +215,17 @@ impl RpcEngine {
     /// When set, `aria2.addUri` sends real `DownloadCommand`s to the engine.
     pub fn with_cmd_tx(mut self, tx: mpsc::UnboundedSender<Box<dyn Command>>) -> Self {
         self.cmd_tx = Some(tx);
+        self
+    }
+
+    /// Chainable builder method to set the EngineCommand channel sender.
+    /// When set, RPC handlers send structured lifecycle commands (AddDownload,
+    /// RemoveDownload, Pause, etc.) to the v2 engine loop.
+    pub fn with_engine_cmd_tx(
+        mut self,
+        tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
+    ) -> Self {
+        self.engine_cmd_tx = Some(tx);
         self
     }
 

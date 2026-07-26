@@ -211,10 +211,13 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to RequestGroupMan when available
-        if let Some(group_man) = &self.group_man {
-            let man = group_man.read().await;
-            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
+        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
+                use aria2_core::engine::engine_command::EngineCommand;
+                let _ = engine_cmd_tx.send(EngineCommand::RemoveDownload { gid: gid_parsed });
+            } else if let Some(group_man) = &self.group_man {
+                let man = group_man.read().await;
                 let _ = man.remove_group(gid_parsed);
             }
         }
@@ -267,10 +270,13 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to RequestGroupMan when available
-        if let Some(group_man) = &self.group_man {
-            let man = group_man.read().await;
-            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
+        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
+                use aria2_core::engine::engine_command::EngineCommand;
+                let _ = engine_cmd_tx.send(EngineCommand::Pause { gid: gid_parsed });
+            } else if let Some(group_man) = &self.group_man {
+                let man = group_man.read().await;
                 let _ = man.pause_group(gid_parsed);
             }
         }
@@ -307,11 +313,14 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to RequestGroupMan when available
-        if let Some(group_man) = &self.group_man {
-            let man = group_man.read().await;
-            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-                let _ = man.pause_group(gid_parsed);
+        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
+        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
+                use aria2_core::engine::engine_command::EngineCommand;
+                let _ = engine_cmd_tx.send(EngineCommand::ForcePause { gid: gid_parsed });
+            } else if let Some(group_man) = &self.group_man {
+                let man = group_man.read().await;
+                let _ = man.force_pause_group(gid_parsed);
             }
         }
 
@@ -345,10 +354,13 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to RequestGroupMan when available
-        if let Some(group_man) = &self.group_man {
-            let man = group_man.read().await;
-            if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
+        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
+            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
+                use aria2_core::engine::engine_command::EngineCommand;
+                let _ = engine_cmd_tx.send(EngineCommand::Unpause { gid: gid_parsed });
+            } else if let Some(group_man) = &self.group_man {
+                let man = group_man.read().await;
                 let _ = man.unpause_group(gid_parsed);
             }
         }
@@ -702,7 +714,27 @@ impl RpcEngine {
         }
 
         // Start a real download if we have shared engine state
-        if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
+        // Prefer EngineCommand (v2) over Box<dyn Command> (v1).
+        if let (Some(group_man), Some(engine_cmd_tx)) = (&self.group_man, &self.engine_cmd_tx) {
+            let man = group_man.read().await;
+            man.add_group_with_gid(gid, uris.clone(), dl_options.clone())
+                .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
+
+            let group = man.group_by_id(gid).ok_or_else(|| {
+                JsonRpcError::InternalError("Group not found after insert".into())
+            })?;
+
+            // Send EngineCommand::AddDownload to the v2 engine loop.
+            // The loop will promote the group from reserved to active on the
+            // next tick, create the appropriate Command, and spawn it.
+            use aria2_core::engine::engine_command::EngineCommand;
+            engine_cmd_tx
+                .send(EngineCommand::AddDownload { group })
+                .map_err(|e| {
+                    JsonRpcError::InternalError(format!("Failed to send engine command: {}", e))
+                })?;
+        } else if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
+            // Fallback: v1 path using Box<dyn Command>.
             let man = group_man.read().await;
             man.add_group_with_gid(gid, uris.clone(), dl_options.clone())
                 .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
@@ -1006,6 +1038,7 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         // FTP
+        timeout: get_u64("timeout"),
         connect_timeout: get_u64("connect-timeout"),
         startup_idle_time: get_u64("startup-idle-time"),
         lowest_speed_limit: get_u64("lowest-speed-limit"),

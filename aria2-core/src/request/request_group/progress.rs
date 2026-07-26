@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct AtomicProgress {
     completed_length: AtomicU64,
     total_length: AtomicU64,
+    /// Total uploaded bytes (BT only). Mirrors C++ `RequestGroup::getUploadLength()`.
+    upload_length: AtomicU64,
     download_speed: AtomicU64,
     upload_speed: AtomicU64,
 }
@@ -17,6 +19,7 @@ impl AtomicProgress {
         Self {
             completed_length: AtomicU64::new(0),
             total_length: AtomicU64::new(0),
+            upload_length: AtomicU64::new(0),
             download_speed: AtomicU64::new(0),
             upload_speed: AtomicU64::new(0),
         }
@@ -52,5 +55,13 @@ impl AtomicProgress {
 
     pub fn set_upload_speed(&self, v: u64) {
         self.upload_speed.store(v, Ordering::Relaxed);
+    }
+
+    pub fn upload_length(&self) -> u64 {
+        self.upload_length.load(Ordering::Relaxed)
+    }
+
+    pub fn set_upload_length(&self, v: u64) {
+        self.upload_length.store(v, Ordering::Relaxed);
     }
 }

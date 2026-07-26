@@ -79,6 +79,9 @@ pub struct DownloadContext {
 
     // -- Whether to parse Metalink info from response headers --
     accept_metalink: bool,
+
+    // -- BT info hash (20 bytes, hex-encoded for RPC). Empty for non-BT. --
+    info_hash: String,
 }
 
 impl std::fmt::Debug for DownloadContext {
@@ -95,6 +98,7 @@ impl std::fmt::Debug for DownloadContext {
             .field("checksum_verified", &self.checksum_verified)
             .field("knows_total_length", &self.knows_total_length)
             .field("accept_metalink", &self.accept_metalink)
+            .field("info_hash", &self.info_hash)
             .finish()
     }
 }
@@ -131,6 +135,7 @@ impl DownloadContext {
             checksum_verified: false,
             knows_total_length: true,
             accept_metalink: true,
+            info_hash: String::new(),
         }
     }
 
@@ -163,6 +168,7 @@ impl DownloadContext {
             checksum_verified: false,
             knows_total_length: true,
             accept_metalink: true,
+            info_hash: String::new(),
         }
     }
 
@@ -446,6 +452,25 @@ impl DownloadContext {
     /// Set an override path for the `.aria2` control file naming.
     pub fn set_base_path(&mut self, path: String) {
         self.base_path = path;
+    }
+
+    // -----------------------------------------------------------------------
+    // BT Info Hash
+    // -----------------------------------------------------------------------
+
+    /// Return the BT info hash as a hex string. Empty for non-BT downloads.
+    /// Mirrors C++ `DownloadContext::getInfoHash()`.
+    pub fn info_hash_hex(&self) -> Option<String> {
+        if self.info_hash.is_empty() {
+            None
+        } else {
+            Some(self.info_hash.clone())
+        }
+    }
+
+    /// Set the BT info hash from a hex string.
+    pub fn set_info_hash(&mut self, hash: String) {
+        self.info_hash = hash;
     }
 
     // -----------------------------------------------------------------------

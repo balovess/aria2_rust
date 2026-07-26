@@ -42,7 +42,42 @@ impl FtpDownloadCommand {
         output_dir: Option<&str>,
         output_name: Option<&str>,
     ) -> Result<Self> {
-        let (host, port, username, password, remote_path) = Self::parse_uri(uri)?;
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+        Self::new_with_group(group, output_dir, output_name)
+    }
+
+    /// Create an FTP download command that reuses an externally-managed
+    /// `RequestGroup` (e.g. from the engine's promotion flow).
+    ///
+    /// The first URI in the group is used to extract FTP parameters
+    /// (host, port, credentials, remote path). Output directory and filename
+    /// fall back to the group's `DownloadOptions` when not explicitly
+    /// overridden. The group's existing GID and progress counters are reused.
+    pub fn new_with_group(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+    ) -> Result<Self> {
+        let (uri, options) = {
+            let g = group.recover();
+            let uri = g
+                .uris()
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    Aria2Error::Fatal(FatalError::Config(
+                        "RequestGroup has no URIs for FTP download".into(),
+                    ))
+                })?;
+            let opts = g.options_arc();
+            (uri, opts)
+        };
+
+        let (host, port, username, password, remote_path) = Self::parse_uri(&uri)?;
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -63,9 +98,8 @@ impl FtpDownloadCommand {
             0
         };
 
-        let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
         info!(
-            "FtpDownloadCommand created: {} -> {} ({}:{}/{}) [resume_offset={}]",
+            "FtpDownloadCommand created (shared group): {} -> {} ({}:{}/{}) [resume_offset={}]",
             uri,
             path.display(),
             host,
@@ -75,7 +109,7 @@ impl FtpDownloadCommand {
         );
 
         Ok(Self {
-            group: Arc::new(std::sync::RwLock::new(group)),
+            group,
             output_path: path,
             started: false,
             completed_bytes: 0,
@@ -666,6 +700,10 @@ impl Command for FtpDownloadCommand {
         } else {
             CommandStatus::Pending
         }
+    }
+
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
     }
 
     fn timeout(&self) -> Option<Duration> {

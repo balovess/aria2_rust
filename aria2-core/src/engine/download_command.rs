@@ -759,6 +759,10 @@ impl Command for DownloadCommand {
         }
     }
 
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
+    }
+
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(
             constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS,

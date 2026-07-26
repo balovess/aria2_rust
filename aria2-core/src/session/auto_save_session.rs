@@ -10,6 +10,7 @@ use tracing::debug;
 use super::save_session_command::SaveSessionCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::Result;
+use crate::request::request_group::GroupId;
 use crate::request::request_group_man::RequestGroupMan;
 
 pub struct AutoSaveSession {
@@ -42,6 +43,25 @@ impl AutoSaveSession {
 
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// Save the session if the dirty flag is set and the interval has elapsed.
+    ///
+    /// Unlike the `Command::execute()` interface, this is a direct method
+    /// call suitable for use from the engine loop's housekeeping tick.
+    pub async fn save_if_dirty(&mut self) {
+        let _ = self.execute().await;
+    }
+
+    /// Force an immediate session save regardless of interval or dirty flag.
+    ///
+    /// Used during shutdown to persist state. Mirrors C++ `onEndOfRun()`
+    /// which unconditionally saves the session file.
+    pub async fn force_save(&mut self) {
+        self.dirty.store(true, Ordering::SeqCst);
+        // Reset interval so the save always executes.
+        self.last_saved = Instant::now() - self.interval - Duration::from_secs(1);
+        let _ = self.execute().await;
     }
 }
 
@@ -78,6 +98,10 @@ impl Command for AutoSaveSession {
 
     fn status(&self) -> CommandStatus {
         self.status.clone()
+    }
+
+    fn gid(&self) -> GroupId {
+        GroupId(0)
     }
 }
 

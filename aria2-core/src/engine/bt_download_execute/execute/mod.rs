@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
+use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
 #[async_trait]
@@ -254,6 +255,10 @@ impl Command for BtDownloadCommand {
         } else {
             CommandStatus::Pending
         }
+    }
+
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
     }
 
     fn timeout(&self) -> Option<Duration> {

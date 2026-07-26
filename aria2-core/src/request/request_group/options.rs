@@ -285,6 +285,10 @@ pub struct DownloadOptions {
     // ------------------------------------------------------------------
     // FTP options (C++ PREF_* for FTP connections)
     // ------------------------------------------------------------------
+    /// Overall per-download timeout in seconds. Default: 0 (no limit).
+    /// Maps to C++ `PREF_TIMEOUT`. When set, the download is aborted if
+    /// it has not completed within this many seconds.
+    pub timeout: Option<u64>,
     /// TCP connection timeout in seconds. Default: 60.
     /// Maps to C++ `PREF_CONNECT_TIMEOUT`.
     pub connect_timeout: Option<u64>,
@@ -394,6 +398,7 @@ impl Default for DownloadOptions {
             piece_length: None,
             metalink_enable_unique_protocol: true,
             // FTP
+            timeout: None,
             connect_timeout: None,
             startup_idle_time: None,
             lowest_speed_limit: None,

@@ -503,6 +503,7 @@ impl OptionHandler {
                 .as_bool()
                 .unwrap_or(true),
             // FTP
+            timeout: get_u64("timeout"),
             connect_timeout: get_u64("connect-timeout"),
             startup_idle_time: get_u64("startup-idle-time"),
             lowest_speed_limit: get_u64("lowest-speed-limit"),

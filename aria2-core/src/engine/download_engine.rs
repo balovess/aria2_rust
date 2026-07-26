@@ -10,6 +10,8 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "bittorrent")]
 use super::bt_registry::BtRegistry;
 use super::command::{Command, ProgressUpdate};
+use super::engine_command::EngineCommand;
+use super::engine_loop::EngineLoopContext;
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -43,6 +45,10 @@ struct RunningTask {
 pub struct DownloadEngine {
     command_tx: mpsc::UnboundedSender<Box<dyn Command>>,
     command_rx: mpsc::UnboundedReceiver<Box<dyn Command>>,
+    /// EngineCommand channel for structured RPC → engine communication.
+    /// Replaces the `Box<dyn Command>` channel for download lifecycle ops.
+    engine_cmd_tx: mpsc::UnboundedSender<EngineCommand>,
+    engine_cmd_rx: Option<mpsc::UnboundedReceiver<EngineCommand>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
     tick_interval: Duration,
@@ -78,6 +84,7 @@ impl DownloadEngine {
 
     pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let max_tries = policy.max_tries();
@@ -85,6 +92,8 @@ impl DownloadEngine {
         let engine = DownloadEngine {
             command_tx,
             command_rx,
+            engine_cmd_tx,
+            engine_cmd_rx: Some(engine_cmd_rx),
             shutdown_tx: Some(shutdown_tx),
             shutdown_rx: Some(shutdown_rx),
             tick_interval: Duration::from_millis(tick_interval_ms),
@@ -273,10 +282,68 @@ impl DownloadEngine {
         self.command_tx.clone()
     }
 
+    /// Clone the EngineCommand sender so external callers (e.g., RPC) can
+    /// submit structured download lifecycle commands.
+    ///
+    /// This is the v2 API that replaces `command_sender()` for download
+    /// management (add/remove/pause/unpause/halt). The old `Box<dyn Command>`
+    /// channel is retained for backward compatibility with existing code.
+    pub fn engine_command_sender(&self) -> mpsc::UnboundedSender<EngineCommand> {
+        self.engine_cmd_tx.clone()
+    }
+
     /// Take the shutdown sender so an external task (e.g., Ctrl+C handler) can
     /// signal the engine to stop. Must be called before `run()`.
     pub fn take_shutdown_sender(&mut self) -> Option<oneshot::Sender<()>> {
         self.shutdown_tx.take()
+    }
+
+    /// Run the v2 engine loop using `EngineCommand` and `RequestGroupMan`
+    /// promotion/demotion. This is the new main loop that mirrors the C++
+    /// `DownloadEngine::run()` architecture with active/reserved/stopped
+    /// queue management.
+    ///
+    /// Requires `request_group_man` to be set via `set_save_session()` or
+    /// directly. If not set, falls back to the v1 loop.
+    pub async fn run_v2(mut self) -> Result<()> {
+        let group_man = self
+            .request_group_man
+            .take()
+            .ok_or_else(|| Aria2Error::DownloadFailed(
+                "run_v2 requires request_group_man to be set".to_string()
+            ))?;
+
+        let shutdown_rx = self
+            .shutdown_rx
+            .take()
+            .ok_or_else(|| Aria2Error::DownloadFailed(
+                "shutdown_rx already taken".to_string()
+            ))?;
+
+        let engine_cmd_rx = self
+            .engine_cmd_rx
+            .take()
+            .ok_or_else(|| Aria2Error::DownloadFailed(
+                "engine_cmd_rx already taken".to_string()
+            ))?;
+
+        let ctx = EngineLoopContext {
+            group_man,
+            ftp_pool: Arc::clone(&self.ftp_pool),
+            dns_cache: Arc::clone(&self.dns_cache),
+            auto_save: self.auto_save.take(),
+            keep_alive: self.keep_alive,
+        };
+
+        super::engine_loop::run_engine_loop(
+            ctx,
+            engine_cmd_rx,
+            shutdown_rx,
+            self.tick_interval,
+        )
+        .await;
+
+        Ok(())
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -531,6 +598,7 @@ impl DownloadEngine {
 mod tests {
     use super::*;
     use crate::engine::command::CommandStatus;
+    use crate::request::request_group::GroupId;
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -555,6 +623,10 @@ mod tests {
 
         fn status(&self) -> CommandStatus {
             CommandStatus::Running
+        }
+
+        fn gid(&self) -> GroupId {
+            GroupId(0)
         }
 
         fn timeout(&self) -> Option<Duration> {
@@ -620,6 +692,10 @@ mod tests {
         fn status(&self) -> CommandStatus {
             CommandStatus::Running
         }
+
+        fn gid(&self) -> GroupId {
+            GroupId(0)
+        }
     }
 
     /// Regression test for Task A2: the old `dispatch_commands` awaited
@@ -665,7 +741,7 @@ mod tests {
     // ==================== Progress channel (Task E3) tests ====================
 
     use crate::engine::command::ProgressUpdate;
-    use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+    use crate::request::request_group::{DownloadOptions, RequestGroup};
 
     /// Helper: build a fresh `RequestGroup` wrapped in an `Arc<std::sync::RwLock<..>>`,
     /// the same shape `DownloadCommand` and the aggregator use.

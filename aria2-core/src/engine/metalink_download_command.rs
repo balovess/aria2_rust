@@ -528,6 +528,10 @@ impl Command for MetalinkDownloadCommand {
         }
     }
 
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
+    }
+
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(600))
     }

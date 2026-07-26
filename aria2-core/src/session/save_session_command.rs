@@ -8,6 +8,7 @@ use tracing::{debug, info};
 use super::session_serializer;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::Result;
+use crate::request::request_group::GroupId;
 use crate::request::request_group_man::RequestGroupMan;
 
 pub struct SaveSessionCommand {
@@ -46,6 +47,10 @@ impl Command for SaveSessionCommand {
 
     fn status(&self) -> CommandStatus {
         self.status.clone()
+    }
+
+    fn gid(&self) -> GroupId {
+        GroupId(0)
     }
 }
 

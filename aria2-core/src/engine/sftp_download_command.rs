@@ -578,6 +578,10 @@ impl Command for SftpDownloadCommand {
         }
     }
 
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
+    }
+
     /// Return the timeout for this command.
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(constants::SFTP_COMMAND_TIMEOUT_SECS))

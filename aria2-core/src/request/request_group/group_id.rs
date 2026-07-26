@@ -1,5 +1,5 @@
 /// Unique identifier for a download group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct GroupId(pub u64);
 
 impl GroupId {

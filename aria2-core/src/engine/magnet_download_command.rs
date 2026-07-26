@@ -25,8 +25,42 @@ impl MagnetDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            vec![magnet_uri.to_string()],
+            options.clone(),
+        )));
+        Self::new_with_group(group, output_dir)
+    }
+
+    /// Create a magnet download command that reuses an externally-managed
+    /// `RequestGroup` (e.g. from the engine's promotion flow).
+    ///
+    /// The first URI in the group is treated as the magnet link. Output
+    /// directory falls back to the group's `DownloadOptions` when not
+    /// explicitly overridden. The group's existing GID and progress counters
+    /// are reused.
+    pub fn new_with_group(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        output_dir: Option<&str>,
+    ) -> Result<Self> {
+        let (magnet_uri, options) = {
+            let g = group.recover();
+            let uri = g
+                .uris()
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    Aria2Error::Fatal(FatalError::Config(
+                        "RequestGroup has no URIs for magnet download".into(),
+                    ))
+                })?;
+            let opts = g.options_arc();
+            (uri, opts)
+        };
+
         let _ml =
-            aria2_protocol::bittorrent::magnet::MagnetLink::parse(magnet_uri).map_err(|e| {
+            aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri).map_err(|e| {
                 Aria2Error::Fatal(FatalError::Config(format!("Invalid magnet link: {}", e)))
             })?;
 
@@ -42,19 +76,16 @@ impl MagnetDownloadCommand {
             .to_string();
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        let urls = vec![magnet_uri.to_string()];
-        let group = RequestGroup::new(gid, urls, options.clone());
-
         info!(
-            "MagnetDownloadCommand created: {} -> {} (hash={})",
+            "MagnetDownloadCommand created (shared group): {} -> {} (hash={})",
             filename,
             path.display(),
             _ml.info_hash_hex()
         );
 
         Ok(Self {
-            group: Arc::new(std::sync::RwLock::new(group)),
-            magnet_uri: magnet_uri.to_string(),
+            group,
+            magnet_uri,
             output_path: path,
             started: false,
             completed_bytes: 0,
@@ -236,6 +267,10 @@ impl Command for MagnetDownloadCommand {
         } else {
             CommandStatus::Pending
         }
+    }
+
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
     }
 
     fn timeout(&self) -> Option<Duration> {
