@@ -10,8 +10,12 @@ use std::fmt;
 
 use crate::bittorrent::message::types::BtMessage;
 
-/// Default maximum block length (16 KiB), matching C++ `MAX_BLOCK_LENGTH`.
-pub const MAX_BLOCK_LENGTH: u32 = 16 * 1024;
+/// Maximum block length (64 KiB), matching C++ aria2 `BtConstants.h` `MAX_BLOCK_LENGTH`.
+///
+/// Note: While aria2 typically *requests* 16 KiB blocks (`BLOCK_SIZE`), the
+/// protocol allows peers to send blocks up to 64 KiB. Using 16 KiB here would
+/// incorrectly reject valid Piece/Request messages with larger blocks.
+pub const MAX_BLOCK_LENGTH: u32 = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -226,8 +230,9 @@ impl BtMessageValidator {
     ///
     /// Checks:
     /// 1. `index < num_pieces`
-    /// 2. `begin + length <= piece_length` (with overflow protection)
-    /// 3. `length <= max_block_length`
+    /// 2. `length != 0` (C++ `checkLength` rejects zero-length blocks)
+    /// 3. `begin + length <= piece_length` (with overflow protection)
+    /// 4. `length <= max_block_length`
     pub fn validate_range(
         &self,
         index: u32,
@@ -238,6 +243,15 @@ impl BtMessageValidator {
             return Ok(());
         }
         self.validate_index(index)?;
+        // C++ checkLength rejects length == 0 for Request/Cancel/Reject.
+        if length == 0 {
+            return Err(BtMessageValidationError::BlockOutOfRange {
+                index,
+                begin,
+                length: 0,
+                piece_length: self.piece_length,
+            });
+        }
         // Overflow-safe addition: if begin + length overflows u32 it is
         // certainly larger than piece_length.
         let end = begin.checked_add(length);
@@ -304,6 +318,7 @@ impl BtMessageValidator {
     /// Validate a Bitfield message's payload length.
     ///
     /// The bitfield must be exactly `ceil(num_pieces / 8)` bytes long.
+    /// Additionally, unused bits in the last byte must be zero (C++ `checkBitfield`).
     pub fn validate_bitfield(&self, data: &[u8]) -> Result<(), BtMessageValidationError> {
         if self.metadata_get_mode {
             return Ok(());
@@ -314,6 +329,23 @@ impl BtMessageValidator {
                 bitfield_len: data.len(),
                 expected_pieces: self.num_pieces,
             });
+        }
+        // C++ checkBitfield: verify that unused bits in the last byte are zero.
+        // If num_pieces is not a multiple of 8, the last byte has some
+        // unused high bits that must be zero.
+        let remainder = (self.num_pieces as usize) % 8;
+        if remainder != 0 {
+            if let Some(&last_byte) = data.last() {
+                // The valid bits in the last byte are the low `remainder` bits.
+                // All higher bits must be zero.
+                let mask: u8 = !((1 << remainder) - 1);
+                if last_byte & mask != 0 {
+                    return Err(BtMessageValidationError::BitfieldLengthMismatch {
+                        bitfield_len: data.len(),
+                        expected_pieces: self.num_pieces,
+                    });
+                }
+            }
         }
         Ok(())
     }

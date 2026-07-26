@@ -1,3 +1,18 @@
+//! BEP 6 Fast Extension (AllowedFast / Suggest / HaveAll / HaveNone) wiring.
+//!
+//! Implements the production send/receive cycle for BEP 6 messages:
+//! - **AllowedFast**: Advertise pieces the peer can request even when choked.
+//!   Sent after handshake/bitfield exchange, calculated using the BEP 6
+//!   fast-set algorithm based on the peer's IP address.
+//! - **Suggest**: Tell the peer which pieces we'd like them to request,
+//!   sent after we unchoke the peer.
+//! - **HaveAll / HaveNone**: Optimized bitfield alternatives sent during
+//!   post-handshake when we have all or no pieces.
+//!
+//! Inbound BEP 6 messages (AllowedFast, Suggest, HaveAll, HaveNone,
+//! Reject) are handled in `BtMessageHandler::wait_for_piece_block` and
+//! `BtPeerInteractive::dispatch_message`.
+
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
@@ -18,7 +33,6 @@ impl BtDownloadCommand {
     /// Check if a bitfield has a specific piece index set
     ///
     /// BitTorrent bitfields use MSB-first ordering within each byte.
-    #[allow(dead_code)] // BEP 6 utility; used in tests only
     pub(crate) fn is_bitfield_set(bitfield: &[u8], piece_index: u32) -> bool {
         let byte_idx = (piece_index as usize) / 8;
         let bit_idx = 7 - ((piece_index as usize) % 8);
@@ -36,7 +50,6 @@ impl BtDownloadCommand {
     /// - We still need (not completed)
     /// - The peer has (based on their bitfield)
     /// - We haven't already sent AllowedFast for
-    #[allow(dead_code)] // BEP 6 utility; used in tests only
     pub(crate) fn calculate_fast_set(
         needed_pieces: &[u32],
         peer_bitfield: &[u8],
@@ -61,12 +74,15 @@ impl BtDownloadCommand {
         fast_set
     }
 
-    /// Send AllowedFast messages to a peer that supports BEP 6 Fast Extension
+    /// Send AllowedFast messages to a peer that supports BEP 6 Fast Extension.
     ///
-    /// This should be called after the extension handshake completes and we've received
-    /// the peer's bitfield. It allows us to request specific pieces even when choked.
-    #[allow(dead_code)] // BEP 6 method; not yet called from production download loop
-    async fn send_allowed_fast_to_peer(
+    /// This should be called after the extension handshake completes and we've
+    /// received the peer's bitfield. It allows us to request specific pieces
+    /// even when choked.
+    ///
+    /// The messages are serialized and queued into the peer's send buffer.
+    /// The caller should flush the buffer after calling this method.
+    pub async fn send_allowed_fast_to_peer(
         peer_conn: &mut BtPeerConn,
         needed_pieces: &[u32],
         peer_bitfield: &[u8],
@@ -76,17 +92,16 @@ impl BtDownloadCommand {
         let count = fast_set.len();
 
         for piece_idx in fast_set {
-            let _msg = serializer::serialize_allowed_fast(piece_idx);
-
-            // Note: In a full implementation, this would use a proper message queue/channel.
-            // For now, we log and track what would be sent.
-            debug!("[BEP6] Would send AllowedFast for piece {}", piece_idx);
-
+            let msg_bytes = serializer::serialize_allowed_fast(piece_idx);
+            peer_conn.queue_message(msg_bytes);
             already_sent.insert(piece_idx);
             peer_conn.add_allowed_fast(piece_idx);
+
+            debug!("[BEP6] Queued AllowedFast for piece {}", piece_idx);
         }
 
         if count > 0 {
+            peer_conn.flush_send_buffer().await?;
             info!("[BEP6] Sent {} AllowedFast messages to peer", count);
         }
 
@@ -94,18 +109,17 @@ impl BtDownloadCommand {
     }
 
     /// Initialize BEP 6 tracking structures for all active connections
-    #[allow(dead_code)]
-    fn init_bep6_tracking(&mut self, num_connections: usize) {
+    pub(crate) fn init_bep6_tracking(&mut self, num_connections: usize) {
         self.allowed_fast_sent_peers = HashMap::with_capacity(num_connections);
         self.suggest_sent_counts = HashMap::with_capacity(num_connections);
     }
 
-    /// Send AllowedFast messages to all peers after handshake/bitfield exchange
+    /// Send AllowedFast messages to all peers after handshake/bitfield exchange.
     ///
     /// This is called once during initialization to establish fast extension
-    /// support with compatible peers.
-    #[allow(dead_code)]
-    async fn broadcast_allowed_fast(
+    /// support with compatible peers. Only sends to peers that have fast
+    /// extension enabled (detected via handshake reserved bytes).
+    pub async fn broadcast_allowed_fast(
         &mut self,
         active_connections: &mut [BtPeerConn],
         needed_pieces: &[u32],
@@ -116,6 +130,11 @@ impl BtDownloadCommand {
         let mut total_sent = 0u64;
 
         for (idx, conn) in active_connections.iter_mut().enumerate() {
+            // Only send AllowedFast if the peer supports BEP 6
+            if !conn.is_fast_extension_enabled() {
+                continue;
+            }
+
             let peer_bf = if idx < peer_bitfields.len() {
                 &peer_bitfields[idx]
             } else {
@@ -149,19 +168,18 @@ impl BtDownloadCommand {
         Ok(total_sent)
     }
 
-    /// Send Suggest messages to a peer to guide them toward pieces we need most
+    /// Send Suggest messages to a peer to guide them toward pieces we need most.
     ///
-    /// Called after unchoking a peer, this sends up to `MAX_SUGGEST_PER_PEER` Suggest
-    /// messages for high-priority, low-availability pieces we need urgently.
+    /// Called after unchoking a peer, this sends up to `MAX_SUGGEST_PER_PEER`
+    /// Suggest messages for high-priority, low-availability pieces.
     ///
-    /// # Arguments
-    /// * `peer_idx` - Index of the peer in active_connections
-    /// * `piece_picker` - The piece picker for selecting which pieces to suggest
-    #[allow(dead_code)] // BEP 6 method; not yet called from production download loop
-    async fn send_suggest_to_peer(
+    /// The messages are serialized and queued into the peer's send buffer.
+    /// The caller should flush the buffer after calling this method.
+    pub async fn send_suggest_to_peer(
         &mut self,
         peer_idx: usize,
         piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
+        conn: &mut BtPeerConn,
     ) -> Result<usize> {
         // Check if we've already sent too many suggests to this peer
         let sent_count = self
@@ -199,16 +217,17 @@ impl BtDownloadCommand {
         let count = suggestions.len();
 
         for piece_idx in suggestions {
-            let _msg = serializer::serialize_suggest(piece_idx);
-
-            // Note: In a full implementation, this would use a proper message queue/channel.
+            let msg_bytes = serializer::serialize_suggest(piece_idx);
+            conn.queue_message(msg_bytes);
             debug!(
-                "[BEP6] Would send Suggest for piece {} to peer {}",
+                "[BEP6] Queued Suggest for piece {} to peer {}",
                 piece_idx, peer_idx
             );
         }
 
         if count > 0 {
+            conn.flush_send_buffer().await?;
+
             // Update suggest count for this peer
             let new_count = sent_count + count;
             self.suggest_sent_counts.insert(peer_idx, new_count);
@@ -220,5 +239,29 @@ impl BtDownloadCommand {
         }
 
         Ok(count)
+    }
+
+    /// Send a HaveAll message to a peer (BEP 6 Fast Extension).
+    ///
+    /// Used as an optimized alternative to sending a full Bitfield message
+    /// when we have all pieces. Only valid when fast extension is enabled.
+    pub async fn send_have_all_to_peer(conn: &mut BtPeerConn) -> Result<()> {
+        let msg_bytes = serializer::serialize_have_all();
+        conn.queue_message(msg_bytes);
+        conn.flush_send_buffer().await?;
+        debug!("[BEP6] Sent HaveAll to peer");
+        Ok(())
+    }
+
+    /// Send a HaveNone message to a peer (BEP 6 Fast Extension).
+    ///
+    /// Used as an optimized alternative to sending a full Bitfield message
+    /// when we have no pieces. Only valid when fast extension is enabled.
+    pub async fn send_have_none_to_peer(conn: &mut BtPeerConn) -> Result<()> {
+        let msg_bytes = serializer::serialize_have_none();
+        conn.queue_message(msg_bytes);
+        conn.flush_send_buffer().await?;
+        debug!("[BEP6] Sent HaveNone to peer");
+        Ok(())
     }
 }

@@ -262,17 +262,7 @@ impl DhtPersistence {
     }
 
     pub fn collect_good_nodes(rt: &RoutingTable) -> Vec<DhtNode> {
-        let mut result = Vec::new();
-        for bucket_idx in 0..160 {
-            if let Some(bucket) = rt.get_bucket(bucket_idx) {
-                for node in bucket.get_nodes() {
-                    if node.is_good() {
-                        result.push(node.clone());
-                    }
-                }
-            }
-        }
-        result
+        rt.collect_good_nodes()
     }
 
     pub async fn save_to_file(

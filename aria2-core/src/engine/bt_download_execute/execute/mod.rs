@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
@@ -154,8 +154,11 @@ impl Command for BtDownloadCommand {
         const PEX_SEND_INTERVAL_SECS: u64 = 60;
 
         if !self.is_private {
-            // Check PEX support for each connection (simplified - assume all peers support PEX)
-            // In a full implementation, this would check extension handshake results
+            // Assume all peers support PEX by default. When the full
+            // BtPeerInteractive handshake flow is wired, this will be
+            // refined to check extension handshake results (ut_pex in
+            // the m dict). For now, enable PEX for all connections as
+            // the PEX layer gracefully handles peers that don't respond.
             for (idx, _conn) in active_connections.iter().enumerate() {
                 pex_enabled_peers.insert(idx);
             }
@@ -163,6 +166,42 @@ impl Command for BtDownloadCommand {
                 "[PEX] Initialized PEX tracking for {} peers (assuming ut_pex support)",
                 pex_enabled_peers.len()
             );
+        }
+
+        // BEP 6 (Fast Extension): Send initial AllowedFast messages to
+        // peers that support fast extension. The fast-set is computed from
+        // the peer's IP address (see compute_fast_set in fast_set.rs).
+        // Also, for peers that support fast extension, we can send HaveAll
+        // or HaveNone instead of a full Bitfield when appropriate.
+        for (idx, conn) in active_connections.iter_mut().enumerate() {
+            if conn.is_fast_extension_enabled() {
+                // Compute the BEP 6 fast-set for this peer's IP
+                let fast_pieces = aria2_protocol::bittorrent::fast_set::compute_fast_set(
+                    &conn.ip_addr,
+                    num_pieces,
+                    &meta.info_hash.bytes,
+                    10, // MAX_ALLOWED_FAST_PER_PEER
+                );
+                if !fast_pieces.is_empty() {
+                    let mut sent = HashSet::new();
+                    for piece_idx in &fast_pieces {
+                        let msg_bytes = aria2_protocol::bittorrent::message::serializer::serialize_allowed_fast(*piece_idx);
+                        conn.queue_message(msg_bytes);
+                        sent.insert(*piece_idx);
+                    }
+                    if let Err(e) = conn.flush_send_buffer().await {
+                        warn!("[BEP6] Failed to flush AllowedFast to peer {}: {}", idx, e);
+                    } else {
+                        self.allowed_fast_sent_peers.insert(idx, sent);
+                        debug!(
+                            "[BEP6] Sent {} AllowedFast pieces to peer {} ({})",
+                            fast_pieces.len(),
+                            idx,
+                            conn.ip_addr
+                        );
+                    }
+                }
+            }
         }
 
         self.download_pieces_loop(

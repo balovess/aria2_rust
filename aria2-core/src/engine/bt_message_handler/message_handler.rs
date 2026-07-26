@@ -15,7 +15,7 @@ use crate::constants;
 use crate::engine::bt_download_execute::EndgameState;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::types::{
     BlockDownloadResult, BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, MAX_BLOCK_READ_MESSAGES,
@@ -135,7 +135,8 @@ impl BtMessageHandler {
     /// Wait for a specific PIECE message from a peer
     ///
     /// Reads messages from the connection until we receive the expected
-    /// piece block or exhaust our message limit.
+    /// piece block or exhaust our message limit. While waiting, processes
+    /// other message types including BEP 10/11 Extended messages (PEX).
     async fn wait_for_piece_block(
         conn: &mut BtPeerConn,
         expected_index: u32,
@@ -161,6 +162,26 @@ impl BtMessageHandler {
                                 index, begin, expected_index, expected_begin
                             );
                         }
+                        BtMessage::Extended { ext_id, ref payload } => {
+                            // BEP 10/11: process Extended messages received
+                            // during block reads. For ut_pex (BEP 11), decode
+                            // the compact peers and stash them on the connection
+                            // for the download loop to drain later.
+                            if ext_id == 0 {
+                                // Extension handshake — log only; the full
+                                // handshake is handled by BtPeerInteractive.
+                                trace!(
+                                    "[BT] Received Extension Handshake during block read (payload_len={})",
+                                    payload.len()
+                                );
+                            } else {
+                                // Try to decode as ut_pex payload. We use a
+                                // heuristic: if the payload parses as a valid
+                                // bencoded dict with "added" or "added6" keys,
+                                // treat it as PEX. Otherwise log and skip.
+                                Self::try_process_pex_during_read(conn, ext_id, payload);
+                            }
+                        }
                         other => {
                             use aria2_protocol::bittorrent::message::types::BtMessage;
                             match &other {
@@ -180,8 +201,6 @@ impl BtMessageHandler {
                                 }
                                 BtMessage::Suggest { index } => {
                                     debug!("[BT] Received Suggest for piece {}", index);
-                                    // Note: Priority boost would be applied here if we had
-                                    // access to the piece picker. For now, just log it.
                                     debug!(
                                         "[BT] Suggest received for piece {} — would boost priority",
                                         index
@@ -230,6 +249,56 @@ impl BtMessageHandler {
                 ),
             },
         ))
+    }
+
+    /// Try to decode a ut_pex Extended message received during block read.
+    ///
+    /// On success, discovered peers are appended to `conn.pending_pex_peers`
+    /// for the download loop to drain and connect. On parse failure, the
+    /// message is silently ignored (it might be ut_metadata or another
+    /// extension we don't handle here).
+    fn try_process_pex_during_read(
+        conn: &mut BtPeerConn,
+        ext_id: u8,
+        payload: &[u8],
+    ) {
+        use aria2_protocol::bittorrent::message::extension::UtPexMessage;
+        use aria2_protocol::bittorrent::peer::connection::PeerAddr;
+
+        match UtPexMessage::from_payload(payload) {
+            Ok(pex_msg) => {
+                // Convert compact IPv4 peers to PeerAddr
+                for compact in &pex_msg.added {
+                    let ip = std::net::Ipv4Addr::from(compact.ip().clone());
+                    let addr = PeerAddr::new(&ip.to_string(), compact.port());
+                    conn.pending_pex_peers.push(addr);
+                }
+
+                // Convert compact IPv6 peers to PeerAddr
+                for compact in &pex_msg.added6 {
+                    let ip = std::net::Ipv6Addr::from(compact.ip().clone());
+                    let addr = PeerAddr::new(&ip.to_string(), compact.port());
+                    conn.pending_pex_peers.push(addr);
+                }
+
+                if !pex_msg.added.is_empty() || !pex_msg.added6.is_empty() {
+                    debug!(
+                        "[BT] PEX during block read: ext_id={}, {} v4 + {} v6 peers (buffered for download loop)",
+                        ext_id,
+                        pex_msg.added.len(),
+                        pex_msg.added6.len()
+                    );
+                }
+            }
+            Err(_) => {
+                // Not a valid PEX payload — likely ut_metadata or another
+                // extension. Silently ignore; no harm done.
+                trace!(
+                    "[BT] Extended message ext_id={} not recognized as PEX during block read",
+                    ext_id
+                );
+            }
+        }
     }
 
     /// Download all blocks for a piece with retry logic

@@ -152,7 +152,42 @@ impl BtDownloadCommand {
                 pex_enabled_peers,
                 last_pex_send,
                 pex_send_interval_secs,
-            );
+            )
+            .await;
+
+            // PEX Integration: Drain inbound PEX peers from all connections.
+            // Peers are accumulated during block reads (in
+            // BtMessageHandler::wait_for_piece_block) and stashed on
+            // BtPeerConn::pending_pex_peers. Here we drain them and add
+            // to our known-peers list.
+            let mut all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = Vec::new();
+            for conn in active_connections.iter_mut() {
+                let peers = conn.drain_pex_peers();
+                if !peers.is_empty() {
+                    for peer in &peers {
+                        self.add_pex_peer(peer.clone());
+                    }
+                    all_new_pex_peers.extend(peers);
+                }
+            }
+            if !all_new_pex_peers.is_empty() {
+                info!(
+                    "[PEX] Drained {} inbound peers from connections, attempting to connect",
+                    all_new_pex_peers.len()
+                );
+                // Attempt to connect to PEX-discovered peers
+                let connected = self
+                    .connect_to_pex_discovered_peers(
+                        &all_new_pex_peers,
+                        &meta.info_hash.bytes,
+                        num_pieces,
+                        active_connections,
+                    )
+                    .await;
+                if connected > 0 {
+                    info!("[PEX] Successfully connected to {} new peers", connected);
+                }
+            }
 
             let remaining = piece_picker.remaining_count();
             let selection = piece_selector.select_next_piece(&mut piece_picker, remaining as usize);
@@ -249,20 +284,6 @@ impl BtDownloadCommand {
                         )
                         .await;
                         piece_ok = true;
-
-                        // PEX Integration: Trigger PEX send on piece completion
-                        if !self.pex_known_peers.is_empty() && self.should_send_pex() {
-                            let dummy_remote =
-                                aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                                    "0.0.0.0", 0,
-                                );
-                            if let Some(_pex_data) = self.maybe_send_pex(&dummy_remote) {
-                                debug!(
-                                    "[PEX] PEX message ready after piece {} completion",
-                                    next_piece_idx
-                                );
-                            }
-                        }
 
                         // P1 integration: periodically save download progress
                         self.maybe_save_progress(

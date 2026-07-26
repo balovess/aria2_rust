@@ -115,6 +115,15 @@ pub struct BtPeerConn {
     // -----------------------------------------------------------------------
     /// Associated peer statistics.
     pub stats: PeerStats,
+
+    // -----------------------------------------------------------------------
+    // PEX (BEP 11) — inbound peer accumulation
+    // -----------------------------------------------------------------------
+    /// Peers discovered via incoming PEX messages while reading blocks.
+    /// The download loop drains this after each iteration to add new peers
+    /// to the connection pool. This avoids having to thread extension-update
+    /// types through the legacy `BtMessageHandler` API.
+    pub pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
 }
 
 impl BtPeerConn {
@@ -151,6 +160,7 @@ impl BtPeerConn {
                         addr.ip.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
                         addr.port,
                     )),
+                    pending_pex_peers: Vec::new(),
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -187,6 +197,7 @@ impl BtPeerConn {
                         addr.ip.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
                         addr.port,
                     )),
+                    pending_pex_peers: Vec::new(),
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -240,6 +251,7 @@ impl BtPeerConn {
             last_keepalive_sent: now,
             last_message_received: now,
             stats: PeerStats::new([0u8; 20], addr),
+            pending_pex_peers: Vec::new(),
         }
     }
 
@@ -271,6 +283,7 @@ impl BtPeerConn {
             last_keepalive_sent: now,
             last_message_received: now,
             stats: PeerStats::new([0u8; 20], addr),
+            pending_pex_peers: Vec::new(),
         })
     }
 
@@ -305,6 +318,7 @@ impl BtPeerConn {
                 std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                 0,
             )),
+            pending_pex_peers: Vec::new(),
         }
     }
 
@@ -516,6 +530,18 @@ impl BtPeerConn {
     /// Get a mutable reference to the send buffer.
     pub fn send_buffer_mut(&mut self) -> &mut SendBuffer {
         &mut self.send_buffer
+    }
+
+    // -----------------------------------------------------------------------
+    // PEX (BEP 11) — inbound peer accumulation
+    // -----------------------------------------------------------------------
+
+    /// Drain all accumulated PEX-discovered peers from this connection.
+    ///
+    /// Called by the download loop after each iteration to process peers
+    /// discovered via incoming ut_pex messages during block reads.
+    pub fn drain_pex_peers(&mut self) -> Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> {
+        std::mem::take(&mut self.pending_pex_peers)
     }
 
     // -----------------------------------------------------------------------

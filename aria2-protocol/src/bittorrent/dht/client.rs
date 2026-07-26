@@ -244,10 +244,7 @@ impl DhtClient {
         // Collect nodes to query first to avoid borrow conflicts
         let nodes_to_query: Vec<DhtNode> = self
             .routing_table
-            .find_closest(target, self.config.max_concurrent_queries)
-            .into_iter()
-            .cloned()
-            .collect();
+            .find_closest(target, self.config.max_concurrent_queries);
 
         for node in nodes_to_query {
             let tx_id = rand::random::<u32>();
@@ -284,10 +281,7 @@ impl DhtClient {
         // Collect nodes to query first to avoid borrow conflicts
         let nodes_to_query: Vec<DhtNode> = self
             .routing_table
-            .find_closest(info_hash, self.config.max_concurrent_queries)
-            .into_iter()
-            .cloned()
-            .collect();
+            .find_closest(info_hash, self.config.max_concurrent_queries);
 
         for node in nodes_to_query {
             let tx_id = rand::random::<u32>();
@@ -333,10 +327,7 @@ impl DhtClient {
         // Collect nodes to query first to avoid borrow conflicts
         let nodes_to_query: Vec<DhtNode> = self
             .routing_table
-            .find_closest(info_hash, 8)
-            .into_iter()
-            .cloned()
-            .collect();
+            .find_closest(info_hash, 8);
 
         for node in nodes_to_query {
             // Generate a token for announce (in real implementation, this should come from previous get_peers response)
