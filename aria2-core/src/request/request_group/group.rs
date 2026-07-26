@@ -13,6 +13,8 @@ use super::progress::AtomicProgress;
 use super::status::DownloadStatus;
 use super::group_id::GroupId;
 use super::options::DownloadOptions;
+use super::halt_reason::{DownloadControlFlags, HaltReason};
+use super::result_code::{DownloadResultCode, DownloadResult};
 
 pub struct RequestGroup {
     pub(super) gid: GroupId,
@@ -49,6 +51,24 @@ pub struct RequestGroup {
     /// Uses its own `RwLock` (independent of the `RequestGroupMan` write lock)
     /// so that `set_rate_limiter` can take `&self`.
     pub rate_limiter: std::sync::RwLock<Option<RateLimiter>>,
+
+    // ── Lifecycle control flags (C++ haltRequested_/forceHaltRequested_/pauseRequested_) ──
+
+    /// Atomic control flags for halt/pause/force-halt/restart signals.
+    /// Checked by hot download loops without acquiring the `RwLock` on status.
+    /// Separates *intent* (halt requested) from *observed status* (Paused, etc.).
+    pub control_flags: DownloadControlFlags,
+
+    /// Reason why the download was halted. Used to determine the
+    /// `DownloadResultCode` reported to RPC consumers.
+    pub halt_reason: std::sync::RwLock<HaltReason>,
+
+    /// Last error code recorded for this download.
+    /// Used by `create_download_result()` to produce structured result codes.
+    pub last_error_code: std::sync::RwLock<DownloadResultCode>,
+
+    /// Last error message recorded for this download.
+    pub last_error_message: std::sync::RwLock<String>,
 }
 
 impl RequestGroup {
@@ -76,6 +96,12 @@ impl RequestGroup {
             // Rate limiter is wired up later by the download engine via
             // `set_rate_limiter` once a `ThrottledWriter` is constructed.
             rate_limiter: std::sync::RwLock::new(None),
+
+            // Lifecycle control flags — all cleared initially
+            control_flags: DownloadControlFlags::new(),
+            halt_reason: std::sync::RwLock::new(HaltReason::None),
+            last_error_code: std::sync::RwLock::new(DownloadResultCode::UnknownError),
+            last_error_message: std::sync::RwLock::new(String::new()),
         }
     }
 
@@ -93,9 +119,37 @@ impl RequestGroup {
     pub fn pause(&mut self) -> Result<()> {
         let mut status = self.status.recover_mut();
 
-        if matches!(*status, DownloadStatus::Active) {
+        if matches!(*status, DownloadStatus::Active | DownloadStatus::Waiting) {
             *status = DownloadStatus::Paused;
+            self.control_flags.request_pause();
             info!("Pausing download task #{}", self.gid.value());
+        }
+
+        Ok(())
+    }
+
+    /// Force-pause: set both pause and force-pause flags so the download loop
+    /// aborts in-flight commands immediately. Mirrors C++ `forcePauseRequested`.
+    pub fn force_pause(&mut self) -> Result<()> {
+        let mut status = self.status.recover_mut();
+
+        if matches!(*status, DownloadStatus::Active | DownloadStatus::Waiting) {
+            *status = DownloadStatus::Paused;
+            self.control_flags.request_force_pause();
+            info!("Force-pausing download task #{}", self.gid.value());
+        }
+
+        Ok(())
+    }
+
+    /// Resume a paused download. Clears pause flags and transitions to Waiting.
+    pub fn resume(&mut self) -> Result<()> {
+        let mut status = self.status.recover_mut();
+
+        if matches!(*status, DownloadStatus::Paused) {
+            *status = DownloadStatus::Waiting;
+            self.control_flags.clear_pause();
+            info!("Resuming download task #{}", self.gid.value());
         }
 
         Ok(())
@@ -107,9 +161,26 @@ impl RequestGroup {
 
         *status = DownloadStatus::Removed;
         *end_time = Some(std::time::Instant::now());
+        *self.halt_reason.recover_mut() = HaltReason::UserRequest;
 
         info!("Removing download task #{}", self.gid.value());
         Ok(())
+    }
+
+    /// Request a graceful halt (let in-flight chunks finish).
+    /// Mirrors C++ `setHaltRequested(true, reason)`.
+    pub fn request_halt(&self, reason: HaltReason) {
+        self.control_flags.request_halt();
+        *self.halt_reason.recover_mut() = reason;
+        info!(gid = self.gid.value(), ?reason, "Halt requested");
+    }
+
+    /// Request a forced halt (abort immediately, even mid-write).
+    /// Mirrors C++ `setForceHaltRequested(true, reason)`.
+    pub fn request_force_halt(&self, reason: HaltReason) {
+        self.control_flags.request_force_halt();
+        *self.halt_reason.recover_mut() = reason;
+        info!(gid = self.gid.value(), ?reason, "Force halt requested");
     }
 
     pub fn complete(&mut self) -> Result<()> {
@@ -635,5 +706,134 @@ impl RequestGroup {
     /// TorrentMeta.
     pub fn set_download_context(&self, ctx: Arc<DownloadContext>) {
         *self.download_context.recover_mut() = Some(ctx);
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle control flag accessors
+    // -----------------------------------------------------------------------
+
+    /// Non-blocking check whether a graceful halt has been requested.
+    ///
+    /// The download loop should call this on each iteration; if `true`,
+    /// finish writing the current chunk and then stop.
+    pub fn is_halt_requested(&self) -> bool {
+        self.control_flags.is_halt_requested()
+    }
+
+    /// Non-blocking check whether a forced halt has been requested.
+    ///
+    /// If `true`, the download loop should abort immediately, even mid-write.
+    pub fn is_force_halt_requested(&self) -> bool {
+        self.control_flags.is_force_halt_requested()
+    }
+
+    /// Non-blocking check whether a pause has been requested.
+    pub fn is_pause_requested(&self) -> bool {
+        self.control_flags.is_pause_requested()
+    }
+
+    /// Non-blocking check whether a forced pause has been requested.
+    pub fn is_force_pause_requested(&self) -> bool {
+        self.control_flags.is_force_pause_requested()
+    }
+
+    /// Non-blocking check whether a restart has been requested.
+    pub fn is_restart_requested(&self) -> bool {
+        self.control_flags.is_restart_requested()
+    }
+
+    /// Request a restart (stop current download and re-queue).
+    pub fn request_restart(&self) {
+        self.control_flags.request_restart();
+        info!(gid = self.gid.value(), "Restart requested");
+    }
+
+    /// Get the current halt reason.
+    pub fn get_halt_reason(&self) -> HaltReason {
+        *self.halt_reason.recover()
+    }
+
+    /// Record an error code and message for this download.
+    pub fn set_last_error(&self, code: DownloadResultCode, message: impl Into<String>) {
+        *self.last_error_code.recover_mut() = code;
+        *self.last_error_message.recover_mut() = message.into();
+    }
+
+    /// Get the last recorded error code.
+    pub fn get_last_error_code(&self) -> DownloadResultCode {
+        *self.last_error_code.recover()
+    }
+
+    /// Get the last recorded error message.
+    pub fn get_last_error_message(&self) -> String {
+        self.last_error_message.recover().clone()
+    }
+
+    // -----------------------------------------------------------------------
+    // DownloadResult creation
+    // -----------------------------------------------------------------------
+
+    /// Create a structured `DownloadResult` for this download.
+    ///
+    /// Mirrors C++ `RequestGroup::downloadResult()` logic:
+    /// - If download is complete and no checksum verification pending → Finished
+    /// - If halt reason is UserRequest → Removed
+    /// - If last error is unknown and halt reason is ShutdownSignal → InProgress
+    /// - If last error is unknown → UnknownError
+    /// - Otherwise → the recorded last error code
+    pub fn create_download_result(&self) -> DownloadResult {
+        let status = self.status.recover().clone();
+        let halt_reason = *self.halt_reason.recover();
+        let last_code = *self.last_error_code.recover();
+        let last_msg = self.last_error_message.recover().clone();
+
+        match status {
+            DownloadStatus::Complete => {
+                // Check if checksum verification is still pending
+                let checksum_pending = self
+                    .download_context
+                    .recover()
+                    .as_ref()
+                    .map(|ctx| ctx.is_checksum_verification_pending())
+                    .unwrap_or(false);
+
+                if checksum_pending {
+                    DownloadResult::error(
+                        DownloadResultCode::ChecksumError,
+                        "Checksum verification pending",
+                    )
+                } else {
+                    DownloadResult::finished()
+                }
+            }
+            DownloadStatus::Removed => {
+                DownloadResult::removed()
+            }
+            DownloadStatus::Paused => {
+                DownloadResult::paused()
+            }
+            DownloadStatus::Error(_) => {
+                // Use structured error code if available
+                if last_code != DownloadResultCode::UnknownError {
+                    DownloadResult::error(last_code, last_msg)
+                } else {
+                    DownloadResult::error(DownloadResultCode::UnknownError, "Unknown error")
+                }
+            }
+            DownloadStatus::Waiting | DownloadStatus::Active => {
+                // Download was interrupted (e.g. by shutdown)
+                match halt_reason {
+                    HaltReason::ShutdownSignal => DownloadResult::in_progress(),
+                    HaltReason::UserRequest => DownloadResult::removed(),
+                    HaltReason::None => {
+                        if last_code != DownloadResultCode::UnknownError {
+                            DownloadResult::error(last_code, last_msg)
+                        } else {
+                            DownloadResult::in_progress()
+                        }
+                    }
+                }
+            }
+        }
     }
 }

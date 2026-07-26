@@ -7,4 +7,5 @@ pub mod random;
 pub mod rwlock_ext;
 pub mod speed_smooth;
 pub mod time;
+pub mod uri;
 pub mod zero_copy;

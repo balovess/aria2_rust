@@ -3,6 +3,8 @@ mod group_id;
 mod options;
 mod progress;
 mod group;
+mod halt_reason;
+mod result_code;
 #[cfg(test)]
 mod tests;
 
@@ -16,3 +18,5 @@ pub use options::{
 };
 pub use progress::AtomicProgress;
 pub use group::RequestGroup;
+pub use halt_reason::{DownloadControlFlags, HaltReason};
+pub use result_code::{DownloadResultCode, DownloadResult};

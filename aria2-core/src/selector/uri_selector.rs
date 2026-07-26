@@ -1,8 +1,13 @@
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::selector::param_expander::expand_parameterized_uri;
 
 pub trait UriSelector: Send + Sync {
+    /// Select the next URI from the candidate list.
+    ///
+    /// Returns the index of the selected URI, or `None` if no URI is available.
+    /// The caller is responsible for removing the URI from the source collection
+    /// (e.g., `FileEntry::remaining_uris`) after a successful selection.
     fn select(&self, uris: &[String], used_hosts: &[(usize, String)]) -> Option<usize>;
 
     fn tune_command(&self, _uris: &[String], _speed: u64) {}
@@ -46,15 +51,20 @@ pub fn prepare_candidates(uris: &[String]) -> Vec<String> {
     result
 }
 
-pub struct InorderUriSelector {
-    current_index: AtomicU32,
-}
+/// In-order URI selector that always picks the front (first) URI.
+///
+/// Mirrors the C++ `InorderURISelector::select()` which pops from the front
+/// of `FileEntry::remainingUris_`. Since the caller removes the selected URI
+/// from `remaining_uris` after each successful selection, always returning
+/// index 0 naturally produces the "pick next untried URI in order" behavior.
+///
+/// No internal counter is needed — the ordering is implicit in the
+/// `remaining_uris` deque maintained by `FileEntry`.
+pub struct InorderUriSelector;
 
 impl InorderUriSelector {
     pub fn new() -> Self {
-        Self {
-            current_index: AtomicU32::new(0),
-        }
+        Self
     }
 }
 
@@ -65,18 +75,27 @@ impl Default for InorderUriSelector {
 }
 
 impl UriSelector for InorderUriSelector {
+    /// Always return index 0 (front of remaining URIs).
+    ///
+    /// Matches C++ `InorderURISelector::select()`:
+    /// ```cpp
+    /// std::string nextURI = uris.front();
+    /// uris.pop_front();
+    /// return nextURI;
+    /// ```
     fn select(&self, uris: &[String], _used_hosts: &[(usize, String)]) -> Option<usize> {
         if uris.is_empty() {
-            return None;
+            None
+        } else {
+            Some(0)
         }
-        let idx = self.current_index.fetch_add(1, Ordering::Relaxed) as usize % uris.len();
-        Some(idx)
     }
 
     fn tune_command(&self, _uris: &[String], _speed: u64) {}
 
     fn reset(&self) {
-        self.current_index.store(0, Ordering::Relaxed);
+        // No-op: InorderUriSelector has no internal state to reset.
+        // The ordering is determined by the `remaining_uris` deque in FileEntry.
     }
 }
 
@@ -143,35 +162,53 @@ mod tests {
         assert_eq!(selector.select(&uris, &[]), Some(0));
     }
 
+    /// Test that InorderUriSelector always returns index 0 (pop-from-front).
+    ///
+    /// In C++, `InorderURISelector::select()` pops from the front of
+    /// `FileEntry::remainingUris_`. The caller then removes the URI
+    /// from the deque, so the next call to `select()` also returns index 0
+    /// (which is now the next URI). This test simulates that pattern.
     #[test]
-    fn test_inorder_cycling() {
+    fn test_inorder_always_returns_front() {
         let selector = InorderUriSelector::new();
-        let uris = vec![
+
+        // Simulate: remaining_uris = ["A", "B", "C"]
+        let mut uris = vec![
             "http://a.com/1".to_string(),
             "http://b.com/2".to_string(),
             "http://c.com/3".to_string(),
         ];
 
+        // First selection: returns 0 → "A", caller removes it
         let r0 = selector.select(&uris, &[]);
-        let r1 = selector.select(&uris, &[]);
-        let r2 = selector.select(&uris, &[]);
-        let r3 = selector.select(&uris, &[]);
-
         assert_eq!(r0, Some(0));
-        assert_eq!(r1, Some(1));
-        assert_eq!(r2, Some(2));
-        assert_eq!(r3, Some(0)); // wraps around
+        uris.remove(0);
+
+        // Second selection: returns 0 → "B" (now at front), caller removes it
+        let r1 = selector.select(&uris, &[]);
+        assert_eq!(r1, Some(0));
+        uris.remove(0);
+
+        // Third selection: returns 0 → "C", caller removes it
+        let r2 = selector.select(&uris, &[]);
+        assert_eq!(r2, Some(0));
+        uris.remove(0);
+
+        // Empty: returns None
+        assert!(selector.select(&uris, &[]).is_none());
     }
 
+    /// Test that reset() is a no-op for InorderUriSelector (no internal state).
     #[test]
-    fn test_reset() {
+    fn test_reset_is_noop() {
         let selector = InorderUriSelector::new();
         let uris = vec!["http://a.com".to_string(), "http://b.com".to_string()];
 
-        selector.select(&uris, &[]);
-        selector.select(&uris, &[]);
+        // reset() is a no-op, select() still returns 0
         selector.reset();
+        assert_eq!(selector.select(&uris, &[]), Some(0));
 
+        selector.reset();
         assert_eq!(selector.select(&uris, &[]), Some(0));
     }
 
@@ -324,19 +361,23 @@ mod tests {
 
     #[test]
     fn test_prepare_candidates_with_selector_integration() {
-        // Test that InorderUriSelector works correctly with prepared candidates
+        // Test that InorderUriSelector works correctly with prepared candidates.
+        // The selector always returns 0; the caller removes from the front.
         let selector = InorderUriSelector::new();
         let candidates = vec!["http://example.com/file${01-02}.txt".to_string()];
 
-        let expanded = prepare_candidates(&candidates);
+        let mut expanded = prepare_candidates(&candidates);
 
-        // Select should work on the expanded list
+        // Select from front, then remove (simulating C++ pop_front behavior)
         let r0 = selector.select(&expanded, &[]);
-        let r1 = selector.select(&expanded, &[]);
-        let r2 = selector.select(&expanded, &[]);
-
         assert_eq!(r0, Some(0));
-        assert_eq!(r1, Some(1));
-        assert_eq!(r2, Some(0)); // wraps around
+        expanded.remove(0);
+
+        let r1 = selector.select(&expanded, &[]);
+        assert_eq!(r1, Some(0)); // Still 0 because we removed the previous front
+        expanded.remove(0);
+
+        // Empty now
+        assert!(selector.select(&expanded, &[]).is_none());
     }
 }

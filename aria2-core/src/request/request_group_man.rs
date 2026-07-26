@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
 
-use super::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
+use super::request_group::{DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup};
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -123,12 +123,67 @@ impl RequestGroupMan {
         if let Some(group_lock) = self.groups.get(&gid) {
             let mut group = group_lock.recover_mut();
             if group.status().is_paused() {
-                group.start()?;
+                group.resume()?;
                 info!("Resuming download task #{}", gid.value());
             }
         }
 
         Ok(())
+    }
+
+    /// Force-pause a specific download group (aborts in-flight commands).
+    /// Mirrors C++ `aria2.forcePause` RPC method.
+    pub fn force_pause_group(&self, gid: GroupId) -> Result<()> {
+        if let Some(group_lock) = self.groups.get(&gid) {
+            let mut group = group_lock.recover_mut();
+            group.force_pause()?;
+        }
+        Ok(())
+    }
+
+    /// Pause all active/waiting downloads.
+    /// Mirrors C++ `aria2.pauseAll` RPC method.
+    pub fn pause_all(&self) {
+        for entry in self.groups.iter() {
+            let mut group = entry.recover_mut();
+            let _ = group.pause();
+        }
+    }
+
+    /// Force-pause all active/waiting downloads.
+    /// Mirrors C++ `aria2.forcePauseAll` RPC method.
+    pub fn force_pause_all(&self) {
+        for entry in self.groups.iter() {
+            let mut group = entry.recover_mut();
+            let _ = group.force_pause();
+        }
+    }
+
+    /// Unpause all paused downloads.
+    /// Mirrors C++ `aria2.unpauseAll` RPC method.
+    pub fn unpause_all(&self) {
+        for entry in self.groups.iter() {
+            let mut group = entry.recover_mut();
+            let _ = group.resume();
+        }
+    }
+
+    /// Request a graceful halt on all downloads (let in-flight chunks finish).
+    /// Used during SIGTERM / Ctrl+C shutdown.
+    pub fn halt_all(&self, reason: HaltReason) {
+        for entry in self.groups.iter() {
+            let group = entry.recover();
+            group.request_halt(reason);
+        }
+    }
+
+    /// Request a forced halt on all downloads (abort immediately).
+    /// Used during emergency shutdown or `aria2.forceRemoveAll`.
+    pub fn force_halt_all(&self, reason: HaltReason) {
+        for entry in self.groups.iter() {
+            let group = entry.recover();
+            group.request_force_halt(reason);
+        }
     }
 
     /// Update runtime-changeable options on a running download task.

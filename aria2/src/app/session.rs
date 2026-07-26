@@ -72,12 +72,11 @@ impl App {
                 continue;
             }
 
-            // Skip entries without progress info
-            if entry.completed_length == 0 && entry.total_length == 0 {
-                debug!(
-                    "Skipping entry with no progress: GID={:x}, URIs={:?}",
-                    entry.gid, entry.uris
-                );
+            // C++ restores ALL non-finished entries, even those with 0/0 progress
+            // (newly added but never started). Only skip entries that have
+            // explicitly been marked as "removed" — they should not be restored.
+            if entry.status == "removed" {
+                debug!("Skipping removed entry: GID={:x}", entry.gid);
                 continue;
             }
 
