@@ -21,6 +21,7 @@ fn create_test_config() -> HttpConfig {
         read_timeout: Duration::from_millis(200),
         write_timeout: Duration::from_millis(200),
         idle_timeout: Duration::from_millis(500),
+        max_idle_per_host: 4,
     }
 }
 
@@ -32,6 +33,7 @@ fn test_config_default() {
     assert_eq!(config.read_timeout, Duration::from_secs(60));
     assert_eq!(config.write_timeout, Duration::from_secs(60));
     assert_eq!(config.idle_timeout, Duration::from_secs(300));
+    assert_eq!(config.max_idle_per_host, 8);
 }
 
 #[test]
@@ -245,6 +247,7 @@ async fn test_connection_pool_reuse() {
         read_timeout: Duration::from_millis(1000),
         write_timeout: Duration::from_millis(1000),
         idle_timeout: Duration::from_millis(2000),
+        max_idle_per_host: 4,
     };
     let mut manager = HttpConnectionManager::new(&config);
 
@@ -263,19 +266,17 @@ async fn test_connection_pool_reuse() {
 
     // First connection acquisition
     let conn1 = manager.acquire(&url, None).await.expect("First acquisition should succeed");
-    let _conn1_id = conn1.id;
     assert_eq!(manager.active_count(), 1);
 
     // Return the connection (move ownership)
-    manager.release(_conn1_id).await;
+    manager.release(conn1).await;
 
     // Second connection acquisition (should succeed)
     let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should succeed");
     assert!(manager.active_count() >= 1); // Connection count should be >= 1
 
     // Cleanup
-    let _conn2_id = conn2.id;
-    manager.release(_conn2_id).await;
+    manager.release(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -371,6 +372,7 @@ async fn test_timeout_on_slow_server() {
         read_timeout: Duration::from_millis(200),
         write_timeout: Duration::from_millis(200),
         idle_timeout: Duration::from_secs(60),
+        max_idle_per_host: 2,
     };
     let mut manager = HttpConnectionManager::new(&config);
 
@@ -411,6 +413,7 @@ async fn test_max_connections_limit() {
         read_timeout: Duration::from_millis(1000),
         write_timeout: Duration::from_millis(1000),
         idle_timeout: Duration::from_secs(60),
+        max_idle_per_host: 2,
     };
     let mut manager = HttpConnectionManager::new(&config);
 
@@ -446,12 +449,12 @@ async fn test_max_connections_limit() {
     }
 
     // After returning one connection, should be able to acquire again (if pool reuse works)
-    manager.release(conn1.id).await;
+    manager.release(conn1).await;
     // Note: since the connection may still be counted in the pool, we only verify no panic
     match manager.acquire(&url, None).await {
         Ok(conn3) => {
             println!("Successfully acquired new connection after release: id={}", conn3.id);
-            manager.release(conn3.id).await;
+            manager.release(conn3).await;
         }
         Err(e) => {
             println!("Acquisition failed after release (may be connection reuse limit): {}", e);
@@ -459,7 +462,7 @@ async fn test_max_connections_limit() {
         }
     }
 
-    manager.release(conn2.id).await;
+    manager.release(conn2).await;
     manager.cleanup().await;
 }
 
@@ -653,4 +656,194 @@ fn test_secure_cookie_not_sent_over_http() {
         header_https.unwrap().contains("token=secret"),
         "Header should contain the secure token cookie"
     );
+}
+
+// ==================== LRU Eviction & Idle Timeout Tests ====================
+
+#[test]
+fn test_max_idle_per_host_default() {
+    let config = HttpConfig::default();
+    assert_eq!(config.max_idle_per_host, 8);
+}
+
+#[test]
+fn test_idle_count_for_key_empty() {
+    let config = create_test_config();
+    let manager = HttpConnectionManager::new(&config);
+    use super::active_connection::ConnectionPoolKey;
+    let key = ConnectionPoolKey {
+        target: "example.com:80".to_string(),
+        proxy: None,
+    };
+    assert_eq!(manager.idle_count_for_key(&key), 0);
+}
+
+#[test]
+fn test_check_timeout_empty_pool() {
+    let mut manager = HttpConnectionManager::new(&create_test_config());
+    let evicted = manager.check_timeout();
+    assert_eq!(evicted, 0);
+}
+
+#[tokio::test]
+async fn test_release_all_closes_idle() {
+    let config = HttpConfig {
+        max_connections: 4,
+        connect_timeout: Duration::from_millis(500),
+        read_timeout: Duration::from_millis(1000),
+        write_timeout: Duration::from_millis(1000),
+        idle_timeout: Duration::from_secs(60),
+        max_idle_per_host: 4,
+    };
+    let mut manager = HttpConnectionManager::new(&config);
+
+    let (addr, server_handle) = start_test_server(|mut stream| {
+        tokio::spawn(async move {
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+            let _ = stream.write_all(resp.as_bytes()).await;
+        });
+    })
+    .await;
+    sleep(Duration::from_millis(100)).await;
+
+    let url = Url::parse(&format!("http://{}", addr)).unwrap();
+
+    // Acquire and release two connections
+    let conn1 = manager.acquire(&url, None).await.unwrap();
+    let conn2 = manager.acquire(&url, None).await.unwrap();
+    manager.put_back(conn1).await;
+    manager.put_back(conn2).await;
+
+    assert_eq!(manager.pool_size(), 2);
+
+    // release_all should close all idle connections
+    manager.release_all().await;
+    assert_eq!(manager.pool_size(), 0);
+
+    manager.cleanup().await;
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_put_back_enforces_idle_limit() {
+    let config = HttpConfig {
+        max_connections: 8,
+        connect_timeout: Duration::from_millis(500),
+        read_timeout: Duration::from_millis(1000),
+        write_timeout: Duration::from_millis(1000),
+        idle_timeout: Duration::from_secs(60),
+        max_idle_per_host: 2, // Only 2 idle per host
+    };
+    let mut manager = HttpConnectionManager::new(&config);
+
+    let (addr, server_handle) = start_test_server(|mut stream| {
+        tokio::spawn(async move {
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+            let _ = stream.write_all(resp.as_bytes()).await;
+        });
+    })
+    .await;
+    sleep(Duration::from_millis(100)).await;
+
+    let url = Url::parse(&format!("http://{}", addr)).unwrap();
+
+    // Acquire 3 connections
+    let conn1 = manager.acquire(&url, None).await.unwrap();
+    let conn2 = manager.acquire(&url, None).await.unwrap();
+    let conn3 = manager.acquire(&url, None).await.unwrap();
+
+    // Put back 3 — but max_idle_per_host=2, so oldest should be evicted
+    manager.put_back(conn1).await;
+    assert_eq!(manager.pool_size(), 1);
+
+    manager.put_back(conn2).await;
+    assert_eq!(manager.pool_size(), 2);
+
+    // Third put_back should evict conn1 (oldest) to stay at limit 2
+    manager.put_back(conn3).await;
+    assert_eq!(manager.pool_size(), 2);
+
+    manager.cleanup().await;
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_check_timeout_evicts_expired() {
+    let config = HttpConfig {
+        max_connections: 4,
+        connect_timeout: Duration::from_millis(500),
+        read_timeout: Duration::from_millis(1000),
+        write_timeout: Duration::from_millis(1000),
+        idle_timeout: Duration::from_millis(200), // Very short idle timeout
+        max_idle_per_host: 4,
+    };
+    let mut manager = HttpConnectionManager::new(&config);
+
+    let (addr, server_handle) = start_test_server(|mut stream| {
+        tokio::spawn(async move {
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+            let _ = stream.write_all(resp.as_bytes()).await;
+        });
+    })
+    .await;
+    sleep(Duration::from_millis(100)).await;
+
+    let url = Url::parse(&format!("http://{}", addr)).unwrap();
+
+    // Acquire and release a connection
+    let conn = manager.acquire(&url, None).await.unwrap();
+    manager.put_back(conn).await;
+    assert_eq!(manager.pool_size(), 1);
+
+    // Wait for idle timeout to elapse
+    sleep(Duration::from_millis(300)).await;
+
+    // check_timeout should evict the expired connection
+    let evicted = manager.check_timeout();
+    assert_eq!(evicted, 1);
+    assert_eq!(manager.pool_size(), 0);
+
+    manager.cleanup().await;
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_put_back_is_alias_for_release() {
+    let config = HttpConfig {
+        max_connections: 4,
+        connect_timeout: Duration::from_millis(500),
+        read_timeout: Duration::from_millis(1000),
+        write_timeout: Duration::from_millis(1000),
+        idle_timeout: Duration::from_secs(60),
+        max_idle_per_host: 4,
+    };
+    let mut manager = HttpConnectionManager::new(&config);
+
+    let (addr, server_handle) = start_test_server(|mut stream| {
+        tokio::spawn(async move {
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+            let _ = stream.write_all(resp.as_bytes()).await;
+        });
+    })
+    .await;
+    sleep(Duration::from_millis(100)).await;
+
+    let url = Url::parse(&format!("http://{}", addr)).unwrap();
+
+    let conn = manager.acquire(&url, None).await.unwrap();
+    let conn_id = conn.id;
+
+    // release and put_back should behave identically
+    manager.release(conn).await;
+    assert_eq!(manager.pool_size(), 1);
+
+    // Re-acquire (should reuse from pool)
+    let conn2 = manager.acquire(&url, None).await.unwrap();
+    assert_eq!(conn2.id, conn_id);
+
+    manager.put_back(conn2).await;
+    assert_eq!(manager.pool_size(), 1);
+
+    manager.cleanup().await;
+    server_handle.abort();
 }

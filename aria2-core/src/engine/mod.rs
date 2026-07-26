@@ -16,6 +16,8 @@ pub mod mirror_coordinator;
 #[cfg(feature = "bittorrent")]
 pub mod multi_file_layout;
 pub mod peer_stats;
+#[cfg(test)]
+pub mod peer_stats_tests;
 pub mod range_prober;
 pub mod resume_data;
 pub mod retry_policy;
@@ -25,6 +27,10 @@ pub mod timer;
 // ── BitTorrent feature-gated modules ──────────────────────────────────
 #[cfg(feature = "bittorrent")]
 pub mod bt_choke_manager;
+#[cfg(feature = "bittorrent")]
+pub mod bt_choke_hooks;
+#[cfg(all(test, feature = "bittorrent"))]
+pub mod bt_choke_manager_tests;
 #[cfg(feature = "bittorrent")]
 pub mod bt_connection_pool;
 #[cfg(feature = "bittorrent")]

@@ -9,6 +9,7 @@ mod feat;
 mod ftp_finish;
 mod negotiation;
 mod parser;
+mod proxy_get;
 mod proxy_tunnel;
 mod transfer;
 mod types;
@@ -30,3 +31,8 @@ pub use ftp_finish::{FtpFinishConfig, FtpFinishHandler, FtpFinishResult, PooledF
 
 // Re-export proxy tunnel types
 pub use proxy_tunnel::{FtpProxyTunnel, FtpProxyTunnelConfig, FtpProxyTunnelResult};
+
+// Re-export proxy GET types
+pub use proxy_get::{
+    FtpProxyConfig, FtpProxyGetRequest, FtpProxyGetRequestBuilder, ProxyMethod, resolve_proxy_method,
+};

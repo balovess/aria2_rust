@@ -126,9 +126,10 @@ mod tests {
         let loaded = manager.load_progress(&info_hash).unwrap();
         assert_eq!(loaded.info_hash, info_hash);
         assert_eq!(loaded.num_pieces, 2);
-        // Binary format persists upload_length but not downloaded_bytes
+        // Binary format persists upload_length but not stats (matching C++)
         assert_eq!(loaded.upload_length, 512);
-        assert_eq!(loaded.stats.uploaded_bytes, 512);
+        // stats.uploaded_bytes is NOT persisted in binary format (defaults to 0)
+        assert_eq!(loaded.stats.uploaded_bytes, 0);
 
         // Cleanup
         let _ = manager.remove_progress(&info_hash);
@@ -233,9 +234,10 @@ mod tests {
         assert_eq!(loaded.piece_length, original.piece_length);
         assert_eq!(loaded.total_size, original.total_size);
         assert_eq!(loaded.version, original.version);
-        // Binary format persists upload_length; downloaded_bytes is not persisted
+        // Binary format persists upload_length; stats are NOT persisted (matching C++)
         assert_eq!(loaded.upload_length, original.upload_length);
-        assert_eq!(loaded.stats.uploaded_bytes, original.stats.uploaded_bytes);
+        // stats.uploaded_bytes defaults to 0 after loading from binary format
+        assert_eq!(loaded.stats.uploaded_bytes, 0);
 
         info!(
             hash = %loaded.to_hex_hash(),

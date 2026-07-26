@@ -531,7 +531,7 @@ fn decode_compact_v4(data: &[u8]) -> Result<Vec<CompactPeerV4>, String> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    if data.len() % COMPACT_PEER_V4_SIZE != 0 {
+    if !data.len().is_multiple_of(COMPACT_PEER_V4_SIZE) {
         return Err(format!(
             "Invalid compact IPv4 peer data length: {} (must be multiple of {})",
             data.len(),
@@ -555,7 +555,7 @@ fn decode_compact_v6(data: &[u8]) -> Result<Vec<CompactPeerV6>, String> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    if data.len() % COMPACT_PEER_V6_SIZE != 0 {
+    if !data.len().is_multiple_of(COMPACT_PEER_V6_SIZE) {
         return Err(format!(
             "Invalid compact IPv6 peer data length: {} (must be multiple of {})",
             data.len(),

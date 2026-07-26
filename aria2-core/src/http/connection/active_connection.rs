@@ -44,8 +44,12 @@ pub struct ActiveConnection {
     pub stream: TcpStream,
     /// Target host (host:port)
     pub host: String,
-    /// Last used timestamp
+    /// Last used timestamp (updated on every I/O and on pool re-entry)
     pub last_used: Instant,
+    /// Timestamp when this connection was placed into the idle pool.
+    /// `None` while the connection is in active use.
+    /// Mirrors C++ `SocketPoolEntry::registeredTime_`.
+    pub pooled_at: Option<Instant>,
     /// Pool key (target + proxy identity)
     pub pool_key: ConnectionPoolKey,
 }
@@ -65,6 +69,31 @@ impl ActiveConnection {
     /// Update last used time
     pub fn touch(&mut self) {
         self.last_used = Instant::now();
+    }
+
+    /// Mark this connection as idle in the pool.
+    /// Sets `pooled_at` to now and touches `last_used`.
+    /// Mirrors C++ `poolSocket()` which records `registeredTime_`.
+    pub fn mark_pooled(&mut self) {
+        let now = Instant::now();
+        self.last_used = now;
+        self.pooled_at = Some(now);
+    }
+
+    /// Mark this connection as actively in use (removed from pool).
+    /// Clears `pooled_at`.
+    pub fn mark_in_use(&mut self) {
+        self.pooled_at = None;
+    }
+
+    /// Check if this connection has been idle longer than the given timeout.
+    /// Uses `pooled_at` (the pool entry time) for the check, matching
+    /// C++ `SocketPoolEntry::isTimeout()`.
+    pub fn is_idle_timeout(&self, timeout: Duration) -> bool {
+        match self.pooled_at {
+            Some(t) => t.elapsed() >= timeout,
+            None => false,
+        }
     }
 
     /// Asynchronous read with timeout control

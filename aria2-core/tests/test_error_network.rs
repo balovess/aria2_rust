@@ -150,6 +150,7 @@ async fn test_connection_timeout_slow_server() {
         read_timeout: Duration::from_millis(100),
         write_timeout: Duration::from_millis(100),
         idle_timeout: Duration::from_secs(5),
+        max_idle_per_host: 4,
     };
 
     let mut manager = HttpConnectionManager::new(&config);
@@ -163,7 +164,7 @@ async fn test_connection_timeout_slow_server() {
     match result {
         Ok(conn) => {
             // Connection succeeded, but read might timeout
-            manager.release(conn.id).await;
+            manager.release(conn).await;
         }
         Err(Aria2Error::Recoverable(RecoverableError::Timeout)) => {
             // Expected: timeout occurred
@@ -458,6 +459,7 @@ async fn test_max_connections_limit_error() {
         read_timeout: Duration::from_secs(5),
         write_timeout: Duration::from_secs(5),
         idle_timeout: Duration::from_secs(60),
+        max_idle_per_host: 2,
     };
 
     let mut manager = HttpConnectionManager::new(&config);
@@ -527,8 +529,8 @@ async fn test_max_connections_limit_error() {
     }
 
     // Cleanup
-    manager.release(conn1.id).await;
-    manager.release(conn2.id).await;
+    manager.release(conn1).await;
+    manager.release(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -542,6 +544,7 @@ async fn test_connection_cleanup_on_error() {
         read_timeout: Duration::from_secs(1),
         write_timeout: Duration::from_secs(1),
         idle_timeout: Duration::from_secs(5),
+        max_idle_per_host: 2,
     };
 
     let mut manager = HttpConnectionManager::new(&config);
@@ -566,7 +569,7 @@ async fn test_connection_cleanup_on_error() {
         }
         Ok(conn) => {
             // If connection somehow succeeded, release it
-            manager.release(conn.id).await;
+            manager.release(conn).await;
         }
     }
 

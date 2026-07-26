@@ -16,6 +16,7 @@
 //!         read_timeout: Duration::from_secs(60),
 //!         write_timeout: Duration::from_secs(60),
 //!         idle_timeout: Duration::from_secs(300),
+//!         max_idle_per_host: 8,
 //!     };
 //!
 //!     let manager = HttpConnectionManager::new(&config);
@@ -24,15 +25,18 @@
 //! ```
 
 mod active_connection;
+pub mod happy_eyeballs;
 mod manager;
 mod pipeline;
 mod types;
+pub mod write_buffer;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export all public types to preserve the public API
 pub use active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
+pub use happy_eyeballs::{connect_with_happy_eyeballs, resolve_dual_stack, HappyEyeballsResult};
 pub use manager::HttpConnectionManager;
 pub use pipeline::{HttpPipelineConnection, NtlmState, PendingRequest, PipelineResponse};
 pub use types::{ConnectionState, HttpConfig, HttpResponse};

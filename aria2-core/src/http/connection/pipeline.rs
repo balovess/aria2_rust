@@ -18,12 +18,13 @@
 
 use std::collections::VecDeque;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tracing::{debug, trace, warn};
 
 use crate::error::{Aria2Error, Result};
 use crate::http::auth::erase_confidential_info;
+use crate::http::connection::write_buffer::HttpWriteBuffer;
 use crate::http::header_processor::{HttpHeaderParseState, HttpHeaderProcessor, HttpResponseHead};
 use crate::http::request_response::HttpMethod;
 
@@ -137,6 +138,8 @@ pub struct HttpPipelineConnection {
     stream: TcpStream,
     /// FIFO queue of outstanding requests awaiting their responses.
     outstanding: VecDeque<PendingRequest>,
+    /// Buffered write queue for pipelined request batching.
+    write_buffer: HttpWriteBuffer,
 }
 
 impl HttpPipelineConnection {
@@ -145,6 +148,7 @@ impl HttpPipelineConnection {
         Self {
             stream,
             outstanding: VecDeque::new(),
+            write_buffer: HttpWriteBuffer::new(),
         }
     }
 
@@ -191,9 +195,11 @@ impl HttpPipelineConnection {
             safe_log.trim()
         );
 
-        // Write to stream
-        self.stream
-            .write_all(raw_request)
+        // Push into write buffer and attempt flush
+        self.write_buffer
+            .push_str(String::from_utf8_lossy(raw_request).into_owned());
+        self.write_buffer
+            .flush(&mut self.stream)
             .await
             .map_err(|e| Aria2Error::Network(format!("Failed to send HTTP request: {}", e)))?;
 
@@ -213,8 +219,11 @@ impl HttpPipelineConnection {
     ) -> Result<()> {
         debug!("Sending proxy CONNECT request");
 
-        self.stream
-            .write_all(raw_request)
+        // Push into write buffer and attempt flush
+        self.write_buffer
+            .push_str(String::from_utf8_lossy(raw_request).into_owned());
+        self.write_buffer
+            .flush(&mut self.stream)
             .await
             .map_err(|e| Aria2Error::Network(format!("Failed to send proxy request: {}", e)))?;
 
@@ -319,21 +328,19 @@ impl HttpPipelineConnection {
     /// Whether the write buffer is empty (all pending data has been flushed).
     ///
     /// Mirrors C++ `HttpConnection::sendBufferIsEmpty()`.
-    /// TODO: Implement proper write-buffer tracking when buffered writes
-    ///       are needed.  Currently we write directly, so this is always true.
     pub fn send_buffer_is_empty(&self) -> bool {
-        true
+        self.write_buffer.is_empty()
     }
 
     /// Flush any pending write data.
     ///
     /// Mirrors C++ `HttpConnection::sendPendingData()`.
-    /// TODO: Implement when buffered writes are added.
     pub async fn send_pending_data(&mut self) -> Result<()> {
-        self.stream
-            .flush()
+        self.write_buffer
+            .flush(&mut self.stream)
             .await
-            .map_err(|e| Aria2Error::Network(format!("Failed to flush: {}", e)))
+            .map_err(|e| Aria2Error::Network(format!("Failed to flush pending data: {}", e)))?;
+        Ok(())
     }
 
     /// Access the underlying TCP stream (e.g., for TLS upgrade).
