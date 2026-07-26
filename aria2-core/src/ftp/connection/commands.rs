@@ -315,7 +315,10 @@ impl FtpClient {
             }
             Err(e) => {
                 // Connection may be in an inconsistent state after ABOR, this is expected
-                warn!("Connection state abnormal after ABOR command (may be normal): {}", e);
+                warn!(
+                    "Connection state abnormal after ABOR command (may be normal): {}",
+                    e
+                );
                 Ok(())
             }
         }
@@ -328,7 +331,10 @@ impl FtpClient {
         debug!("Sending QUIT command");
 
         if let Err(e) = self.send_command("QUIT").await {
-            warn!("Failed to send QUIT command (connection may already be closed): {}", e);
+            warn!(
+                "Failed to send QUIT command (connection may already be closed): {}",
+                e
+            );
             return Ok(());
         }
 
@@ -468,7 +474,8 @@ fn parse_mdtm_timestamp(s: &str) -> Option<std::time::SystemTime> {
     // Convert to Unix epoch using chrono-free approach
     // Days from year 1970 to start of `year`
     let days_since_epoch = days_from_civil(year, month, day)?;
-    let secs = days_since_epoch as u64 * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
+    let secs =
+        days_since_epoch as u64 * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
     Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }
 

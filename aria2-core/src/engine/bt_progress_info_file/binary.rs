@@ -173,10 +173,11 @@ pub fn deserialize_binary(data: &[u8], expected_info_hash: &[u8; 20]) -> Result<
 
         // Validate info_hash matches expected (matches C++ behavior)
         if is_torrent && &info_hash != expected_info_hash {
-            let expected_hex: String =
-                expected_info_hash.iter().map(|b| format!("{:02x}", b)).collect();
-            let actual_hex: String =
-                info_hash.iter().map(|b| format!("{:02x}", b)).collect();
+            let expected_hex: String = expected_info_hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            let actual_hex: String = info_hash.iter().map(|b| format!("{:02x}", b)).collect();
             return Err(Aria2Error::InvalidArgument(format!(
                 "info hash mismatch. expected: {}, actual: {}",
                 expected_hex, actual_hex
@@ -230,9 +231,13 @@ pub fn deserialize_binary(data: &[u8], expected_info_hash: &[u8; 20]) -> Result<
     }
 
     Ok(BtProgress {
-        info_hash: if is_torrent { info_hash } else { *expected_info_hash },
+        info_hash: if is_torrent {
+            info_hash
+        } else {
+            *expected_info_hash
+        },
         bitfield,
-        peers: Vec::new(), // Binary format does not persist peers
+        peers: Vec::new(),               // Binary format does not persist peers
         stats: DownloadStats::default(), // Not stored in binary format
         piece_length,
         total_size,

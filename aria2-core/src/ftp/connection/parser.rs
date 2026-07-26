@@ -20,13 +20,13 @@ impl FtpClient {
     ///
     /// Returns a `(host, port)` tuple
     pub(super) fn parse_pasv_response(text: &str) -> Result<(String, u16)> {
-        let start = text
-            .find('(')
-            .ok_or_else(|| Aria2Error::Parse("PASV response missing opening parenthesis".to_string()))?;
+        let start = text.find('(').ok_or_else(|| {
+            Aria2Error::Parse("PASV response missing opening parenthesis".to_string())
+        })?;
 
-        let end = text
-            .find(')')
-            .ok_or_else(|| Aria2Error::Parse("PASV response missing closing parenthesis".to_string()))?;
+        let end = text.find(')').ok_or_else(|| {
+            Aria2Error::Parse("PASV response missing closing parenthesis".to_string())
+        })?;
 
         let inner = &text[start + 1..end];
         let parts: Vec<&str> = inner.split(',').collect();

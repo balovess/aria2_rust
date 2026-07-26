@@ -36,7 +36,7 @@ mod tests;
 
 // Re-export all public types to preserve the public API
 pub use active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
-pub use happy_eyeballs::{connect_with_happy_eyeballs, resolve_dual_stack, HappyEyeballsResult};
+pub use happy_eyeballs::{HappyEyeballsResult, connect_with_happy_eyeballs, resolve_dual_stack};
 pub use manager::HttpConnectionManager;
 pub use pipeline::{HttpPipelineConnection, NtlmState, PendingRequest, PipelineResponse};
 pub use types::{ConnectionState, HttpConfig, HttpResponse};

@@ -472,7 +472,8 @@ impl BtMessageDispatcher {
     /// calls `onChokingEvent()` on each queued message. For Piece messages,
     /// `onChokingEvent()` invalidates them (marks as not-to-send).
     pub fn do_choking_action(&mut self) {
-        self.message_queue.retain(|msg| !matches!(msg, PendingMessage::Upload { .. }));
+        self.message_queue
+            .retain(|msg| !matches!(msg, PendingMessage::Upload { .. }));
     }
 
     /// Handle receiving a Cancel message from the peer.
@@ -534,7 +535,9 @@ impl BtMessageDispatcher {
             }
             // Check if block was acquired from another peer
             if is_block_acquired(slot.index, slot.block_index) {
-                result.cancelled_blocks.push((slot.index, slot.begin, slot.length));
+                result
+                    .cancelled_blocks
+                    .push((slot.index, slot.begin, slot.length));
                 return false;
             }
             true
@@ -582,7 +585,12 @@ impl BtMessageDispatcher {
                 PendingMessage::Control(data) => {
                     sendable.push(data);
                 }
-                PendingMessage::Upload { data, index, begin, length } => {
+                PendingMessage::Upload {
+                    data,
+                    index,
+                    begin,
+                    length,
+                } => {
                     if upload_limited {
                         // Defer: re-queue the upload message
                         deferred.push(PendingMessage::Upload {

@@ -18,12 +18,12 @@ mod types;
 mod tests;
 
 // Re-export all public types to preserve the original API
-pub use types::{FtpClient, FtpFileInfo, FtpFeatures, FtpMode, FtpResponse};
+pub use types::{FtpClient, FtpFeatures, FtpFileInfo, FtpMode, FtpResponse};
 
 // Re-export negotiation types
 pub use negotiation::{
-    FtpDataProxyConfig, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator,
-    FtpTransferType, RawFtpControl, ServerCapabilities,
+    FtpDataProxyConfig, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator, FtpTransferType,
+    RawFtpControl, ServerCapabilities,
 };
 
 // Re-export finish handler types
@@ -34,5 +34,6 @@ pub use proxy_tunnel::{FtpProxyTunnel, FtpProxyTunnelConfig, FtpProxyTunnelResul
 
 // Re-export proxy GET types
 pub use proxy_get::{
-    FtpProxyConfig, FtpProxyGetRequest, FtpProxyGetRequestBuilder, ProxyMethod, resolve_proxy_method,
+    FtpProxyConfig, FtpProxyGetRequest, FtpProxyGetRequestBuilder, ProxyMethod,
+    resolve_proxy_method,
 };

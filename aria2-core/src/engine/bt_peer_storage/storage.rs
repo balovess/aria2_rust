@@ -140,30 +140,30 @@ impl DefaultPeerStorage {
         if self.unused_peers.len() >= self.max_peer_list_size {
             debug!(
                 "Adding {}:{} rejected: unused list full ({}/{}",
-                peer.ip, peer.port, self.unused_peers.len(), self.max_peer_list_size
+                peer.ip,
+                peer.port,
+                self.unused_peers.len(),
+                self.max_peer_list_size
             );
             return false;
         }
 
         if self.uniq_peers.contains(&key) {
-            debug!(
-                "Adding {}:{} rejected: already tracked",
-                peer.ip, peer.port
-            );
+            debug!("Adding {}:{} rejected: already tracked", peer.ip, peer.port);
             return false;
         }
 
         if self.is_blocked_by_blocklist(&peer.ip) {
-            debug!(
-                "Adding {}:{} rejected: blocklisted",
-                peer.ip, peer.port
-            );
+            debug!("Adding {}:{} rejected: blocklisted", peer.ip, peer.port);
             self.blocklist_reject_count += 1;
             return false;
         }
 
         if self.is_temporarily_rejected(&peer.ip) {
-            debug!("Adding {}:{} rejected: temporarily rejected", peer.ip, peer.port);
+            debug!(
+                "Adding {}:{} rejected: temporarily rejected",
+                peer.ip, peer.port
+            );
             return false;
         }
 
@@ -197,24 +197,21 @@ impl DefaultPeerStorage {
                 let key = (peer.ip.clone(), peer.port);
 
                 if self.uniq_peers.contains(&key) {
-                    debug!(
-                        "Adding {}:{} rejected: already tracked",
-                        peer.ip, peer.port
-                    );
+                    debug!("Adding {}:{} rejected: already tracked", peer.ip, peer.port);
                     continue;
                 }
 
                 if self.is_blocked_by_blocklist(&peer.ip) {
-                    debug!(
-                        "Adding {}:{} rejected: blocklisted",
-                        peer.ip, peer.port
-                    );
+                    debug!("Adding {}:{} rejected: blocklisted", peer.ip, peer.port);
                     self.blocklist_reject_count += 1;
                     continue;
                 }
 
                 if self.is_temporarily_rejected(&peer.ip) {
-                    debug!("Adding {}:{} rejected: temporarily rejected", peer.ip, peer.port);
+                    debug!(
+                        "Adding {}:{} rejected: temporarily rejected",
+                        peer.ip, peer.port
+                    );
                     continue;
                 }
 
@@ -226,7 +223,10 @@ impl DefaultPeerStorage {
             for peer in &peers {
                 debug!(
                     "Adding {}:{} rejected: unused list full ({}/{}",
-                    peer.ip, peer.port, self.unused_peers.len(), self.max_peer_list_size
+                    peer.ip,
+                    peer.port,
+                    self.unused_peers.len(),
+                    self.max_peer_list_size
                 );
             }
         }
@@ -257,13 +257,19 @@ impl DefaultPeerStorage {
         let key = (peer.ip.clone(), peer.port);
 
         if self.is_blocked_by_blocklist(&peer.ip) {
-            debug!("addAndCheckout: {}:{} rejected: blocklisted", peer.ip, peer.port);
+            debug!(
+                "addAndCheckout: {}:{} rejected: blocklisted",
+                peer.ip, peer.port
+            );
             self.blocklist_reject_count += 1;
             return None;
         }
 
         if self.is_temporarily_rejected(&peer.ip) {
-            debug!("addAndCheckout: {}:{} rejected: temporarily rejected", peer.ip, peer.port);
+            debug!(
+                "addAndCheckout: {}:{} rejected: temporarily rejected",
+                peer.ip, peer.port
+            );
             return None;
         }
 
@@ -307,7 +313,10 @@ impl DefaultPeerStorage {
             return None;
         }
 
-        let mut peer = self.unused_peers.pop_front().expect("is_peer_available guarantees non-empty");
+        let mut peer = self
+            .unused_peers
+            .pop_front()
+            .expect("is_peer_available guarantees non-empty");
 
         if peer.used_by != 0 {
             warn!(
@@ -342,10 +351,7 @@ impl DefaultPeerStorage {
             self.on_returning_peer(peer);
             self.on_erasing_peer(peer);
         } else {
-            warn!(
-                "Cannot find peer {}:{} in used_peers",
-                peer.ip, peer.port
-            );
+            warn!("Cannot find peer {}:{} in used_peers", peer.ip, peer.port);
         }
     }
 
@@ -390,15 +396,14 @@ impl DefaultPeerStorage {
         if now.duration_since(self.last_temp_peer_cleanup)
             >= Duration::from_secs(TEMP_PEER_CLEANUP_INTERVAL_SECS)
         {
-            self.temporarily_rejected_peers
-                .retain(|ip, timeout| {
-                    if *timeout <= now {
-                        debug!("Purge temporarily rejected peer {}", ip);
-                        false
-                    } else {
-                        true
-                    }
-                });
+            self.temporarily_rejected_peers.retain(|ip, timeout| {
+                if *timeout <= now {
+                    debug!("Purge temporarily rejected peer {}", ip);
+                    false
+                } else {
+                    true
+                }
+            });
             self.last_temp_peer_cleanup = now;
         }
 
@@ -407,10 +412,7 @@ impl DefaultPeerStorage {
         let extra_secs: u64 = rng.gen_range(0..TEMP_REJECT_TIMEOUT_RANGE_SECS);
         let timeout_secs = TEMP_REJECT_TIMEOUT_MIN_SECS + extra_secs;
 
-        debug!(
-            "Temporarily rejected peer {} for {}s",
-            ipaddr, timeout_secs
-        );
+        debug!("Temporarily rejected peer {} for {}s", ipaddr, timeout_secs);
 
         self.temporarily_rejected_peers
             .insert(ipaddr.to_string(), now + Duration::from_secs(timeout_secs));
@@ -446,15 +448,10 @@ impl DefaultPeerStorage {
     pub fn choke_round_interval_elapsed(&self) -> bool {
         let choke_interval = Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS);
 
-        let last_round = if self.download_finished {
-            self.seeder_state_choke.last_round_time()
+        if self.download_finished {
+            self.seeder_state_choke.should_execute(choke_interval)
         } else {
-            self.leecher_state_choke.last_round_time()
-        };
-
-        match last_round {
-            None => true, // No round has been executed yet — interval is elapsed.
-            Some(t) => t.elapsed() >= choke_interval,
+            self.leecher_state_choke.should_execute(choke_interval)
         }
     }
 

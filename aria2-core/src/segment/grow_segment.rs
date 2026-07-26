@@ -167,10 +167,7 @@ impl GrowSegment {
     /// clears all blocks on the wrapped `Piece`. In this Rust version, the
     /// piece is implicitly cleared since `written_length` returns to 0.
     pub fn clear(&mut self) {
-        trace!(
-            previous = self.written_length,
-            "GrowSegment: clearing"
-        );
+        trace!(previous = self.written_length, "GrowSegment: clearing");
         self.written_length = 0;
     }
 }

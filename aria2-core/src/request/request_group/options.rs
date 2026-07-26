@@ -36,7 +36,7 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "enable-async-dns6",
     "enable-mmap",
     "file-allocation",
-    "force-save", // also in RUNTIME_CHANGEABLE_OPTIONS
+    "force-save",     // also in RUNTIME_CHANGEABLE_OPTIONS
     "save-not-found", // also in RUNTIME_CHANGEABLE_OPTIONS
     "hash-check-only",
     "max-connection-per-server",
@@ -120,7 +120,7 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
-    "bt-remove-unselected-file", // also in RUNTIME_CHANGEABLE_OPTIONS
+    "bt-remove-unselected-file",   // also in RUNTIME_CHANGEABLE_OPTIONS
     "bt-request-peer-speed-limit", // also in RUNTIME_CHANGEABLE_OPTIONS
     "bt-require-crypto",
     "bt-seed-unverified",

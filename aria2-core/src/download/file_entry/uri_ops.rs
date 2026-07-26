@@ -113,11 +113,7 @@ impl FileEntry {
                 // For now, we mark removal via Arc::try_unwrap or by finding and
                 // replacing in the collections. The simplest correct approach:
                 // remove from pool if found there; in-flight stays but is marked.
-                if let Some(pos) = self
-                    .request_pool
-                    .iter()
-                    .position(|r| Arc::ptr_eq(r, &req))
-                {
+                if let Some(pos) = self.request_pool.iter().position(|r| Arc::ptr_eq(r, &req)) {
                     self.request_pool.remove(pos);
                 }
                 // Note: We cannot mutate the Request through Arc<Request> directly.
@@ -161,19 +157,13 @@ impl FileEntry {
                 // For correctness, we remove from pool (if found) and mark
                 // the in-flight one for removal via a separate mechanism.
                 // We remove from pool to prevent re-use:
-                if let Some(pool_pos) = self
-                    .request_pool
-                    .iter()
-                    .position(|r| Arc::ptr_eq(r, &req))
+                if let Some(pool_pos) = self.request_pool.iter().position(|r| Arc::ptr_eq(r, &req))
                 {
                     self.request_pool.remove(pool_pos);
                 }
             } else if let Some(req) = self.find_request_by_uri_in_pool(uri) {
                 // Remove from pool entirely.
-                if let Some(pool_pos) = self
-                    .request_pool
-                    .iter()
-                    .position(|r| Arc::ptr_eq(r, &req))
+                if let Some(pool_pos) = self.request_pool.iter().position(|r| Arc::ptr_eq(r, &req))
                 {
                     self.request_pool.remove(pool_pos);
                 }
@@ -187,16 +177,13 @@ impl FileEntry {
     /// Remove all remaining URIs whose hostname matches the given hostname.
     pub fn remove_uri_whose_hostname_is(&mut self, hostname: &str) {
         let before = self.remaining_uris.len();
-        self.remaining_uris.retain(|uri| {
-            extract_host(uri).as_deref() != Some(hostname)
-        });
+        self.remaining_uris
+            .retain(|uri| extract_host(uri).as_deref() != Some(hostname));
         let removed = before - self.remaining_uris.len();
         if removed > 0 {
             debug!(
                 "Removed {} URIs with hostname '{}' for path={}",
-                removed,
-                hostname,
-                self.path
+                removed, hostname, self.path
             );
         }
     }
@@ -274,11 +261,7 @@ impl FileEntry {
         spent_sorted.dedup();
 
         // Collect error URIs.
-        let mut error_uris: Vec<String> = self
-            .uri_results
-            .iter()
-            .map(|r| r.uri.clone())
-            .collect();
+        let mut error_uris: Vec<String> = self.uri_results.iter().map(|r| r.uri.clone()).collect();
         error_uris.sort();
         error_uris.dedup();
 

@@ -94,7 +94,10 @@ impl TransactionTracker {
         info_hash: Option<[u8; 20]>,
         timeout: Duration,
     ) -> (Vec<u8>, tokio::sync::oneshot::Receiver<TrackedResponse>) {
-        let mut inner = self.inner.lock().expect("TransactionTracker mutex poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("TransactionTracker mutex poisoned");
         let tx_id = inner.next_tx_id;
         inner.next_tx_id = inner.next_tx_id.wrapping_add(1);
         let key = tx_id.to_be_bytes().to_vec();
@@ -123,7 +126,10 @@ impl TransactionTracker {
     /// If a matching transaction is found, the response is delivered to the
     /// waiting task via the oneshot channel. Returns `true` if matched.
     pub fn handle_response(&self, tx_id: &[u8], response: DhtMessage, from: SocketAddr) -> bool {
-        let mut inner = self.inner.lock().expect("TransactionTracker mutex poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("TransactionTracker mutex poisoned");
         if let Some(mut pending) = inner.transactions.remove(tx_id) {
             let rtt = pending.created_at.elapsed();
             trace!(
@@ -173,7 +179,10 @@ impl TransactionTracker {
     /// Returns a list of (target_addr, query_type, target_id) for each
     /// timed-out transaction, so the caller can mark nodes as failed.
     pub fn handle_timeouts(&self) -> Vec<(SocketAddr, QueryType, Option<[u8; 20]>)> {
-        let mut inner = self.inner.lock().expect("TransactionTracker mutex poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("TransactionTracker mutex poisoned");
         let now = Instant::now();
         let mut timed_out = Vec::new();
 
@@ -185,11 +194,7 @@ impl TransactionTracker {
                     target = %pending.target_addr,
                     "DHT transaction timed out"
                 );
-                timed_out.push((
-                    pending.target_addr,
-                    pending.query_type,
-                    pending.target_id,
-                ));
+                timed_out.push((pending.target_addr, pending.query_type, pending.target_id));
                 // Dropping the oneshot Sender without sending signals RecvError
                 // to the waiting Receiver.
                 false
@@ -203,20 +208,26 @@ impl TransactionTracker {
 
     /// Number of currently pending transactions.
     pub fn pending_count(&self) -> usize {
-        let inner = self.inner.lock().expect("TransactionTracker mutex poisoned");
+        let inner = self
+            .inner
+            .lock()
+            .expect("TransactionTracker mutex poisoned");
         inner.transactions.len()
     }
 
     /// Clean up expired transactions (older than `QUERY_TIMEOUT * 3`).
     /// This is a safety net in case `handle_timeouts` isn't called.
     pub fn cleanup_expired(&self) -> usize {
-        let mut inner = self.inner.lock().expect("TransactionTracker mutex poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("TransactionTracker mutex poisoned");
         let now = Instant::now();
         let max_age = QUERY_TIMEOUT * 3;
         let before = inner.transactions.len();
-        inner.transactions.retain(|_, pending| {
-            now.duration_since(pending.created_at) < max_age
-        });
+        inner
+            .transactions
+            .retain(|_, pending| now.duration_since(pending.created_at) < max_age);
         before - inner.transactions.len()
     }
 }
@@ -237,13 +248,8 @@ mod tests {
         let tracker = TransactionTracker::new();
         let addr: SocketAddr = "10.0.0.1:6881".parse().unwrap();
 
-        let (tx_id, mut rx) = tracker.allocate(
-            QueryType::Ping,
-            addr,
-            None,
-            None,
-            Duration::from_secs(10),
-        );
+        let (tx_id, mut rx) =
+            tracker.allocate(QueryType::Ping, addr, None, None, Duration::from_secs(10));
 
         assert_eq!(tracker.pending_count(), 1);
 
@@ -262,7 +268,11 @@ mod tests {
     fn test_unknown_transaction_ignored() {
         let tracker = TransactionTracker::new();
         let response = DhtMessageBuilder::ping_response(&[0, 0, 0, 99], &[0u8; 20]);
-        assert!(!tracker.handle_response(&[0, 0, 0, 99], response, "10.0.0.1:6881".parse().unwrap()));
+        assert!(!tracker.handle_response(
+            &[0, 0, 0, 99],
+            response,
+            "10.0.0.1:6881".parse().unwrap()
+        ));
     }
 
     #[test]

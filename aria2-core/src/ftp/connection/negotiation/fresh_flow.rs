@@ -13,9 +13,7 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::connection::negotiation::capabilities;
 use crate::ftp::connection::negotiation::capabilities::ServerCapabilities;
 use crate::ftp::connection::negotiation::control::FreshControl;
-use crate::ftp::connection::negotiation::parsing::{
-    parse_epsv_response, parse_pasv_response,
-};
+use crate::ftp::connection::negotiation::parsing::{parse_epsv_response, parse_pasv_response};
 use crate::ftp::connection::negotiation::{FtpNegotiator, PasvResult};
 
 impl FtpNegotiator {
@@ -111,16 +109,11 @@ impl FtpNegotiator {
                         let data_stream =
                             timeout(connect_timeout, TcpStream::connect((host, port)))
                                 .await
-                                .map_err(|_| {
-                                    Aria2Error::Recoverable(RecoverableError::Timeout)
-                                })?
+                                .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
                                 .map_err(|e| {
                                     Aria2Error::Recoverable(
                                         RecoverableError::TemporaryNetworkFailure {
-                                            message: format!(
-                                                "EPSV data connection failed: {}",
-                                                e
-                                            ),
+                                            message: format!("EPSV data connection failed: {}", e),
                                         },
                                     )
                                 })?;
@@ -139,7 +132,10 @@ impl FtpNegotiator {
                     );
                 }
                 Ok(resp) => {
-                    debug!("EPSV unexpected response: {} {}, trying PASV", resp.0, resp.1);
+                    debug!(
+                        "EPSV unexpected response: {} {}, trying PASV",
+                        resp.0, resp.1
+                    );
                 }
                 _ => {
                     debug!("EPSV not supported (I/O error), trying PASV");
@@ -217,15 +213,11 @@ impl FtpNegotiator {
         _caps: &ServerCapabilities,
     ) -> Result<TcpStream> {
         // Get local address from the control stream
-        let local_addr = ctrl
-            .reader
-            .get_ref()
-            .local_addr()
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Failed to get local address: {}", e),
-                })
-            })?;
+        let local_addr = ctrl.reader.get_ref().local_addr().map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Failed to get local address: {}", e),
+            })
+        })?;
 
         let local_ip = local_addr.ip();
 
@@ -262,11 +254,7 @@ impl FtpNegotiator {
         let eprt_resp = ctrl.command(&eprt_cmd).await?;
 
         // C++ recvEprt: 200 -> SEQ_SEND_REST; else -> SEQ_PREPARE_SERVER_SOCKET (PORT fallback)
-        if eprt_resp.0 != 200
-            && eprt_resp.0 != 500
-            && eprt_resp.0 != 501
-            && eprt_resp.0 != 502
-        {
+        if eprt_resp.0 != 200 && eprt_resp.0 != 500 && eprt_resp.0 != 501 && eprt_resp.0 != 502 {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::FtpProtocolError {
                     message: format!("EPRT command failed: {} {}", eprt_resp.0, eprt_resp.1),

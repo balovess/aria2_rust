@@ -157,7 +157,10 @@ mod tests {
         for node in &nodes {
             assert_eq!(node.id.len(), 20);
             // Resolved nodes should NOT be 0.0.0.0:0
-            assert_ne!(node.addr, "0.0.0.0:0".parse::<std::net::SocketAddr>().unwrap());
+            assert_ne!(
+                node.addr,
+                "0.0.0.0:0".parse::<std::net::SocketAddr>().unwrap()
+            );
         }
     }
 

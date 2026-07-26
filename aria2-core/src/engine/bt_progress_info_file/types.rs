@@ -90,10 +90,7 @@ impl InFlightPiece {
 
     /// Compute the number of completed blocks.
     pub fn completed_blocks(&self) -> u32 {
-        self.bitfield
-            .iter()
-            .map(|b| b.count_ones())
-            .sum()
+        self.bitfield.iter().map(|b| b.count_ones()).sum()
     }
 
     /// Check if all blocks are complete.
@@ -171,11 +168,7 @@ impl BtProgress {
         if self.num_pieces == 0 || self.bitfield.is_empty() {
             return 0.0;
         }
-        let set_bits: u32 = self
-            .bitfield
-            .iter()
-            .map(|b| b.count_ones())
-            .sum();
+        let set_bits: u32 = self.bitfield.iter().map(|b| b.count_ones()).sum();
         let effective_bits = set_bits.min(self.num_pieces);
         effective_bits as f64 / self.num_pieces as f64
     }
@@ -194,7 +187,10 @@ impl BtProgress {
     /// Matches C++ `BtProgressInfoFile::toHexHash()` which returns
     /// the SHA-1 info hash as a 40-character lowercase hex string.
     pub fn to_hex_hash(&self) -> String {
-        self.info_hash.iter().map(|b| format!("{:02x}", b)).collect()
+        self.info_hash
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect()
     }
 }
 

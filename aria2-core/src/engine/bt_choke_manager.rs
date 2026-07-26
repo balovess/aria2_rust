@@ -41,9 +41,8 @@ use crate::engine::peer_stats::PeerStats;
 
 // Re-export hooks for backward compatibility (importers use bt_choke_manager::*)
 pub use crate::engine::bt_choke_hooks::{
-    add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer,
-    on_data_received_from_peer, on_peer_choke, on_peer_unchoke, on_piece_received,
-    select_best_peer_for_request,
+    add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
+    on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
 };
 
 // ---------------------------------------------------------------------------
@@ -90,7 +89,8 @@ impl SeederPeerEntry {
     fn from_peer(index: usize, peer: &PeerStats) -> Self {
         let now = Instant::now();
         let last_am_unchoking = peer.last_unchoke_at;
-        let recent_unchoking = now.duration_since(last_am_unchoking) < SEEDER_RECENT_UNCHOKE_TIME_FRAME;
+        let recent_unchoking =
+            now.duration_since(last_am_unchoking) < SEEDER_RECENT_UNCHOKE_TIME_FRAME;
         Self {
             index,
             outstanding_upload: peer.outstanding_upload_count > 0,
@@ -116,13 +116,27 @@ impl Ord for SeederPeerEntry {
             _ => {}
         }
         // Priority 2: recently unchoked (more recent = higher priority)
+        //
+        // C++ logic:
+        //   if (this->recentUnchoking_ && this->lastAmUnchoking_ > rhs.lastAmUnchoking_)
+        //     return true;  // this < rhs, this ranks first
+        //   else if (rhs.recentUnchoking_)
+        //     return false; // rhs ranks first
+        //   else
+        //     compare by upload speed
+        //
+        // When this=recent, rhs=not-recent: this.lastAmUnchoking_ is always
+        // more recent than rhs.lastAmUnchoking_ (by the TIME_FRAME invariant),
+        // so the first condition is true → this ranks first.
+        //
+        // When both=recent: more recent timestamp ranks first.
         match (self.recent_unchoking, other.recent_unchoking) {
             (true, false) => return std::cmp::Ordering::Less,
             (false, true) => return std::cmp::Ordering::Greater,
             (true, true) => {
                 // Both recently unchoked: more recent wins
-                // C++ checks `this->lastAmUnchoking_ > rhs.lastAmUnchoking_`
-                // (greater = more recent = higher priority = "less than" in sort)
+                // C++ `this->lastAmUnchoking_ > rhs.lastAmUnchoking_`
+                // means "this is more recent → this < rhs (ranks first)"
                 return other.last_am_unchoking.cmp(&self.last_am_unchoking);
             }
             _ => {}
@@ -215,8 +229,9 @@ impl Eq for LeecherPeerEntry {}
 pub struct BtLeecherStateChoke {
     /// Round counter (cycles 0..2, wrapping)
     round: u32,
-    /// Timestamp of the last choke round execution
-    last_round: Instant,
+    /// Timestamp of the last choke round execution.
+    /// `None` means no round has been executed yet (mirrors C++ `Timer::zero()`).
+    last_round: Option<Instant>,
 }
 
 impl BtLeecherStateChoke {
@@ -224,7 +239,7 @@ impl BtLeecherStateChoke {
     pub fn new() -> Self {
         Self {
             round: 0,
-            last_round: Instant::now(),
+            last_round: None, // Mirrors C++ Timer::zero() — interval always elapsed
         }
     }
 
@@ -240,7 +255,7 @@ impl BtLeecherStateChoke {
     /// Mirrors C++ `BtLeecherStateChoke::executeChoke()`.
     pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
         tracing::debug!("Leecher state, {} choke round started", self.round);
-        self.last_round = Instant::now();
+        self.last_round = Some(Instant::now());
 
         // Phase 1: reset all peers to choked, collect entries (skip snubbed)
         let mut entries: Vec<LeecherPeerEntry> = Vec::new();
@@ -281,7 +296,7 @@ impl BtLeecherStateChoke {
             peers[entry.index].opt_unchoking = false;
         }
 
-        // Find choked+interested peers
+        // Partition: find choked+interested peers (mirrors C++ PeerFilter(true, true))
         let choked_interested: Vec<usize> = entries
             .iter()
             .filter(|e| peers[e.index].am_choking && peers[e.index].peer_interested)
@@ -292,7 +307,7 @@ impl BtLeecherStateChoke {
             return;
         }
 
-        // Shuffle and pick first
+        // Shuffle and pick first (mirrors C++ std::shuffle + pick begin)
         let mut rng = rand::thread_rng();
         let pick = choked_interested[rng.gen_range(0..choked_interested.len())];
         peers[pick].opt_unchoking = true;
@@ -302,46 +317,56 @@ impl BtLeecherStateChoke {
     /// Regular unchoke: partition by regular-unchoker status, sort, unchoke top N.
     ///
     /// Mirrors C++ `BtLeecherStateChoke::regularUnchoke()`.
-    fn regular_unchoke(
-        &mut self,
-        entries: &mut [LeecherPeerEntry],
-        peers: &mut [&mut PeerStats],
-    ) {
-        // Partition: regular unchokers first
-        entries.sort_by(|a, b| {
-            // regular_unchoker = true should come first
-            match (a.regular_unchoker, b.regular_unchoker) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.cmp(b), // Within same partition, sort by download speed
-            }
+    ///
+    /// **C++ equivalence note**: The C++ `for` loop decrements `count` in the
+    /// increment expression (`--count`), which runs even on `continue`. This means
+    /// not-interested peers *consume* an unchoke slot without being unchoked.
+    /// We replicate this behavior for strict C++ equivalence.
+    fn regular_unchoke(&mut self, entries: &mut [LeecherPeerEntry], peers: &mut [&mut PeerStats]) {
+        // Partition: regular unchokers first, then sort by download speed
+        entries.sort_by(|a, b| match (a.regular_unchoker, b.regular_unchoker) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.cmp(b),
         });
 
-        // Shuffle the non-regular-unchoker partition for variety
+        // Shuffle the non-regular-unchoker partition for variety.
+        // Mirrors C++ `std::shuffle(rest, end, rng)` after partition.
         let first_non_regular = entries
             .iter()
             .position(|e| !e.regular_unchoker)
             .unwrap_or(entries.len());
-        let mut rng = rand::thread_rng();
-        // Fisher-Yates partial shuffle on the tail
-        for i in (first_non_regular..entries.len()).rev() {
-            if first_non_regular > 0 {
-                let j = first_non_regular + rng.gen_range(0..=i - first_non_regular);
-                entries.swap(i, j.min(entries.len() - 1));
+        if first_non_regular < entries.len() {
+            let mut rng = rand::thread_rng();
+            // Fisher-Yates partial shuffle on the tail
+            for i in (first_non_regular..entries.len()).rev() {
+                let range_size = i - first_non_regular;
+                if range_size == 0 {
+                    break;
+                }
+                let j = first_non_regular + rng.gen_range(0..=range_size);
+                entries.swap(i, j);
             }
         }
 
-        let mut count = LEECHER_REGULAR_UNCHOKE_SLOTS;
+        // Unchoke the top N peers. In C++, the for-loop increment decrements
+        // count even on `continue` (when `!peer->peerInterested()`), so
+        // not-interested peers consume a slot. We replicate this.
+        let mut count = LEECHER_REGULAR_UNCHOKE_SLOTS as i32;
         let mut fast_opt_unchoker = false;
 
         for entry in entries.iter() {
-            if count == 0 {
+            if count <= 0 {
                 break;
             }
             let peer = &mut peers[entry.index];
+
             if !peer.peer_interested {
+                // C++ `continue` still decrements count in the for-increment
+                count -= 1;
                 continue;
             }
+
             // Unchoke this peer
             peer.am_choking = false;
             peer.record_unchoke();
@@ -384,12 +409,25 @@ impl BtLeecherStateChoke {
         self.round = round;
     }
 
-    /// Return the timestamp of the last round, or None if never executed.
+    /// Return the timestamp of the last choke round execution.
+    ///
+    /// Mirrors C++ `BtLeecherStateChoke::getLastRound()`.
+    /// Returns `None` if no round has been executed yet (equivalent to C++
+    /// `Timer::zero()` where the interval is always considered elapsed).
     pub fn last_round_time(&self) -> Option<Instant> {
-        if self.round == 0 {
-            None
-        } else {
-            Some(self.last_round)
+        self.last_round
+    }
+
+    /// Check whether enough time has elapsed since the last choke round
+    /// to warrant another execution.
+    ///
+    /// Mirrors the interval check in C++ `PeerChokeCommand::execute()`
+    /// which calls `peerStorage_->chokeRoundIntervalElapsed()`.
+    /// Returns `true` if no round has been executed yet.
+    pub fn should_execute(&self, interval: Duration) -> bool {
+        match self.last_round {
+            None => true,
+            Some(t) => t.elapsed() >= interval,
         }
     }
 }
@@ -419,8 +457,9 @@ impl Default for BtLeecherStateChoke {
 pub struct BtSeederStateChoke {
     /// Round counter (cycles 0..2, wrapping)
     round: u32,
-    /// Timestamp of the last choke round execution
-    last_round: Instant,
+    /// Timestamp of the last choke round execution.
+    /// `None` means no round has been executed yet (mirrors C++ `Timer::zero()`).
+    last_round: Option<Instant>,
     /// Number of upload slots for regular unchoke.
     /// Round 2 uses +1 slot (4 vs 3) matching C++ logic.
     base_unchoke_slots: usize,
@@ -431,7 +470,7 @@ impl BtSeederStateChoke {
     pub fn new() -> Self {
         Self {
             round: 0,
-            last_round: Instant::now(),
+            last_round: None, // Mirrors C++ Timer::zero() — interval always elapsed
             base_unchoke_slots: 4,
         }
     }
@@ -440,7 +479,7 @@ impl BtSeederStateChoke {
     pub fn with_slots(slots: usize) -> Self {
         Self {
             round: 0,
-            last_round: Instant::now(),
+            last_round: None,
             base_unchoke_slots: slots,
         }
     }
@@ -457,7 +496,7 @@ impl BtSeederStateChoke {
     /// Mirrors C++ `BtSeederStateChoke::executeChoke()`.
     pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
         tracing::debug!("Seeder state, {} choke round started", self.round);
-        self.last_round = Instant::now();
+        self.last_round = Some(Instant::now());
 
         // Phase 1: reset all peers to choked, collect interested peers
         let mut entries: Vec<SeederPeerEntry> = Vec::new();
@@ -484,11 +523,7 @@ impl BtSeederStateChoke {
     /// Unchoke the top-ranked peers and optionally perform optimistic unchoke.
     ///
     /// Mirrors C++ `BtSeederStateChoke::unchoke()`.
-    fn unchoke_peers(
-        &mut self,
-        entries: &mut Vec<SeederPeerEntry>,
-        peers: &mut [&mut PeerStats],
-    ) {
+    fn unchoke_peers(&mut self, entries: &mut Vec<SeederPeerEntry>, peers: &mut [&mut PeerStats]) {
         // Round 2 gets one more regular slot (C++: count = (round==2) ? 4 : 3)
         let regular_slots = if self.round == 2 {
             self.base_unchoke_slots
@@ -535,18 +570,37 @@ impl BtSeederStateChoke {
         }
     }
 
-    /// Return the timestamp of the last round, or None if never executed.
+    /// Return the timestamp of the last choke round execution.
+    ///
+    /// Mirrors C++ `BtSeederStateChoke::getLastRound()`.
+    /// Returns `None` if no round has been executed yet (equivalent to C++
+    /// `Timer::zero()` where the interval is always considered elapsed).
     pub fn last_round_time(&self) -> Option<Instant> {
-        if self.round == 0 {
-            None
-        } else {
-            Some(self.last_round)
-        }
+        self.last_round
     }
 
     /// Return the current round counter.
     pub fn round(&self) -> u32 {
         self.round
+    }
+
+    /// Set the round counter (for testing purposes).
+    #[cfg(test)]
+    pub fn set_round(&mut self, round: u32) {
+        self.round = round;
+    }
+
+    /// Check whether enough time has elapsed since the last choke round
+    /// to warrant another execution.
+    ///
+    /// Mirrors the interval check in C++ `PeerChokeCommand::execute()`
+    /// which calls `peerStorage_->chokeRoundIntervalElapsed()`.
+    /// Returns `true` if no round has been executed yet.
+    pub fn should_execute(&self, interval: Duration) -> bool {
+        match self.last_round {
+            None => true,
+            Some(t) => t.elapsed() >= interval,
+        }
     }
 }
 
@@ -555,5 +609,3 @@ impl Default for BtSeederStateChoke {
         Self::new()
     }
 }
-
-

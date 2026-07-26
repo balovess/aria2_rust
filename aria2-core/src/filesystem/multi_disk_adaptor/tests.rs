@@ -378,16 +378,12 @@ async fn test_cross_file_write_spanning_two_files() {
     adaptor.close_file().await;
 
     // file1.txt should have 15 bytes (first 5 uninitialized, next 10 from write)
-    let content1 = tokio::fs::read(dir.path().join("file1.txt"))
-        .await
-        .unwrap();
+    let content1 = tokio::fs::read(dir.path().join("file1.txt")).await.unwrap();
     assert_eq!(content1.len(), 15);
     assert_eq!(&content1[5..15], b"67890ABCDE");
 
     // file2.txt first byte should be 'F'
-    let content2 = tokio::fs::read(dir.path().join("file2.txt"))
-        .await
-        .unwrap();
+    let content2 = tokio::fs::read(dir.path().join("file2.txt")).await.unwrap();
     assert!(content2.len() >= 1);
     assert_eq!(content2[0], b'F');
 }
@@ -407,9 +403,7 @@ async fn test_cross_file_write_full_cplusplus_test() {
     adaptor.close_file().await;
 
     // Verify file1.txt
-    let content1 = tokio::fs::read(dir.path().join("file1.txt"))
-        .await
-        .unwrap();
+    let content1 = tokio::fs::read(dir.path().join("file1.txt")).await.unwrap();
     assert_eq!(&content1[..5], b"12345");
 
     // Re-open and write "67890ABCDEF" at offset 5
@@ -417,15 +411,11 @@ async fn test_cross_file_write_full_cplusplus_test() {
     adaptor.write_data(5, b"67890ABCDEF").await.unwrap();
     adaptor.close_file().await;
 
-    let content1 = tokio::fs::read(dir.path().join("file1.txt"))
-        .await
-        .unwrap();
+    let content1 = tokio::fs::read(dir.path().join("file1.txt")).await.unwrap();
     assert_eq!(content1.len(), 15);
     assert_eq!(&content1[..15], b"1234567890ABCDE");
 
-    let content2 = tokio::fs::read(dir.path().join("file2.txt"))
-        .await
-        .unwrap();
+    let content2 = tokio::fs::read(dir.path().join("file2.txt")).await.unwrap();
     assert!(content2.len() >= 1);
     assert_eq!(content2[0], b'F');
 
@@ -434,14 +424,10 @@ async fn test_cross_file_write_full_cplusplus_test() {
     adaptor.write_data(10, b"12345123456712").await.unwrap();
     adaptor.close_file().await;
 
-    let content1 = tokio::fs::read(dir.path().join("file1.txt"))
-        .await
-        .unwrap();
+    let content1 = tokio::fs::read(dir.path().join("file1.txt")).await.unwrap();
     assert_eq!(&content1[..15], b"123456789012345");
 
-    let content2 = tokio::fs::read(dir.path().join("file2.txt"))
-        .await
-        .unwrap();
+    let content2 = tokio::fs::read(dir.path().join("file2.txt")).await.unwrap();
     assert_eq!(content2.len(), 7);
     assert_eq!(&content2[..7], b"1234567");
 }
@@ -566,9 +552,7 @@ async fn test_open_existing_file_lazy() {
         .await
         .unwrap();
 
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 19, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 19, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(2);
     adaptor.set_file_entries(entries);
@@ -746,9 +730,7 @@ async fn test_init_and_open_truncates() {
         .await
         .unwrap();
 
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 5, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 5, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -759,9 +741,7 @@ async fn test_init_and_open_truncates() {
     adaptor.close_file().await;
 
     // File should contain only the new data (truncated)
-    let content = tokio::fs::read(dir.path().join("file1.txt"))
-        .await
-        .unwrap();
+    let content = tokio::fs::read(dir.path().join("file1.txt")).await.unwrap();
     assert_eq!(&content[..5], b"12345");
 }
 
@@ -774,9 +754,7 @@ async fn test_open_file_preserves_content() {
         .await
         .unwrap();
 
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 21, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 21, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -794,9 +772,7 @@ async fn test_open_file_preserves_content() {
 #[tokio::test]
 async fn test_disk_adaptor_trait_open() {
     let dir = tempfile::tempdir().unwrap();
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 10, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 10, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -839,9 +815,7 @@ async fn test_disk_adaptor_trait_read_write() {
 #[tokio::test]
 async fn test_disk_adaptor_trait_truncate_error() {
     let dir = tempfile::tempdir().unwrap();
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 10, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 10, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -861,9 +835,7 @@ async fn test_disk_adaptor_trait_size() {
         .await
         .unwrap();
 
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 10, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 10, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -904,9 +876,7 @@ async fn test_max_open_files_eviction() {
 #[tokio::test]
 async fn test_write_empty_data() {
     let dir = tempfile::tempdir().unwrap();
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 10, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 10, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -921,9 +891,7 @@ async fn test_write_empty_data() {
 #[tokio::test]
 async fn test_read_zero_length() {
     let dir = tempfile::tempdir().unwrap();
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 10, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 10, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -941,9 +909,7 @@ async fn test_read_zero_length() {
 #[tokio::test]
 async fn test_flush_os_buffers() {
     let dir = tempfile::tempdir().unwrap();
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 10, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 10, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -955,9 +921,7 @@ async fn test_flush_os_buffers() {
     adaptor.close_file().await;
 
     // Verify data persisted after flush
-    let content = tokio::fs::read(dir.path().join("file1.txt"))
-        .await
-        .unwrap();
+    let content = tokio::fs::read(dir.path().join("file1.txt")).await.unwrap();
     assert_eq!(&content[..10], b"0123456789");
 }
 
@@ -966,9 +930,7 @@ async fn test_flush_os_buffers() {
 #[tokio::test]
 async fn test_open_close_cycles() {
     let dir = tempfile::tempdir().unwrap();
-    let entries = vec![
-        FileEntry::new(dir.path().join("file1.txt"), 10, 0, true),
-    ];
+    let entries = vec![FileEntry::new(dir.path().join("file1.txt"), 10, 0, true)];
 
     let mut adaptor = MultiDiskAdaptor::new(1);
     adaptor.set_file_entries(entries);
@@ -980,8 +942,6 @@ async fn test_open_close_cycles() {
     }
 
     // Last write should have written 0x02
-    let content = tokio::fs::read(dir.path().join("file1.txt"))
-        .await
-        .unwrap();
+    let content = tokio::fs::read(dir.path().join("file1.txt")).await.unwrap();
     assert_eq!(content[..10], [2u8; 10]);
 }

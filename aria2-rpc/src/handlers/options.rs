@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use aria2_core::request::request_group::{is_option_changeable, ChangeableKind};
+use aria2_core::request::request_group::{ChangeableKind, is_option_changeable};
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};

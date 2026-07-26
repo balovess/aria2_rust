@@ -180,7 +180,11 @@ impl UtpConnection {
     }
 
     /// Accept an incoming connection (server-side) - creates SYN-ACK packet
-    pub fn accept(&mut self, syn_packet: &UtpPacket, remote_addr: SocketAddr) -> Result<UtpPacket, ConnectionError> {
+    pub fn accept(
+        &mut self,
+        syn_packet: &UtpPacket,
+        remote_addr: SocketAddr,
+    ) -> Result<UtpPacket, ConnectionError> {
         if self.state != ConnectionState::Closed {
             return Err(ConnectionError::AlreadyExists);
         }
@@ -248,7 +252,8 @@ impl UtpConnection {
                 data[offset..offset + chunk_size].to_vec(),
             );
 
-            self.send_buffer.extend_from_slice(&data[offset..offset + chunk_size]);
+            self.send_buffer
+                .extend_from_slice(&data[offset..offset + chunk_size]);
             self.bytes_in_flight += chunk_size as u32;
             self.seq_nr = self.seq_nr.wrapping_add(1);
             offset += chunk_size;
@@ -267,7 +272,10 @@ impl UtpConnection {
     }
 
     /// Handle an incoming packet - returns response packets to send
-    pub fn on_packet_received(&mut self, packet: &UtpPacket) -> Result<Vec<UtpPacket>, ConnectionError> {
+    pub fn on_packet_received(
+        &mut self,
+        packet: &UtpPacket,
+    ) -> Result<Vec<UtpPacket>, ConnectionError> {
         self.last_activity = Instant::now();
 
         match packet.packet_type()? {
@@ -284,15 +292,9 @@ impl UtpConnection {
                     Err(ConnectionError::InvalidPacket("Unexpected SYN".to_string()))
                 }
             }
-            PacketType::StData => {
-                self.handle_data_packet(packet)
-            }
-            PacketType::StAck => {
-                self.handle_ack_packet(packet)
-            }
-            PacketType::StFin => {
-                self.handle_fin_packet(packet)
-            }
+            PacketType::StData => self.handle_data_packet(packet),
+            PacketType::StAck => self.handle_ack_packet(packet),
+            PacketType::StFin => self.handle_fin_packet(packet),
             PacketType::StReset => {
                 self.state = ConnectionState::Closed;
                 Err(ConnectionError::Reset)
@@ -301,7 +303,10 @@ impl UtpConnection {
     }
 
     /// Handle incoming DATA packet
-    fn handle_data_packet(&mut self, packet: &UtpPacket) -> Result<Vec<UtpPacket>, ConnectionError> {
+    fn handle_data_packet(
+        &mut self,
+        packet: &UtpPacket,
+    ) -> Result<Vec<UtpPacket>, ConnectionError> {
         if self.state != ConnectionState::Established {
             return Err(ConnectionError::NotConnected);
         }
@@ -326,7 +331,10 @@ impl UtpConnection {
     /// Handle incoming ACK packet
     fn handle_ack_packet(&mut self, packet: &UtpPacket) -> Result<Vec<UtpPacket>, ConnectionError> {
         // Update RTT estimates
-        let acked_bytes = std::cmp::min(self.bytes_in_flight, packet.ack_nr.wrapping_sub(self.ack_nr) as u32 * 1400);
+        let acked_bytes = std::cmp::min(
+            self.bytes_in_flight,
+            packet.ack_nr.wrapping_sub(self.ack_nr) as u32 * 1400,
+        );
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
 
         // Remove acknowledged data from send buffer

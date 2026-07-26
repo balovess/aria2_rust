@@ -28,8 +28,14 @@ mod tests {
             info_hash,
             bitfield: vec![0xF0], // first 4 bits set
             peers: vec![
-                PeerAddr { ip: "192.168.1.100".to_string(), port: 6881 },
-                PeerAddr { ip: "10.0.0.1".to_string(), port: 6882 },
+                PeerAddr {
+                    ip: "192.168.1.100".to_string(),
+                    port: 6881,
+                },
+                PeerAddr {
+                    ip: "10.0.0.1".to_string(),
+                    port: 6882,
+                },
             ],
             stats: DownloadStats {
                 uploaded_bytes: 1024 * 1024 * 100,
@@ -43,9 +49,7 @@ mod tests {
             num_pieces: 4,
             upload_length: 1024 * 1024 * 100,
             // 256 KiB piece / 16 KiB block = 16 blocks = 2 bytes bitfield
-            in_flight_pieces: vec![
-                InFlightPiece::new(3, 256 * 1024, vec![0xC0, 0x00]),
-            ],
+            in_flight_pieces: vec![InFlightPiece::new(3, 256 * 1024, vec![0xC0, 0x00])],
             is_torrent: true,
             save_time: std::time::SystemTime::now(),
             version: 1,
@@ -58,12 +62,14 @@ mod tests {
         let manager = BtProgressManager::new(&test_dir).expect("Failed to create manager");
 
         let info_hash = [
-            0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11,
+            0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+            0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11,
         ];
         let original = create_test_progress(info_hash);
 
-        manager.save_progress(&info_hash, &original).expect("Save failed");
+        manager
+            .save_progress(&info_hash, &original)
+            .expect("Save failed");
         let loaded = manager.load_progress(&info_hash).expect("Load failed");
 
         // Verify core fields (binary format persists)
@@ -76,8 +82,15 @@ mod tests {
         assert_eq!(loaded.version, original.version);
 
         // Verify in-flight pieces
-        assert_eq!(loaded.in_flight_pieces.len(), original.in_flight_pieces.len());
-        for (a, b) in loaded.in_flight_pieces.iter().zip(original.in_flight_pieces.iter()) {
+        assert_eq!(
+            loaded.in_flight_pieces.len(),
+            original.in_flight_pieces.len()
+        );
+        for (a, b) in loaded
+            .in_flight_pieces
+            .iter()
+            .zip(original.in_flight_pieces.iter())
+        {
             assert_eq!(a.index, b.index);
             assert_eq!(a.length, b.length);
             assert_eq!(a.bitfield, b.bitfield);
@@ -99,7 +112,7 @@ mod tests {
 
         // Test with consistent sizes: 4 pieces of 256 KiB = 1 byte bitfield
         let test_cases = [
-            (vec![0xFF], "All ones"),    // 8 set bits (but only 4 pieces)
+            (vec![0xFF], "All ones"), // 8 set bits (but only 4 pieces)
             (vec![0x00], "All zeros"),
             (vec![0xF0], "High 4 bits"),
         ];
@@ -136,7 +149,9 @@ mod tests {
             InFlightPiece::new(1, 16384, vec![0xC0]),
         ];
 
-        manager.save_progress(&info_hash, &progress).expect("Save failed");
+        manager
+            .save_progress(&info_hash, &progress)
+            .expect("Save failed");
         let loaded = manager.load_progress(&info_hash).expect("Load failed");
 
         assert_eq!(loaded.in_flight_pieces.len(), 2);
@@ -219,7 +234,8 @@ mod tests {
     #[test]
     fn test_atomic_write_safety() {
         let test_dir = create_test_dir();
-        let manager = Arc::new(BtProgressManager::new(&test_dir).expect("Failed to create manager"));
+        let manager =
+            Arc::new(BtProgressManager::new(&test_dir).expect("Failed to create manager"));
 
         let info_hash = [0x33; 20];
         let num_threads = 5;
@@ -303,7 +319,9 @@ mod tests {
 
         let info_hash = [0x55; 20];
         let progress = create_test_progress(info_hash);
-        manager.save_progress(&info_hash, &progress).expect("Save failed");
+        manager
+            .save_progress(&info_hash, &progress)
+            .expect("Save failed");
         let loaded = manager.load_progress(&info_hash).expect("Load failed");
         assert_eq!(loaded.info_hash, info_hash);
 
@@ -318,14 +336,18 @@ mod tests {
         let info_hash = [0x66; 20];
         let progress = create_test_progress(info_hash);
 
-        manager.save_progress(&info_hash, &progress).expect("Save failed");
+        manager
+            .save_progress(&info_hash, &progress)
+            .expect("Save failed");
         let file_path = manager.get_progress_file_path(&info_hash);
         assert!(file_path.exists());
 
         manager.remove_progress(&info_hash).expect("Remove failed");
         assert!(!file_path.exists());
 
-        manager.remove_progress(&info_hash).expect("Repeated removal should succeed");
+        manager
+            .remove_progress(&info_hash)
+            .expect("Repeated removal should succeed");
         let _ = fs::remove_dir_all(&test_dir);
     }
 
@@ -353,16 +375,32 @@ mod tests {
 
     #[test]
     fn test_completion_ratio_calculation() {
-        let progress = BtProgress { num_pieces: 10, bitfield: vec![0x00, 0x00], ..Default::default() };
+        let progress = BtProgress {
+            num_pieces: 10,
+            bitfield: vec![0x00, 0x00],
+            ..Default::default()
+        };
         assert_eq!(progress.completion_ratio(), 0.0);
 
-        let progress = BtProgress { num_pieces: 8, bitfield: vec![0xFF], ..Default::default() };
+        let progress = BtProgress {
+            num_pieces: 8,
+            bitfield: vec![0xFF],
+            ..Default::default()
+        };
         assert!((progress.completion_ratio() - 1.0).abs() < f64::EPSILON);
 
-        let progress = BtProgress { num_pieces: 8, bitfield: vec![0x0F], ..Default::default() };
+        let progress = BtProgress {
+            num_pieces: 8,
+            bitfield: vec![0x0F],
+            ..Default::default()
+        };
         assert!((progress.completion_ratio() - 0.5).abs() < 0.01);
 
-        let progress = BtProgress { num_pieces: 10, bitfield: vec![], ..Default::default() };
+        let progress = BtProgress {
+            num_pieces: 10,
+            bitfield: vec![],
+            ..Default::default()
+        };
         assert_eq!(progress.completion_ratio(), 0.0);
     }
 
@@ -375,7 +413,9 @@ mod tests {
         let mut progress = create_test_progress(info_hash);
         progress.peers = Vec::new();
 
-        manager.save_progress(&info_hash, &progress).expect("Save failed");
+        manager
+            .save_progress(&info_hash, &progress)
+            .expect("Save failed");
         let loaded = manager.load_progress(&info_hash).expect("Load failed");
 
         // Binary format does not persist peers
@@ -394,7 +434,9 @@ mod tests {
 
         let info_hash = [0x99; 20];
         let progress = create_test_progress(info_hash);
-        manager.save_progress(&info_hash, &progress).expect("Save failed");
+        manager
+            .save_progress(&info_hash, &progress)
+            .expect("Save failed");
 
         // Loading with a different info_hash tries a non-existent file
         let wrong_hash = [0xFF; 20];
@@ -413,7 +455,9 @@ mod tests {
         assert!(!manager.exists(&info_hash));
 
         let progress = create_test_progress(info_hash);
-        manager.save_progress(&info_hash, &progress).expect("Save failed");
+        manager
+            .save_progress(&info_hash, &progress)
+            .expect("Save failed");
         assert!(manager.exists(&info_hash));
 
         let _ = fs::remove_dir_all(&test_dir);

@@ -67,9 +67,9 @@ impl SequentialDownloader {
             Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
                 "Download cancelled by user".into(),
             )),
-            Ok(g) if g.is_paused_flag() => Err(Aria2Error::DownloadFailed(
-                "Download paused".into(),
-            )),
+            Ok(g) if g.is_paused_flag() => {
+                Err(Aria2Error::DownloadFailed("Download paused".into()))
+            }
             _ => Ok(()),
         }
     }
@@ -209,7 +209,8 @@ impl SequentialDownloader {
                 Err(e) => {
                     tracing::warn!(
                         "Sequential: control file creation failed {}: {}",
-                        ctrl_path.display(), e
+                        ctrl_path.display(),
+                        e
                     );
                     None
                 }
@@ -230,7 +231,10 @@ impl SequentialDownloader {
                 if let Some(ref mut cf) = ctrl_file {
                     cf.update_completed_length(completed_bytes);
                     if let Err(save_err) = cf.save().await {
-                        tracing::warn!("Sequential: control file save on pause/remove failed: {}", save_err);
+                        tracing::warn!(
+                            "Sequential: control file save on pause/remove failed: {}",
+                            save_err
+                        );
                     }
                 }
                 return Err(e);

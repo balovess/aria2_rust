@@ -460,12 +460,7 @@ mod tests {
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
 
         // Report completion
-        let success = coord.on_segment_complete(
-            mirror_idx,
-            seg_idx,
-            500_000,
-            1_000_000,
-        );
+        let success = coord.on_segment_complete(mirror_idx, seg_idx, 500_000, 1_000_000);
         assert!(success);
 
         // Check progress
@@ -509,22 +504,12 @@ mod tests {
 
         // Complete first segment
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(
-            mirror_idx,
-            seg_idx,
-            500_000,
-            1_000_000,
-        );
+        coord.on_segment_complete(mirror_idx, seg_idx, 500_000, 1_000_000);
         assert!((coord.progress() - 50.0).abs() < 0.01);
 
         // Complete second segment
         let (mirror_idx2, _, (seg_idx2, _, _)) = coord.select_mirror_for_segment().unwrap();
-        coord.on_segment_complete(
-            mirror_idx2,
-            seg_idx2,
-            500_000,
-            1_000_000,
-        );
+        coord.on_segment_complete(mirror_idx2, seg_idx2, 500_000, 1_000_000);
         assert!((coord.progress() - 100.0).abs() < 0.01);
         assert!(coord.is_complete());
     }
@@ -670,12 +655,7 @@ mod tests {
 
         // Select and complete segment from fast mirror
         let (mirror_idx, _, (seg_idx, _, _)) = coord.select_mirror_for_segment().unwrap();
-        let success = coord.on_segment_complete(
-            mirror_idx,
-            seg_idx,
-            500_000,
-            2_000_000,
-        );
+        let success = coord.on_segment_complete(mirror_idx, seg_idx, 500_000, 2_000_000);
         assert!(success);
 
         // After completion, the coordinator should have updated stats

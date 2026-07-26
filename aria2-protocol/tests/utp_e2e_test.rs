@@ -1111,7 +1111,13 @@ fn test_utp_connection_bit_torrent_piece_data() {
     ];
 
     // Simulate receiving header - seq_nr must match expected_recv_seq (1)
-    let data_packet = UtpPacket::data(conn.local_connection_id(), 1, 1, 0, piece_data_header.clone());
+    let data_packet = UtpPacket::data(
+        conn.local_connection_id(),
+        1,
+        1,
+        0,
+        piece_data_header.clone(),
+    );
 
     conn.on_packet_received(&data_packet)
         .expect("Handle piece header failed");

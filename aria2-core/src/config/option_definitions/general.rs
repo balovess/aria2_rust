@@ -528,7 +528,8 @@ impl crate::config::OptionRegistry {
             name: "optimize-concurrent-downloads-coeffa".into(),
             opt_type: OptionType::Float,
             default_value: OptionValue::Float(5.0),
-            description: "Coefficient A for optimize-concurrent-downloads (linear increasing factor)".into(),
+            description:
+                "Coefficient A for optimize-concurrent-downloads (linear increasing factor)".into(),
             category: OptionCategory::General,
             hidden: true,
             ..Default::default()
@@ -537,7 +538,8 @@ impl crate::config::OptionRegistry {
             name: "optimize-concurrent-downloads-coeffb".into(),
             opt_type: OptionType::Float,
             default_value: OptionValue::Float(5.0),
-            description: "Coefficient B for optimize-concurrent-downloads (linear decreasing factor)".into(),
+            description:
+                "Coefficient B for optimize-concurrent-downloads (linear decreasing factor)".into(),
             category: OptionCategory::General,
             hidden: true,
             ..Default::default()
@@ -737,7 +739,8 @@ impl crate::config::OptionRegistry {
             name: "metalink-enable-unique-protocol".into(),
             opt_type: OptionType::Boolean,
             default_value: OptionValue::Bool(true),
-            description: "Use only unique protocols per Metalink file (skip duplicate protocols)".into(),
+            description: "Use only unique protocols per Metalink file (skip duplicate protocols)"
+                .into(),
             category: OptionCategory::General,
             ..Default::default()
         });

@@ -62,7 +62,10 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_have(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 4 {
-        return Err(format!("Have message payload too short: {} bytes", payload.len()));
+        return Err(format!(
+            "Have message payload too short: {} bytes",
+            payload.len()
+        ));
     }
     let piece_index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     Ok(Some(BtMessage::Have { piece_index }))
@@ -98,7 +101,10 @@ fn parse_block_op(payload: &[u8], is_request: bool) -> Result<Option<BtMessage>,
 
 fn parse_piece(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 8 {
-        return Err(format!("Piece message payload too short: {} bytes", payload.len()));
+        return Err(format!(
+            "Piece message payload too short: {} bytes",
+            payload.len()
+        ));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -108,7 +114,10 @@ fn parse_piece(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 2 {
-        return Err(format!("Port message payload too short: {} bytes", payload.len()));
+        return Err(format!(
+            "Port message payload too short: {} bytes",
+            payload.len()
+        ));
     }
     let port = u16::from_be_bytes([payload[0], payload[1]]);
     Ok(Some(BtMessage::Port { port }))
@@ -116,7 +125,10 @@ fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_allowed_fast(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 4 {
-        return Err(format!("AllowedFast message payload too short: {} bytes", payload.len()));
+        return Err(format!(
+            "AllowedFast message payload too short: {} bytes",
+            payload.len()
+        ));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     Ok(Some(BtMessage::AllowedFast { index }))
@@ -124,7 +136,10 @@ fn parse_allowed_fast(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_suggest(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 4 {
-        return Err(format!("Suggest message payload too short: {} bytes", payload.len()));
+        return Err(format!(
+            "Suggest message payload too short: {} bytes",
+            payload.len()
+        ));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     Ok(Some(BtMessage::Suggest { index }))
@@ -132,7 +147,10 @@ fn parse_suggest(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 
 fn parse_reject(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.len() < 12 {
-        return Err(format!("Reject message payload too short: {} bytes", payload.len()));
+        return Err(format!(
+            "Reject message payload too short: {} bytes",
+            payload.len()
+        ));
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let offset = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -151,7 +169,9 @@ fn parse_reject(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 /// - `ext_id` = 1+: application-specific (negotiated during handshake)
 fn parse_extended(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     if payload.is_empty() {
-        return Err("Extended message payload too short: 0 bytes (need at least ext_id)".to_string());
+        return Err(
+            "Extended message payload too short: 0 bytes (need at least ext_id)".to_string(),
+        );
     }
     let ext_id = payload[0];
     let ext_payload = payload[1..].to_vec();
@@ -457,7 +477,7 @@ mod tests {
         let total_len = 1 + 1 + bencoded.len(); // msg_id + ext_id + payload
         data[0..4].copy_from_slice(&(total_len as u32).to_be_bytes());
         data.push(20); // message ID
-        data.push(0);  // ext_id = 0 (handshake)
+        data.push(0); // ext_id = 0 (handshake)
         data.extend_from_slice(bencoded);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
@@ -477,7 +497,7 @@ mod tests {
         let total_len = 1 + 1 + bencoded.len();
         data[0..4].copy_from_slice(&(total_len as u32).to_be_bytes());
         data.push(20);
-        data.push(2);  // ext_id = 2
+        data.push(2); // ext_id = 2
         data.extend_from_slice(bencoded);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {

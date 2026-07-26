@@ -245,7 +245,12 @@ mod tests {
         let fast = compute_fast_set("192.168.0.1", num_pieces, &info_hash, 10);
         assert_eq!(fast.len(), 10);
         for &idx in &fast {
-            assert!(idx < num_pieces, "index {} >= num_pieces {}", idx, num_pieces);
+            assert!(
+                idx < num_pieces,
+                "index {} >= num_pieces {}",
+                idx,
+                num_pieces
+            );
         }
     }
 

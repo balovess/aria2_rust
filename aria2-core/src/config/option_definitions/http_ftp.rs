@@ -454,7 +454,8 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "ssh-host-key-md".into(),
             opt_type: OptionType::String,
-            description: "SSH host key fingerprint (hashType=digest format, e.g. sha-1=..., md5=...)".into(),
+            description:
+                "SSH host key fingerprint (hashType=digest format, e.g. sha-1=..., md5=...)".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

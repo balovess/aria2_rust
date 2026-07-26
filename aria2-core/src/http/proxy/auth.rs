@@ -1,4 +1,4 @@
-﻿//! Proxy authentication header builders.
+//! Proxy authentication header builders.
 //!
 //! Constructs Proxy-Authorization headers for Basic and Digest schemes,
 //! and selects the appropriate scheme from Proxy-Authenticate challenges.
@@ -47,7 +47,10 @@ pub(crate) fn build_proxy_auth_header(
         if value.starts_with("Digest ") || value.starts_with("digest ") {
             if let Ok(challenge) = DigestAuthChallenge::parse(value) {
                 let auth = proxy_digest_auth(username, password, method, uri, &challenge, nc);
-                debug!("Using Digest proxy authentication for realm='{}'", challenge.realm);
+                debug!(
+                    "Using Digest proxy authentication for realm='{}'",
+                    challenge.realm
+                );
                 return Some(auth);
             }
         }

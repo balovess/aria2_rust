@@ -151,7 +151,10 @@ impl ActiveSessionManager {
     /// - This method starts an infinite-loop background task
     /// - Save operations are only performed when the dirty flag is true
     /// - The dirty flag is cleared after a successful save
-    pub fn start_auto_save(self: &Arc<Self>, groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>>) {
+    pub fn start_auto_save(
+        self: &Arc<Self>,
+        groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>>,
+    ) {
         let mgr = Arc::clone(self);
 
         tracing::info!(
@@ -206,9 +209,18 @@ mod tests {
 
         let manager = ActiveSessionManager::new(session_path.clone(), interval);
 
-        assert_eq!(manager.session_path, session_path, "Path should be set correctly");
-        assert_eq!(manager.auto_save_interval, interval, "Interval should be set correctly");
-        assert!(!manager.is_dirty(), "Newly created manager should not be dirty");
+        assert_eq!(
+            manager.session_path, session_path,
+            "Path should be set correctly"
+        );
+        assert_eq!(
+            manager.auto_save_interval, interval,
+            "Interval should be set correctly"
+        );
+        assert!(
+            !manager.is_dirty(),
+            "Newly created manager should not be dirty"
+        );
     }
 
     /// Test 2: Return empty list when file does not exist
@@ -222,7 +234,10 @@ mod tests {
 
         assert!(result.is_ok(), "Non-existent file should not return error");
         let entries = result.unwrap();
-        assert!(entries.is_empty(), "Non-existent file should return empty list");
+        assert!(
+            entries.is_empty(),
+            "Non-existent file should return empty list"
+        );
     }
 
     /// Test 3: Save and load roundtrip test
@@ -269,7 +284,11 @@ mod tests {
         assert!(load_result.is_ok(), "Load should succeed");
         let entries = load_result.unwrap();
 
-        assert_eq!(entries.len(), saved_count, "Loaded entry count should match saved count");
+        assert_eq!(
+            entries.len(),
+            saved_count,
+            "Loaded entry count should match saved count"
+        );
 
         // Verify data integrity
         assert!(
@@ -303,7 +322,10 @@ mod tests {
 
         // Mark again (idempotent)
         manager.mark_dirty();
-        assert!(manager.is_dirty(), "Repeated mark_dirty should keep dirty state");
+        assert!(
+            manager.is_dirty(),
+            "Repeated mark_dirty should keep dirty state"
+        );
     }
 
     /// Test 5: Auto-save skips saving when clean
@@ -319,7 +341,8 @@ mod tests {
             Duration::from_millis(50), // Short interval to speed up test
         ));
 
-        let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> =
+            Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
         // Start auto-save (dirty=false at this point)
         manager.start_auto_save(Arc::clone(&groups));
@@ -328,7 +351,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Verify file was not created (because no dirty flag)
-        assert!(!session_path.exists(), "Should not create session file when dirty=false");
+        assert!(
+            !session_path.exists(),
+            "Should not create session file when dirty=false"
+        );
     }
 
     /// Test 6: File should exist at specified path after saving
@@ -340,7 +366,10 @@ mod tests {
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
         // Verify file does not exist initially
-        assert!(!session_path.exists(), "File should not exist before saving");
+        assert!(
+            !session_path.exists(),
+            "File should not exist before saving"
+        );
 
         // Create test group
         let gid = GroupId::new(12345);
@@ -355,7 +384,10 @@ mod tests {
         assert!(result.is_ok(), "Save should succeed");
 
         // Verify file was created
-        assert!(session_path.exists(), "File should exist at specified path after saving");
+        assert!(
+            session_path.exists(),
+            "File should exist at specified path after saving"
+        );
 
         // Verify file content is not empty
         let content = tokio::fs::read_to_string(&session_path)
@@ -433,7 +465,10 @@ mod tests {
             let content = tokio::fs::read_to_string(&session_path)
                 .await
                 .expect("Failed to read file");
-            assert!(content.is_empty(), "Empty group list should produce empty file");
+            assert!(
+                content.is_empty(),
+                "Empty group list should produce empty file"
+            );
         }
     }
 

@@ -377,19 +377,25 @@ async fn send_batch(
 /// Receive a single UDP message and decode it.
 async fn recv_response(socket: &DhtSocket) -> Option<(DhtMessage, SocketAddr)> {
     let mut buf = [0u8; 4096];
-    match socket.recv_with_timeout(&mut buf, Duration::from_secs(5)).await {
-        Ok((len, from)) if len > 0 => {
-            match DhtMessage::decode(&buf[..len]) {
-                Ok(msg) => Some((msg, from)),
-                Err(_) => None,
-            }
-        }
+    match socket
+        .recv_with_timeout(&mut buf, Duration::from_secs(5))
+        .await
+    {
+        Ok((len, from)) if len > 0 => match DhtMessage::decode(&buf[..len]) {
+            Ok(msg) => Some((msg, from)),
+            Err(_) => None,
+        },
         _ => None,
     }
 }
 
 /// Insert a new entry into the lookup list, avoiding duplicates.
-fn insert_entry(entries: &mut Vec<LookupEntry>, node_id: [u8; 20], addr: SocketAddr, target: &[u8; 20]) {
+fn insert_entry(
+    entries: &mut Vec<LookupEntry>,
+    node_id: [u8; 20],
+    addr: SocketAddr,
+    target: &[u8; 20],
+) {
     // Skip if already present
     if entries.iter().any(|e| e.node_id == node_id) {
         return;
@@ -435,7 +441,10 @@ fn xor_distance(a: &[u8; 20], b: &[u8; 20]) -> [u8; 20] {
 /// This is currently a no-op because the RoutingTable doesn't have a
 /// find_by_addr method. Nodes get marked good through the
 /// TransactionTracker when they respond to our tracked queries.
-async fn mark_node_good(_addr: &SocketAddr, _routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>) {
+async fn mark_node_good(
+    _addr: &SocketAddr,
+    _routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
+) {
     // No-op: see comment above
 }
 

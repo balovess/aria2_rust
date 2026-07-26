@@ -123,8 +123,8 @@ impl MetalinkEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metalink::parser::MetalinkDocument;
     use crate::metalink::parser::HashAlgorithm;
+    use crate::metalink::parser::MetalinkDocument;
 
     fn make_test_entry() -> MetalinkEntry {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>

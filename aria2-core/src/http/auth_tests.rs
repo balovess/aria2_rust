@@ -165,8 +165,7 @@ fn test_erase_confidential_info() {
 
 #[test]
 fn test_erase_confidential_proxy_auth() {
-    let raw =
-        "CONNECT host:443 HTTP/1.1\r\nProxy-Authorization: Digest user=test\r\nSet-Cookie: id=123\r\n";
+    let raw = "CONNECT host:443 HTTP/1.1\r\nProxy-Authorization: Digest user=test\r\nSet-Cookie: id=123\r\n";
     let safe = erase_confidential_info(raw);
     assert!(safe.contains("Proxy-Authorization: <snip>"));
     assert!(safe.contains("Set-Cookie: <snip>"));

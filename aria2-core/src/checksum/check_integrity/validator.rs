@@ -108,7 +108,10 @@ impl ValidatorKind {
     /// Apply all collected validation results to the given PieceStorage.
     ///
     /// No-op for `ValidatorKind::None`.
-    pub fn apply_validation_results(&self, ps: &mut dyn crate::segment::piece_storage::PieceStorage) {
+    pub fn apply_validation_results(
+        &self,
+        ps: &mut dyn crate::segment::piece_storage::PieceStorage,
+    ) {
         match self {
             ValidatorKind::None => {}
             ValidatorKind::PieceHash(v) => v.apply_validation_results(ps),
@@ -311,7 +314,10 @@ impl PieceHashValidator {
                     // No expected hash available — cannot verify this piece.
                     // In C++ this doesn't happen (pieces always have hashes),
                     // but we handle it gracefully.
-                    tracing::trace!(piece_index, "No expected hash for piece — skipping verification");
+                    tracing::trace!(
+                        piece_index,
+                        "No expected hash for piece — skipping verification"
+                    );
                 }
             }
             Ok(data) => {
@@ -450,7 +456,9 @@ impl PieceHashValidator {
     }
 
     /// Return a reference to the PieceStorage.
-    pub fn piece_storage(&self) -> &std::sync::Arc<dyn crate::segment::piece_storage::PieceStorage> {
+    pub fn piece_storage(
+        &self,
+    ) -> &std::sync::Arc<dyn crate::segment::piece_storage::PieceStorage> {
         &self.piece_storage
     }
 }

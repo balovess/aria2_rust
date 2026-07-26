@@ -487,16 +487,16 @@ mod tests {
 
     #[test]
     fn test_unquoted_rel() {
-        let links =
-            MetalinkHttpParser::parse_link_header(r#"<http://example.com>; rel=duplicate"#);
+        let links = MetalinkHttpParser::parse_link_header(r#"<http://example.com>; rel=duplicate"#);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].rel, vec!["duplicate"]);
     }
 
     #[test]
     fn test_pri_out_of_range() {
-        let links =
-            MetalinkHttpParser::parse_link_header(r#"<http://example.com>; rel="duplicate"; pri="0""#);
+        let links = MetalinkHttpParser::parse_link_header(
+            r#"<http://example.com>; rel="duplicate"; pri="0""#,
+        );
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].pri, None); // 0 is out of [1, 999999]
     }
@@ -610,9 +610,8 @@ mod tests {
 
     #[test]
     fn test_split_link_entries_respects_quotes() {
-        let entries = split_link_entries(
-            r#"<http://a>; title="hello, world", <http://b>; rel="duplicate""#,
-        );
+        let entries =
+            split_link_entries(r#"<http://a>; title="hello, world", <http://b>; rel="duplicate""#);
         assert_eq!(entries.len(), 2);
     }
 

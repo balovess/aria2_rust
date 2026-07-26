@@ -213,11 +213,8 @@ impl DigestAuthResponse {
         };
 
         // Create a DigestAuthProvider to leverage its correct hash implementations
-        let provider = DigestAuthProvider::new(
-            username.to_string(),
-            password.to_string(),
-            Some(algorithm),
-        );
+        let provider =
+            DigestAuthProvider::new(username.to_string(), password.to_string(), Some(algorithm));
 
         // Compute HA1 = H(username:realm:password)
         let ha1 = provider.compute_ha1(&challenge.realm);
@@ -459,13 +456,17 @@ mod tests {
             Some(DigestAlgorithm::Md5),
         );
         let ha1 = provider.compute_ha1("testrealm@host.com");
-        assert_eq!(ha1, "939e7578ed9e3c518a452acee763bce9",
-            "HA1 should match RFC 2617 test vector");
+        assert_eq!(
+            ha1, "939e7578ed9e3c518a452acee763bce9",
+            "HA1 should match RFC 2617 test vector"
+        );
 
         // Verify HA2 computation
         let ha2 = provider.compute_ha2("GET", "/dir/index.html", None, None);
-        assert_eq!(ha2, "39aff3a2bab6126f332b942af96d3366",
-            "HA2 should match RFC 2617 test vector");
+        assert_eq!(
+            ha2, "39aff3a2bab6126f332b942af96d3366",
+            "HA2 should match RFC 2617 test vector"
+        );
 
         // Verify response computation with known cnonce
         let response = provider.compute_response(
@@ -476,8 +477,10 @@ mod tests {
             Some("auth"),
             &ha2,
         );
-        assert_eq!(response, "6629fae49393a05397450978507c4ef1",
-            "Response should match RFC 2617 test vector");
+        assert_eq!(
+            response, "6629fae49393a05397450978507c4ef1",
+            "Response should match RFC 2617 test vector"
+        );
     }
 
     /// Verify SHA-256 variant produces correct length hash (64 hex chars).

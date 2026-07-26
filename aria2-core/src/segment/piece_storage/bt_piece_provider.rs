@@ -222,10 +222,18 @@ impl DefaultPieceStorage {
                             mis_block += piece.count_missing_blocks();
                             pieces.push(piece);
                             // Flip this bit off so we don't select it again
-                            super::super::bitfield_util::clear_bit(&mut mis_bitfield, num_pieces, index);
+                            super::super::bitfield_util::clear_bit(
+                                &mut mis_bitfield,
+                                num_pieces,
+                                index,
+                            );
                         } else {
                             // Piece was already checked out or not available
-                            super::super::bitfield_util::clear_bit(&mut mis_bitfield, num_pieces, index);
+                            super::super::bitfield_util::clear_bit(
+                                &mut mis_bitfield,
+                                num_pieces,
+                                index,
+                            );
                         }
                     }
                     None => break,
@@ -264,7 +272,10 @@ impl DefaultPieceStorage {
         self.bfman.set_use_piece(index);
 
         let piece_start = index as u64 * self.piece_length;
-        let piece_len = std::cmp::min(self.piece_length, self.total_length.saturating_sub(piece_start));
+        let piece_len = std::cmp::min(
+            self.piece_length,
+            self.total_length.saturating_sub(piece_start),
+        );
 
         let mut piece = Piece::new(index, piece_len);
         piece.add_user(cuid);

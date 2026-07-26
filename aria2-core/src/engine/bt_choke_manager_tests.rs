@@ -210,10 +210,7 @@ pub(crate) mod tests {
         choke.set_round(1);
         choke.execute_choke(&mut refs[..]);
 
-        assert!(
-            peers[0].am_choking,
-            "Snubbed peer should remain choked"
-        );
+        assert!(peers[0].am_choking, "Snubbed peer should remain choked");
         assert!(
             !peers[0].opt_unchoking,
             "Snubbed peer should not be optimistically unchoked"

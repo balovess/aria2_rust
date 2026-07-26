@@ -169,8 +169,7 @@ impl Bucket {
     ///
     /// Uses lexicographic comparison, equivalent to C++ `isInRange()`.
     pub fn is_in_range(&self, node_id: &[u8; 20]) -> bool {
-        node_id.as_slice() >= self.min_id.as_slice()
-            && node_id.as_slice() <= self.max_id.as_slice()
+        node_id.as_slice() >= self.min_id.as_slice() && node_id.as_slice() <= self.max_id.as_slice()
     }
 
     // -----------------------------------------------------------------------
@@ -301,7 +300,10 @@ impl Bucket {
     ///
     /// Equivalent to C++ `DHTBucket::split()`.
     pub fn split(&mut self) -> Bucket {
-        assert!(self.split_allowed(), "split() called on non-splittable bucket");
+        assert!(
+            self.split_allowed(),
+            "split() called on non-splittable bucket"
+        );
 
         // Right bucket's max = current max.
         let r_max = self.max_id;
@@ -318,7 +320,8 @@ impl Bucket {
         let new_prefix_length = self.prefix_length;
 
         // Create the right bucket.
-        let mut right_bucket = Bucket::new_for_range(new_prefix_length, r_min, r_max, self.local_id);
+        let mut right_bucket =
+            Bucket::new_for_range(new_prefix_length, r_min, r_max, self.local_id);
 
         // Redistribute nodes.
         let mut remaining = Vec::with_capacity(K);
@@ -353,7 +356,8 @@ impl Bucket {
     /// A bucket needs refresh if it has fewer than K nodes or hasn't been
     /// updated in `BUCKET_REFRESH_INTERVAL`.
     pub fn needs_refresh(&self) -> bool {
-        self.nodes.len() < K || self.last_updated.elapsed().as_secs() >= BUCKET_REFRESH_INTERVAL_SECS
+        self.nodes.len() < K
+            || self.last_updated.elapsed().as_secs() >= BUCKET_REFRESH_INTERVAL_SECS
     }
 
     /// Returns `true` if this bucket contains at least one questionable node.
@@ -435,11 +439,7 @@ impl Bucket {
 
     /// Collect good nodes (non-bad) from this bucket.
     pub fn get_good_nodes(&self) -> Vec<DhtNode> {
-        self.nodes
-            .iter()
-            .filter(|n| !n.is_bad())
-            .cloned()
-            .collect()
+        self.nodes.iter().filter(|n| !n.is_bad()).cloned().collect()
     }
 
     /// Count questionable nodes in this bucket.
@@ -516,7 +516,10 @@ mod tests {
 
         // Fill the bucket with bad nodes.
         for i in 0..K {
-            let mut node = DhtNode::new([i as u8; 20], format!("127.0.0.1:{}", 6882 + i).parse().unwrap());
+            let mut node = DhtNode::new(
+                [i as u8; 20],
+                format!("127.0.0.1:{}", 6882 + i).parse().unwrap(),
+            );
             for _ in 0..3 {
                 node.record_failure();
             }
@@ -537,7 +540,10 @@ mod tests {
 
         // Fill with good nodes.
         for i in 0..K {
-            let node = DhtNode::new([(i + 1) as u8; 20], format!("127.0.0.1:{}", 6882 + i).parse().unwrap());
+            let node = DhtNode::new(
+                [(i + 1) as u8; 20],
+                format!("127.0.0.1:{}", 6882 + i).parse().unwrap(),
+            );
             bucket.add_node(node);
         }
         assert!(bucket.is_full());
@@ -560,8 +566,8 @@ mod tests {
         let local = DhtNode::new([0xFFu8; 20], "127.0.0.1:6881".parse().unwrap());
         let bucket = Bucket::new_for_range(
             1,
-            [0u8; 20],      // min
-            [0x7Fu8; 20],   // max (first bit = 0)
+            [0u8; 20],    // min
+            [0x7Fu8; 20], // max (first bit = 0)
             local.id,
         );
         // Local ID [0xFF..] is not in range [0x00.., 0x7F..]
@@ -575,7 +581,10 @@ mod tests {
 
         // Add nodes to the left half (first bit = 0).
         for i in 0..4u8 {
-            let node = DhtNode::new([i; 20], format!("127.0.0.1:{}", 6882 + i as u16).parse().unwrap());
+            let node = DhtNode::new(
+                [i; 20],
+                format!("127.0.0.1:{}", 6882 + i as u16).parse().unwrap(),
+            );
             bucket.add_node(node);
         }
 
@@ -583,7 +592,10 @@ mod tests {
         for i in 0..4u8 {
             let mut id = [0u8; 20];
             id[0] = 0x80 | i;
-            let node = DhtNode::new(id, format!("127.0.0.2:{}", 6882 + i as u16).parse().unwrap());
+            let node = DhtNode::new(
+                id,
+                format!("127.0.0.2:{}", 6882 + i as u16).parse().unwrap(),
+            );
             bucket.add_node(node);
         }
 
@@ -615,7 +627,10 @@ mod tests {
         let local = make_local_node();
         let mut bucket = Bucket::new(&local);
         for i in 0..5u8 {
-            let node = DhtNode::new([i; 20], format!("127.0.0.1:{}", 6882 + i as u16).parse().unwrap());
+            let node = DhtNode::new(
+                [i; 20],
+                format!("127.0.0.1:{}", 6882 + i as u16).parse().unwrap(),
+            );
             bucket.cache_node(node);
         }
         assert_eq!(bucket.cached_nodes().len(), CACHE_SIZE);

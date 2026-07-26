@@ -130,46 +130,193 @@ pub(crate) fn format_http_date(epoch: i64) -> String {
     )
 }
 
-/// Parse an HTTP-date string (RFC 7231 IMF-fixdate format) into a Unix epoch timestamp.
+/// Parse an HTTP-date string into a Unix epoch timestamp.
 ///
-/// Expected format: `"Day, DD Mon YYYY HH:MM:SS GMT"`
-/// Returns `None` if the string cannot be parsed.
+/// Implements the full RFC 6265 Section 5.1.1 date parsing algorithm,
+/// matching the C++ `cookie_helper.cc::parseDate()` behavior:
+/// 1. Split the date string into tokens by delimiter characters
+///    (tab, space, and most punctuation)
+/// 2. Identify the time token (HH:MM:SS), day-of-month token, month token,
+///    and year token regardless of their position in the string
+/// 3. Normalize 2-digit years per RFC 6265 (70-99 -> 1970-1999, 0-69 -> 2000-2069)
+/// 4. Validate the date (day-of-month ranges, leap year, etc.)
+/// 5. Convert to Unix epoch using UTC (equivalent to C++ timegm())
+///
+/// Returns `None` if the date string cannot be parsed.
 pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    const MONTH_NAMES: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
     ];
-    let s = s.trim();
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
+
+    // Step 1: Tokenize by delimiter characters per RFC 6265 Section 5.1.1.
+    // Delimiters: 0x09, 0x20-0x2F, 0x3B-0x40, 0x5B-0x60, 0x7B-0x7E
+    fn is_delimiter(c: u8) -> bool {
+        c == 0x09
+            || (0x20..=0x2F).contains(&c)
+            || (0x3B..=0x40).contains(&c)
+            || (0x5B..=0x60).contains(&c)
+            || (0x7B..=0x7E).contains(&c)
     }
-    let day: u32 = parts[1].parse().ok()?;
-    let month_idx = MONTHS.iter().position(|&m| m == parts[2])? as u32;
-    let year: u32 = parts[3].parse().ok()?;
-    let time_parts: Vec<u32> = parts[4].split(':').filter_map(|x| x.parse().ok()).collect();
-    if time_parts.len() < 3 {
-        return None;
+
+    let bytes = s.trim().as_bytes();
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_delimiter(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && !is_delimiter(bytes[i]) {
+            i += 1;
+        }
+        tokens.push(std::str::from_utf8(&bytes[start..i]).ok()?);
     }
-    let _mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 11, 30, 31];
-    let leap = year.is_multiple_of(4) && !year.is_multiple_of(100) || year.is_multiple_of(400);
-    let feb_days = if leap { 29 } else { 28 };
-    let dim = [31, feb_days, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let total_days = (0..year)
-        .map(|y| {
-            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-                366
-            } else {
-                365
+
+    // Step 2: Identify time, day-of-month, month, and year tokens.
+    let mut found_time = false;
+    let mut hour: u32 = 0;
+    let mut minute: u32 = 0;
+    let mut second: u32 = 0;
+
+    let mut found_day = false;
+    let mut day_of_month: u32 = 0;
+
+    let mut found_month = false;
+    let mut month: u32 = 0; // 1-based
+
+    let mut found_year = false;
+    let mut year: u32 = 0;
+
+    for token in &tokens {
+        // Try to parse as time (HH:MM:SS)
+        if !found_time {
+            if let Some((h, m, s)) = parse_time_token(token) {
+                hour = h;
+                minute = m;
+                second = s;
+                found_time = true;
+                continue;
             }
-        })
-        .sum::<u32>()
-        + (0..month_idx).map(|m| dim[m as usize]).sum::<u32>()
-        + day
-        - 1;
-    Some(
-        total_days as i64 * 86400
-            + time_parts[0] as i64 * 3600
-            + time_parts[1] as i64 * 60
-            + time_parts[2] as i64,
-    )
+        }
+
+        // Try to parse as day-of-month (1-2 digit number)
+        if !found_day {
+            let digits = leading_digits(token);
+            if (1..=2).contains(&digits) && digits == token.len() {
+                if let Ok(d) = token.parse::<u32>() {
+                    day_of_month = d;
+                    found_day = true;
+                    continue;
+                }
+            }
+        }
+
+        // Try to parse as month name (case-insensitive, at least 3 chars)
+        if !found_month && token.len() >= 3 {
+            let lower = token.to_lowercase();
+            for (idx, &name) in MONTH_NAMES.iter().enumerate() {
+                if lower.starts_with(name) {
+                    month = (idx + 1) as u32;
+                    found_month = true;
+                    break;
+                }
+            }
+            if found_month {
+                continue;
+            }
+        }
+
+        // Try to parse as year (1-4 digit number)
+        if !found_year {
+            let digits = leading_digits(token);
+            if (1..=4).contains(&digits) && digits == token.len() {
+                if let Ok(y) = token.parse::<u32>() {
+                    year = y;
+                    found_year = true;
+                    continue;
+                }
+            }
+        }
+    }
+
+    // Step 3: Normalize 2-digit years per RFC 6265 Section 5.1.1
+    if (70..=99).contains(&year) {
+        year += 1900;
+    } else if year <= 69 {
+        year += 2000;
+    }
+
+    // Step 4: Validate the date
+    if !found_time || !found_day || !found_month || !found_year {
+        return None;
+    }
+    if !(1..=31).contains(&day_of_month) || year < 1601 || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    // Validate day-of-month against month
+    let max_day = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if is_leap { 29 } else { 28 }
+        }
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return None,
+    };
+    if day_of_month > max_day {
+        return None;
+    }
+
+    // Step 5: Convert to Unix epoch timestamp (equivalent to C++ timegm())
+    let total_days = days_since_epoch(year, month, day_of_month);
+    Some(total_days as i64 * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64)
+}
+
+/// Parse a time token in HH:MM:SS format.
+/// Returns (hour, minute, second) if valid, None otherwise.
+fn parse_time_token(token: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    // Each component must be 1-2 digits
+    for p in &parts {
+        let digits = leading_digits(p);
+        if digits == 0 || digits > 2 || digits != p.len() {
+            return None;
+        }
+    }
+    let h: u32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
+    let s: u32 = parts[2].parse().ok()?;
+    Some((h, m, s))
+}
+
+/// Count leading ASCII digits in a string.
+fn leading_digits(s: &str) -> usize {
+    s.bytes().take_while(|c| c.is_ascii_digit()).count()
+}
+
+/// Calculate the number of days since Unix epoch (1970-01-01 UTC) for a given date.
+/// Equivalent to C++ timegm() for date conversion.
+fn days_since_epoch(year: u32, month: u32, day: u32) -> u32 {
+    let mut days: u32 = 0;
+    for y in 1970..year {
+        days += if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+    }
+    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    for m in 1..month {
+        days += if m == 2 && is_leap {
+            29
+        } else {
+            mdays[(m - 1) as usize]
+        };
+    }
+    days + day - 1
 }

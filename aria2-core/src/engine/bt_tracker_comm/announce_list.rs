@@ -246,12 +246,18 @@ impl AnnounceList {
 
     /// Count the number of tiers that accept the "stopped" event.
     pub fn count_stopped_allowed_tier(&self) -> usize {
-        self.tiers.iter().filter(|t| t.accepts_stopped_event()).count()
+        self.tiers
+            .iter()
+            .filter(|t| t.accepts_stopped_event())
+            .count()
     }
 
     /// Count the number of tiers that accept the "completed" event.
     pub fn count_completed_allowed_tier(&self) -> usize {
-        self.tiers.iter().filter(|t| t.accepts_completed_event()).count()
+        self.tiers
+            .iter()
+            .filter(|t| t.accepts_completed_event())
+            .count()
     }
 
     /// Move to a tier that accepts the "stopped" event using wrap-around search.
@@ -358,8 +364,6 @@ impl AnnounceList {
 
     /// Get the URL for a specific tracker by tier and entry index.
     pub fn get_tracker_url(&self, tier_idx: usize, entry_idx: usize) -> Option<&String> {
-        self.tiers
-            .get(tier_idx)
-            .and_then(|t| t.urls.get(entry_idx))
+        self.tiers.get(tier_idx).and_then(|t| t.urls.get(entry_idx))
     }
 }

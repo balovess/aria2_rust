@@ -178,9 +178,9 @@ fn remove_fragment(uri: &str) -> &str {
 /// Per RFC 3986 §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
 fn is_absolute_uri(uri: &str) -> bool {
     match uri.find("://") {
-        Some(scheme_end) if scheme_end > 0 => uri[..scheme_end]
-            .chars()
-            .all(|c| c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '+' || c == '-' || c == '.'),
+        Some(scheme_end) if scheme_end > 0 => uri[..scheme_end].chars().all(|c| {
+            c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '+' || c == '-' || c == '.'
+        }),
         _ => false,
     }
 }
@@ -239,7 +239,10 @@ impl Request {
         } else {
             // Relative URI: resolve against current URI.
             match Url::parse(&self.current_uri) {
-                Ok(base) => base.join(uri).map(|u| u.to_string()).unwrap_or_else(|_| uri.to_owned()),
+                Ok(base) => base
+                    .join(uri)
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|_| uri.to_owned()),
                 Err(_) => uri.to_owned(),
             }
         };

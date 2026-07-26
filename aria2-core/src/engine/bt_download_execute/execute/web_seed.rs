@@ -2,9 +2,9 @@ use tracing::{info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
+use crate::error::Result;
 use crate::filesystem::disk_writer::DiskWriter;
 use crate::util::rwlock_ext::RwLockRecover;
-use crate::error::Result;
 
 /// Attempt to download a piece from web seeds when peer download fails (BEP 19).
 ///
@@ -38,10 +38,7 @@ pub(super) async fn try_web_seed_fallback(
             );
             // Verify hash
             if piece_manager.verify_piece_hash(next_piece_idx as u32, &web_seed_data) {
-                tracing::info!(
-                    "[BT] Piece {} from web seed verified OK",
-                    next_piece_idx
-                );
+                tracing::info!("[BT] Piece {} from web seed verified OK", next_piece_idx);
                 piece_manager.mark_piece_complete(next_piece_idx as u32);
                 piece_picker.mark_completed(next_piece_idx as u32);
 

@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::session_resource::PeerSessionResource;
 use super::peer_conn::{KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
+use super::session_resource::PeerSessionResource;
 use super::types::SendBuffer;
 
 // -----------------------------------------------------------------------

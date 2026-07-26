@@ -23,11 +23,13 @@ impl BtDownloadCommand {
         info_hash_raw: &[u8; 20],
     ) -> Result<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>> {
         let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        let mut peer_addrs =
-            crate::engine::bt_tracker_comm::perform_http_tracker_announce(
-                &meta.announce, info_hash_raw, &my_peer_id, total_size,
-            )
-            .await?;
+        let mut peer_addrs = crate::engine::bt_tracker_comm::perform_http_tracker_announce(
+            &meta.announce,
+            info_hash_raw,
+            &my_peer_id,
+            total_size,
+        )
+        .await?;
 
         if let Ok(udp) = UdpTrackerClient::new(0).await {
             self.udp_client = Some(std::sync::Arc::new(tokio::sync::Mutex::new(udp)));
@@ -173,7 +175,10 @@ impl BtDownloadCommand {
 
             for url in http_urls.iter().take(MAX_PUBLIC_TRACKERS_TO_TRY) {
                 match crate::engine::bt_tracker_comm::announce_to_public_tracker(
-                    url, info_hash_raw, &my_peer_id, total_size,
+                    url,
+                    info_hash_raw,
+                    &my_peer_id,
+                    total_size,
                 )
                 .await
                 {

@@ -34,7 +34,7 @@
 pub mod types;
 
 // Re-export key types from the types submodule for convenience
-pub use types::{SeedExitCondition, UploadSession, BAD_DATA_THRESHOLD};
+pub use types::{BAD_DATA_THRESHOLD, SeedExitCondition, UploadSession};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -227,8 +227,9 @@ impl BtSeedManager {
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                let addr: std::net::SocketAddr =
-                    format!("127.0.0.1:{}", 6881 + i as u16).parse().unwrap_or_else(|_| "127.0.0.1:6881".parse().unwrap());
+                let addr: std::net::SocketAddr = format!("127.0.0.1:{}", 6881 + i as u16)
+                    .parse()
+                    .unwrap_or_else(|_| "127.0.0.1:6881".parse().unwrap());
                 PeerStats::new([0u8; 20], addr)
             })
             .collect();
@@ -501,11 +502,7 @@ impl BtSeedManager {
 
         // Check seed time
         if let Some(time) = self.exit_condition.seed_time {
-            if SeedExitCondition::check_seed_time(
-                self.seeding_start_time,
-                time.as_secs(),
-                true,
-            ) {
+            if SeedExitCondition::check_seed_time(self.seeding_start_time, time.as_secs(), true) {
                 return true;
             }
         }

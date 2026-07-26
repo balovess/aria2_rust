@@ -78,11 +78,13 @@ impl DiskWriterEntry {
     pub(super) async fn init_and_open_file(&mut self, read_only: bool) -> Result<()> {
         self.ensure_parent_dirs()?;
         let mut opts = tokio::fs::OpenOptions::new();
-        opts.write(!read_only).read(true).create(true).truncate(true);
-        let f = opts
-            .open(&self.file_entry.path)
-            .await
-            .map_err(|e| Aria2Error::Io(format!("initAndOpenFile {:?}: {}", self.file_entry.path, e)))?;
+        opts.write(!read_only)
+            .read(true)
+            .create(true)
+            .truncate(true);
+        let f = opts.open(&self.file_entry.path).await.map_err(|e| {
+            Aria2Error::Io(format!("initAndOpenFile {:?}: {}", self.file_entry.path, e))
+        })?;
         self.file = Some(f);
         self.is_open = true;
         debug!("initAndOpenFile: {:?}", self.file_entry.path);
@@ -120,10 +122,12 @@ impl DiskWriterEntry {
         } else {
             opts.write(true).read(true);
         }
-        let f = opts
-            .open(&self.file_entry.path)
-            .await
-            .map_err(|e| Aria2Error::Io(format!("openExistingFile {:?}: {}", self.file_entry.path, e)))?;
+        let f = opts.open(&self.file_entry.path).await.map_err(|e| {
+            Aria2Error::Io(format!(
+                "openExistingFile {:?}: {}",
+                self.file_entry.path, e
+            ))
+        })?;
         self.file = Some(f);
         self.is_open = true;
         debug!("openExistingFile: {:?}", self.file_entry.path);
@@ -222,9 +226,9 @@ impl DiskWriterEntry {
     /// Truncate this file to `length` bytes.
     pub(super) async fn truncate(&mut self, length: u64) -> Result<()> {
         if let Some(ref mut file) = self.file {
-            file.set_len(length)
-                .await
-                .map_err(|e| Aria2Error::Io(format!("truncate {:?}: {}", self.file_entry.path, e)))?;
+            file.set_len(length).await.map_err(|e| {
+                Aria2Error::Io(format!("truncate {:?}: {}", self.file_entry.path, e))
+            })?;
         }
         Ok(())
     }
@@ -275,12 +279,8 @@ impl DiskWriterEntry {
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Aria2Error::Io(format!(
-                    "create_dir_all {:?}: {}",
-                    parent, e
-                ))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Aria2Error::Io(format!("create_dir_all {:?}: {}", parent, e)))?;
             debug!("Created parent directories: {:?}", parent);
         }
         Ok(())

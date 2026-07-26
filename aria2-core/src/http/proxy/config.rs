@@ -129,14 +129,9 @@ impl HttpProxyConfig {
     /// - `socks5://[user:pass@]host:port` -> SOCKS5 proxy
     ///
     /// Uses the existing [ProxyUrl] parser from the socks_connector module.
-    pub fn from_proxy_url(
-        proxy_url: &str,
-        target_host: String,
-        target_port: u16,
-    ) -> Result<Self> {
-        let parsed = ProxyUrl::parse(proxy_url).map_err(|e| {
-            Aria2Error::Parse(format!("Invalid proxy URL '{}': {}", proxy_url, e))
-        })?;
+    pub fn from_proxy_url(proxy_url: &str, target_host: String, target_port: u16) -> Result<Self> {
+        let parsed = ProxyUrl::parse(proxy_url)
+            .map_err(|e| Aria2Error::Parse(format!("Invalid proxy URL '{}': {}", proxy_url, e)))?;
 
         let proxy_type = match parsed.protocol {
             crate::http::socks_connector::ProxyProtocol::Http => ProxyType::Http,

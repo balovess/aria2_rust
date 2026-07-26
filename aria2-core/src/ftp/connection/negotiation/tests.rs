@@ -31,7 +31,10 @@ fn test_percent_decode_invalid() {
 
 #[test]
 fn test_percent_decode_mixed() {
-    assert_eq!(percent_decode("/pub/my%20dir/file.txt"), "/pub/my dir/file.txt");
+    assert_eq!(
+        percent_decode("/pub/my%20dir/file.txt"),
+        "/pub/my dir/file.txt"
+    );
 }
 
 #[test]
@@ -85,9 +88,7 @@ fn test_extract_file_part_percent_decoded() {
 fn test_parse_mdtm_timestamp_valid() {
     let ts = parse_mdtm_timestamp("20240115103000").unwrap();
     // 2024-01-15 10:30:00 UTC = epoch 1705314600
-    let duration = ts
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
+    let duration = ts.duration_since(std::time::UNIX_EPOCH).unwrap();
     assert_eq!(duration.as_secs(), 1705314600);
 }
 

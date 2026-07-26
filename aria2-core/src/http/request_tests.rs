@@ -20,7 +20,10 @@ fn test_request_builder_fluent_api() {
 
     assert_eq!(request.method, HttpMethod::Post);
     assert_eq!(request.url, url);
-    assert_eq!(request.headers.get("Content-Type").unwrap(), "application/json");
+    assert_eq!(
+        request.headers.get("Content-Type").unwrap(),
+        "application/json"
+    );
     assert_eq!(request.headers.get("Accept").unwrap(), "application/json");
     assert!(request.body.is_some());
     assert_eq!(request.body.unwrap(), b"{\"key\":\"value\"}");
@@ -67,7 +70,10 @@ fn test_request_auto_content_length() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("Content-Length").unwrap(), &body.len().to_string());
+    assert_eq!(
+        request.headers.get("Content-Length").unwrap(),
+        &body.len().to_string()
+    );
 }
 
 #[test]
@@ -123,7 +129,10 @@ fn test_accept_gzip_header() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("Accept-Encoding").unwrap(), "deflate, gzip");
+    assert_eq!(
+        request.headers.get("Accept-Encoding").unwrap(),
+        "deflate, gzip"
+    );
 }
 
 #[test]
@@ -202,7 +211,10 @@ fn test_if_none_match_header() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("If-None-Match").unwrap(), "\"etag-123\"");
+    assert_eq!(
+        request.headers.get("If-None-Match").unwrap(),
+        "\"etag-123\""
+    );
 }
 
 // ==================== Referer tests ====================
@@ -229,7 +241,10 @@ fn test_auto_referer() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("Referer").unwrap(), "http://example.com");
+    assert_eq!(
+        request.headers.get("Referer").unwrap(),
+        "http://example.com"
+    );
 }
 
 // ==================== Cookie tests ====================
@@ -242,7 +257,10 @@ fn test_cookie_header() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("Cookie").unwrap(), "session=abc123; user=john");
+    assert_eq!(
+        request.headers.get("Cookie").unwrap(),
+        "session=abc123; user=john"
+    );
 }
 
 // ==================== Authorization tests ====================
@@ -255,7 +273,10 @@ fn test_authorization_header() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("Authorization").unwrap(), "Basic dXNlcjpwYXNz");
+    assert_eq!(
+        request.headers.get("Authorization").unwrap(),
+        "Basic dXNlcjpwYXNz"
+    );
 }
 
 #[test]
@@ -266,7 +287,10 @@ fn test_bearer_authorization_header() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("Authorization").unwrap(), "Bearer my-jwt-token");
+    assert_eq!(
+        request.headers.get("Authorization").unwrap(),
+        "Bearer my-jwt-token"
+    );
 }
 
 #[test]
@@ -396,7 +420,10 @@ fn test_multiple_conditional_headers_combined() {
         .build()
         .unwrap();
 
-    assert_eq!(request.headers.get("Accept-Encoding").unwrap(), "deflate, gzip");
+    assert_eq!(
+        request.headers.get("Accept-Encoding").unwrap(),
+        "deflate, gzip"
+    );
     assert_eq!(request.headers.get("Pragma").unwrap(), "no-cache");
     assert_eq!(request.headers.get("Cache-Control").unwrap(), "no-cache");
     assert_eq!(
@@ -407,13 +434,19 @@ fn test_multiple_conditional_headers_combined() {
         request.headers.get("If-Modified-Since").unwrap(),
         "Wed, 21 Oct 2015 07:28:00 GMT"
     );
-    assert_eq!(request.headers.get("If-None-Match").unwrap(), "\"etag-123\"");
+    assert_eq!(
+        request.headers.get("If-None-Match").unwrap(),
+        "\"etag-123\""
+    );
     assert_eq!(
         request.headers.get("Referer").unwrap(),
         "http://referrer.example.com/page"
     );
     assert_eq!(request.headers.get("Cookie").unwrap(), "session=abc");
-    assert_eq!(request.headers.get("Authorization").unwrap(), "Basic dXNlcjpwYXNz");
+    assert_eq!(
+        request.headers.get("Authorization").unwrap(),
+        "Basic dXNlcjpwYXNz"
+    );
     assert_eq!(request.headers.get("Range").unwrap(), "bytes=0-999");
 }
 

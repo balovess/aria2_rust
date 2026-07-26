@@ -327,10 +327,7 @@ impl App {
                 .get("remote-time")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            dry_run: options
-                .get("dry-run")
-                .map(|v| v == "true")
-                .unwrap_or(false),
+            dry_run: options.get("dry-run").map(|v| v == "true").unwrap_or(false),
             ftp_reuse_connection: options
                 .get("ftp-reuse-connection")
                 .map(|v| v != "false")
@@ -358,10 +355,7 @@ impl App {
                 .get("enable-rpc")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            pause: options
-                .get("pause")
-                .map(|v| v == "true")
-                .unwrap_or(false),
+            pause: options.get("pause").map(|v| v == "true").unwrap_or(false),
         }
     }
 }

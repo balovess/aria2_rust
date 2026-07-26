@@ -24,12 +24,8 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 type SegmentFetchFuture = std::pin::Pin<
     Box<
-        dyn std::future::Future<
-                Output = (
-                    u32,
-                    std::result::Result<u64, crate::error::Aria2Error>,
-                ),
-            > + Send,
+        dyn std::future::Future<Output = (u32, std::result::Result<u64, crate::error::Aria2Error>)>
+            + Send,
     >,
 >;
 
@@ -88,9 +84,9 @@ impl ConcurrentDownloader {
             Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
                 "Download cancelled by user".into(),
             )),
-            Ok(g) if g.is_paused_flag() => Err(Aria2Error::DownloadFailed(
-                "Download paused".into(),
-            )),
+            Ok(g) if g.is_paused_flag() => {
+                Err(Aria2Error::DownloadFailed("Download paused".into()))
+            }
             _ => Ok(()),
         }
     }
@@ -167,16 +163,18 @@ impl ConcurrentDownloader {
         // piece bitfield that survive across process restarts.
         let num_pieces = manager.num_segments().max(1);
         let ctrl_path = ControlFile::control_path_for(&self.output_path);
-        let mut ctrl_file = match ControlFile::open_or_create(&ctrl_path, total_length, num_pieces).await {
-            Ok(cf) => Some(cf),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to create control file {}: {}. Resume will be less reliable.",
-                    ctrl_path.display(), e
-                );
-                None
-            }
-        };
+        let mut ctrl_file =
+            match ControlFile::open_or_create(&ctrl_path, total_length, num_pieces).await {
+                Ok(cf) => Some(cf),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create control file {}: {}. Resume will be less reliable.",
+                        ctrl_path.display(),
+                        e
+                    );
+                    None
+                }
+            };
         // If resuming, update the control file with existing progress
         if let Some(ref mut cf) = ctrl_file {
             if resume_state.should_resume && resume_state.start_offset > 0 {
@@ -261,15 +259,13 @@ impl ConcurrentDownloader {
                             let mut speed_sample_bytes = 0u64;
                             while let Some(update) = seg_progress_rx.recv().await {
                                 // Compute delta for this segment
-                                let downloaded =
-                                    update.completed_bytes.saturating_sub(seg_offset);
+                                let downloaded = update.completed_bytes.saturating_sub(seg_offset);
                                 let delta = downloaded.saturating_sub(last_reported);
                                 if delta > 0 {
                                     last_reported = downloaded;
                                     seg_reported_clone.store(last_reported, Ordering::Relaxed);
                                     let total =
-                                        total_inflight.fetch_add(delta, Ordering::Relaxed)
-                                            + delta;
+                                        total_inflight.fetch_add(delta, Ordering::Relaxed) + delta;
 
                                     // Lock-free progress update — no RwLock acquisition needed.
                                     progress_for_listener.set_completed_length(total);
@@ -585,7 +581,11 @@ impl ConcurrentDownloader {
     ) -> Result<ConcurrentDownloadResult> {
         tracing::info!(
             "Using concurrent download mode (split={}, max_retries/segment={})",
-            self.group.recover().options().split.unwrap_or(constants::DEFAULT_SPLIT),
+            self.group
+                .recover()
+                .options()
+                .split
+                .unwrap_or(constants::DEFAULT_SPLIT),
             max_retries_per_segment
         );
 
@@ -718,8 +718,7 @@ impl ConcurrentDownloader {
                     }
                 });
 
-                let (write_tx, mut write_rx) =
-                    mpsc::unbounded_channel::<WriteChunk>();
+                let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
                 let result = downloader
                     .download_range_streaming(
                         &mirror_url,
@@ -738,7 +737,11 @@ impl ConcurrentDownloader {
 
                 // Drain all pending write chunks to disk — the download is
                 // complete so all chunks have been sent into the channel.
-                while let Ok(WriteChunk { offset: chunk_off, data }) = write_rx.try_recv() {
+                while let Ok(WriteChunk {
+                    offset: chunk_off,
+                    data,
+                }) = write_rx.try_recv()
+                {
                     writer.write_bytes_at(chunk_off, data).await.map_err(|e| {
                         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                             "Write failed: {}",

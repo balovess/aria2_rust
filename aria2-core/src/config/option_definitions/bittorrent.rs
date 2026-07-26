@@ -398,7 +398,8 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "select-file".into(),
             opt_type: OptionType::List,
-            description: "Comma-separated list of file indices to download (BT/Metalink, 1-indexed)".into(),
+            description:
+                "Comma-separated list of file indices to download (BT/Metalink, 1-indexed)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

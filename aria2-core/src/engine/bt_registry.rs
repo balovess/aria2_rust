@@ -114,10 +114,9 @@ impl fmt::Debug for BtObject {
         f.debug_struct("BtObject")
             .field(
                 "download_context",
-                &self
-                    .download_context
-                    .as_ref()
-                    .map(|ctx| format!("<DownloadContext piece_length={}>", ctx.get_piece_length())),
+                &self.download_context.as_ref().map(|ctx| {
+                    format!("<DownloadContext piece_length={}>", ctx.get_piece_length())
+                }),
             )
             .field(
                 "piece_storage",
@@ -135,7 +134,13 @@ impl fmt::Debug for BtObject {
                 "bt_runtime",
                 &self.bt_runtime.as_ref().map(|_| "<BtRuntime>"),
             )
-            .field("bt_progress_manager", &self.bt_progress_manager.as_ref().map(|_| "<BtProgressManager>"))
+            .field(
+                "bt_progress_manager",
+                &self
+                    .bt_progress_manager
+                    .as_ref()
+                    .map(|_| "<BtProgressManager>"),
+            )
             .finish()
     }
 }
@@ -327,7 +332,10 @@ impl BtRegistry {
     /// info hash from the `DownloadContext`'s `BitTorrent` attribute.
     /// Rust uses a secondary `HashMap<String, u64>` index for O(1) lookup
     /// instead of the C++ linear scan.
-    pub fn get_download_context_by_info_hash(&self, info_hash: &str) -> Option<Arc<DownloadContext>> {
+    pub fn get_download_context_by_info_hash(
+        &self,
+        info_hash: &str,
+    ) -> Option<Arc<DownloadContext>> {
         // Try the secondary index first (O(1))
         if let Some(&gid) = self.info_hash_index.get(info_hash) {
             if let Some(obj) = self.pool.get(&gid) {
@@ -427,7 +435,10 @@ impl BtRegistry {
     ///
     /// Equivalent to C++ `BtRegistry::removeAll()`.
     pub fn remove_all(&mut self) {
-        trace!("BtRegistry::remove_all: clearing {} entries", self.pool.len());
+        trace!(
+            "BtRegistry::remove_all: clearing {} entries",
+            self.pool.len()
+        );
         self.pool.clear();
         self.info_hash_index.clear();
     }
@@ -441,7 +452,9 @@ impl BtRegistry {
     /// Convenience method that avoids two-level `Option` unwrapping.
     /// Returns `None` if the GID is not registered or has no piece storage.
     pub fn get_piece_storage(&self, gid: u64) -> Option<Arc<dyn PieceStorage>> {
-        self.pool.get(&gid).and_then(|obj| obj.piece_storage.clone())
+        self.pool
+            .get(&gid)
+            .and_then(|obj| obj.piece_storage.clone())
     }
 
     /// Get the `PieceStorage` by info hash.
@@ -486,7 +499,9 @@ impl BtRegistry {
     ///
     /// Returns `None` if the GID is not registered or has no progress manager.
     pub fn get_bt_progress_manager(&self, gid: u64) -> Option<Arc<BtProgressManager>> {
-        self.pool.get(&gid).and_then(|obj| obj.bt_progress_manager.clone())
+        self.pool
+            .get(&gid)
+            .and_then(|obj| obj.bt_progress_manager.clone())
     }
 
     // -----------------------------------------------------------------------
@@ -498,7 +513,10 @@ impl BtRegistry {
     /// In C++ aria2, the DHT node is a process-level singleton accessed
     /// via `DHT::getInstance()`. Here the engine is explicitly set on the
     /// registry, making it testable and lifecycle-managed.
-    pub fn set_dht_engine(&mut self, engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>) {
+    pub fn set_dht_engine(
+        &mut self,
+        engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) {
         trace!("BtRegistry::set_dht_engine");
         self.dht_engine = Some(engine);
     }
@@ -506,7 +524,9 @@ impl BtRegistry {
     /// Get a reference to the shared DHT engine.
     ///
     /// Returns `None` if no DHT engine has been set.
-    pub fn get_dht_engine(&self) -> Option<&Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+    pub fn get_dht_engine(
+        &self,
+    ) -> Option<&Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
         self.dht_engine.as_ref()
     }
 
@@ -765,7 +785,11 @@ mod tests {
 
     /// Helper: create a BtObject with only a DownloadContext.
     fn make_bt_object_with_ctx(piece_length: u32, total_length: u64, path: &str) -> BtObject {
-        let ctx = Arc::new(DownloadContext::new(piece_length, total_length, path.to_string()));
+        let ctx = Arc::new(DownloadContext::new(
+            piece_length,
+            total_length,
+            path.to_string(),
+        ));
         BtObject {
             download_context: Some(ctx),
             ..BtObject::new()
@@ -962,11 +986,29 @@ mod tests {
 
         let obj1 = make_bt_object_with_ctx(1024, 4096, "/tmp/old.bin");
         registry.put(1, obj1);
-        assert_eq!(registry.get(1).unwrap().download_context.as_ref().unwrap().get_piece_length(), 1024);
+        assert_eq!(
+            registry
+                .get(1)
+                .unwrap()
+                .download_context
+                .as_ref()
+                .unwrap()
+                .get_piece_length(),
+            1024
+        );
 
         let obj2 = make_bt_object_with_ctx(2048, 8192, "/tmp/new.bin");
         registry.put(1, obj2);
-        assert_eq!(registry.get(1).unwrap().download_context.as_ref().unwrap().get_piece_length(), 2048);
+        assert_eq!(
+            registry
+                .get(1)
+                .unwrap()
+                .download_context
+                .as_ref()
+                .unwrap()
+                .get_piece_length(),
+            2048
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -992,7 +1034,10 @@ mod tests {
     #[test]
     fn test_bt_object_builder() {
         let ctx = Arc::new(DownloadContext::new(1024, 4096, "/tmp/file.bin".into()));
-        let bt_announce = Arc::new(BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string())));
+        let bt_announce = Arc::new(BtAnnounce::new(
+            &[],
+            &Some("http://tracker.test/announce".to_string()),
+        ));
         let peer_storage = Arc::new(crate::engine::bt_peer_storage::DefaultPeerStorage::new());
 
         let obj = BtObject::builder()
@@ -1059,7 +1104,11 @@ mod tests {
         let obj = make_bt_object_with_ctx(1024, 4096, "/tmp/file.bin");
         registry.put(1, obj);
 
-        assert!(registry.get_download_context_by_info_hash("any_hash").is_none());
+        assert!(
+            registry
+                .get_download_context_by_info_hash("any_hash")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1075,7 +1124,11 @@ mod tests {
         assert!(found.is_some());
 
         // Wrong hash should not find it
-        assert!(registry.get_download_context_by_info_hash("wrong_hash").is_none());
+        assert!(
+            registry
+                .get_download_context_by_info_hash("wrong_hash")
+                .is_none()
+        );
 
         // Secondary index should be populated
         assert_eq!(registry.info_hash_index_len(), 1);
@@ -1105,7 +1158,11 @@ mod tests {
         let mut registry = BtRegistry::new();
 
         for i in 1..=10 {
-            let obj = make_bt_object_with_ctx(1024 * i as u32, 4096 * i as u64, &format!("/tmp/file{}.bin", i));
+            let obj = make_bt_object_with_ctx(
+                1024 * i as u32,
+                4096 * i as u64,
+                &format!("/tmp/file{}.bin", i),
+            );
             registry.put(i, obj);
         }
 
@@ -1135,7 +1192,10 @@ mod tests {
     #[test]
     fn test_registry_blocklist_add_and_check() {
         let mut registry = BtRegistry::new();
-        registry.peer_blocklist_mut().add_rule("10.0.0.0/8").unwrap();
+        registry
+            .peer_blocklist_mut()
+            .add_rule("10.0.0.0/8")
+            .unwrap();
 
         assert!(registry.is_peer_blocked("10.0.0.1"));
         assert!(registry.is_peer_blocked("10.255.255.255"));
@@ -1146,7 +1206,10 @@ mod tests {
     #[test]
     fn test_registry_blocklist_accessors() {
         let mut registry = BtRegistry::new();
-        registry.peer_blocklist_mut().add_rule("192.168.0.0/16").unwrap();
+        registry
+            .peer_blocklist_mut()
+            .add_rule("192.168.0.0/16")
+            .unwrap();
 
         // Immutable accessor
         assert_eq!(registry.peer_blocklist().count(), 1);
@@ -1172,9 +1235,8 @@ mod tests {
         use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let engine = rt.block_on(async {
-            DhtEngine::start(DhtEngineConfig::default()).await.unwrap()
-        });
+        let engine =
+            rt.block_on(async { DhtEngine::start(DhtEngineConfig::default()).await.unwrap() });
 
         let mut registry = BtRegistry::new();
         registry.set_dht_engine(engine);
@@ -1187,9 +1249,8 @@ mod tests {
         use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let engine = rt.block_on(async {
-            DhtEngine::start(DhtEngineConfig::default()).await.unwrap()
-        });
+        let engine =
+            rt.block_on(async { DhtEngine::start(DhtEngineConfig::default()).await.unwrap() });
 
         let mut registry = BtRegistry::new();
         registry.set_dht_engine(engine);
@@ -1277,8 +1338,13 @@ mod tests {
     fn test_rebuild_info_hash_index() {
         let mut registry = BtRegistry::new();
         // Directly insert into pool (bypassing put) -- index stays empty
-        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin",
-            "aaa1111111111111111111111111111111111111", false);
+        let obj1 = make_bt_object_with_info_hash(
+            1024,
+            4096,
+            "/tmp/a.bin",
+            "aaa1111111111111111111111111111111111111",
+            false,
+        );
         registry.pool.insert(1, obj1);
 
         assert_eq!(registry.info_hash_index_len(), 0);
@@ -1286,7 +1352,11 @@ mod tests {
         // Rebuild the index
         registry.rebuild_info_hash_index();
         assert_eq!(registry.info_hash_index_len(), 1);
-        assert!(registry.get_download_context_by_info_hash("aaa1111111111111111111111111111111111111").is_some());
+        assert!(
+            registry
+                .get_download_context_by_info_hash("aaa1111111111111111111111111111111111111")
+                .is_some()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1315,9 +1385,8 @@ mod tests {
     fn test_get_peer_storage() {
         let mut registry = BtRegistry::new();
         let mut obj = BtObject::new();
-        let ps: Arc<dyn PeerStorage> = Arc::new(
-            crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
-        );
+        let ps: Arc<dyn PeerStorage> =
+            Arc::new(crate::engine::bt_peer_storage::DefaultPeerStorage::new());
         obj.peer_storage = Some(ps);
         registry.put(1, obj);
 
@@ -1340,7 +1409,10 @@ mod tests {
     fn test_get_bt_announce() {
         let mut registry = BtRegistry::new();
         let mut obj = BtObject::new();
-        obj.bt_announce = Some(Arc::new(BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string()))));
+        obj.bt_announce = Some(Arc::new(BtAnnounce::new(
+            &[],
+            &Some("http://tracker.test/announce".to_string()),
+        )));
         registry.put(1, obj);
 
         assert!(registry.get_bt_announce(1).is_some());
@@ -1360,23 +1432,30 @@ mod tests {
         registry.put(1, obj);
 
         assert!(registry.get_piece_storage_by_info_hash(hash1).is_some());
-        assert!(registry.get_piece_storage_by_info_hash("wrong_hash").is_none());
+        assert!(
+            registry
+                .get_piece_storage_by_info_hash("wrong_hash")
+                .is_none()
+        );
     }
 
     #[test]
     fn test_get_peer_storage_by_info_hash() {
         let hash1 = "aaa1111111111111111111111111111111111111";
         let mut obj = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin", hash1, false);
-        let ps: Arc<dyn PeerStorage> = Arc::new(
-            crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
-        );
+        let ps: Arc<dyn PeerStorage> =
+            Arc::new(crate::engine::bt_peer_storage::DefaultPeerStorage::new());
         obj.peer_storage = Some(ps);
 
         let mut registry = BtRegistry::new();
         registry.put(1, obj);
 
         assert!(registry.get_peer_storage_by_info_hash(hash1).is_some());
-        assert!(registry.get_peer_storage_by_info_hash("wrong_hash").is_none());
+        assert!(
+            registry
+                .get_peer_storage_by_info_hash("wrong_hash")
+                .is_none()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1386,7 +1465,10 @@ mod tests {
     #[test]
     fn test_all_download_finished_empty_registry() {
         let registry = BtRegistry::new();
-        assert!(registry.all_download_finished(), "empty registry should return true");
+        assert!(
+            registry.all_download_finished(),
+            "empty registry should return true"
+        );
     }
 
     #[test]
@@ -1435,12 +1517,14 @@ mod tests {
 
         // Entry 1: finished (0-length)
         let mut obj1 = BtObject::new();
-        obj1.piece_storage = Some(Arc::new(DefaultPieceStorage::new(0, 0)) as Arc<dyn PieceStorage>);
+        obj1.piece_storage =
+            Some(Arc::new(DefaultPieceStorage::new(0, 0)) as Arc<dyn PieceStorage>);
         registry.put(1, obj1);
 
         // Entry 2: not finished
         let mut obj2 = BtObject::new();
-        obj2.piece_storage = Some(Arc::new(DefaultPieceStorage::new(1024, 4096)) as Arc<dyn PieceStorage>);
+        obj2.piece_storage =
+            Some(Arc::new(DefaultPieceStorage::new(1024, 4096)) as Arc<dyn PieceStorage>);
         registry.put(2, obj2);
 
         // Entry 3: no piece storage
@@ -1458,13 +1542,23 @@ mod tests {
         let mut registry = BtRegistry::new();
 
         // Private torrent
-        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/private.bin",
-            "aaa1111111111111111111111111111111111111", true);
+        let obj1 = make_bt_object_with_info_hash(
+            1024,
+            4096,
+            "/tmp/private.bin",
+            "aaa1111111111111111111111111111111111111",
+            true,
+        );
         registry.put(1, obj1);
 
         // Public torrent
-        let obj2 = make_bt_object_with_info_hash(1024, 4096, "/tmp/public.bin",
-            "bbb2222222222222222222222222222222222222", false);
+        let obj2 = make_bt_object_with_info_hash(
+            1024,
+            4096,
+            "/tmp/public.bin",
+            "bbb2222222222222222222222222222222222222",
+            false,
+        );
         registry.put(2, obj2);
 
         // No torrent attribute
@@ -1481,8 +1575,13 @@ mod tests {
     fn test_get_torrent_name() {
         let mut registry = BtRegistry::new();
 
-        let obj1 = make_bt_object_with_info_hash(1024, 4096, "/tmp/a.bin",
-            "aaa1111111111111111111111111111111111111", false);
+        let obj1 = make_bt_object_with_info_hash(
+            1024,
+            4096,
+            "/tmp/a.bin",
+            "aaa1111111111111111111111111111111111111",
+            false,
+        );
         registry.put(1, obj1);
 
         let name = registry.get_torrent_name(1);

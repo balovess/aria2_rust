@@ -29,8 +29,7 @@ mod tests;
 // Re-export public API to preserve the original import paths.
 pub use constants::{
     CHOKE_ROUND_INTERVAL_SECS, MAX_DROPPED_PEERS, MAX_PEER_LIST_SIZE,
-    TEMP_PEER_CLEANUP_INTERVAL_SECS, TEMP_REJECT_TIMEOUT_MIN_SECS,
-    TEMP_REJECT_TIMEOUT_RANGE_SECS,
+    TEMP_PEER_CLEANUP_INTERVAL_SECS, TEMP_REJECT_TIMEOUT_MIN_SECS, TEMP_REJECT_TIMEOUT_RANGE_SECS,
 };
 pub use peer_entry::PeerEntry;
 pub use peer_storage_trait::PeerStorage;

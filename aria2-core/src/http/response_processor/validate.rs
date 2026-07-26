@@ -64,9 +64,11 @@ pub fn validate_response(
         }
         _ => {
             // 1xx, 209, etc. — unexpected status codes.
-            Err(Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
-                message: format!("Unexpected HTTP status code: {}", status),
-            }))
+            Err(Aria2Error::Recoverable(
+                RecoverableError::HttpProtocolError {
+                    message: format!("Unexpected HTTP status code: {}", status),
+                },
+            ))
         }
     }
 }
@@ -92,9 +94,7 @@ fn validate_200_206(
     if !has_transfer_encoding {
         // No Transfer-Encoding: validate Content-Range against requested range.
         if let Some((req_start, req_end)) = ctx.requested_range {
-            if let Some((resp_start, resp_end, _resp_total)) =
-                parse_content_range(response_head)
-            {
+            if let Some((resp_start, resp_end, _resp_total)) = parse_content_range(response_head) {
                 if let Err(_e) = validate_response_range(req_start, req_end, resp_start, resp_end) {
                     return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
                 }
@@ -123,9 +123,11 @@ fn validate_200_206(
 /// error_code::HTTP_PROTOCOL_ERROR)`.
 fn validate_304(ctx: &ValidateRequestContext) -> Result<(), Aria2Error> {
     if !ctx.conditional_request {
-        return Err(Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
-            message: "Got 304 without If-Modified-Since or If-None-Match".to_string(),
-        }));
+        return Err(Aria2Error::Recoverable(
+            RecoverableError::HttpProtocolError {
+                message: "Got 304 without If-Modified-Since or If-None-Match".to_string(),
+            },
+        ));
     }
     Ok(())
 }
@@ -135,14 +137,13 @@ fn validate_304(ctx: &ValidateRequestContext) -> Result<(), Aria2Error> {
 /// Per C++ `validateResponse()`: if `!httpHeader_->defined(LOCATION)`,
 /// throw `DL_ABORT_EX2(fmt(EX_LOCATION_HEADER_REQUIRED, statusCode),
 /// error_code::HTTP_PROTOCOL_ERROR)`.
-fn validate_redirect(
-    response_head: &HttpResponseHead,
-    status: u16,
-) -> Result<(), Aria2Error> {
+fn validate_redirect(response_head: &HttpResponseHead, status: u16) -> Result<(), Aria2Error> {
     if response_head.header("location").is_none() {
-        return Err(Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
-            message: format!("Location header required for status {}", status),
-        }));
+        return Err(Aria2Error::Recoverable(
+            RecoverableError::HttpProtocolError {
+                message: format!("Location header required for status {}", status),
+            },
+        ));
     }
     Ok(())
 }
@@ -228,9 +229,8 @@ mod tests {
         // When Transfer-Encoding is present, Content-Range is stripped by the
         // header processor per RFC 7230 §3.3.2. We accept the response and
         // defer range validation to downstream body reception.
-        let head = parse_head(
-            b"HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n\r\n",
-        );
+        let head =
+            parse_head(b"HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n\r\n");
         assert!(validate_response(&head, &non_conditional_ctx()).is_ok());
     }
 

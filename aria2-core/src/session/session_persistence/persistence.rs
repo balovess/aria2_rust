@@ -118,7 +118,10 @@ impl SessionPersistence {
     ///
     /// Each command is saved as `{gid}.aria2` in JSON format.
     /// Global options are saved as `session_options.json`.
-    pub async fn save_state(&self, groups: &[Arc<std::sync::RwLock<RequestGroup>>]) -> Result<usize, String> {
+    pub async fn save_state(
+        &self,
+        groups: &[Arc<std::sync::RwLock<RequestGroup>>],
+    ) -> Result<usize, String> {
         // Ensure session directory exists
         tokio::fs::create_dir_all(&self.session_dir)
             .await

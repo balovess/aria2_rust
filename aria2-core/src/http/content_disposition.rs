@@ -45,10 +45,20 @@ fn is_rfc2616_http_token(c: u8) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(
             c,
-            b'!' | b'#' | b'$' | b'%'
-                | b'&' | b'\'' | b'*' | b'+'
-                | b'-' | b'.' | b'^' | b'_'
-                | b'`' | b'|' | b'~'
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
         )
 }
 
@@ -58,10 +68,18 @@ fn is_rfc2978_mime_charset(c: u8) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(
             c,
-            b'!' | b'#' | b'$' | b'%'
-                | b'&' | b'\'' | b'+'
-                | b'-' | b'^' | b'_'
-                | b'`' | b'{' | b'}'
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'+'
+                | b'-'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'{'
+                | b'}'
                 | b'~'
         )
 }
@@ -267,7 +285,10 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                     }
                     state = ParseState::DispositionType;
                 } else if !is_lws(c) {
-                    trace!("parse_raw: unexpected byte 0x{:02x} in BeforeDispositionType", c);
+                    trace!(
+                        "parse_raw: unexpected byte 0x{:02x} in BeforeDispositionType",
+                        c
+                    );
                     return None;
                 }
             }
@@ -282,9 +303,7 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                         disposition_type_end = i;
                     }
                     state = ParseState::AfterDispositionType;
-                } else if state == ParseState::AfterDispositionType
-                    || !is_rfc2616_http_token(c)
-                {
+                } else if state == ParseState::AfterDispositionType || !is_rfc2616_http_token(c) {
                     trace!("parse_raw: unexpected byte 0x{:02x} in DispositionType", c);
                     return None;
                 }
@@ -541,9 +560,10 @@ fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
     if disposition_type_end == 0 {
         disposition_type_end = input.len();
     }
-    let disposition_type = std::str::from_utf8(&input[disposition_type_start..disposition_type_end])
-        .ok()?
-        .to_owned();
+    let disposition_type =
+        std::str::from_utf8(&input[disposition_type_start..disposition_type_end])
+            .ok()?
+            .to_owned();
 
     Some((
         disposition_type,
@@ -696,8 +716,7 @@ fn decode_filename_ext(bytes: &[u8], charset: Charset) -> Option<String> {
         Charset::Iso8859p1 => iso8859p1_to_utf8(bytes)?,
         Charset::Unknown => {
             // For unknown charsets, try UTF-8 first, then ISO-8859-1
-            validate_utf8(bytes)
-                .or_else(|| iso8859p1_to_utf8(bytes))?
+            validate_utf8(bytes).or_else(|| iso8859p1_to_utf8(bytes))?
         }
     };
 
@@ -797,7 +816,10 @@ mod tests {
             "attachment; filename*=UTF-8''%e3%81%93%e3%82%93%e3%81%ab%e3%81%a1%e3%81%af.txt",
         );
         assert_eq!(result.disposition_type, "attachment");
-        assert_eq!(result.filename.as_deref(), Some("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}.txt"));
+        assert_eq!(
+            result.filename.as_deref(),
+            Some("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}.txt")
+        );
     }
 
     #[test]
@@ -824,9 +846,8 @@ mod tests {
 
     #[test]
     fn test_filename_star_before_filename_still_wins() {
-        let result = parse_content_disposition(
-            "attachment; filename*=UTF-8''star.txt; filename=plain.txt",
-        );
+        let result =
+            parse_content_disposition("attachment; filename*=UTF-8''star.txt; filename=plain.txt");
         // filename* takes priority per RFC 6266
         assert_eq!(result.filename.as_deref(), Some("star.txt"));
         assert_eq!(result.filename_ascii.as_deref(), Some("plain.txt"));
@@ -842,9 +863,8 @@ mod tests {
 
     #[test]
     fn test_duplicate_filename_is_rejected() {
-        let result = parse_content_disposition(
-            "attachment; filename=first.txt; filename=second.txt",
-        );
+        let result =
+            parse_content_disposition("attachment; filename=first.txt; filename=second.txt");
         // Duplicate filename= should cause parse failure
         assert_eq!(result.disposition_type, "");
         assert!(result.filename.is_none());
@@ -1114,7 +1134,8 @@ mod tests {
 
     #[test]
     fn test_non_filename_params_ignored() {
-        let result = parse_content_disposition("form-data; name=\"fieldName\"; filename=\"file.dat\"");
+        let result =
+            parse_content_disposition("form-data; name=\"fieldName\"; filename=\"file.dat\"");
         assert_eq!(result.disposition_type, "form-data");
         assert_eq!(result.filename.as_deref(), Some("file.dat"));
     }
@@ -1127,7 +1148,10 @@ mod tests {
         let result = parse_content_disposition(
             "attachment; filename*=UTF-8''%e6%97%a5%e6%9c%ac%e8%aa%9e.txt",
         );
-        assert_eq!(result.filename.as_deref(), Some("\u{65e5}\u{672c}\u{8a9e}.txt"));
+        assert_eq!(
+            result.filename.as_deref(),
+            Some("\u{65e5}\u{672c}\u{8a9e}.txt")
+        );
     }
 
     // -- Filename with special token characters --
@@ -1146,7 +1170,10 @@ mod tests {
         // but filenames containing backslashes are rejected by the
         // directory-traversal check (is_dir_traversal rejects '\').
         let result = parse_content_disposition("attachment; filename=\"path\\\\to\\\\file.txt\"");
-        assert_eq!(result.filename, None, "Backslash in filename should be rejected by dir traversal");
+        assert_eq!(
+            result.filename, None,
+            "Backslash in filename should be rejected by dir traversal"
+        );
     }
 
     #[test]
@@ -1160,9 +1187,8 @@ mod tests {
 
     #[test]
     fn test_filename_ignored_when_ext_already_found() {
-        let result = parse_content_disposition(
-            "attachment; filename*=UTF-8''star.txt; filename=plain.txt",
-        );
+        let result =
+            parse_content_disposition("attachment; filename*=UTF-8''star.txt; filename=plain.txt");
         // RFC 6266: filename* takes priority for the `filename` field,
         // but filename= is still collected as filename_ascii fallback.
         assert_eq!(result.filename.as_deref(), Some("star.txt"));

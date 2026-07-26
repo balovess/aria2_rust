@@ -86,10 +86,7 @@ impl AnnounceEvent {
     ///
     /// Matching C++ FindCompletedAllowedTier: DOWNLOADING, COMPLETED
     pub fn accepts_completed_event(self) -> bool {
-        matches!(
-            self,
-            AnnounceEvent::Downloading | AnnounceEvent::Completed
-        )
+        matches!(self, AnnounceEvent::Downloading | AnnounceEvent::Completed)
     }
 
     /// Convert to the event string for tracker URL parameter.

@@ -82,7 +82,8 @@ impl ServerCapabilities {
             // Per RFC 2389, a feature line like "MLST type*;size*;modify*;" has
             // "MLST" as the keyword. We must split on whitespace first, then on
             // semicolons to avoid "MLST type*" being treated as the keyword.
-            let first_token = feature.split(|c: char| c.is_whitespace() || c == ';')
+            let first_token = feature
+                .split(|c: char| c.is_whitespace() || c == ';')
                 .next()
                 .unwrap_or(feature)
                 .trim();
@@ -301,10 +302,7 @@ pub async fn send_auth_tls(ctrl: &mut FreshControl) -> Result<bool> {
             Ok(false)
         }
         _ => {
-            info!(
-                "AUTH TLS not supported by server ({} {})",
-                resp.0, resp.1
-            );
+            info!("AUTH TLS not supported by server ({} {})", resp.0, resp.1);
             Ok(false)
         }
     }

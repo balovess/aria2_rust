@@ -105,7 +105,9 @@ impl MessageDigest {
 
     pub fn update(&mut self, data: &[u8]) {
         match &mut self.inner {
-            DigestInner::Md5(d) => { md5::Digest::update(d, data); }
+            DigestInner::Md5(d) => {
+                md5::Digest::update(d, data);
+            }
             DigestInner::Sha1(d) => d.update(data),
             DigestInner::Sha256(d) => d.update(data),
             DigestInner::Sha512(d) => d.update(data),

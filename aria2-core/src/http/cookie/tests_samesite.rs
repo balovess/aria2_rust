@@ -42,7 +42,8 @@ fn test_from_set_cookie_samesite_none_with_secure() {
 
 #[test]
 fn test_from_set_cookie_samesite_case_insensitive() {
-    let c1 = Cookie::from_set_cookie_header("foo=bar; SameSite=strict", "example.com", "/").unwrap();
+    let c1 =
+        Cookie::from_set_cookie_header("foo=bar; SameSite=strict", "example.com", "/").unwrap();
     assert_eq!(c1.same_site, SameSite::Strict);
 
     let c2 = Cookie::from_set_cookie_header("foo=bar; SameSite=LAX", "example.com", "/").unwrap();
@@ -57,7 +58,11 @@ fn test_from_set_cookie_samesite_unknown_value_defaults_to_none() {
     // Unknown SameSite values are treated as None (the default), per C++ behavior
     let hdr = "sid=abc; SameSite=InvalidValue";
     let c = Cookie::from_set_cookie_header(hdr, "example.com", "/").unwrap();
-    assert_eq!(c.same_site, SameSite::None, "Unknown SameSite value defaults to None");
+    assert_eq!(
+        c.same_site,
+        SameSite::None,
+        "Unknown SameSite value defaults to None"
+    );
 }
 
 #[test]

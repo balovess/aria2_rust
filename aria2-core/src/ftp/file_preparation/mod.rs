@@ -317,7 +317,10 @@ pub fn prepare_ftp_file(
             // Derive file path if not already set (C++ checks getFileEntry()->getPath().empty())
             let (local_path, suffix_path) = if config.path_already_set {
                 // Path already determined by a prior step (e.g., HTTP redirect)
-                (PathBuf::from(&config.request_file), config.request_file.clone())
+                (
+                    PathBuf::from(&config.request_file),
+                    config.request_file.clone(),
+                )
             } else {
                 derive_local_path(&config.dir, &config.request_file)
             };
@@ -360,7 +363,10 @@ pub fn prepare_ftp_file(
             debug!("SIZE not supported by server, total length unknown");
 
             let (local_path, suffix_path) = if config.path_already_set {
-                (PathBuf::from(&config.request_file), config.request_file.clone())
+                (
+                    PathBuf::from(&config.request_file),
+                    config.request_file.clone(),
+                )
             } else {
                 derive_local_path(&config.dir, &config.request_file)
             };
@@ -406,7 +412,10 @@ fn handle_zero_length_file(
 ) -> Result<FtpFilePreparationResult, Aria2Error> {
     // C++: dry-run + zero-length → initPieceStorage + onDryRunFileFound
     if config.dry_run {
-        info!("Dry-run: zero-length file found, path={}", local_path.display());
+        info!(
+            "Dry-run: zero-length file found, path={}",
+            local_path.display()
+        );
         return Ok(FtpFilePreparationResult::DryRunFileFound {
             total_length: 0,
             local_path,
@@ -425,9 +434,7 @@ fn handle_zero_length_file(
             );
             // TODO: C++ pushes ChecksumCheckIntegrityEntry and sets
             // sequence_ = SEQ_EXIT. Requires CheckIntegrityManager integration.
-            return Ok(FtpFilePreparationResult::ChecksumVerificationNeeded {
-                local_path,
-            });
+            return Ok(FtpFilePreparationResult::ChecksumVerificationNeeded { local_path });
         }
 
         // C++: markAllPiecesDone(), setChecksumVerified(true),
@@ -436,9 +443,7 @@ fn handle_zero_length_file(
             "Zero-length file already exists, download complete: {}",
             local_path.display()
         );
-        return Ok(FtpFilePreparationResult::DownloadAlreadyCompleted {
-            local_path,
-        });
+        return Ok(FtpFilePreparationResult::DownloadAlreadyCompleted { local_path });
     }
 
     // C++: adjustFilename + initPieceStorage + openFile for zero-length file.

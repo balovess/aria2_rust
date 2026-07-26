@@ -113,10 +113,7 @@ impl ExtensionHandshake {
         }
 
         // reqq
-        root.insert(
-            b"reqq".to_vec(),
-            BencodeValue::Int(self.reqq as i64),
-        );
+        root.insert(b"reqq".to_vec(), BencodeValue::Int(self.reqq as i64));
 
         BencodeValue::Dict(root).encode()
     }
@@ -141,7 +138,9 @@ impl ExtensionHandshake {
             );
         }
 
-        let dict = val.as_dict().ok_or("Extension handshake payload is not a dict")?;
+        let dict = val
+            .as_dict()
+            .ok_or("Extension handshake payload is not a dict")?;
 
         let m_val = dict
             .get(b"m".as_slice())
@@ -380,7 +379,8 @@ impl UtMetadataMessage {
                 let total_size = dict
                     .get(b"total_size".as_slice())
                     .and_then(|v| v.as_int())
-                    .ok_or("Missing 'total_size' in ut_metadata Data message")? as u32;
+                    .ok_or("Missing 'total_size' in ut_metadata Data message")?
+                    as u32;
 
                 // The raw metadata bytes follow the bencoded dict.
                 let data = payload[consumed..].to_vec();
@@ -438,19 +438,32 @@ impl CompactPeerV6 {
 /// Wire format (bencoded dict):
 /// ```text
 /// d
-///   5:added  <compact IPv4 peer bytes>
-///   7:added6 <compact IPv6 peer bytes>
+///   5:added    <compact IPv4 peer bytes>
+///   7:added.f  <IPv4 flag bytes>
+///   7:added6   <compact IPv6 peer bytes>
+///   9:added6.f <IPv6 flag bytes>
+///   7:dropped  <compact IPv4 dropped peer bytes>
+///   9:dropped6 <compact IPv6 dropped peer bytes>
 /// e
 /// ```
 ///
-/// Optional keys `added.f` / `added6.f` (flag bytes) are parsed but not
-/// modeled here; they can be added when needed.
+/// Flag byte bits (BEP 11):
+/// - bit 0: peer uses encryption
+/// - bit 1: peer is a seeder
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UtPexMessage {
-    /// IPv4 peers in compact format (6 bytes each).
+    /// Newly connected IPv4 peers in compact format (6 bytes each).
     pub added: Vec<CompactPeerV4>,
-    /// IPv6 peers in compact format (18 bytes each).
+    /// Flags for each IPv4 added peer (1 byte per peer).
+    pub added_f: Vec<u8>,
+    /// Newly connected IPv6 peers in compact format (18 bytes each).
     pub added6: Vec<CompactPeerV6>,
+    /// Flags for each IPv6 added peer (1 byte per peer).
+    pub added6_f: Vec<u8>,
+    /// Disconnected IPv4 peers in compact format (6 bytes each).
+    pub dropped: Vec<CompactPeerV4>,
+    /// Disconnected IPv6 peers in compact format (18 bytes each).
+    pub dropped6: Vec<CompactPeerV6>,
 }
 
 /// Compact peer size constants.
@@ -462,34 +475,78 @@ impl UtPexMessage {
     pub fn new() -> Self {
         Self {
             added: Vec::new(),
+            added_f: Vec::new(),
             added6: Vec::new(),
+            added6_f: Vec::new(),
+            dropped: Vec::new(),
+            dropped6: Vec::new(),
         }
     }
 
     /// Encode this message to the payload bytes (after the ext_id byte).
+    ///
+    /// Mirrors C++ `UTPexExtensionMessage::getPayload()` which separates
+    /// IPv4 and IPv6 peers into distinct keys per BEP 11.
     pub fn to_payload(&self) -> Vec<u8> {
         let mut dict = BTreeMap::new();
 
+        // IPv4 added peers + flags
         if !self.added.is_empty() {
             let mut compact = Vec::with_capacity(self.added.len() * COMPACT_PEER_V4_SIZE);
             for peer in &self.added {
                 compact.extend_from_slice(&peer.0);
             }
             dict.insert(b"added".to_vec(), BencodeValue::Bytes(compact));
+
+            if !self.added_f.is_empty() {
+                dict.insert(
+                    b"added.f".to_vec(),
+                    BencodeValue::Bytes(self.added_f.clone()),
+                );
+            }
         }
 
+        // IPv6 added peers + flags
         if !self.added6.is_empty() {
             let mut compact = Vec::with_capacity(self.added6.len() * COMPACT_PEER_V6_SIZE);
             for peer in &self.added6 {
                 compact.extend_from_slice(&peer.0);
             }
             dict.insert(b"added6".to_vec(), BencodeValue::Bytes(compact));
+
+            if !self.added6_f.is_empty() {
+                dict.insert(
+                    b"added6.f".to_vec(),
+                    BencodeValue::Bytes(self.added6_f.clone()),
+                );
+            }
+        }
+
+        // IPv4 dropped peers
+        if !self.dropped.is_empty() {
+            let mut compact = Vec::with_capacity(self.dropped.len() * COMPACT_PEER_V4_SIZE);
+            for peer in &self.dropped {
+                compact.extend_from_slice(&peer.0);
+            }
+            dict.insert(b"dropped".to_vec(), BencodeValue::Bytes(compact));
+        }
+
+        // IPv6 dropped peers
+        if !self.dropped6.is_empty() {
+            let mut compact = Vec::with_capacity(self.dropped6.len() * COMPACT_PEER_V6_SIZE);
+            for peer in &self.dropped6 {
+                compact.extend_from_slice(&peer.0);
+            }
+            dict.insert(b"dropped6".to_vec(), BencodeValue::Bytes(compact));
         }
 
         BencodeValue::Dict(dict).encode()
     }
 
     /// Parse a ut_pex payload (the bytes after the ext_id byte).
+    ///
+    /// Mirrors C++ `UTPexExtensionMessage::create()` which extracts
+    /// added/dropped for both IPv4 and IPv6 address families.
     pub fn from_payload(payload: &[u8]) -> Result<Self, String> {
         let (val, _) = BencodeValue::decode(payload)
             .map_err(|e| format!("Failed to decode ut_pex payload: {}", e))?;
@@ -498,21 +555,53 @@ impl UtPexMessage {
             .as_dict()
             .ok_or("ut_pex payload is not a bencoded dict")?;
 
-        let added = if let Some(bytes) = dict.get(b"added".as_slice()).and_then(|v| v.as_bytes())
-        {
+        let added = if let Some(bytes) = dict.get(b"added".as_slice()).and_then(|v| v.as_bytes()) {
             decode_compact_v4(bytes)?
         } else {
             Vec::new()
         };
 
-        let added6 =
-            if let Some(bytes) = dict.get(b"added6".as_slice()).and_then(|v| v.as_bytes()) {
+        let added_f = dict
+            .get(b"added.f".as_slice())
+            .and_then(|v| v.as_bytes())
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
+
+        let added6 = if let Some(bytes) = dict.get(b"added6".as_slice()).and_then(|v| v.as_bytes())
+        {
+            decode_compact_v6(bytes)?
+        } else {
+            Vec::new()
+        };
+
+        let added6_f = dict
+            .get(b"added6.f".as_slice())
+            .and_then(|v| v.as_bytes())
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
+
+        let dropped =
+            if let Some(bytes) = dict.get(b"dropped".as_slice()).and_then(|v| v.as_bytes()) {
+                decode_compact_v4(bytes)?
+            } else {
+                Vec::new()
+            };
+
+        let dropped6 =
+            if let Some(bytes) = dict.get(b"dropped6".as_slice()).and_then(|v| v.as_bytes()) {
                 decode_compact_v6(bytes)?
             } else {
                 Vec::new()
             };
 
-        Ok(Self { added, added6 })
+        Ok(Self {
+            added,
+            added_f,
+            added6,
+            added6_f,
+            dropped,
+            dropped6,
+        })
     }
 }
 
@@ -798,11 +887,17 @@ mod tests {
         let msg = UtPexMessage::new();
         assert!(msg.added.is_empty());
         assert!(msg.added6.is_empty());
+        assert!(msg.added_f.is_empty());
+        assert!(msg.added6_f.is_empty());
+        assert!(msg.dropped.is_empty());
+        assert!(msg.dropped6.is_empty());
 
         let payload = msg.to_payload();
         let parsed = UtPexMessage::from_payload(&payload).unwrap();
         assert!(parsed.added.is_empty());
         assert!(parsed.added6.is_empty());
+        assert!(parsed.dropped.is_empty());
+        assert!(parsed.dropped6.is_empty());
     }
 
     #[test]
@@ -870,10 +965,7 @@ mod tests {
     fn test_pex_invalid_v4_data_length() {
         // 5 bytes is not a multiple of 6
         let mut dict = BTreeMap::new();
-        dict.insert(
-            b"added".to_vec(),
-            BencodeValue::Bytes(vec![1, 2, 3, 4, 5]),
-        );
+        dict.insert(b"added".to_vec(), BencodeValue::Bytes(vec![1, 2, 3, 4, 5]));
         let payload = BencodeValue::Dict(dict).encode();
         let result = UtPexMessage::from_payload(&payload);
         assert!(result.is_err());
@@ -884,10 +976,7 @@ mod tests {
     fn test_pex_invalid_v6_data_length() {
         // 17 bytes is not a multiple of 18
         let mut dict = BTreeMap::new();
-        dict.insert(
-            b"added6".to_vec(),
-            BencodeValue::Bytes(vec![0u8; 17]),
-        );
+        dict.insert(b"added6".to_vec(), BencodeValue::Bytes(vec![0u8; 17]));
         let payload = BencodeValue::Dict(dict).encode();
         let result = UtPexMessage::from_payload(&payload);
         assert!(result.is_err());
@@ -921,6 +1010,144 @@ mod tests {
         let peer = CompactPeerV6(bytes);
         assert_eq!(peer.port(), 9999);
         assert_eq!(peer.ip()[15], 1);
+    }
+
+    // ======================== BEP 11 IPv6 PEX field tests ========================
+
+    #[test]
+    fn test_pex_dropped_v4_roundtrip() {
+        let mut msg = UtPexMessage::new();
+        let mut peer = [0u8; 6];
+        peer[..4].copy_from_slice(&[192, 168, 1, 1]);
+        peer[4..6].copy_from_slice(&6881u16.to_be_bytes());
+        msg.dropped.push(CompactPeerV4(peer));
+
+        let payload = msg.to_payload();
+        let parsed = UtPexMessage::from_payload(&payload).unwrap();
+        assert!(parsed.added.is_empty());
+        assert!(parsed.added6.is_empty());
+        assert_eq!(parsed.dropped.len(), 1);
+        assert_eq!(parsed.dropped[0].port(), 6881);
+    }
+
+    #[test]
+    fn test_pex_dropped_v6_roundtrip() {
+        let mut msg = UtPexMessage::new();
+        let mut peer = [0u8; 18];
+        peer[15] = 1; // ::1
+        peer[16..18].copy_from_slice(&6881u16.to_be_bytes());
+        msg.dropped6.push(CompactPeerV6(peer));
+
+        let payload = msg.to_payload();
+        let parsed = UtPexMessage::from_payload(&payload).unwrap();
+        assert!(parsed.added.is_empty());
+        assert!(parsed.added6.is_empty());
+        assert_eq!(parsed.dropped6.len(), 1);
+        assert_eq!(parsed.dropped6[0].port(), 6881);
+    }
+
+    #[test]
+    fn test_pex_added_f_roundtrip() {
+        let mut msg = UtPexMessage::new();
+        let mut peer1 = [0u8; 6];
+        peer1[..4].copy_from_slice(&[10, 0, 0, 1]);
+        peer1[4..6].copy_from_slice(&6881u16.to_be_bytes());
+        msg.added.push(CompactPeerV4(peer1));
+
+        let mut peer2 = [0u8; 6];
+        peer2[..4].copy_from_slice(&[10, 0, 0, 2]);
+        peer2[4..6].copy_from_slice(&6882u16.to_be_bytes());
+        msg.added.push(CompactPeerV4(peer2));
+
+        // bit 0 = encryption, bit 1 = seeder
+        msg.added_f = vec![0x01, 0x03];
+
+        let payload = msg.to_payload();
+        let parsed = UtPexMessage::from_payload(&payload).unwrap();
+        assert_eq!(parsed.added_f.len(), 2);
+        assert_eq!(parsed.added_f[0], 0x01);
+        assert_eq!(parsed.added_f[1], 0x03);
+    }
+
+    #[test]
+    fn test_pex_added6_f_roundtrip() {
+        let mut msg = UtPexMessage::new();
+        let mut peer = [0u8; 18];
+        peer[..16].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        peer[16..18].copy_from_slice(&6881u16.to_be_bytes());
+        msg.added6.push(CompactPeerV6(peer));
+
+        msg.added6_f = vec![0x02]; // seeder
+
+        let payload = msg.to_payload();
+        let parsed = UtPexMessage::from_payload(&payload).unwrap();
+        assert_eq!(parsed.added6_f.len(), 1);
+        assert_eq!(parsed.added6_f[0], 0x02);
+    }
+
+    #[test]
+    fn test_pex_full_bep11_roundtrip() {
+        let mut msg = UtPexMessage::new();
+
+        // IPv4 added
+        let mut v4_added = [0u8; 6];
+        v4_added[..4].copy_from_slice(&[192, 168, 1, 1]);
+        v4_added[4..6].copy_from_slice(&6881u16.to_be_bytes());
+        msg.added.push(CompactPeerV4(v4_added));
+        msg.added_f.push(0x02);
+
+        // IPv6 added
+        let mut v6_added = [0u8; 18];
+        v6_added[15] = 1;
+        v6_added[16..18].copy_from_slice(&6882u16.to_be_bytes());
+        msg.added6.push(CompactPeerV6(v6_added));
+        msg.added6_f.push(0x01);
+
+        // IPv4 dropped
+        let mut v4_dropped = [0u8; 6];
+        v4_dropped[..4].copy_from_slice(&[10, 0, 0, 1]);
+        v4_dropped[4..6].copy_from_slice(&6883u16.to_be_bytes());
+        msg.dropped.push(CompactPeerV4(v4_dropped));
+
+        // IPv6 dropped
+        let mut v6_dropped = [0u8; 18];
+        v6_dropped[15] = 2;
+        v6_dropped[16..18].copy_from_slice(&6884u16.to_be_bytes());
+        msg.dropped6.push(CompactPeerV6(v6_dropped));
+
+        let payload = msg.to_payload();
+        let parsed = UtPexMessage::from_payload(&payload).unwrap();
+
+        assert_eq!(parsed.added.len(), 1);
+        assert_eq!(parsed.added_f.len(), 1);
+        assert_eq!(parsed.added_f[0], 0x02);
+        assert_eq!(parsed.added6.len(), 1);
+        assert_eq!(parsed.added6_f.len(), 1);
+        assert_eq!(parsed.added6_f[0], 0x01);
+        assert_eq!(parsed.dropped.len(), 1);
+        assert_eq!(parsed.dropped[0].port(), 6883);
+        assert_eq!(parsed.dropped6.len(), 1);
+        assert_eq!(parsed.dropped6[0].port(), 6884);
+    }
+
+    #[test]
+    fn test_pex_parse_dropped6_without_added6() {
+        let mut dict = BTreeMap::new();
+        let mut v6_dropped = [0u8; 18];
+        v6_dropped[15] = 1;
+        v6_dropped[16..18].copy_from_slice(&6881u16.to_be_bytes());
+        dict.insert(
+            b"dropped6".to_vec(),
+            BencodeValue::Bytes(v6_dropped.to_vec()),
+        );
+
+        let payload = BencodeValue::Dict(dict).encode();
+        let parsed = UtPexMessage::from_payload(&payload).unwrap();
+
+        assert!(parsed.added.is_empty());
+        assert!(parsed.added6.is_empty());
+        assert!(parsed.dropped.is_empty());
+        assert_eq!(parsed.dropped6.len(), 1);
     }
 
     #[test]
@@ -1062,7 +1289,10 @@ mod tests {
         m_dict.insert(b"ut_metadata".to_vec(), BencodeValue::Int(1));
         let mut root = BTreeMap::new();
         root.insert(b"m".to_vec(), BencodeValue::Dict(m_dict));
-        root.insert(b"metadata_size".to_vec(), BencodeValue::Int(oversized as i64));
+        root.insert(
+            b"metadata_size".to_vec(),
+            BencodeValue::Int(oversized as i64),
+        );
         let bytes = BencodeValue::Dict(root).encode();
         let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.metadata_size(), None);
@@ -1154,7 +1384,10 @@ mod tests {
 
         let mut root = BTreeMap::new();
         root.insert(b"m".to_vec(), BencodeValue::Dict(m_dict));
-        root.insert(b"v".to_vec(), BencodeValue::Bytes(b"qBittorrent/4.5.2".to_vec()));
+        root.insert(
+            b"v".to_vec(),
+            BencodeValue::Bytes(b"qBittorrent/4.5.2".to_vec()),
+        );
         root.insert(b"p".to_vec(), BencodeValue::Int(6969));
         root.insert(b"metadata_size".to_vec(), BencodeValue::Int(98765));
         root.insert(b"reqq".to_vec(), BencodeValue::Int(250));

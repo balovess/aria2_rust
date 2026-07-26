@@ -357,10 +357,7 @@ impl AuthConfigFactory {
         if let Some(ref user) = opts.http_user {
             if !user.is_empty() {
                 debug!("Resolved HTTP auth for {} from CLI options", host);
-                return AuthConfig::new(
-                    user.clone(),
-                    opts.http_passwd.clone().unwrap_or_default(),
-                );
+                return AuthConfig::new(user.clone(), opts.http_passwd.clone().unwrap_or_default());
             }
         }
         None
@@ -387,10 +384,7 @@ impl AuthConfigFactory {
                 if let Some(ref netrc) = self.netrc {
                     if let Some(entry) = netrc.find(host) {
                         if entry.login == username {
-                            return AuthConfig::new(
-                                entry.login.clone(),
-                                entry.password.clone(),
-                            );
+                            return AuthConfig::new(entry.login.clone(), entry.password.clone());
                         }
                     }
                 }
@@ -426,14 +420,8 @@ impl AuthConfigFactory {
             }
         }
         // FTP anonymous default
-        debug!(
-            "Resolved FTP auth for {} as anonymous (default)",
-            host
-        );
-        AuthConfig::new(
-            FTP_DEFAULT_USER.to_string(),
-            FTP_DEFAULT_PASSWD.to_string(),
-        )
+        debug!("Resolved FTP auth for {} as anonymous (default)", host);
+        AuthConfig::new(FTP_DEFAULT_USER.to_string(), FTP_DEFAULT_PASSWD.to_string())
     }
 
     // -- BasicCred management --------------------------------------------
@@ -483,10 +471,7 @@ impl AuthConfigFactory {
             self.find_basic_cred_mut(host, port, path, |cred| {
                 cred.activate();
             });
-            info!(
-                "Activated existing BasicCred for {}:{}{}",
-                host, port, path
-            );
+            info!("Activated existing BasicCred for {}:{}{}", host, port, path);
             true
         } else {
             // Try to resolve from chain

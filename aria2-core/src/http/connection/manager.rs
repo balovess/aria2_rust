@@ -94,7 +94,11 @@ impl HttpConnectionManager {
     ///
     /// Mirrors C++ `popPooledSocket()` + new connection creation.
     /// On reuse, the oldest valid idle connection is returned (LRU front).
-    pub async fn acquire(&mut self, url: &Url, proxy: Option<&ProxyInfo>) -> Result<ActiveConnection> {
+    pub async fn acquire(
+        &mut self,
+        url: &Url,
+        proxy: Option<&ProxyInfo>,
+    ) -> Result<ActiveConnection> {
         let host = Self::extract_host(url);
         let pool_key = ConnectionPoolKey {
             target: host.clone(),
@@ -156,7 +160,11 @@ impl HttpConnectionManager {
         // Enforce per-key idle limit (evict oldest = front of deque)
         self.enforce_idle_limit(&pool_key).await;
 
-        tracing::debug!("Put back connection to pool: id={}, key={:?}", conn_id, pool_key);
+        tracing::debug!(
+            "Put back connection to pool: id={}, key={:?}",
+            conn_id,
+            pool_key
+        );
     }
 
     /// Legacy alias for `put_back()`.
@@ -168,7 +176,10 @@ impl HttpConnectionManager {
     ///
     /// Mirrors C++ `popPooledSocket()`. Returns `None` if no valid idle
     /// connection exists for the given key.
-    pub fn get_connection(&mut self, pool_key: &ConnectionPoolKey) -> Result<Option<ActiveConnection>> {
+    pub fn get_connection(
+        &mut self,
+        pool_key: &ConnectionPoolKey,
+    ) -> Result<Option<ActiveConnection>> {
         self.pop_pooled_connection(pool_key)
     }
 
@@ -259,12 +270,14 @@ impl HttpConnectionManager {
     ) -> Result<Url> {
         if !response.is_redirect() {
             return Err(Aria2Error::Parse(format!(
-                "Non-redirect response code: {}", response.status_code
+                "Non-redirect response code: {}",
+                response.status_code
             )));
         }
         if redirect_count >= self.max_redirects {
             return Err(Aria2Error::Network(format!(
-                "Max redirect count exceeded: {}", self.max_redirects
+                "Max redirect count exceeded: {}",
+                self.max_redirects
             )));
         }
         let location = response
@@ -275,12 +288,16 @@ impl HttpConnectionManager {
             .map_err(|e| Aria2Error::Parse(format!("Failed to parse redirect URL: {}", e)))?;
         if redirect_chain.contains(&new_url) {
             return Err(Aria2Error::Network(format!(
-                "Circular redirect detected: {}", new_url
+                "Circular redirect detected: {}",
+                new_url
             )));
         }
         tracing::info!(
             "Following redirect: {} -> {} ({}/{})",
-            current_url, new_url, redirect_count + 1, self.max_redirects
+            current_url,
+            new_url,
+            redirect_count + 1,
+            self.max_redirects
         );
         Ok(new_url)
     }
@@ -302,7 +319,10 @@ impl HttpConnectionManager {
         for iteration in 0..MAX_REDIRECTS {
             let url_str = current_url.to_string();
             if !seen_urls.insert(url_str.clone()) {
-                return Err(Aria2Error::Network(format!("Redirect loop detected: {}", url_str)));
+                return Err(Aria2Error::Network(format!(
+                    "Redirect loop detected: {}",
+                    url_str
+                )));
             }
             let resp = get_response(&current_url).await?;
             if !resp.is_redirect() {
@@ -314,11 +334,16 @@ impl HttpConnectionManager {
             current_url = current_url
                 .join(location)
                 .map_err(|e| Aria2Error::Parse(format!("Failed to parse redirect URL: {}", e)))?;
-            tracing::info!("Following redirect: iteration {}/{}", iteration + 1, MAX_REDIRECTS);
+            tracing::info!(
+                "Following redirect: iteration {}/{}",
+                iteration + 1,
+                MAX_REDIRECTS
+            );
         }
 
         Err(Aria2Error::Network(format!(
-            "Too many redirects (>{}), last URL: {}", MAX_REDIRECTS, current_url
+            "Too many redirects (>{}), last URL: {}",
+            MAX_REDIRECTS, current_url
         )))
     }
 
@@ -335,11 +360,17 @@ impl HttpConnectionManager {
     /// Parse Content-Range response header. Returns `(start, end, total)`.
     pub fn parse_content_range(&self, header: &str) -> Option<(u64, u64, u64)> {
         let header = header.trim();
-        if !header.starts_with("bytes ") { return None; }
+        if !header.starts_with("bytes ") {
+            return None;
+        }
         let parts: Vec<&str> = header[6..].split('/').collect();
-        if parts.len() != 2 { return None; }
+        if parts.len() != 2 {
+            return None;
+        }
         let rv: Vec<&str> = parts[0].split('-').collect();
-        if rv.len() != 2 { return None; }
+        if rv.len() != 2 {
+            return None;
+        }
         let start: u64 = rv[0].trim().parse().ok()?;
         let end: u64 = rv[1].trim().parse().ok()?;
         let total = match parts[1].trim() {
@@ -418,7 +449,10 @@ impl HttpConnectionManager {
 
     /// Pop the oldest valid idle connection for the key.
     /// Matches C++ `findSocketPoolEntry()`. Skips timed-out/invalid.
-    fn pop_pooled_connection(&mut self, pool_key: &ConnectionPoolKey) -> Result<Option<ActiveConnection>> {
+    fn pop_pooled_connection(
+        &mut self,
+        pool_key: &ConnectionPoolKey,
+    ) -> Result<Option<ActiveConnection>> {
         let deque = match self.key_connections.get_mut(pool_key) {
             Some(dq) => dq,
             None => return Ok(None),
@@ -444,7 +478,11 @@ impl HttpConnectionManager {
                     return Ok(Some(conn));
                 } else {
                     // Expired or invalid — discard
-                    let reason = if !conn.is_valid() { "invalid" } else { "timed-out" };
+                    let reason = if !conn.is_valid() {
+                        "invalid"
+                    } else {
+                        "timed-out"
+                    };
                     tracing::debug!("Discarded {} idle connection: id={}", reason, conn_id);
                     std::mem::drop(conn.shutdown());
                     self.active_count = self.active_count.saturating_sub(1);
@@ -499,7 +537,10 @@ impl HttpConnectionManager {
 
         tracing::info!(
             "Created new connection: id={}, host={}, active={}/{}",
-            conn_id, host, self.active_count, self.config.max_connections
+            conn_id,
+            host,
+            self.active_count,
+            self.config.max_connections
         );
 
         Ok(conn)
@@ -540,7 +581,9 @@ impl HttpConnectionManager {
             if let Some(mut conn) = self.pool.remove(&evict_id) {
                 tracing::debug!(
                     "LRU evicted oldest idle connection: id={}, key={:?} (limit={})",
-                    evict_id, pool_key, max_idle
+                    evict_id,
+                    pool_key,
+                    max_idle
                 );
                 let _ = conn.shutdown().await;
                 self.active_count = self.active_count.saturating_sub(1);

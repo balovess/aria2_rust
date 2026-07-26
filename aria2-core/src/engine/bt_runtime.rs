@@ -73,7 +73,11 @@ impl BtRuntime {
 
     /// Set the cumulative upload length recorded at startup.
     pub fn set_upload_length_at_startup(&mut self, length: u64) {
-        trace!(old = self.upload_length_at_startup, new = length, "set_upload_length_at_startup");
+        trace!(
+            old = self.upload_length_at_startup,
+            new = length,
+            "set_upload_length_at_startup"
+        );
         self.upload_length_at_startup = length;
     }
 
@@ -166,7 +170,11 @@ impl BtRuntime {
             0
         } else {
             let calculated = (max_peers as f64 * 0.8) as u32;
-            if calculated == 0 { max_peers } else { calculated }
+            if calculated == 0 {
+                max_peers
+            } else {
+                calculated
+            }
         };
         trace!(
             old_max = self.max_peers,

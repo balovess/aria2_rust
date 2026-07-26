@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::engine::bt_download_command::{BtDownloadCommand, BLOCK_SIZE, MAX_RETRIES, PEER_CONNECTION_DELAY_MS};
+use crate::engine::bt_download_command::{
+    BLOCK_SIZE, BtDownloadCommand, MAX_RETRIES, PEER_CONNECTION_DELAY_MS,
+};
 use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
@@ -160,7 +162,8 @@ impl BtDownloadCommand {
             // BtMessageHandler::wait_for_piece_block) and stashed on
             // BtPeerConn::pending_pex_peers. Here we drain them and add
             // to our known-peers list.
-            let mut all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = Vec::new();
+            let mut all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
+                Vec::new();
             for conn in active_connections.iter_mut() {
                 let peers = conn.drain_pex_peers();
                 if !peers.is_empty() {

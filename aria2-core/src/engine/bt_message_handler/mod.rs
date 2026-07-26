@@ -22,17 +22,17 @@
 //! - [`BtMessageHandler`] — Legacy stateless block request/receive utilities
 //!   (kept for backward compatibility; prefer `BtPeerMessageHandler`).
 
-pub mod types;
-pub mod peer_message_handler;
 pub mod message_handler;
+pub mod peer_message_handler;
 #[cfg(test)]
 mod tests;
+pub mod types;
 
 // Public re-exports — all public items remain accessible from `bt_message_handler::`
-pub use types::{
-    BLOCK_SIZE, MAX_RETRIES, BLOCK_REQUEST_TIMEOUT_SECS, MAX_BLOCK_READ_MESSAGES,
-    DEFAULT_MAX_OUTSTANDING_REQUEST, UB_MAX_OUTSTANDING_REQUEST,
-    PeerStateUpdate, RequestResponse, BlockDownloadResult,
-};
-pub use peer_message_handler::BtPeerMessageHandler;
 pub use message_handler::BtMessageHandler;
+pub use peer_message_handler::BtPeerMessageHandler;
+pub use types::{
+    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, DEFAULT_MAX_OUTSTANDING_REQUEST,
+    MAX_BLOCK_READ_MESSAGES, MAX_RETRIES, PeerStateUpdate, RequestResponse,
+    UB_MAX_OUTSTANDING_REQUEST,
+};

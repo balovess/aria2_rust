@@ -96,15 +96,17 @@ pub async fn connect_with_happy_eyeballs(
         "Starting Happy Eyeballs dual-stack race"
     );
 
-    let result =
-        time::timeout(connect_timeout, race_primary_and_backup(primary_addr, backup, stagger_delay))
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Happy Eyeballs connection timed out",
-                )
-            })??;
+    let result = time::timeout(
+        connect_timeout,
+        race_primary_and_backup(primary_addr, backup, stagger_delay),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Happy Eyeballs connection timed out",
+        )
+    })??;
 
     Ok(result)
 }

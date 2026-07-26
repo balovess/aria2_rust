@@ -20,10 +20,7 @@ fn test_announce_event_transitions() {
         AnnounceEvent::Seeding
     );
     // Stopped -> Halted
-    assert_eq!(
-        AnnounceEvent::Stopped.next_event(),
-        AnnounceEvent::Halted
-    );
+    assert_eq!(AnnounceEvent::Stopped.next_event(), AnnounceEvent::Halted);
     // Completed -> Seeding
     assert_eq!(
         AnnounceEvent::Completed.next_event(),
@@ -34,14 +31,8 @@ fn test_announce_event_transitions() {
         AnnounceEvent::Downloading.next_event(),
         AnnounceEvent::Downloading
     );
-    assert_eq!(
-        AnnounceEvent::Seeding.next_event(),
-        AnnounceEvent::Seeding
-    );
-    assert_eq!(
-        AnnounceEvent::Halted.next_event(),
-        AnnounceEvent::Halted
-    );
+    assert_eq!(AnnounceEvent::Seeding.next_event(), AnnounceEvent::Seeding);
+    assert_eq!(AnnounceEvent::Halted.next_event(), AnnounceEvent::Halted);
 }
 
 #[test]
@@ -251,10 +242,7 @@ fn test_announce_list_all_tiers_failed() {
 
 #[test]
 fn test_announce_list_event_management() {
-    let mut list = AnnounceList::new(
-        &[vec!["http://t.com/announce".to_string()]],
-        &None,
-    );
+    let mut list = AnnounceList::new(&[vec!["http://t.com/announce".to_string()]], &None);
 
     // Initial event is Started
     assert_eq!(list.get_event(), AnnounceEvent::Started);
@@ -404,10 +392,7 @@ fn test_bt_announce_default_ready_when_interval_zero() {
 
 #[test]
 fn test_bt_announce_stopped_ready_when_halted() {
-    let mut bt = BtAnnounce::new(
-        &[vec!["http://tracker.test/announce".to_string()]],
-        &None,
-    );
+    let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
     // Advance the tier to Downloading so it accepts stopped
     bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
 
@@ -419,10 +404,7 @@ fn test_bt_announce_stopped_ready_when_halted() {
 
 #[test]
 fn test_bt_announce_completed_ready() {
-    let mut bt = BtAnnounce::new(
-        &[vec!["http://tracker.test/announce".to_string()]],
-        &None,
-    );
+    let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
     // Advance the tier to Downloading so it accepts completed
     bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
 
@@ -434,10 +416,7 @@ fn test_bt_announce_completed_ready() {
 
 #[test]
 fn test_bt_announce_no_more_announce() {
-    let mut bt = BtAnnounce::new(
-        &[vec!["http://tracker.test/announce".to_string()]],
-        &None,
-    );
+    let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
 
     assert!(!bt.no_more_announce()); // not halted
 
@@ -452,10 +431,7 @@ fn test_bt_announce_no_more_announce() {
 
 #[test]
 fn test_bt_announce_adjust_started_after_completion() {
-    let mut bt = BtAnnounce::new(
-        &[vec!["http://tracker.test/announce".to_string()]],
-        &None,
-    );
+    let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
 
     // Mark download complete while event is still Started
     bt.set_download_complete(true);
@@ -465,15 +441,15 @@ fn test_bt_announce_adjust_started_after_completion() {
 
     assert!(bt.adjust_announce_list());
     // Event should be changed to STARTED_AFTER_COMPLETION
-    assert_eq!(bt.announce_list().get_event(), AnnounceEvent::StartedAfterCompletion);
+    assert_eq!(
+        bt.announce_list().get_event(),
+        AnnounceEvent::StartedAfterCompletion
+    );
 }
 
 #[test]
 fn test_bt_announce_adjust_stopped_priority() {
-    let mut bt = BtAnnounce::new(
-        &[vec!["http://tracker.test/announce".to_string()]],
-        &None,
-    );
+    let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
 
     // Set up both stopped and completed as ready
     bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
@@ -522,7 +498,9 @@ fn test_get_announce_url_with_existing_query() {
 
     let info_hash = [0u8; 20];
     let peer_id = [0u8; 20];
-    let url = bt.get_announce_url(&info_hash, &peer_id, 0, 0, 0, None).unwrap();
+    let url = bt
+        .get_announce_url(&info_hash, &peer_id, 0, 0, 0, None)
+        .unwrap();
 
     // Should use & instead of ? when URL already has query params
     assert!(url.contains("&info_hash="));
@@ -536,7 +514,9 @@ fn test_get_announce_url_numwant_zero_when_enough_peers() {
 
     let info_hash = [0u8; 20];
     let peer_id = [0u8; 20];
-    let url = bt.get_announce_url(&info_hash, &peer_id, 0, 0, 0, None).unwrap();
+    let url = bt
+        .get_announce_url(&info_hash, &peer_id, 0, 0, 0, None)
+        .unwrap();
 
     assert!(url.contains("numwant=0"));
 }
@@ -549,7 +529,9 @@ fn test_get_announce_url_numwant_zero_when_halted() {
 
     let info_hash = [0u8; 20];
     let peer_id = [0u8; 20];
-    let url = bt.get_announce_url(&info_hash, &peer_id, 0, 0, 0, None).unwrap();
+    let url = bt
+        .get_announce_url(&info_hash, &peer_id, 0, 0, 0, None)
+        .unwrap();
 
     assert!(url.contains("numwant=0"));
 }
@@ -680,7 +662,9 @@ fn test_process_announce_response_stores_tracker_id() {
     // Verify tracker_id is sent in subsequent announce URLs
     let info_hash = [0u8; 20];
     let peer_id = [0u8; 20];
-    let url = bt.get_announce_url(&info_hash, &peer_id, 0, 0, 0, None).unwrap();
+    let url = bt
+        .get_announce_url(&info_hash, &peer_id, 0, 0, 0, None)
+        .unwrap();
     assert!(
         url.contains("&trackerid="),
         "announce URL should contain trackerid parameter: {}",
@@ -719,10 +703,8 @@ fn test_bt_announce_user_defined_interval() {
 #[test]
 fn test_health_tracking_announce_list_creation() {
     // Test from announce string
-    let list1 = HealthTrackingAnnounceList::new(
-        &[],
-        &Some("http://tracker1.com/announce".to_string()),
-    );
+    let list1 =
+        HealthTrackingAnnounceList::new(&[], &Some("http://tracker1.com/announce".to_string()));
     assert_eq!(list1.tiers.len(), 1);
     assert_eq!(list1.tiers[0].trackers.len(), 1);
     assert_eq!(

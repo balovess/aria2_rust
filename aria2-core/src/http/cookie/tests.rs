@@ -204,7 +204,10 @@ fn test_from_set_cookie_max_age_negative() {
     let hdr = "sid=abc; Max-Age=0";
     let c = Cookie::from_set_cookie_header(hdr, "example.com", "/").unwrap();
     assert!(c.persistent);
-    assert!(c.is_delete_cookie(), "Max-Age=0 should mark cookie for deletion");
+    assert!(
+        c.is_delete_cookie(),
+        "Max-Age=0 should mark cookie for deletion"
+    );
 }
 
 #[test]
@@ -436,7 +439,10 @@ fn test_domain_cookie_allows_subdomain() {
 #[test]
 fn test_domain_matches_numeric_host_rejects_subdomain() {
     // Numeric hosts must not allow subdomain matching even in domain_matches()
-    assert!(domain_matches("192.168.1.1", "192.168.1.1"), "Exact match OK");
+    assert!(
+        domain_matches("192.168.1.1", "192.168.1.1"),
+        "Exact match OK"
+    );
     assert!(
         !domain_matches("192.168.1.1", "168.1.1"),
         "Subdomain matching for numeric hosts must be rejected"
@@ -459,7 +465,10 @@ fn test_from_set_cookie_numeric_host_exact_domain_match() {
     // Server at 192.168.1.1 sets Domain=192.168.1.1 → OK but host_only = true
     let hdr = "sid=abc; Domain=192.168.1.1";
     let c = Cookie::from_set_cookie_header(hdr, "192.168.1.1", "/").unwrap();
-    assert!(c.host_only, "Numeric host must force host-only even with exact domain match");
+    assert!(
+        c.host_only,
+        "Numeric host must force host-only even with exact domain match"
+    );
     assert_eq!(c.domain, "192.168.1.1");
 }
 
@@ -530,7 +539,10 @@ fn test_from_set_cookie_max_age_negative_value() {
     let hdr = "sid=abc; Max-Age=-1";
     let c = Cookie::from_set_cookie_header(hdr, "example.com", "/").unwrap();
     assert!(c.persistent);
-    assert!(c.is_delete_cookie(), "Negative Max-Age must mark cookie for deletion");
+    assert!(
+        c.is_delete_cookie(),
+        "Negative Max-Age must mark cookie for deletion"
+    );
 }
 
 #[test]
@@ -538,7 +550,10 @@ fn test_from_set_cookie_value_with_quotes() {
     // Bug 6: Double quotes around cookie value must be stripped
     let hdr = "SID=\"abc123\"";
     let c = Cookie::from_set_cookie_header(hdr, "example.com", "/").unwrap();
-    assert_eq!(c.value, "abc123", "Quotes must be stripped from cookie value");
+    assert_eq!(
+        c.value, "abc123",
+        "Quotes must be stripped from cookie value"
+    );
 }
 
 #[test]

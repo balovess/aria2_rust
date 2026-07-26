@@ -213,10 +213,7 @@ impl HttpPipelineConnection {
     /// Send a proxy CONNECT request and enqueue it.
     ///
     /// Mirrors C++ `HttpConnection::sendProxyRequest()`.
-    pub async fn send_proxy_request(
-        &mut self,
-        raw_request: &[u8],
-    ) -> Result<()> {
+    pub async fn send_proxy_request(&mut self, raw_request: &[u8]) -> Result<()> {
         debug!("Sending proxy CONNECT request");
 
         // Push into write buffer and attempt flush
@@ -296,7 +293,10 @@ impl HttpPipelineConnection {
                             "Received {} informational response, resetting processor",
                             head.status_code
                         );
-                        self.outstanding.front_mut().unwrap().reset_header_processor();
+                        self.outstanding
+                            .front_mut()
+                            .unwrap()
+                            .reset_header_processor();
                         continue;
                     }
 
@@ -309,8 +309,7 @@ impl HttpPipelineConnection {
                         segment_id: entry.segment_id,
                     }));
                 }
-                HttpHeaderParseState::ParsingStatusLine
-                | HttpHeaderParseState::ParsingHeaders => {
+                HttpHeaderParseState::ParsingStatusLine | HttpHeaderParseState::ParsingHeaders => {
                     // Need more data — continue reading
                     continue;
                 }
@@ -465,7 +464,11 @@ mod tests {
         assert!(state.is_authenticated());
 
         let mut state = NtlmState::ChallengeReceived;
-        assert!(state.build_type3_header("challenge", "user", "pass").is_err());
+        assert!(
+            state
+                .build_type3_header("challenge", "user", "pass")
+                .is_err()
+        );
     }
 
     #[test]

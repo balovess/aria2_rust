@@ -163,7 +163,9 @@ impl BtDownloadCommand {
         // which calls `ctx->setAttribute(CTX_ATTR_BT, torrent)` with all torrent
         // metadata fields. We replicate this here.
         {
-            use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+            use crate::download::download_context::{
+                BtFileMode, ContextAttributeType, TorrentAttribute,
+            };
 
             let total_size = meta.total_size();
             let piece_length = meta.info.piece_length;
@@ -173,7 +175,10 @@ impl BtDownloadCommand {
             let mut ctx = DownloadContext::new(piece_length, total_size, file_path_str);
 
             // Set piece hashes from torrent info dict (sha-1 hashes in hex format)
-            let piece_hashes_hex: Vec<String> = meta.info.pieces.iter()
+            let piece_hashes_hex: Vec<String> = meta
+                .info
+                .pieces
+                .iter()
                 .map(|hash_bytes| hex::encode(hash_bytes))
                 .collect();
             ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
@@ -586,7 +591,10 @@ impl BtDownloadCommand {
     /// # Arguments
     ///
     /// * `registry` - The engine's `Arc<std::sync::RwLock<BtRegistry>>`
-    pub fn set_bt_registry(&mut self, registry: Arc<std::sync::RwLock<super::bt_registry::BtRegistry>>) {
+    pub fn set_bt_registry(
+        &mut self,
+        registry: Arc<std::sync::RwLock<super::bt_registry::BtRegistry>>,
+    ) {
         info!("BtRegistry reference set for BT download self-registration");
         self.bt_registry = Some(registry);
     }

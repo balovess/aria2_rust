@@ -7,9 +7,9 @@ use tokio::task::{AbortHandle, Id, JoinSet};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use super::command::{Command, ProgressUpdate};
 #[cfg(feature = "bittorrent")]
 use super::bt_registry::BtRegistry;
+use super::command::{Command, ProgressUpdate};
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -20,9 +20,9 @@ use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::session::save_session_command::SaveSessionCommand;
-use crate::util::speed_smooth::SpeedSmoother;
 #[cfg(test)]
 use crate::util::rwlock_ext::RwLockRecover;
+use crate::util::speed_smooth::SpeedSmoother;
 
 /// Bookkeeping the engine retains for each spawned command task so it can
 /// enforce per-command timeouts and abort stalled tasks individually.
@@ -687,7 +687,11 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(
+            group_clone,
+            group.recover().progress.clone(),
+            rx,
+        );
 
         // Send a sequence of strictly increasing updates.
         tx.send(ProgressUpdate {
@@ -727,7 +731,11 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(
+            group_clone,
+            group.recover().progress.clone(),
+            rx,
+        );
 
         // First real update.
         tx.send(ProgressUpdate {
@@ -791,7 +799,11 @@ mod tests {
         }
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(
+            group_clone,
+            group.recover().progress.clone(),
+            rx,
+        );
 
         // Advance bytes but send a 0 speed sample (no fresh measurement).
         tx.send(ProgressUpdate {
@@ -823,7 +835,11 @@ mod tests {
         let group = make_group();
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
-        let handle = DownloadEngine::spawn_progress_aggregator(group.clone(), group.recover().progress.clone(), rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(
+            group.clone(),
+            group.recover().progress.clone(),
+            rx,
+        );
 
         // Drop the only sender; the aggregator's `recv().await` returns None.
         drop(tx);
@@ -852,7 +868,11 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
 
         let group_clone = Arc::clone(&group);
-        let handle = DownloadEngine::spawn_progress_aggregator(group_clone, group.recover().progress.clone(), rx);
+        let handle = DownloadEngine::spawn_progress_aggregator(
+            group_clone,
+            group.recover().progress.clone(),
+            rx,
+        );
 
         // Send a sequence of strictly increasing byte deltas, waiting long
         // enough between sends to cross the smoother's SAMPLE_INTERVAL_MS
@@ -943,13 +963,16 @@ mod tests {
     /// DownloadContext with TorrentAttribute is registered.
     #[test]
     fn test_bt_registry_info_hash_lookup_via_engine() {
-        use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+        use crate::download::download_context::{
+            BtFileMode, ContextAttributeType, TorrentAttribute,
+        };
 
         let engine = DownloadEngine::new(100);
         let info_hash = "abcdef0123456789abcdef0123456789abcdef01";
 
         // Create a DownloadContext with TorrentAttribute
-        let mut ctx = crate::download::DownloadContext::new(1024, 4096, "/tmp/test.bin".to_string());
+        let mut ctx =
+            crate::download::DownloadContext::new(1024, 4096, "/tmp/test.bin".to_string());
         let ta = TorrentAttribute {
             name: "test_torrent".to_string(),
             mode: BtFileMode::Single,
@@ -979,11 +1002,15 @@ mod tests {
         // Lookup by info_hash should find the context
         let reg = engine.bt_registry().read().unwrap();
         let found = reg.get_download_context_by_info_hash(info_hash);
-        assert!(found.is_some(), "info-hash lookup should find registered context");
+        assert!(
+            found.is_some(),
+            "info-hash lookup should find registered context"
+        );
 
         // Wrong hash should not find it
         assert!(
-            reg.get_download_context_by_info_hash("wrong_hash").is_none(),
+            reg.get_download_context_by_info_hash("wrong_hash")
+                .is_none(),
             "wrong hash should not match"
         );
     }

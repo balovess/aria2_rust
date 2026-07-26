@@ -45,7 +45,10 @@ fn test_percent_decode_single_hex_digit() {
 
 #[test]
 fn test_percent_decode_mixed() {
-    assert_eq!(percent_decode("/pub/my%20file.tar.gz"), "/pub/my file.tar.gz");
+    assert_eq!(
+        percent_decode("/pub/my%20file.tar.gz"),
+        "/pub/my file.tar.gz"
+    );
 }
 
 // ---- create_safe_path ----

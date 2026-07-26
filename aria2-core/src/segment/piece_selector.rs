@@ -31,8 +31,8 @@
 use std::sync::Arc;
 use tracing::trace;
 
-use super::bitfield_util::test_bit;
 use super::PieceStatMan;
+use super::bitfield_util::test_bit;
 
 // ===========================================================================
 // RarestPieceSelector
@@ -105,9 +105,7 @@ impl RarestPieceSelector {
         } else {
             trace!(
                 best_idx,
-                min_count,
-                nbits,
-                "RarestPieceSelector: selected piece"
+                min_count, nbits, "RarestPieceSelector: selected piece"
             );
             Some(best_idx)
         }
@@ -191,8 +189,7 @@ impl PriorityPieceSelector {
             if test_bit(bitfield, nbits, p) {
                 trace!(
                     index = p,
-                    nbits,
-                    "PriorityPieceSelector: selected prioritized piece"
+                    nbits, "PriorityPieceSelector: selected prioritized piece"
                 );
                 return Some(p);
             }
@@ -569,9 +566,8 @@ mod tests {
         let debug_str = format!("{:?}", rarest);
         assert!(debug_str.contains("Rarest"));
 
-        let mut priority = PriorityPieceSelector::new(PieceSelectorKind::Rarest(
-            RarestPieceSelector::new(man),
-        ));
+        let mut priority =
+            PriorityPieceSelector::new(PieceSelectorKind::Rarest(RarestPieceSelector::new(man)));
         priority.set_priority_pieces(vec![1, 2, 3]);
         let priority_kind = PieceSelectorKind::Priority(priority);
         let debug_str = format!("{:?}", priority_kind);

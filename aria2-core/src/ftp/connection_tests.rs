@@ -153,7 +153,11 @@ async fn test_active_mode_connection() -> Result<(), Box<dyn std::error::Error>>
     client.login("admin", "password123").await?;
 
     // Verify client is in active mode
-    assert_eq!(client.mode, FtpMode::Active, "Client should be in active mode");
+    assert_eq!(
+        client.mode,
+        FtpMode::Active,
+        "Client should be in active mode"
+    );
 
     // Test binary mode
     client.set_binary_mode(true).await?;
@@ -187,7 +191,10 @@ async fn test_binary_type_setting() -> Result<(), Box<dyn std::error::Error>> {
 
     // Switch back to ASCII mode
     client.set_binary_mode(false).await?;
-    assert!(!client.binary_mode, "Should have switched back to ASCII mode");
+    assert!(
+        !client.binary_mode,
+        "Should have switched back to ASCII mode"
+    );
 
     // Set to binary again
     client.set_binary_mode(true).await?;
@@ -208,7 +215,10 @@ fn test_directory_listing_parse() {
     // 1. Unix format - regular file
     let unix_file = "-rw-r--r--  1 owner group     1024 Mar 15 2024 document.pdf";
     let file_info = FtpClient::parse_list_line(unix_file);
-    assert!(file_info.is_some(), "Should be able to parse Unix file line");
+    assert!(
+        file_info.is_some(),
+        "Should be able to parse Unix file line"
+    );
     let info = file_info.unwrap();
     assert_eq!(info.name, "document.pdf");
     assert_eq!(info.size, 1024);
@@ -218,7 +228,10 @@ fn test_directory_listing_parse() {
     // 2. Unix format - directory
     let unix_dir = "drwxr-xr-x  2 owner staff   4096 Jan  1 00:00 my_folder";
     let dir_info = FtpClient::parse_list_line(unix_dir);
-    assert!(dir_info.is_some(), "Should be able to parse Unix directory line");
+    assert!(
+        dir_info.is_some(),
+        "Should be able to parse Unix directory line"
+    );
     let dir = dir_info.unwrap();
     assert_eq!(dir.name, "my_folder");
     assert_eq!(dir.size, 4096);
@@ -234,8 +247,14 @@ fn test_directory_listing_parse() {
         link.name, "link.txt",
         "Symbolic link name should be 'link.txt' not the target"
     );
-    assert!(!link.is_dir, "Symbolic link itself should not be a directory");
-    println!("Unix symbolic link parsed: {} -> (target stripped)", link.name);
+    assert!(
+        !link.is_dir,
+        "Symbolic link itself should not be a directory"
+    );
+    println!(
+        "Unix symbolic link parsed: {} -> (target stripped)",
+        link.name
+    );
 
     // 4. Unix format - hidden file
     let unix_hidden = "-rw-------  1 user staff    512 Apr 10 09:15 .bashrc";
@@ -263,7 +282,10 @@ fn test_directory_listing_parse() {
     // 6. Windows/DOS format - file
     let win_file = "03-15-24  10:30PM       1024 report.docx";
     let win_file_info = FtpClient::parse_list_line(win_file);
-    assert!(win_file_info.is_some(), "Should be able to parse Windows file line");
+    assert!(
+        win_file_info.is_some(),
+        "Should be able to parse Windows file line"
+    );
     let win_f = win_file_info.unwrap();
     assert_eq!(win_f.name, "report.docx");
     assert_eq!(win_f.size, 1024);
@@ -273,16 +295,25 @@ fn test_directory_listing_parse() {
     // 7. Windows/DOS format - directory
     let win_dir = "01-01-24  10:00AM       <DIR> Documents";
     let win_dir_info = FtpClient::parse_list_line(win_dir);
-    assert!(win_dir_info.is_some(), "Should be able to parse Windows directory line");
+    assert!(
+        win_dir_info.is_some(),
+        "Should be able to parse Windows directory line"
+    );
     let win_d = win_dir_info.unwrap();
     assert_eq!(win_d.name, "Documents");
-    assert!(win_d.is_dir, "Windows directory should be correctly identified");
+    assert!(
+        win_d.is_dir,
+        "Windows directory should be correctly identified"
+    );
     println!("Windows directory parsed: {} [DIR]", win_d.name);
 
     // 8. MLSD format - file
     let mlsd_file = "type=file;size=2048;modify=20240315143000;perm=r;unique=U1FE90; readme.txt";
     let mlsd_file_info = FtpClient::parse_list_line(mlsd_file);
-    assert!(mlsd_file_info.is_some(), "Should be able to parse MLSD file line");
+    assert!(
+        mlsd_file_info.is_some(),
+        "Should be able to parse MLSD file line"
+    );
     let mlsd_f = mlsd_file_info.unwrap();
     assert_eq!(mlsd_f.name, "readme.txt");
     assert_eq!(mlsd_f.size, 2048);
@@ -292,16 +323,25 @@ fn test_directory_listing_parse() {
     // 9. MLSD format - directory
     let mlsd_dir = "type=dir;size=4096;modify=20240101000000;perm=elcmf;unique=U1FE91; uploads";
     let mlsd_dir_info = FtpClient::parse_list_line(mlsd_dir);
-    assert!(mlsd_dir_info.is_some(), "Should be able to parse MLSD directory line");
+    assert!(
+        mlsd_dir_info.is_some(),
+        "Should be able to parse MLSD directory line"
+    );
     let mlsd_d = mlsd_dir_info.unwrap();
     assert_eq!(mlsd_d.name, "uploads");
-    assert!(mlsd_d.is_dir, "MLSD directory should be correctly identified");
+    assert!(
+        mlsd_d.is_dir,
+        "MLSD directory should be correctly identified"
+    );
     println!("MLSD directory parsed: {} [DIR]", mlsd_d.name);
 
     // 10. Filename with spaces
     let space_name = "-rw-r--r--  1 user staff   5678 Apr 20 11:00 my document with spaces.txt";
     let space_info = FtpClient::parse_list_line(space_name);
-    assert!(space_info.is_some(), "Should be able to handle filename with spaces");
+    assert!(
+        space_info.is_some(),
+        "Should be able to handle filename with spaces"
+    );
     let space_f = space_info.unwrap();
     assert_eq!(space_f.name, "my document with spaces.txt");
     assert_eq!(space_f.size, 5678);

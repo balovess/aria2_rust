@@ -13,9 +13,9 @@ use tracing::{debug, trace, warn};
 
 use super::message::{DhtMessage, DhtMessageBuilder, DhtQueryMethod};
 use super::node::DhtNode;
+use super::peer_storage::DhtPeerStorage;
 use super::routing_table::RoutingTable;
 use super::token_tracker::TokenTracker;
-use super::peer_storage::DhtPeerStorage;
 
 #[cfg(test)]
 use crate::bittorrent::bencode::codec::BencodeValue;
@@ -78,15 +78,20 @@ impl DhtQueryHandler {
         };
 
         // Extract sender ID from query arguments
-        let sender_id = query.a.as_ref().and_then(|a| a.dict_get(b"id")).and_then(|v| v.as_bytes()).and_then(|b| {
-            if b.len() == 20 {
-                let mut id = [0u8; 20];
-                id.copy_from_slice(b);
-                Some(id)
-            } else {
-                None
-            }
-        });
+        let sender_id = query
+            .a
+            .as_ref()
+            .and_then(|a| a.dict_get(b"id"))
+            .and_then(|v| v.as_bytes())
+            .and_then(|b| {
+                if b.len() == 20 {
+                    let mut id = [0u8; 20];
+                    id.copy_from_slice(b);
+                    Some(id)
+                } else {
+                    None
+                }
+            });
 
         trace!(
             method = %method,
@@ -97,12 +102,27 @@ impl DhtQueryHandler {
 
         let response = match method.as_str() {
             DhtQueryMethod::PING => self.handle_ping(&query.t, from, routing_table, token_tracker),
-            DhtQueryMethod::FIND_NODE => self.handle_find_node(&query.t, from, query, routing_table, token_tracker),
-            DhtQueryMethod::GET_PEERS => self.handle_get_peers(&query.t, from, query, routing_table, token_tracker, peer_storage),
-            DhtQueryMethod::ANNOUNCE_PEER => self.handle_announce_peer(&query.t, from, query, token_tracker, peer_storage),
+            DhtQueryMethod::FIND_NODE => {
+                self.handle_find_node(&query.t, from, query, routing_table, token_tracker)
+            }
+            DhtQueryMethod::GET_PEERS => self.handle_get_peers(
+                &query.t,
+                from,
+                query,
+                routing_table,
+                token_tracker,
+                peer_storage,
+            ),
+            DhtQueryMethod::ANNOUNCE_PEER => {
+                self.handle_announce_peer(&query.t, from, query, token_tracker, peer_storage)
+            }
             _ => {
                 debug!(method = %method, "Unknown DHT query method, sending error");
-                Some(DhtMessageBuilder::error_response(&query.t, 204, "Method Unknown"))
+                Some(DhtMessageBuilder::error_response(
+                    &query.t,
+                    204,
+                    "Method Unknown",
+                ))
             }
         };
 
@@ -134,7 +154,9 @@ impl DhtQueryHandler {
         _token_tracker: &TokenTracker,
     ) -> Option<DhtMessage> {
         // Extract target ID from query
-        let target = query.a.as_ref()
+        let target = query
+            .a
+            .as_ref()
             .and_then(|a| a.dict_get(b"target"))
             .and_then(|v| v.as_bytes());
 
@@ -153,7 +175,11 @@ impl DhtQueryHandler {
         let closest = routing_table.find_closest(&target_id, K);
         let compact_nodes = Self::encode_compact_nodes(&closest);
 
-        Some(DhtMessageBuilder::find_node_response(tx, &self.self_id, &compact_nodes))
+        Some(DhtMessageBuilder::find_node_response(
+            tx,
+            &self.self_id,
+            &compact_nodes,
+        ))
     }
 
     /// Handle a get_peers query: return peers if known, otherwise closest nodes.
@@ -167,7 +193,9 @@ impl DhtQueryHandler {
         peer_storage: &DhtPeerStorage,
     ) -> Option<DhtMessage> {
         // Extract info_hash from query
-        let info_hash_bytes = query.a.as_ref()
+        let info_hash_bytes = query
+            .a
+            .as_ref()
             .and_then(|a| a.dict_get(b"info_hash"))
             .and_then(|v| v.as_bytes());
 
@@ -192,14 +220,20 @@ impl DhtQueryHandler {
 
         if !peers.is_empty() {
             Some(DhtMessageBuilder::get_peers_response_with_peers(
-                tx, &self.self_id, &token_bytes, &peers,
+                tx,
+                &self.self_id,
+                &token_bytes,
+                &peers,
             ))
         } else {
             // No peers known — return closest nodes instead
             let closest = routing_table.find_closest(&info_hash, K);
             let compact_nodes = Self::encode_compact_nodes(&closest);
             Some(DhtMessageBuilder::get_peers_response_with_nodes(
-                tx, &self.self_id, &token_bytes, &compact_nodes,
+                tx,
+                &self.self_id,
+                &token_bytes,
+                &compact_nodes,
             ))
         }
     }
@@ -249,20 +283,26 @@ impl DhtQueryHandler {
         }
 
         // Extract port — if "implied_port" is set, use the source port
-        let port: u16 = if let Some(implied) = args.dict_get(b"implied_port").and_then(|v| v.as_int()) {
-            if implied != 0 {
-                from.port()
+        let port: u16 =
+            if let Some(implied) = args.dict_get(b"implied_port").and_then(|v| v.as_int()) {
+                if implied != 0 {
+                    from.port()
+                } else {
+                    args.dict_get(b"port").and_then(|v| v.as_int()).unwrap_or(0) as u16
+                }
             } else {
                 args.dict_get(b"port").and_then(|v| v.as_int()).unwrap_or(0) as u16
-            }
-        } else {
-            args.dict_get(b"port").and_then(|v| v.as_int()).unwrap_or(0) as u16
-        };
+            };
 
         if port > 0 {
             let peer_addr: SocketAddr = match from {
                 SocketAddr::V4(v4) => SocketAddr::V4(std::net::SocketAddrV4::new(*v4.ip(), port)),
-                SocketAddr::V6(v6) => SocketAddr::V6(std::net::SocketAddrV6::new(*v6.ip(), port, v6.flowinfo(), v6.scope_id())),
+                SocketAddr::V6(v6) => SocketAddr::V6(std::net::SocketAddrV6::new(
+                    *v6.ip(),
+                    port,
+                    v6.flowinfo(),
+                    v6.scope_id(),
+                )),
             };
             peer_storage.add_peer(info_hash, peer_addr);
             trace!(
@@ -411,9 +451,15 @@ mod tests {
         // Build announce_peer query manually with the valid token
         let mut args = BTreeMap::new();
         args.insert(b"id".to_vec(), BencodeValue::Bytes(vec![0xBBu8; 20]));
-        args.insert(b"info_hash".to_vec(), BencodeValue::Bytes(info_hash.to_vec()));
+        args.insert(
+            b"info_hash".to_vec(),
+            BencodeValue::Bytes(info_hash.to_vec()),
+        );
         args.insert(b"port".to_vec(), BencodeValue::Int(5000));
-        args.insert(b"token".to_vec(), BencodeValue::Bytes(token.as_bytes().to_vec()));
+        args.insert(
+            b"token".to_vec(),
+            BencodeValue::Bytes(token.as_bytes().to_vec()),
+        );
 
         let query = DhtMessage::new_query(1111, "announce_peer", BencodeValue::Dict(args));
         let result = handler.handle_query(&query, from, &rt, &tt, &ps);
@@ -440,9 +486,15 @@ mod tests {
 
         let mut args = BTreeMap::new();
         args.insert(b"id".to_vec(), BencodeValue::Bytes(vec![0xBBu8; 20]));
-        args.insert(b"info_hash".to_vec(), BencodeValue::Bytes(info_hash.to_vec()));
+        args.insert(
+            b"info_hash".to_vec(),
+            BencodeValue::Bytes(info_hash.to_vec()),
+        );
         args.insert(b"port".to_vec(), BencodeValue::Int(5000));
-        args.insert(b"token".to_vec(), BencodeValue::Bytes(b"bad_token".to_vec()));
+        args.insert(
+            b"token".to_vec(),
+            BencodeValue::Bytes(b"bad_token".to_vec()),
+        );
 
         let query = DhtMessage::new_query(1111, "announce_peer", BencodeValue::Dict(args));
         let result = handler.handle_query(&query, from, &rt, &tt, &ps);

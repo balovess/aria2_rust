@@ -107,7 +107,8 @@ impl HttpResponseHead {
 
     /// Parse `Content-Length` header value as `u64`.
     pub fn content_length(&self) -> Option<u64> {
-        self.header("content-length").and_then(|v| v.parse::<u64>().ok())
+        self.header("content-length")
+            .and_then(|v| v.parse::<u64>().ok())
     }
 
     /// Check whether `Transfer-Encoding` header is present.
@@ -193,9 +194,7 @@ impl HttpHeaderProcessor {
 
             // Guard against unbounded buffer growth
             if self.buf.len() > MAX_HEADER_SIZE {
-                self.state = HttpHeaderParseState::Error(
-                    "Too large HTTP header block".to_string(),
-                );
+                self.state = HttpHeaderParseState::Error("Too large HTTP header block".to_string());
                 debug!(buf_len = self.buf.len(), "Header block exceeds size limit");
             }
         }
@@ -215,9 +214,7 @@ impl HttpHeaderProcessor {
     /// the header data is malformed.
     pub fn get_result(&self) -> Result<HttpResponseHead> {
         if !matches!(self.state, HttpHeaderParseState::Complete) {
-            return Err(Aria2Error::Parse(
-                "Headers not yet complete".to_string(),
-            ));
+            return Err(Aria2Error::Parse("Headers not yet complete".to_string()));
         }
 
         let header_str = std::str::from_utf8(&self.buf)
@@ -244,9 +241,7 @@ impl HttpHeaderProcessor {
 
     /// Find the `\r\n\r\n` terminator in the buffer.
     fn find_terminator(&self) -> Option<usize> {
-        self.buf
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
+        self.buf.windows(4).position(|w| w == b"\r\n\r\n")
     }
 
     /// Find the next `\r\n` in `data` starting from `from`.
@@ -260,18 +255,15 @@ impl HttpHeaderProcessor {
     /// Parse a complete header block into `HttpResponseHead`.
     fn parse_header_block(header_str: &str) -> Result<HttpResponseHead> {
         // Strip the trailing \r\n\r\n terminator
-        let header_str = header_str
-            .strip_suffix("\r\n\r\n")
-            .unwrap_or(header_str);
+        let header_str = header_str.strip_suffix("\r\n\r\n").unwrap_or(header_str);
 
         let mut lines = header_str.lines();
 
         // --- Status line ---
-        let status_line = lines.next().ok_or_else(|| {
-            Aria2Error::Parse("Empty HTTP response".to_string())
-        })?;
-        let (http_version, status_code, reason_phrase) =
-            Self::parse_status_line(status_line)?;
+        let status_line = lines
+            .next()
+            .ok_or_else(|| Aria2Error::Parse("Empty HTTP response".to_string()))?;
+        let (http_version, status_code, reason_phrase) = Self::parse_status_line(status_line)?;
 
         // --- Headers with obs-fold support ---
         let headers = Self::parse_headers(lines)?;
@@ -315,13 +307,13 @@ impl HttpHeaderProcessor {
             ));
         }
 
-        let code_str = parts.next().ok_or_else(|| {
-            Aria2Error::Parse("Bad Status-Line: missing status-code".to_string())
-        })?;
+        let code_str = parts
+            .next()
+            .ok_or_else(|| Aria2Error::Parse("Bad Status-Line: missing status-code".to_string()))?;
 
-        let status_code: u16 = code_str.parse().map_err(|_| {
-            Aria2Error::Parse("Bad status code: invalid status-code".to_string())
-        })?;
+        let status_code: u16 = code_str
+            .parse()
+            .map_err(|_| Aria2Error::Parse("Bad status code: invalid status-code".to_string()))?;
 
         if status_code < 100 {
             return Err(Aria2Error::Parse(
@@ -335,9 +327,7 @@ impl HttpHeaderProcessor {
     }
 
     /// Parse header lines with obs-fold continuation support.
-    fn parse_headers<'a, I: Iterator<Item = &'a str>>(
-        lines: I,
-    ) -> Result<Vec<(String, String)>> {
+    fn parse_headers<'a, I: Iterator<Item = &'a str>>(lines: I) -> Result<Vec<(String, String)>> {
         let mut headers: Vec<(String, String)> = Vec::new();
         let mut current_name: Option<String> = None;
         let mut current_value = String::new();

@@ -29,7 +29,10 @@ fn make_ps(
 #[test]
 fn test_validator_kind_none_is_finished() {
     let v = ValidatorKind::None;
-    assert!(v.is_finished(), "None variant should be finished (nothing to validate)");
+    assert!(
+        v.is_finished(),
+        "None variant should be finished (nothing to validate)"
+    );
 }
 
 #[test]
@@ -52,10 +55,11 @@ fn test_validator_kind_none_init_and_validate_noop() {
 fn test_validator_kind_piece_hash_dispatch() {
     let ctx = make_dctx(1_048_576, 5_242_880);
     let ps = make_ps(1_048_576, 5_242_880);
-    let v = ValidatorKind::PieceHash(
-        PieceHashValidator::new(ctx, ps, 5, 5_242_880, 1_048_576)
+    let v = ValidatorKind::PieceHash(PieceHashValidator::new(ctx, ps, 5, 5_242_880, 1_048_576));
+    assert!(
+        !v.is_finished(),
+        "PieceHash with 5 pieces should not be finished initially"
     );
-    assert!(!v.is_finished(), "PieceHash with 5 pieces should not be finished initially");
     assert_eq!(v.total_length(), 5_242_880);
     assert_eq!(v.current_offset(), 0);
 }
@@ -79,7 +83,10 @@ fn test_piece_hash_validator_zero_pieces_is_finished() {
     let ctx = make_dctx(1_048_576, 0);
     let ps = make_ps(1_048_576, 0);
     let v = PieceHashValidator::new(ctx, ps, 0, 0, 1_048_576);
-    assert!(v.is_finished(), "Zero pieces should be immediately finished");
+    assert!(
+        v.is_finished(),
+        "Zero pieces should be immediately finished"
+    );
 }
 
 #[test]
@@ -187,8 +194,14 @@ fn test_piece_hash_validator_collects_failed_results() {
     // All pieces should have failed (no disk adaptor)
     let results = v.validation_results();
     assert_eq!(results.len(), 2);
-    assert!(matches!(results[0], PieceValidationResult::Failed { piece_index: 0 }));
-    assert!(matches!(results[1], PieceValidationResult::Failed { piece_index: 1 }));
+    assert!(matches!(
+        results[0],
+        PieceValidationResult::Failed { piece_index: 0 }
+    ));
+    assert!(matches!(
+        results[1],
+        PieceValidationResult::Failed { piece_index: 1 }
+    ));
     assert_eq!(v.pieces_failed(), 2);
     assert_eq!(v.pieces_ok(), 0);
 }
@@ -214,9 +227,7 @@ fn test_piece_hash_validator_apply_results() {
 fn test_check_integrity_kind_stream() {
     let ctx = make_dctx(1024, 4096);
     let ps = make_ps(1024, 4096);
-    let entry = CheckIntegrityKind::Stream(
-        StreamCheckIntegrity::new(ctx, ps, false)
-    );
+    let entry = CheckIntegrityKind::Stream(StreamCheckIntegrity::new(ctx, ps, false));
     assert!(!entry.is_validation_ready()); // No piece hashes set
     assert!(entry.is_finished()); // No validator yet (None), so finished
     assert_eq!(entry.total_length(), 0);
@@ -228,9 +239,7 @@ fn test_check_integrity_kind_stream() {
 fn test_check_integrity_kind_bt() {
     let ctx = make_dctx(1024, 4096);
     let ps = make_ps(1024, 4096);
-    let entry = CheckIntegrityKind::Bt(
-        BtCheckIntegrity::new(ctx, ps)
-    );
+    let entry = CheckIntegrityKind::Bt(BtCheckIntegrity::new(ctx, ps));
     assert!(!entry.is_validation_ready()); // No piece hashes set
     assert!(entry.is_finished()); // No validator yet (None), so finished
     assert_eq!(entry.total_length(), 0);
@@ -242,9 +251,7 @@ fn test_check_integrity_kind_bt() {
 fn test_check_integrity_kind_init_and_validate_stream() {
     let ctx = make_dctx(1_048_576, 3_145_728);
     let ps = make_ps(1_048_576, 3_145_728);
-    let mut entry = CheckIntegrityKind::Stream(
-        StreamCheckIntegrity::new(ctx, ps, false)
-    );
+    let mut entry = CheckIntegrityKind::Stream(StreamCheckIntegrity::new(ctx, ps, false));
     entry.init_validator();
     // Without piece hashes, the validator won't be created,
     // so it remains finished (ValidatorKind::None).
@@ -255,9 +262,7 @@ fn test_check_integrity_kind_init_and_validate_stream() {
 fn test_check_integrity_kind_init_and_validate_bt() {
     let ctx = make_dctx(1_048_576, 2_097_152);
     let ps = make_ps(1_048_576, 2_097_152);
-    let mut entry = CheckIntegrityKind::Bt(
-        BtCheckIntegrity::new(ctx, ps)
-    );
+    let mut entry = CheckIntegrityKind::Bt(BtCheckIntegrity::new(ctx, ps));
     entry.init_validator();
     // Without piece hashes, the validator won't be created,
     // so it remains finished (ValidatorKind::None).
@@ -299,7 +304,12 @@ fn test_stream_check_integrity_validation_ready_with_hashes() {
     let mut ctx = crate::download::DownloadContext::new(1024, 4096, "/tmp/test.bin".to_string());
     ctx.set_piece_hashes(
         "sha-1".to_string(),
-        vec!["h1".to_string(), "h2".to_string(), "h3".to_string(), "h4".to_string()],
+        vec![
+            "h1".to_string(),
+            "h2".to_string(),
+            "h3".to_string(),
+            "h4".to_string(),
+        ],
     );
     let ctx = Arc::new(ctx);
     let ps = make_ps(1024, 4096);
@@ -321,10 +331,16 @@ fn test_stream_check_integrity_init_validator() {
 
 #[test]
 fn test_stream_check_integrity_init_validator_with_hashes() {
-    let mut ctx = crate::download::DownloadContext::new(1_048_576, 4_194_304, "/tmp/test.bin".to_string());
+    let mut ctx =
+        crate::download::DownloadContext::new(1_048_576, 4_194_304, "/tmp/test.bin".to_string());
     ctx.set_piece_hashes(
         "sha-1".to_string(),
-        vec!["h1".to_string(), "h2".to_string(), "h3".to_string(), "h4".to_string()],
+        vec![
+            "h1".to_string(),
+            "h2".to_string(),
+            "h3".to_string(),
+            "h4".to_string(),
+        ],
     );
     let ctx = Arc::new(ctx);
     let ps = make_ps(1_048_576, 4_194_304);
@@ -394,7 +410,8 @@ fn test_bt_check_integrity_new() {
 
 #[test]
 fn test_bt_check_integrity_init_validator() {
-    let mut ctx = crate::download::DownloadContext::new(1_048_576, 2_097_152, "/tmp/test.bin".to_string());
+    let mut ctx =
+        crate::download::DownloadContext::new(1_048_576, 2_097_152, "/tmp/test.bin".to_string());
     ctx.set_piece_hashes(
         "sha-1".to_string(),
         vec!["h1".to_string(), "h2".to_string()],
@@ -423,9 +440,7 @@ fn test_bt_check_integrity_on_download_handlers() {
 fn test_validator_kind_piece_hash_full_lifecycle() {
     let ctx = make_dctx(1_048_576, 2_097_152);
     let ps = make_ps(1_048_576, 2_097_152);
-    let mut v = ValidatorKind::PieceHash(
-        PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576)
-    );
+    let mut v = ValidatorKind::PieceHash(PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576));
 
     v.init();
     assert!(!v.is_finished());
@@ -447,9 +462,7 @@ fn test_validator_kind_piece_hash_full_lifecycle() {
 fn test_validator_kind_init_on_piece_hash() {
     let ctx = make_dctx(1_048_576, 3_145_728);
     let ps = make_ps(1_048_576, 3_145_728);
-    let mut v = ValidatorKind::PieceHash(
-        PieceHashValidator::new(ctx, ps, 3, 3_145_728, 1_048_576)
-    );
+    let mut v = ValidatorKind::PieceHash(PieceHashValidator::new(ctx, ps, 3, 3_145_728, 1_048_576));
     v.validate_chunk(); // advance to piece 1
     assert_eq!(v.current_offset(), 1_048_576);
 
@@ -462,9 +475,7 @@ fn test_validator_kind_init_on_piece_hash() {
 fn test_validator_kind_apply_validation_results() {
     let ctx = make_dctx(1_048_576, 2_097_152);
     let ps = make_ps(1_048_576, 2_097_152);
-    let mut v = ValidatorKind::PieceHash(
-        PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576)
-    );
+    let mut v = ValidatorKind::PieceHash(PieceHashValidator::new(ctx, ps, 2, 2_097_152, 1_048_576));
 
     v.validate_chunk();
     v.validate_chunk();

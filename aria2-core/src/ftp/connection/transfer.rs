@@ -134,7 +134,10 @@ impl FtpClient {
         remote_path: &str,
         offset: Option<u64>,
     ) -> Result<TcpStream> {
-        debug!("Preparing to download file: {} (offset: {:?})", remote_path, offset);
+        debug!(
+            "Preparing to download file: {} (offset: {:?})",
+            remote_path, offset
+        );
 
         // If there is an offset, send REST command first
         if let Some(off) = offset

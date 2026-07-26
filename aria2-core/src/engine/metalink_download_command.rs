@@ -72,8 +72,8 @@ impl MetalinkDownloadCommand {
     ) -> Result<Self> {
         let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
-            })?;
+            Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
+        })?;
 
         if doc.files.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -174,8 +174,8 @@ impl MetalinkDownloadCommand {
     ) -> Result<Vec<MetalinkFileInfo>> {
         let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
-            })?;
+            Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
+        })?;
 
         if doc.files.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -382,27 +382,34 @@ impl Command for MetalinkDownloadCommand {
                 hash_entry_owned = info.hash_entry.clone();
             }
             None => {
-            let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data, None)
+                let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(
+                    &self.metalink_data,
+                    None,
+                )
                 .map_err(|e| {
                     Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
                 })?;
 
-            let file = if doc.files.len() == 1 {
-                &doc.files[0]
-            } else {
-                // Multi-file Metalink in single-file mode: use first file
-                &doc.files[0]
-            };
+                let file = if doc.files.len() == 1 {
+                    &doc.files[0]
+                } else {
+                    // Multi-file Metalink in single-file mode: use first file
+                    &doc.files[0]
+                };
 
-            sorted_urls_owned = file.get_sorted_urls().iter().map(|u| (*u).clone()).collect();
-            expected_size = file.size;
-            hash_entry_owned = file.hashes.first().cloned();
+                sorted_urls_owned = file
+                    .get_sorted_urls()
+                    .iter()
+                    .map(|u| (*u).clone())
+                    .collect();
+                expected_size = file.size;
+                hash_entry_owned = file.hashes.first().cloned();
 
-            if sorted_urls_owned.is_empty() {
-                return Err(Aria2Error::Fatal(FatalError::Config(
-                    "No download mirrors available".into(),
-                )));
-            }
+                if sorted_urls_owned.is_empty() {
+                    return Err(Aria2Error::Fatal(FatalError::Config(
+                        "No download mirrors available".into(),
+                    )));
+                }
             }
         }
 
@@ -894,10 +901,7 @@ mod tests {
             try_mirrors_with_failover(&urls.iter().collect::<Vec<_>>(), &fallback_fn).await;
 
         assert!(result.is_ok());
-        assert_eq!(
-            attempt_count.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
+        assert_eq!(attempt_count.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(result.unwrap(), b"Success data");
     }
 
@@ -928,35 +932,35 @@ mod tests {
         let options = DownloadOptions::default();
         // Previously this would return "Metalink contains multiple files or no files"
         // Now it should succeed, picking the first file
-        let result = MetalinkDownloadCommand::new(
-            GroupId::new(1),
-            &make_multi_file_xml(),
-            &options,
-            None,
-        );
+        let result =
+            MetalinkDownloadCommand::new(GroupId::new(1), &make_multi_file_xml(), &options, None);
         assert!(result.is_ok(), "new() should accept multi-file Metalink");
     }
 
     #[test]
     fn test_create_multi_file_returns_all_files() {
         let options = DownloadOptions::default();
-        let commands = MetalinkDownloadCommand::create_multi_file(
-            &make_multi_file_xml(),
-            &options,
-            None,
-            100,
-        )
-        .unwrap();
+        let commands =
+            MetalinkDownloadCommand::create_multi_file(&make_multi_file_xml(), &options, None, 100)
+                .unwrap();
 
         assert_eq!(commands.len(), 2, "Should create 2 commands for 2 files");
         assert_eq!(commands[0].file_index, 0);
         assert_eq!(commands[1].file_index, 1);
         assert!(
-            commands[0].command.output_path.to_string_lossy().contains("first.bin"),
+            commands[0]
+                .command
+                .output_path
+                .to_string_lossy()
+                .contains("first.bin"),
             "First command should be for first.bin"
         );
         assert!(
-            commands[1].command.output_path.to_string_lossy().contains("second.bin"),
+            commands[1]
+                .command
+                .output_path
+                .to_string_lossy()
+                .contains("second.bin"),
             "Second command should be for second.bin"
         );
     }
@@ -964,13 +968,9 @@ mod tests {
     #[test]
     fn test_create_multi_file_assigns_incrementing_gids() {
         let options = DownloadOptions::default();
-        let commands = MetalinkDownloadCommand::create_multi_file(
-            &make_multi_file_xml(),
-            &options,
-            None,
-            200,
-        )
-        .unwrap();
+        let commands =
+            MetalinkDownloadCommand::create_multi_file(&make_multi_file_xml(), &options, None, 200)
+                .unwrap();
 
         let g0 = commands[0].command.group.read().unwrap();
         let g1 = commands[1].command.group.read().unwrap();
@@ -994,13 +994,8 @@ mod tests {
 </metalink>"#;
 
         let options = DownloadOptions::default();
-        let commands = MetalinkDownloadCommand::create_multi_file(
-            xml.as_bytes(),
-            &options,
-            None,
-            1,
-        )
-        .unwrap();
+        let commands =
+            MetalinkDownloadCommand::create_multi_file(xml.as_bytes(), &options, None, 1).unwrap();
 
         assert_eq!(commands.len(), 1, "Should skip file with no URLs");
         assert_eq!(commands[0].file_index, 0);
@@ -1017,6 +1012,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(commands[0].command.output_path().to_string_lossy().contains("first.bin"));
+        assert!(
+            commands[0]
+                .command
+                .output_path()
+                .to_string_lossy()
+                .contains("first.bin")
+        );
     }
 }

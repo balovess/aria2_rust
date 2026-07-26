@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::constants;
-use crate::engine::lpd_manager::{parse_lpd_announcement, LpdPeer};
+use crate::engine::lpd_manager::{LpdPeer, parse_lpd_announcement};
 
 // ===========================================================================
 // Constants

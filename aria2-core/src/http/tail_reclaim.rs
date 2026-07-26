@@ -144,7 +144,7 @@ impl TailReclaimConfig {
         // Use saturating_add to avoid overflow when diff == u64::MAX.
         let range_size = match range_end.checked_sub(range_start) {
             Some(diff) => diff.saturating_add(1), // inclusive range
-            None => return false,                  // range_end < range_start: invalid range
+            None => return false,                 // range_end < range_start: invalid range
         };
 
         // Bytes already consumed (received + in-flight).
@@ -228,7 +228,9 @@ impl TailReclaimResult {
     /// For a valid inclusive range `[tail_start, tail_end]`, the length is
     /// `tail_end - tail_start + 1`.
     pub fn length(&self) -> u64 {
-        self.tail_end.saturating_sub(self.tail_start).saturating_add(1)
+        self.tail_end
+            .saturating_sub(self.tail_start)
+            .saturating_add(1)
     }
 }
 
@@ -741,7 +743,9 @@ mod tests {
 
         // After 30 seconds with no progress — stalled.
         let at_timeout = now + Duration::from_secs(30);
-        assert!(tracker.check_stalled_at(Duration::from_secs(config.stall_timeout_secs), at_timeout));
+        assert!(
+            tracker.check_stalled_at(Duration::from_secs(config.stall_timeout_secs), at_timeout)
+        );
 
         // Calculate tail: 1024 received, 0 in flight → remaining = 3072 > 1024.
         let result = config.calculate_tail(range_start, range_end, 1024, 0);
@@ -801,7 +805,11 @@ mod tests {
         // Even though stalled, tail reclaim is disabled.
         let at_timeout = now + Duration::from_secs(30);
         assert!(tracker.check_stalled_at(Duration::from_secs(30), at_timeout));
-        assert!(config.calculate_tail(range_start, range_end, 1024, 0).is_none());
+        assert!(
+            config
+                .calculate_tail(range_start, range_end, 1024, 0)
+                .is_none()
+        );
     }
 
     #[test]

@@ -389,59 +389,35 @@ fn test_update_option_new_runtime_changeable() {
     let mut group = RequestGroup::new(gid, uris, DownloadOptions::default());
 
     // max-connection-per-server
-    assert!(
-        group
-            .update_option("max-connection-per-server", serde_json::json!(4))
-    );
+    assert!(group.update_option("max-connection-per-server", serde_json::json!(4)));
     assert_eq!(group.options().max_connection_per_server, Some(4));
 
     // bt-max-upload-slots
-    assert!(
-        group
-            .update_option("bt-max-upload-slots", serde_json::json!(8))
-    );
+    assert!(group.update_option("bt-max-upload-slots", serde_json::json!(8)));
     assert_eq!(group.options().bt_max_upload_slots, Some(8));
 
     // bt-snubbed-timeout
-    assert!(
-        group
-            .update_option("bt-snubbed-timeout", serde_json::json!(120))
-    );
+    assert!(group.update_option("bt-snubbed-timeout", serde_json::json!(120)));
     assert_eq!(group.options().bt_snubbed_timeout, Some(120));
 
     // bt-optimistic-unchoke-interval
-    assert!(
-        group
-            .update_option("bt-optimistic-unchoke-interval", serde_json::json!(45))
-    );
+    assert!(group.update_option("bt-optimistic-unchoke-interval", serde_json::json!(45)));
     assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
 
     // bt-endgame-threshold
-    assert!(
-        group
-            .update_option("bt-endgame-threshold", serde_json::json!(50))
-    );
+    assert!(group.update_option("bt-endgame-threshold", serde_json::json!(50)));
     assert_eq!(group.options().bt_endgame_threshold, 50);
 
     // seed-time
-    assert!(
-        group
-            .update_option("seed-time", serde_json::json!(3600))
-    );
+    assert!(group.update_option("seed-time", serde_json::json!(3600)));
     assert_eq!(group.options().seed_time, Some(3600.0));
 
     // seed-ratio
-    assert!(
-        group
-            .update_option("seed-ratio", serde_json::json!(2.0))
-    );
+    assert!(group.update_option("seed-ratio", serde_json::json!(2.0)));
     assert_eq!(group.options().seed_ratio, Some(2.0));
 
     // Unknown option returns false
-    assert!(
-        !group
-            .update_option("unknown-option", serde_json::json!(1))
-    );
+    assert!(!group.update_option("unknown-option", serde_json::json!(1)));
 }
 
 /// Verify that `is_removed()` correctly reflects the group's Removed

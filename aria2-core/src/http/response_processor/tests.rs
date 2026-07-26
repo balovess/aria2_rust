@@ -601,9 +601,7 @@ fn test_redirect_without_location_rejected() {
 fn test_206_chunked_accepted() {
     // When Transfer-Encoding is present, Content-Range is stripped by the
     // header processor per RFC 7230 §3.3.2. We accept the response.
-    let head = parse_head(
-        b"HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n\r\n",
-    );
+    let head = parse_head(b"HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n\r\n");
     let processor = HttpResponseProcessor::with_defaults();
     let result = processor.process(
         &head,

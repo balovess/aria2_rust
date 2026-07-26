@@ -210,13 +210,10 @@ mod tests {
         });
 
         // Accept one connection via the channel.
-        let accepted = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            rx.recv(),
-        )
-        .await
-        .expect("timeout waiting for accepted peer")
-        .expect("channel closed unexpectedly");
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout waiting for accepted peer")
+            .expect("channel closed unexpectedly");
 
         assert_eq!(
             accepted.addr.ip(),
@@ -226,11 +223,7 @@ mod tests {
 
         // Shut down the listener and wait for cleanup.
         let _ = shutdown_tx.send(());
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            listener_task,
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), listener_task).await;
         connect_task.await.unwrap();
     }
 }

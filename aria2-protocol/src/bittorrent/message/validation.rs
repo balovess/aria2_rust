@@ -26,10 +26,7 @@ pub const MAX_BLOCK_LENGTH: u32 = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BtMessageValidationError {
     /// Piece index exceeds the total number of pieces in the torrent.
-    IndexOutOfRange {
-        index: u32,
-        num_pieces: u32,
-    },
+    IndexOutOfRange { index: u32, num_pieces: u32 },
     /// `begin + length` exceeds the piece length for the given piece index.
     BlockOutOfRange {
         index: u32,
@@ -45,17 +42,18 @@ pub enum BtMessageValidationError {
     /// Received info-hash does not match the expected hash.
     InfoHashMismatch,
     /// Block length exceeds the configured maximum.
-    InvalidBlockLength {
-        length: u32,
-        max_block_length: u32,
-    },
+    InvalidBlockLength { length: u32, max_block_length: u32 },
 }
 
 impl fmt::Display for BtMessageValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IndexOutOfRange { index, num_pieces } => {
-                write!(f, "piece index {} out of range (num_pieces={})", index, num_pieces)
+                write!(
+                    f,
+                    "piece index {} out of range (num_pieces={})",
+                    index, num_pieces
+                )
             }
             Self::BlockOutOfRange {
                 index,
@@ -180,11 +178,9 @@ impl BtMessageValidator {
             BtMessage::Request { request } => {
                 self.validate_range(request.index, request.begin, request.length)
             }
-            BtMessage::Piece {
-                index,
-                begin,
-                data,
-            } => self.validate_piece(*index, *begin, data.len()),
+            BtMessage::Piece { index, begin, data } => {
+                self.validate_piece(*index, *begin, data.len())
+            }
             BtMessage::Cancel { request } => {
                 self.validate_range(request.index, request.begin, request.length)
             }
@@ -353,7 +349,10 @@ impl BtMessageValidator {
     /// Validate a Handshake message's info-hash.
     ///
     /// If no expected info-hash has been configured, validation always passes.
-    pub fn validate_handshake(&self, received_hash: &[u8; 20]) -> Result<(), BtMessageValidationError> {
+    pub fn validate_handshake(
+        &self,
+        received_hash: &[u8; 20],
+    ) -> Result<(), BtMessageValidationError> {
         if let Some(expected) = self.expected_info_hash {
             if received_hash != &expected {
                 return Err(BtMessageValidationError::InfoHashMismatch);
@@ -440,7 +439,10 @@ mod tests {
         let v = validator_1k();
         // begin + length overflows u32
         let err = v.validate_range(0, u32::MAX - 1, 3).unwrap_err();
-        assert!(matches!(err, BtMessageValidationError::BlockOutOfRange { .. }));
+        assert!(matches!(
+            err,
+            BtMessageValidationError::BlockOutOfRange { .. }
+        ));
     }
 
     #[test]
@@ -468,14 +470,20 @@ mod tests {
     fn invalid_piece_message_bad_index() {
         let v = validator_1k();
         let err = v.validate_piece(2000, 0, 1024).unwrap_err();
-        assert!(matches!(err, BtMessageValidationError::IndexOutOfRange { .. }));
+        assert!(matches!(
+            err,
+            BtMessageValidationError::IndexOutOfRange { .. }
+        ));
     }
 
     #[test]
     fn invalid_piece_message_block_out_of_range() {
         let v = validator_1k();
         let err = v.validate_piece(0, 262140, 16).unwrap_err();
-        assert!(matches!(err, BtMessageValidationError::BlockOutOfRange { .. }));
+        assert!(matches!(
+            err,
+            BtMessageValidationError::BlockOutOfRange { .. }
+        ));
     }
 
     // -- validate_bitfield -------------------------------------------------
@@ -581,9 +589,13 @@ mod tests {
     #[test]
     fn validate_dispatches_bitfield() {
         let v = validator_1k();
-        let msg = BtMessage::Bitfield { data: vec![0u8; 125] };
+        let msg = BtMessage::Bitfield {
+            data: vec![0u8; 125],
+        };
         assert!(v.validate(&msg).is_ok());
-        let bad = BtMessage::Bitfield { data: vec![0u8; 10] };
+        let bad = BtMessage::Bitfield {
+            data: vec![0u8; 10],
+        };
         assert!(v.validate(&bad).is_err());
     }
 

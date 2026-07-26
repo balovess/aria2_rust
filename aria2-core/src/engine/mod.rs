@@ -26,15 +26,13 @@ pub mod timer;
 
 // ── BitTorrent feature-gated modules ──────────────────────────────────
 #[cfg(feature = "bittorrent")]
-pub mod bt_choke_manager;
-#[cfg(feature = "bittorrent")]
 pub mod bt_choke_hooks;
+#[cfg(feature = "bittorrent")]
+pub mod bt_choke_manager;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_choke_manager_tests;
 #[cfg(feature = "bittorrent")]
 pub mod bt_connection_pool;
-#[cfg(feature = "bittorrent")]
-pub mod bt_registry;
 #[cfg(feature = "bittorrent")]
 pub mod bt_download_command;
 #[cfg(all(test, feature = "bittorrent"))]
@@ -46,11 +44,11 @@ pub mod bt_download_seeding;
 #[cfg(feature = "bittorrent")]
 pub mod bt_message_dispatcher;
 #[cfg(feature = "bittorrent")]
-pub mod bt_message_receiver;
-#[cfg(feature = "bittorrent")]
 pub mod bt_message_handler;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_message_handler_tests;
+#[cfg(feature = "bittorrent")]
+pub mod bt_message_receiver;
 #[cfg(feature = "bittorrent")]
 pub mod bt_mse_handshake;
 #[cfg(all(test, feature = "bittorrent"))]
@@ -60,13 +58,11 @@ pub mod bt_peer_blocklist;
 #[cfg(feature = "bittorrent")]
 pub mod bt_peer_connection;
 #[cfg(feature = "bittorrent")]
-pub mod bt_peer_storage;
-#[cfg(feature = "bittorrent")]
 pub mod bt_peer_interaction;
 #[cfg(feature = "bittorrent")]
-pub mod bt_piece_downloader;
+pub mod bt_peer_storage;
 #[cfg(feature = "bittorrent")]
-pub mod bt_request_factory;
+pub mod bt_piece_downloader;
 #[cfg(feature = "bittorrent")]
 pub mod bt_piece_selector;
 #[cfg(feature = "bittorrent")]
@@ -75,6 +71,10 @@ pub mod bt_post_download_handler;
 pub mod bt_progress_info_file;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_progress_info_file_tests;
+#[cfg(feature = "bittorrent")]
+pub mod bt_registry;
+#[cfg(feature = "bittorrent")]
+pub mod bt_request_factory;
 #[cfg(feature = "bittorrent")]
 pub mod bt_runtime;
 #[cfg(feature = "bittorrent")]
@@ -86,13 +86,13 @@ pub mod bt_upload_session;
 #[cfg(feature = "bittorrent")]
 pub mod bt_web_seed;
 #[cfg(feature = "bittorrent")]
+pub mod extension_registry;
+#[cfg(feature = "bittorrent")]
 pub mod lpd_manager;
 #[cfg(feature = "bittorrent")]
 pub mod lpd_receive_loop;
 #[cfg(feature = "bittorrent")]
 pub mod magnet_download_command;
-#[cfg(feature = "bittorrent")]
-pub mod extension_registry;
 #[cfg(feature = "bittorrent")]
 pub mod metadata_exchange;
 #[cfg(feature = "bittorrent")]

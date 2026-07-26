@@ -93,7 +93,10 @@ impl ResourceType {
     /// Mirrors C++ `MetalinkEntry::dropUnsupportedResource()` — only
     /// HTTP, HTTPS, FTP, and BitTorrent are kept; the rest are dropped.
     pub fn is_supported(&self) -> bool {
-        matches!(self, Self::Ftp | Self::Http | Self::Https | Self::BitTorrent)
+        matches!(
+            self,
+            Self::Ftp | Self::Http | Self::Https | Self::BitTorrent
+        )
     }
 
     /// Whether this is a non-P2P resource type (HTTP, HTTPS, FTP).
@@ -174,12 +177,30 @@ mod tests {
 
     #[test]
     fn test_resource_type_from_url() {
-        assert_eq!(ResourceType::from_url("http://example.com/file"), ResourceType::Http);
-        assert_eq!(ResourceType::from_url("https://example.com/file"), ResourceType::Https);
-        assert_eq!(ResourceType::from_url("ftp://example.com/file"), ResourceType::Ftp);
-        assert_eq!(ResourceType::from_url("magnet:?xt=urn:btih:abc"), ResourceType::BitTorrent);
-        assert_eq!(ResourceType::from_url("file.torrent"), ResourceType::BitTorrent);
-        assert_eq!(ResourceType::from_url("unknown://host"), ResourceType::Unknown);
+        assert_eq!(
+            ResourceType::from_url("http://example.com/file"),
+            ResourceType::Http
+        );
+        assert_eq!(
+            ResourceType::from_url("https://example.com/file"),
+            ResourceType::Https
+        );
+        assert_eq!(
+            ResourceType::from_url("ftp://example.com/file"),
+            ResourceType::Ftp
+        );
+        assert_eq!(
+            ResourceType::from_url("magnet:?xt=urn:btih:abc"),
+            ResourceType::BitTorrent
+        );
+        assert_eq!(
+            ResourceType::from_url("file.torrent"),
+            ResourceType::BitTorrent
+        );
+        assert_eq!(
+            ResourceType::from_url("unknown://host"),
+            ResourceType::Unknown
+        );
     }
 
     #[test]
@@ -187,8 +208,14 @@ mod tests {
         assert_eq!(ResourceType::from_v3_type("http"), ResourceType::Http);
         assert_eq!(ResourceType::from_v3_type("HTTPS"), ResourceType::Https);
         assert_eq!(ResourceType::from_v3_type("ftp"), ResourceType::Ftp);
-        assert_eq!(ResourceType::from_v3_type("bittorrent"), ResourceType::BitTorrent);
-        assert_eq!(ResourceType::from_v3_type("unknown"), ResourceType::NotSupported);
+        assert_eq!(
+            ResourceType::from_v3_type("bittorrent"),
+            ResourceType::BitTorrent
+        );
+        assert_eq!(
+            ResourceType::from_v3_type("unknown"),
+            ResourceType::NotSupported
+        );
     }
 
     #[test]

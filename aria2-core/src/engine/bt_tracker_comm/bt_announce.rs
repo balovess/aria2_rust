@@ -181,10 +181,9 @@ impl BtAnnounce {
             // we change the event to STARTED_AFTER_COMPLETION to prevent sending
             // a "completed" event later (which would be incorrect since we
             // already had all pieces when we started).
-            if self.download_complete
-                && self.announce_list.get_event() == AnnounceEvent::Started
-            {
-                self.announce_list.set_event(AnnounceEvent::StartedAfterCompletion);
+            if self.download_complete && self.announce_list.get_event() == AnnounceEvent::Started {
+                self.announce_list
+                    .set_event(AnnounceEvent::StartedAfterCompletion);
             }
         } else {
             return false;

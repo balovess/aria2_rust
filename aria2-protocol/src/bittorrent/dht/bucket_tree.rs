@@ -33,9 +33,7 @@ pub enum BucketTreeNode {
         max_id: [u8; 20],
     },
     /// Leaf node holding a bucket.
-    Leaf {
-        bucket: Bucket,
-    },
+    Leaf { bucket: Bucket },
 }
 
 impl BucketTreeNode {
@@ -219,7 +217,10 @@ pub fn find_tree_node_for<'a>(root: &'a BucketTreeNode, key: &[u8; 20]) -> &'a B
 }
 
 /// Find the mutable leaf tree node whose bucket range contains `key`.
-pub fn find_tree_node_for_mut<'a>(root: &'a mut BucketTreeNode, key: &[u8; 20]) -> &'a mut BucketTreeNode {
+pub fn find_tree_node_for_mut<'a>(
+    root: &'a mut BucketTreeNode,
+    key: &[u8; 20],
+) -> &'a mut BucketTreeNode {
     match root {
         BucketTreeNode::Leaf { .. } => root,
         BucketTreeNode::Internal { .. } => {
@@ -311,9 +312,7 @@ pub fn enumerate_buckets<'a>(root: &'a BucketTreeNode, buckets: &mut Vec<&'a Buc
 pub fn count_buckets(root: &BucketTreeNode) -> usize {
     match root {
         BucketTreeNode::Leaf { .. } => 1,
-        BucketTreeNode::Internal { left, right, .. } => {
-            count_buckets(left) + count_buckets(right)
-        }
+        BucketTreeNode::Internal { left, right, .. } => count_buckets(left) + count_buckets(right),
     }
 }
 

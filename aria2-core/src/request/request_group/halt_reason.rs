@@ -168,9 +168,7 @@ impl DownloadControlFlags {
 
     /// Check whether any control flag is set (for quick early-exit checks).
     pub fn any_requested(&self) -> bool {
-        self.is_halt_requested()
-            || self.is_pause_requested()
-            || self.is_restart_requested()
+        self.is_halt_requested() || self.is_pause_requested() || self.is_restart_requested()
     }
 }
 

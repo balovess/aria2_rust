@@ -18,18 +18,18 @@
 //! ~2 minutes if no other message has been sent. The connection is
 //! considered dead after ~3 minutes of inactivity.
 
-mod types;
-mod utp_connection;
-mod session_resource;
 mod peer_conn;
+mod session_resource;
 #[cfg(test)]
 mod tests;
+mod types;
+mod utp_connection;
 
 // Public re-exports — preserve the original API surface.
+pub use peer_conn::BtPeerConn;
+pub use session_resource::PeerSessionResource;
 pub use types::{ConnectionType, SendBuffer};
 pub use utp_connection::UtpPeerConnection;
-pub use session_resource::PeerSessionResource;
-pub use peer_conn::BtPeerConn;
 
 // crate-visible re-export: InnerConnection was pub(crate) in the original file.
 pub(crate) use peer_conn::InnerConnection;

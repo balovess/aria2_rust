@@ -1,162 +1,141 @@
+﻿//! Adaptive URI selector matching C++ aria2's `AdaptiveURISelector`.
+//!
+//! This selector returns one of the best mirrors for first and reserved
+//! connections. For supplementary ones, it returns mirrors that have not
+//! been tested yet, and if all have been tested, returns mirrors that
+//! need to be tested again. Otherwise, it does not return more mirrors.
+//!
+//! # Algorithm (from C++)
+//!
+//! 1. At least 3 mirrors must be tested before choosing the best.
+//! 2. For supplementary connections (nbServerToEvaluate > 0):
+//!    - Prefer untested mirrors
+//!    - Then mirrors that haven't been tested recently (exponential backoff)
+//!    - Then the best mirror by speed
+//! 3. `getBestMirror()` selects from a 25% speed range with random tie-breaking.
+//! 4. `adjustLowestSpeedLimit()` lowers the speed limit when max speed is unknown.
+//!
+//! # C++ Reference
+//!
+//! Based on `AdaptiveURISelector.h/.cc` from both aria2_original and aria2-next.
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::selector::server_stat::ServerStat;
+use rand::Rng;
+use tracing::trace;
+
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
 
-// =========================================================================
-// Source Scoring Functions (consolidated from source_scorer.rs)
-// =========================================================================
+// ---------------------------------------------------------------------------
+// Constants (matching C++ aria2)
+// ---------------------------------------------------------------------------
 
-/// Score a source server using EMA-averaged speed from ServerStat.
-///
-/// Lower score = better source. `f64::MAX` indicates a dead source.
-pub fn score_source(stat: &ServerStat) -> f64 {
-    let avg_speed = stat.get_avg_speed() as f64;
-    let failure_count = stat.get_consecutive_failures();
-    let last_success_age = calculate_last_success_age(stat);
+/// Maximum timeout for retry with increased timeout (60 seconds).
+/// From C++: `constexpr auto MAX_TIMEOUT = 60_s;`
+const MAX_TIMEOUT_SECS: u64 = 60;
 
-    if avg_speed <= 0.0 && failure_count > 0 {
-        return f64::MAX;
-    }
+/// Floor value for lowest speed limit when max speed is unknown.
+/// From C++: `int low_lowest = 4_k;` (4096 bytes/sec)
+const LOW_LOWEST_SPEED_LIMIT: u64 = 4096;
 
-    let speed_score = if avg_speed > 0.0 {
-        -avg_speed.ln_1p()
-    } else {
-        0.0
-    };
+/// Minimum number of tested servers before selecting best mirror.
+/// From C++: `if (getNbTestedServers(uris) < 3)`
+const MIN_TESTED_SERVERS: usize = 3;
 
-    let penalty = (failure_count as f64) * 100.0;
-    let age_bonus = (last_success_age as f64 / 60.0).min(10.0);
+/// Maximum counter value for exponential backoff retest.
+/// From C++: `if (counter > 8) continue;`
+const MAX_RETEST_COUNTER: u32 = 8;
 
-    speed_score + penalty - age_bonus
-}
+/// Speed range percentage for best mirror selection.
+/// From C++: `int min = max - (int)(max * 0.25);`
+const BEST_MIRROR_RANGE_PCT: f64 = 0.25;
 
-/// Score a source using raw parameters (convenience function).
-pub fn score_source_raw(avg_speed_bps: f64, failure_count: u32, last_success_age_secs: u64) -> f64 {
-    if avg_speed_bps <= 0.0 && failure_count > 0 {
-        return f64::MAX;
-    }
-
-    let speed_score = if avg_speed_bps > 0.0 {
-        -avg_speed_bps.ln_1p()
-    } else {
-        0.0
-    };
-
-    let penalty = (failure_count as f64) * 100.0;
-    let age_bonus = (last_success_age_secs as f64 / 60.0).min(10.0);
-
-    speed_score + penalty - age_bonus
-}
-
-/// Calculate seconds since last successful update.
-fn calculate_last_success_age(stat: &ServerStat) -> u64 {
-    let last_updated = stat.get_last_updated();
-    if last_updated == 0 {
-        return 0;
-    }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    now.saturating_sub(last_updated)
-}
-
-/// Compare two sources and return the better one.
-pub fn is_better_source(stat_a: &ServerStat, stat_b: &ServerStat) -> bool {
-    score_source(stat_a) < score_source(stat_b)
-}
-
-/// Sort a list of ServerStat references by score (best first).
-pub fn sort_by_score(stats: &mut [&ServerStat]) {
-    stats.sort_by(|a, b| {
-        let score_a = score_source(a);
-        let score_b = score_source(b);
-        score_a
-            .partial_cmp(&score_b)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-}
+// ---------------------------------------------------------------------------
+// URI parsing helpers
+// ---------------------------------------------------------------------------
 
 fn extract_host(uri: &str) -> Option<String> {
     crate::selector::feedback_uri_selector::extract_host_and_protocol(uri).map(|(h, _)| h)
 }
 
-/// Extract both host and protocol from a URI string.
-///
-/// This is a thin wrapper around [`feedback_uri_selector::extract_host_and_protocol`].
 fn extract_host_and_protocol(uri: &str) -> Option<(String, String)> {
     crate::selector::feedback_uri_selector::extract_host_and_protocol(uri)
 }
 
+/// Extract (index, host, protocol) triples from URI list.
+fn extract_hosts(uris: &[String]) -> Vec<(usize, String, String)> {
+    uris.iter()
+        .enumerate()
+        .filter_map(|(i, u)| extract_host_and_protocol(u).map(|(h, p)| (i, h, p)))
+        .collect()
+}
+
+/// Get ServerStat for a URI via (host, protocol) lookup.
+#[allow(dead_code)]
+fn get_server_stats(
+    stat_man: &ServerStatMan,
+    uri: &str,
+) -> Option<Arc<crate::selector::server_stat::ServerStat>> {
+    let (host, protocol) = extract_host_and_protocol(uri)?;
+    stat_man.find_stat_by_protocol(&host, &protocol)
+}
+
+/// Get the max speed for a URI: max(single_avg, multi_avg).
+/// Matches C++ `getUriMaxSpeed()`.
+#[allow(dead_code)]
+fn get_uri_max_speed(stat_man: &ServerStatMan, uri: &str) -> u64 {
+    get_server_stats(stat_man, uri)
+        .map(|s| s.get_single_avg_speed().max(s.get_multi_avg_speed()))
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// AdaptiveUriSelector
+// ---------------------------------------------------------------------------
+
 pub struct AdaptiveUriSelector {
     stat_man: Arc<ServerStatMan>,
     uris: Vec<String>,
-    nb_server_toevaluate: AtomicI32,
+    nb_server_to_evaluate: AtomicI32,
     nb_connections: AtomicI32,
+    /// Current timeout for retry-with-increased-timeout logic.
+    timeout_secs: AtomicUsize,
 }
 
 impl AdaptiveUriSelector {
+    /// Create a new selector with default counters.
     pub fn new(stat_man: Arc<ServerStatMan>) -> Self {
         Self {
             stat_man,
             uris: Vec::new(),
-            nb_server_toevaluate: AtomicI32::new(
+            nb_server_to_evaluate: AtomicI32::new(
                 crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32,
             ),
             nb_connections: AtomicI32::new(crate::constants::DEFAULT_NB_CONNECTIONS as i32),
+            timeout_secs: AtomicUsize::new(0),
         }
     }
 
-    /// Create an AdaptiveUriSelector with a known list of URIs.
-    ///
-    /// This constructor stores the URI list internally, enabling
-    /// `report_failure` and `report_success` to work correctly
-    /// by looking up hosts from URI indices.
-    ///
-    /// # Arguments
-    ///
-    /// * `stat_man` - Shared server statistics manager
-    /// * `uris` - List of candidate URIs (mirrors)
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use aria2_core::selector::server_stat_man::ServerStatMan;
-    /// use aria2_core::selector::adaptive_uri_selector::AdaptiveUriSelector;
-    ///
-    /// let stat_man = Arc::new(ServerStatMan::new());
-    /// let uris = vec![
-    ///     "http://mirror1.com/file".to_string(),
-    ///     "http://mirror2.com/file".to_string(),
-    /// ];
-    /// let selector = AdaptiveUriSelector::new_with_uris(stat_man, uris);
-    /// ```
+    /// Create with a known URI list (for report_success/report_failure).
     pub fn new_with_uris(stat_man: Arc<ServerStatMan>, uris: Vec<String>) -> Self {
         Self {
             stat_man,
             uris,
-            nb_server_toevaluate: AtomicI32::new(
+            nb_server_to_evaluate: AtomicI32::new(
                 crate::constants::DEFAULT_NB_SERVER_TO_EVALUATE as i32,
             ),
             nb_connections: AtomicI32::new(crate::constants::DEFAULT_NB_CONNECTIONS as i32),
+            timeout_secs: AtomicUsize::new(0),
         }
     }
 
-    /// Set the URI list after construction.
-    ///
-    /// This is useful when the URI list is not known at construction time.
     pub fn set_uris(&mut self, uris: Vec<String>) {
         self.uris = uris;
     }
 
-    /// Get the stored URI list.
     pub fn get_uris(&self) -> &[String] {
         &self.uris
     }
@@ -166,217 +145,300 @@ impl AdaptiveUriSelector {
     }
 
     pub fn set_nb_evaluate(&self, n: i32) {
-        self.nb_server_toevaluate.store(n, Ordering::Relaxed);
+        self.nb_server_to_evaluate.store(n, Ordering::Relaxed);
     }
 
-    fn extract_hosts(&self, uris: &[String]) -> Vec<(usize, String, String)> {
-        uris.iter()
-            .enumerate()
-            .filter_map(|(i, u)| {
-                extract_host_and_protocol(u).map(|(h, p)| (i, h, p))
-            })
-            .collect()
-    }
-
-    fn get_first_not_tested<'a>(
-        &self,
-        hosts: &'a [(usize, String, String)],
-    ) -> Option<&'a (usize, String, String)> {
-        hosts.iter().find(|(_, host, protocol)| {
-            self.stat_man
-                .find_stat_by_protocol(host, protocol)
-                .is_none_or(|s| s.get_counter() == 0)
-        })
-    }
-
-    fn get_first_to_test<'a>(
-        &self,
-        hosts: &'a [(usize, String, String)],
-        max_test: i32,
-    ) -> Option<&'a (usize, String, String)> {
-        let tested_count = self.get_nb_tested_servers(hosts);
-        if tested_count < max_test as usize {
-            self.get_first_not_tested(hosts)
-        } else {
-            None
-        }
-    }
-
-    fn get_best_mirror(
-        &self,
-        hosts: &[(usize, String, String)],
-        used_hosts: &[(usize, String)],
-    ) -> Option<usize> {
-        let mut candidates: Vec<(usize, u64)> = hosts
-            .iter()
-            .filter_map(|(idx, host, protocol)| {
-                let stat = self.stat_man.find_stat_by_protocol(host, protocol)?;
-                if !stat.is_ok() {
-                    return None;
-                }
-                Some((*idx, stat.get_avg_speed()))
-            })
-            .collect();
-
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
-
-        let used_set: std::collections::HashSet<&str> =
-            used_hosts.iter().map(|(_, h)| h.as_str()).collect();
-
-        for (idx, _) in &candidates {
-            let host = &hosts[*idx].1;
-            if !used_set.contains(host.as_str()) {
-                return Some(*idx);
-            }
-        }
-
-        candidates.first().map(|(idx, _)| *idx)
-    }
-
-    fn select_one(&self, uris: &[String], used_hosts: &[(usize, String)]) -> Option<usize> {
-        if uris.is_empty() {
-            return None;
-        }
-        if uris.len() == 1 {
-            return Some(0);
-        }
-
-        let hosts = self.extract_hosts(uris);
-        if hosts.is_empty() {
-            return Some(0);
-        }
-
-        let max_eval = self.nb_server_toevaluate.load(Ordering::Relaxed);
-
-        if let Some(selected) = self.get_first_to_test(&hosts, max_eval) {
-            let idx = selected.0;
-            if let Some(stat) = self.stat_man.find_stat_by_protocol(&selected.1, &selected.2) {
-                stat.increment_counter();
-            }
-            return Some(idx);
-        }
-
-        self.get_best_mirror(&hosts, used_hosts)
-    }
-
-    fn get_nb_tested_servers(&self, hosts: &[(usize, String, String)]) -> usize {
-        hosts
-            .iter()
-            .filter(|(_, host, protocol)| {
-                self.stat_man
-                    .find_stat_by_protocol(host, protocol)
-                    .is_some_and(|s| s.get_counter() > 0)
-            })
-            .count()
-    }
-
-    pub fn adjust_lowest_speed_limit(&self, uris: &[String]) -> u64 {
-        let hosts = self.extract_hosts(uris);
-        let speeds: Vec<u64> = hosts
-            .iter()
-            .filter_map(|(_, host, protocol)| {
-                self.stat_man
-                    .find_stat_by_protocol(host, protocol)
-                    .map(|s| s.get_avg_speed())
-            })
-            .collect();
-
-        if speeds.is_empty() {
-            return 0;
-        }
-        let max = *speeds.iter().max().unwrap_or(&0u64);
-        if max == 0 {
-            return 0;
-        }
-        (max as f64 * 0.3) as u64
-    }
-
-    pub fn reset_counters(&self) {
-        for stat in self.stat_man.get_all_stats() {
-            stat.reset_counter();
-        }
+    /// Set the initial timeout (from RequestGroup option).
+    pub fn set_timeout_secs(&self, secs: usize) {
+        self.timeout_secs.store(secs, Ordering::Relaxed);
     }
 
     pub fn stat_man(&self) -> &Arc<ServerStatMan> {
         &self.stat_man
     }
 
+    // ====================================================================
+    // Core selection algorithm (matching C++ AdaptiveURISelector::selectOne)
+    // ====================================================================
+
+    /// Select one URI using the adaptive algorithm.
+    ///
+    /// Matches C++ `AdaptiveURISelector::selectOne()`.
+    fn select_one(&self, uris: &[String], used_hosts: &[(usize, String)]) -> Option<usize> {
+        if uris.is_empty() {
+            return None;
+        }
+
+        let nb_conn = self.nb_connections.fetch_add(1, Ordering::Relaxed);
+
+        // Single URI shortcut
+        if uris.len() == 1 {
+            return Some(0);
+        }
+
+        let hosts = extract_hosts(uris);
+        if hosts.is_empty() {
+            return Some(0);
+        }
+
+        // At least MIN_TESTED_SERVERS (3) mirrors must be tested
+        let nb_tested = self.get_nb_tested_servers(&hosts);
+        if nb_tested < MIN_TESTED_SERVERS {
+            if let Some(idx) = self.get_first_not_tested(&hosts) {
+                trace!(idx, "AdaptiveURISelector: choosing first non-tested mirror");
+                self.nb_server_to_evaluate.fetch_sub(1, Ordering::Relaxed);
+                return Some(idx);
+            }
+        }
+
+        // Check if we should evaluate servers or select best
+        let nb_eval = self.nb_server_to_evaluate.load(Ordering::Relaxed);
+        if nb_eval > 0 && nb_conn > 1 {
+            self.nb_server_to_evaluate.fetch_sub(1, Ordering::Relaxed);
+
+            // Prefer untested mirror
+            if let Some(idx) = self.get_first_not_tested(&hosts) {
+                trace!(
+                    idx,
+                    nb_conn, "AdaptiveURISelector: choosing non-tested mirror"
+                );
+                return Some(idx);
+            }
+
+            // Then mirror that hasn't been tested recently (exponential backoff)
+            if let Some(idx) = self.get_first_to_test_uri(&hosts) {
+                trace!(idx, nb_conn, "AdaptiveURISelector: choosing re-test mirror");
+                return Some(idx);
+            }
+
+            // Fall back to best mirror
+            return self.get_best_mirror(&hosts, used_hosts);
+        }
+
+        // Select best mirror
+        self.get_best_mirror(&hosts, used_hosts)
+    }
+
+    // ====================================================================
+    // Helper methods (matching C++ AdaptiveURISelector private methods)
+    // ====================================================================
+
+    /// Find the first URI with no ServerStat entry (untested mirror).
+    /// Matches C++ `getFirstNotTestedUri()`.
+    fn get_first_not_tested(&self, hosts: &[(usize, String, String)]) -> Option<usize> {
+        for (idx, host, protocol) in hosts {
+            if self
+                .stat_man
+                .find_stat_by_protocol(host, protocol)
+                .is_none()
+            {
+                return Some(*idx);
+            }
+        }
+        None
+    }
+
+    /// Find the first URI that should be retested.
+    ///
+    /// Matches C++ `getFirstToTestUri()`. Uses exponential backoff:
+    /// retest if not tested since `2^counter` days. Counter capped at 8.
+    fn get_first_to_test_uri(&self, hosts: &[(usize, String, String)]) -> Option<usize> {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for (idx, host, protocol) in hosts {
+            let stat = match self.stat_man.find_stat_by_protocol(host, protocol) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let counter = stat.get_counter();
+            if counter > MAX_RETEST_COUNTER {
+                continue;
+            }
+
+            // Retest if not tested since 2^counter days
+            let retest_hours = 1u64.checked_shl(counter).unwrap_or(u64::MAX) * 24;
+            let last_updated = stat.get_last_updated();
+            if last_updated > 0 && now_secs.saturating_sub(last_updated) > retest_hours * 3600 {
+                return Some(*idx);
+            }
+        }
+        None
+    }
+
+    /// Count the number of tested servers (those with a ServerStat entry).
+    /// Matches C++ `getNbTestedServers()`.
+    fn get_nb_tested_servers(&self, hosts: &[(usize, String, String)]) -> usize {
+        hosts
+            .iter()
+            .filter(|(_, host, protocol)| {
+                self.stat_man
+                    .find_stat_by_protocol(host, protocol)
+                    .is_some()
+            })
+            .count()
+    }
+
+    /// Select the best mirror, using a 25% speed range with random tie-breaking.
+    ///
+    /// Matches C++ `getBestMirror()`.
+    fn get_best_mirror(
+        &self,
+        hosts: &[(usize, String, String)],
+        used_hosts: &[(usize, String)],
+    ) -> Option<usize> {
+        let max_speed = self.get_max_download_speed(hosts);
+        let min_speed = (max_speed as f64 * (1.0 - BEST_MIRROR_RANGE_PCT)) as u64;
+        let mut bests = self.get_uris_by_speed(hosts, min_speed);
+
+        // Filter out used hosts
+        let used_set: std::collections::HashSet<&str> =
+            used_hosts.iter().map(|(_, h)| h.as_str()).collect();
+        bests.retain(|idx| {
+            hosts
+                .get(*idx)
+                .map_or(false, |(_, h, _)| !used_set.contains(h.as_str()))
+        });
+
+        if bests.is_empty() {
+            bests = self.get_uris_by_speed(hosts, 0);
+        }
+
+        if bests.len() < 2 {
+            self.get_max_download_speed_uri(hosts)
+        } else {
+            let idx = self.select_random_uri(&bests);
+            Some(idx)
+        }
+    }
+
+    /// Get the maximum download speed across all URIs.
+    fn get_max_download_speed(&self, hosts: &[(usize, String, String)]) -> u64 {
+        hosts.iter().fold(0u64, |max, (_, host, protocol)| {
+            if let Some(stat) = self.stat_man.find_stat_by_protocol(host, protocol) {
+                let speed = stat.get_single_avg_speed().max(stat.get_multi_avg_speed());
+                max.max(speed)
+            } else {
+                max
+            }
+        })
+    }
+
+    /// Get the URI index with the maximum download speed.
+    fn get_max_download_speed_uri(&self, hosts: &[(usize, String, String)]) -> Option<usize> {
+        let mut max_speed: i64 = -1;
+        let mut best_idx: Option<usize> = None;
+
+        for (idx, host, protocol) in hosts {
+            if let Some(stat) = self.stat_man.find_stat_by_protocol(host, protocol) {
+                let single = stat.get_single_avg_speed() as i64;
+                let multi = stat.get_multi_avg_speed() as i64;
+                if single > max_speed {
+                    max_speed = single;
+                    best_idx = Some(*idx);
+                }
+                if multi > max_speed {
+                    max_speed = multi;
+                    best_idx = Some(*idx);
+                }
+            }
+        }
+        best_idx
+    }
+
+    /// Get URIs with speed above the given minimum.
+    fn get_uris_by_speed(&self, hosts: &[(usize, String, String)], min: u64) -> Vec<usize> {
+        hosts
+            .iter()
+            .filter_map(|(idx, host, protocol)| {
+                let stat = self.stat_man.find_stat_by_protocol(host, protocol)?;
+                if stat.get_single_avg_speed() > min || stat.get_multi_avg_speed() > min {
+                    Some(*idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Randomly select a URI index from a list.
+    fn select_random_uri(&self, indices: &[usize]) -> usize {
+        let mut rng = rand::thread_rng();
+        let pos = rng.gen_range(0..indices.len());
+        indices[pos]
+    }
+
+    /// Adjust lowest speed limit based on known max download speed.
+    ///
+    /// Returns the adjusted limit or 0 if no adjustment is needed.
+    pub fn adjust_lowest_speed_limit(&self, uris: &[String], lowest_limit: u64) -> u64 {
+        if lowest_limit == 0 {
+            return 0;
+        }
+
+        let hosts = extract_hosts(uris);
+        let max = self.get_max_download_speed(&hosts);
+
+        if max > 0 && lowest_limit > max / 4 {
+            max / 4
+        } else if max == 0 && lowest_limit > LOW_LOWEST_SPEED_LIMIT {
+            LOW_LOWEST_SPEED_LIMIT
+        } else {
+            0
+        }
+    }
+
+    /// Try to retry failed URIs with increased timeout.
+    ///
+    /// Returns timeouted URIs that should be added back, if any.
+    pub fn may_retry_with_increased_timeout(&self) -> Option<Vec<String>> {
+        let current = self.timeout_secs.load(Ordering::Relaxed) as u64;
+        let new_timeout = current * 2;
+        if new_timeout >= MAX_TIMEOUT_SECS {
+            return None;
+        }
+        self.timeout_secs
+            .store(new_timeout as usize, Ordering::Relaxed);
+        Some(Vec::new())
+    }
+
+    pub fn reset_counters(&self) {
+        self.nb_connections.store(1, Ordering::Relaxed);
+        for stat in self.stat_man.get_all_stats() {
+            stat.reset_counter();
+        }
+    }
+
+    // ====================================================================
+    // Report success/failure
+    // ====================================================================
+
     /// Report a successful download from a specific URI.
-    ///
-    /// This updates the server statistics with the measured download speed,
-    /// which affects future mirror selection decisions.
-    ///
-    /// # Arguments
-    ///
-    /// * `uri_idx` - Index of the URI in the stored URI list
-    /// * `speed` - Measured download speed in bytes per second
-    /// * `is_multi` - Whether this was a multi-connection download
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use aria2_core::selector::server_stat_man::ServerStatMan;
-    /// use aria2_core::selector::adaptive_uri_selector::AdaptiveUriSelector;
-    ///
-    /// let stat_man = Arc::new(ServerStatMan::new());
-    /// let uris = vec!["http://fast.mirror.com/file".to_string()];
-    /// let selector = AdaptiveUriSelector::new_with_uris(stat_man, uris);
-    ///
-    /// // Report 1 MB/s download speed
-    /// selector.report_success(0, 1_000_000, false);
-    /// ```
     pub fn report_success(&self, uri_idx: usize, speed: u64, is_multi: bool) {
         if let Some(uri) = self.uris.get(uri_idx)
             && let Some(host) = extract_host(uri)
         {
             self.stat_man.update(&host, speed, is_multi);
-            // Reset failure count on success
             if let Some(stat) = self.stat_man.find_stat(&host) {
-                // Success resets the error status
                 stat.reset_status();
             }
         }
     }
 
-    /// Report a failed download attempt from a specific URI.
-    ///
-    /// This marks the server as failed in the statistics manager,
-    /// which will affect future mirror selection (the server may be
-    /// temporarily deprioritized or disabled depending on failure count).
-    ///
-    /// # Arguments
-    ///
-    /// * `uri_idx` - Index of the URI in the stored URI list
-    /// * `error_code` - HTTP error code (e.g., 500, 503) or 0 for network errors
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    /// use aria2_core::selector::server_stat_man::ServerStatMan;
-    /// use aria2_core::selector::adaptive_uri_selector::AdaptiveUriSelector;
-    ///
-    /// let stat_man = Arc::new(ServerStatMan::new());
-    /// let uris = vec!["http://failing.mirror.com/file".to_string()];
-    /// let selector = AdaptiveUriSelector::new_with_uris(stat_man, uris);
-    ///
-    /// // Report HTTP 503 error
-    /// selector.report_failure_with_code(0, 503);
-    /// ```
+    /// Report a failed download with error code.
     pub fn report_failure_with_code(&self, uri_idx: usize, error_code: u16) {
         if let Some(uri) = self.uris.get(uri_idx)
             && let Some(host) = extract_host(uri)
         {
-            // Ensure stat exists before marking failure
             self.stat_man.get_or_create(&host);
             self.stat_man.mark_failure(&host, error_code);
         }
     }
 
-    /// Report a failed download attempt with default error code (500).
-    ///
-    /// This is a convenience method that calls `report_failure_with_code(uri_idx, 500)`.
+    /// Report failure with default error code (500).
     pub fn report_failure_default(&self, uri_idx: usize) {
         self.report_failure_with_code(uri_idx, 500);
     }
@@ -388,7 +450,7 @@ impl UriSelector for AdaptiveUriSelector {
     }
 
     fn tune_command(&self, uris: &[String], _speed: u64) {
-        let limit = self.adjust_lowest_speed_limit(uris);
+        let limit = self.adjust_lowest_speed_limit(uris, 0);
         if limit > 0 {
             tracing::debug!("AdaptiveURISelector tuning lowest-speed-limit to {}", limit);
         }
@@ -406,442 +468,7 @@ impl UriSelector for AdaptiveUriSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selector::server_stat_man::ServerStatMan;
 
-    fn create_selector() -> AdaptiveUriSelector {
-        AdaptiveUriSelector::new(Arc::new(ServerStatMan::new()))
-    }
-
-    #[test]
-    fn test_select_empty_uris() {
-        let sel = create_selector();
-        assert!(sel.select(&[], &[]).is_none());
-    }
-
-    #[test]
-    fn test_select_single_uri() {
-        let sel = create_selector();
-        let uris = vec!["http://example.com/file".to_string()];
-        assert_eq!(sel.select(&uris, &[]), Some(0));
-    }
-
-    #[test]
-    fn test_select_prefers_untested() {
-        let sel = create_selector();
-        let uris = vec![
-            "http://fast.com/a".to_string(),
-            "http://slow.com/b".to_string(),
-        ];
-
-        sel.stat_man.update_with_protocol("slow.com", "http", 10000, false);
-
-        let result = sel.select(&uris, &[]);
-        assert_eq!(result, Some(0));
-    }
-
-    #[test]
-    fn test_select_picks_fastest_when_all_tested() {
-        let sel = create_selector();
-        let uris = vec![
-            "http://slow.com/a".to_string(),
-            "http://fast.com/b".to_string(),
-        ];
-
-        sel.stat_man.update_with_protocol("slow.com", "http", 100, false);
-        sel.stat_man.update_with_protocol("fast.com", "http", 10000, false);
-
-        let s1 = sel.stat_man.find_stat_by_protocol("slow.com", "http").unwrap();
-        s1.increment_counter();
-        let s2 = sel.stat_man.find_stat_by_protocol("fast.com", "http").unwrap();
-        s2.increment_counter();
-
-        let result = sel.select(&uris, &[]);
-        assert_eq!(result, Some(1));
-    }
-
-    #[test]
-    fn test_select_skips_error_servers() {
-        let sel = create_selector();
-        let uris = vec![
-            "http://error.com/a".to_string(),
-            "http://ok.com/b".to_string(),
-        ];
-
-        sel.stat_man.update_with_protocol("error.com", "http", 99999, false);
-        sel.stat_man.update_with_protocol("ok.com", "http", 5000, false);
-        let err_stat = sel.stat_man.find_stat_by_protocol("error.com", "http").unwrap();
-        err_stat.set_error();
-        err_stat.increment_counter();
-        let ok_stat = sel.stat_man.find_stat_by_protocol("ok.com", "http").unwrap();
-        ok_stat.increment_counter();
-
-        let result = sel.select(&uris, &[]);
-        assert_eq!(result, Some(1));
-    }
-
-    #[test]
-    fn test_select_avoids_used_hosts() {
-        let sel = create_selector();
-        let uris = vec![
-            "http://used.com/a".to_string(),
-            "http://free.com/b".to_string(),
-        ];
-
-        sel.stat_man.update_with_protocol("used.com", "http", 8000, false);
-        sel.stat_man.update_with_protocol("free.com", "http", 6000, false);
-        let su = sel.stat_man.find_stat_by_protocol("used.com", "http").unwrap();
-        su.increment_counter();
-        let sf = sel.stat_man.find_stat_by_protocol("free.com", "http").unwrap();
-        sf.increment_counter();
-
-        let used = vec![(0, "used.com".to_string())];
-        let result = sel.select(&uris, &used);
-        assert_eq!(result, Some(1));
-    }
-
-    #[test]
-    fn test_select_falls_back_to_used_if_no_alternative() {
-        let sel = create_selector();
-        let uris = vec!["http://only.com/a".to_string()];
-
-        sel.stat_man.update_with_protocol("only.com", "http", 5000, false);
-        let s = sel.stat_man.find_stat_by_protocol("only.com", "http").unwrap();
-        s.increment_counter();
-
-        let used = vec![(0, "only.com".to_string())];
-        let result = sel.select(&uris, &used);
-        assert_eq!(result, Some(0));
-    }
-
-    #[test]
-    fn test_nb_evaluate_limits_testing() {
-        let sel = create_selector();
-        sel.set_nb_evaluate(1);
-
-        let uris = vec![
-            "http://a.com/1".to_string(),
-            "http://b.com/2".to_string(),
-            "http://c.com/3".to_string(),
-        ];
-
-        let r1 = sel.select(&uris, &[]).unwrap();
-        assert_eq!(r1, 0, "First select picks first untested host");
-
-        sel.stat_man.update_with_protocol("a.com", "http", 100, false);
-        sel.stat_man.update_with_protocol("b.com", "http", 10000, false);
-        let sb = sel.stat_man.find_stat_by_protocol("b.com", "http").unwrap();
-        sb.increment_counter();
-
-        let _r2 = sel.select(&uris, &[]).unwrap();
-
-        assert!(
-            sel.stat_man.find_stat_by_protocol("a.com", "http").is_some() || sel.stat_man.find_stat_by_protocol("b.com", "http").is_some(),
-            "Stats should be created for tested hosts"
-        );
-    }
-
-    #[test]
-    fn test_extract_host() {
-        assert_eq!(
-            extract_host("http://example.com/path"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(
-            extract_host("https://host:8080/file?q=1"),
-            Some("host:8080".to_string())
-        );
-        assert_eq!(
-            extract_host("ftp://server.com"),
-            Some("server.com".to_string())
-        );
-        assert!(extract_host("not-a-uri").is_none());
-        assert!(extract_host("").is_none());
-    }
-
-    #[test]
-    fn test_adjust_lowest_speed_limit() {
-        let sel = create_selector();
-        let uris = vec![
-            "http://fast.com/f".to_string(),
-            "http://slow.com/s".to_string(),
-        ];
-        for _ in 0..20 {
-            sel.stat_man.update_with_protocol("fast.com", "http", 10000, false);
-        }
-        sel.stat_man.update_with_protocol("slow.com", "http", 2000, false);
-
-        let limit = sel.adjust_lowest_speed_limit(&uris);
-        assert!(limit > 0);
-        let expected = (10000_f64 * 0.3) as u64;
-        assert!(
-            (limit as i64 - expected as i64).abs() <= 1,
-            "limit={} expected={}",
-            limit,
-            expected
-        );
-    }
-
-    #[test]
-    fn test_adjust_zero_when_no_stats() {
-        let sel = create_selector();
-        let uris = vec!["http://unknown.com/x".to_string()];
-        assert_eq!(sel.adjust_lowest_speed_limit(&uris), 0);
-    }
-
-    #[test]
-    fn test_reset_counters() {
-        let sel = create_selector();
-        sel.stat_man.update_with_protocol("test.com", "http", 5000, false);
-        let s = sel.stat_man.find_stat_by_protocol("test.com", "http").unwrap();
-        s.increment_counter();
-        s.increment_counter();
-        assert_eq!(s.get_counter(), 2);
-
-        sel.reset_counters();
-        assert_eq!(s.get_counter(), 0);
-    }
-
-    #[test]
-    fn test_tune_command_no_panic() {
-        let sel = create_selector();
-        let uris = vec!["http://example.com/file".to_string()];
-        sel.tune_command(&uris, 12345);
-    }
-
-    #[test]
-    fn test_get_best_mirror_with_all_same_speed() {
-        let sel = create_selector();
-        let uris = vec![
-            "http://a.com/1".to_string(),
-            "http://b.com/2".to_string(),
-            "http://c.com/3".to_string(),
-        ];
-
-        for host in &["a.com", "b.com", "c.com"] {
-            sel.stat_man.update_with_protocol(host, "http", 5000, false);
-            let s = sel.stat_man.find_stat_by_protocol(host, "http").unwrap();
-            s.increment_counter();
-        }
-
-        let result = sel.select(&uris, &[]);
-        assert!(result.is_some());
-        assert!(result.unwrap() < 3);
-    }
-
-    #[test]
-    fn test_stat_man_accessor() {
-        let man = Arc::new(ServerStatMan::new());
-        let sel = AdaptiveUriSelector::new(Arc::clone(&man));
-        assert_eq!(sel.stat_man().count(), 0);
-    }
-
-    // ======================================================================
-    // Tests for report_failure
-    // ======================================================================
-
-    #[test]
-    fn test_adaptive_report_failure() {
-        let man = Arc::new(ServerStatMan::new());
-        let _sel = AdaptiveUriSelector::new(Arc::clone(&man));
-
-        // Create a stat for the host
-        man.get_or_create("failing.server");
-
-        // Report failure via ServerStatMan (direct API) 3 times to trigger cooldown
-        man.mark_failure("failing.server", 500);
-        man.mark_failure("failing.server", 500);
-        man.mark_failure("failing.server", 500);
-
-        let stat = man.find_stat("failing.server").unwrap();
-        assert!(
-            !stat.is_available(),
-            "Server should be unavailable after 3 failures"
-        );
-    }
-
-    #[test]
-    fn test_report_failure_invalid_uri() {
-        let man = Arc::new(ServerStatMan::new());
-        let mut sel = AdaptiveUriSelector::new(Arc::clone(&man));
-
-        // Should not panic on any index value
-        sel.report_failure(999);
-        sel.report_failure(0);
-
-        assert_eq!(
-            man.count(),
-            0,
-            "No stats should be created for invalid indices"
-        );
-    }
-
-    #[test]
-    fn test_server_availability_cooldown() {
-        let man = ServerStatMan::new();
-        man.get_or_create("cooldown.test");
-
-        // Mark as failed 3 times
-        for _ in 0..3 {
-            man.mark_failure("cooldown.test", 500);
-        }
-
-        let stat = man.find_stat("cooldown.test").unwrap();
-        assert!(
-            !stat.is_available(),
-            "Server should be unavailable after 3 consecutive failures"
-        );
-
-        // Simulate time passing (more than 60 seconds) by setting a past timestamp
-        // Note: We need to clone, modify, and re-insert because ServerStat is behind Arc
-        let mut updated = (*stat).clone();
-        updated.last_error_time =
-            Some(std::time::SystemTime::now() - std::time::Duration::from_secs(61));
-        // Re-insert the modified stat
-        {
-            // Access internal map through mark_failure pattern
-            man.mark_failure("cooldown.test", 500); // This will create a new version
-        }
-        // For testing purposes, we'll just verify the logic is correct conceptually
-        // The actual cooldown expiration would happen naturally over time
-        assert!(
-            !stat.is_available(), // Still unavailable because we can't modify Arc directly in test
-            "Server should be unavailable (test limitation)"
-        );
-
-        // Verify cooldown logic works with a fresh stat
-        let mut test_stat = crate::selector::server_stat::ServerStat::new("test");
-        test_stat.consecutive_failures = 5;
-        test_stat.last_error_time =
-            Some(std::time::SystemTime::now() - std::time::Duration::from_secs(61));
-        assert!(
-            test_stat.is_available(),
-            "Server should become available after cooldown expires"
-        );
-    }
-
-    // ======================================================================
-    // Tests for new_with_uris and report_success/report_failure_with_code
-    // ======================================================================
-
-    #[test]
-    fn test_new_with_uris() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec![
-            "http://mirror1.com/file".to_string(),
-            "http://mirror2.com/file".to_string(),
-        ];
-        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris.clone());
-
-        assert_eq!(sel.get_uris().len(), 2);
-        assert_eq!(sel.get_uris()[0], "http://mirror1.com/file");
-    }
-
-    #[test]
-    fn test_report_success_updates_speed() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec!["http://fast.mirror.com/file".to_string()];
-        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
-
-        // Report success with 1 MB/s speed
-        sel.report_success(0, 1_000_000, false);
-
-        let stat = man.find_stat("fast.mirror.com").unwrap();
-        assert!(stat.get_download_speed() > 0);
-        assert!(stat.get_single_avg_speed() > 0);
-    }
-
-    #[test]
-    fn test_report_success_multi_connection() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec!["http://multi.mirror.com/file".to_string()];
-        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
-
-        // Report success with multi-connection flag
-        sel.report_success(0, 2_000_000, true);
-
-        let stat = man.find_stat("multi.mirror.com").unwrap();
-        assert!(stat.get_multi_avg_speed() > 0);
-    }
-
-    #[test]
-    fn test_report_failure_with_code() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec!["http://failing.mirror.com/file".to_string()];
-        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
-
-        // Report failure with HTTP 503
-        sel.report_failure_with_code(0, 503);
-
-        let stat = man.find_stat("failing.mirror.com").unwrap();
-        assert_eq!(stat.get_consecutive_failures(), 1);
-        assert_eq!(stat.get_last_error_code(), 503);
-    }
-
-    #[test]
-    fn test_report_failure_default_code() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec!["http://error.mirror.com/file".to_string()];
-        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
-
-        sel.report_failure_default(0);
-
-        let stat = man.find_stat("error.mirror.com").unwrap();
-        assert_eq!(stat.get_last_error_code(), 500);
-    }
-
-    #[test]
-    fn test_report_failure_via_trait() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec!["http://trait.mirror.com/file".to_string()];
-        let mut sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
-
-        // Call via trait method
-        sel.report_failure(0);
-
-        let stat = man.find_stat("trait.mirror.com").unwrap();
-        assert_eq!(stat.get_consecutive_failures(), 1);
-    }
-
-    #[test]
-    fn test_report_success_resets_error_status() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec!["http://recovering.mirror.com/file".to_string()];
-        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
-
-        // First report failure
-        sel.report_failure_with_code(0, 500);
-        let stat = man.find_stat("recovering.mirror.com").unwrap();
-        stat.set_error();
-        assert!(!stat.is_ok());
-
-        // Then report success
-        sel.report_success(0, 1_000_000, false);
-        assert!(stat.is_ok(), "Success should reset error status");
-    }
-
-    #[test]
-    fn test_set_uris_after_construction() {
-        let man = Arc::new(ServerStatMan::new());
-        let mut sel = AdaptiveUriSelector::new(Arc::clone(&man));
-
-        assert!(sel.get_uris().is_empty());
-
-        let uris = vec!["http://late.mirror.com/file".to_string()];
-        sel.set_uris(uris);
-
-        assert_eq!(sel.get_uris().len(), 1);
-    }
-
-    #[test]
-    fn test_report_failure_out_of_bounds() {
-        let man = Arc::new(ServerStatMan::new());
-        let uris = vec!["http://only.mirror.com/file".to_string()];
-        let sel = AdaptiveUriSelector::new_with_uris(Arc::clone(&man), uris);
-
-        // Index out of bounds should not panic
-        sel.report_failure_with_code(999, 500);
-        sel.report_success(999, 1000, false);
-
-        // Only one stat should exist
-        assert_eq!(man.count(), 0);
-    }
+    include!("adaptive_uri_selector_tests.rs");
 }

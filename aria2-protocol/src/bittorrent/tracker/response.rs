@@ -105,7 +105,10 @@ impl TrackerResponse {
 
     fn parse_compact_peers(data: &[u8]) -> Result<Vec<PeerInfo>, String> {
         if !data.len().is_multiple_of(6) {
-            return Err(format!("Compact peers data length ({}) is not a multiple of 6", data.len()));
+            return Err(format!(
+                "Compact peers data length ({}) is not a multiple of 6",
+                data.len()
+            ));
         }
 
         let mut peers = Vec::new();

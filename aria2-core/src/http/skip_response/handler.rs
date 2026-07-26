@@ -231,7 +231,10 @@ impl HttpSkipResponseHandler {
 
         // Resolve relative URLs against the current URL
         let target_url = current_url.join(location).map_err(|e| {
-            Aria2Error::Parse(format!("Failed to resolve redirect URL '{}': {}", location, e))
+            Aria2Error::Parse(format!(
+                "Failed to resolve redirect URL '{}': {}",
+                location, e
+            ))
         })?;
 
         // Determine redirect type and method change rules per RFC 7231
@@ -296,13 +299,10 @@ impl HttpSkipResponseHandler {
                 // Retry-After, matching aria2-next behavior for "Payload Too
                 // Large" with backoff. Without Retry-After, this is fatal.
                 if response.header("Retry-After").is_some() {
-                    tracing::info!(
-                        "413 Request Entity Too Large with Retry-After, will retry"
-                    );
+                    tracing::info!("413 Request Entity Too Large with Retry-After, will retry");
                     SkipResponseResult::RetryableError {
                         status_code: status,
-                        message: "Request entity too large, retrying after backoff"
-                            .to_string(),
+                        message: "Request entity too large, retrying after backoff".to_string(),
                     }
                 } else {
                     SkipResponseResult::FatalError {
@@ -355,10 +355,7 @@ impl HttpSkipResponseHandler {
                 match scheme {
                     Some(AuthScheme::Digest) => {
                         let digest = DigestAuthChallenge::parse(value).ok();
-                        let realm = digest
-                            .as_ref()
-                            .map(|d| d.realm.clone())
-                            .unwrap_or_default();
+                        let realm = digest.as_ref().map(|d| d.realm.clone()).unwrap_or_default();
                         SkipResponseResult::AuthChallenge(HttpAuthChallenge {
                             scheme: AuthScheme::Digest,
                             realm,
@@ -377,11 +374,7 @@ impl HttpSkipResponseHandler {
                         })
                     }
                     None => {
-                        tracing::warn!(
-                            "Unknown auth scheme in {} header: {}",
-                            header_name,
-                            value
-                        );
+                        tracing::warn!("Unknown auth scheme in {} header: {}", header_name, value);
                         SkipResponseResult::FatalError {
                             status_code: if is_proxy { 407 } else { 401 },
                             message: "Authentication failed: unknown scheme".to_string(),

@@ -155,7 +155,13 @@ impl UtpPacket {
     }
 
     /// Create a DATA packet
-    pub fn data(connection_id: u16, seq_nr: u16, ack_nr: u16, wnd_size: u32, payload: Vec<u8>) -> Self {
+    pub fn data(
+        connection_id: u16,
+        seq_nr: u16,
+        ack_nr: u16,
+        wnd_size: u32,
+        payload: Vec<u8>,
+    ) -> Self {
         let mut packet = Self::new(PacketType::StData);
         packet.connection_id = connection_id;
         packet.seq_nr = seq_nr;

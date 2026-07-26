@@ -1,4 +1,4 @@
-﻿//! GZip format decompressor with true streaming support
+//! GZip format decompressor with true streaming support
 //!
 //! GZip (RFC 1952) data decompressor implemented using the flate2 library.
 //! Supports true streaming/incremental decompression: data can be fed in
@@ -67,7 +67,9 @@ impl Default for GZipDecoder {
 impl StreamFilter for GZipDecoder {
     fn filter(&mut self, input: &[u8]) -> Result<Vec<u8>> {
         if self.finished {
-            return Err(Aria2Error::Parse("GZip decoder already finished".to_string()));
+            return Err(Aria2Error::Parse(
+                "GZip decoder already finished".to_string(),
+            ));
         }
         if input.is_empty() {
             self.bytes_processed = 0;
@@ -192,7 +194,10 @@ impl GZipDecoder {
             }
             Err(e) => {
                 self.input_buffer = all_data;
-                Err(Aria2Error::Io(format!("Deflate decompression failed: {}", e)))
+                Err(Aria2Error::Io(format!(
+                    "Deflate decompression failed: {}",
+                    e
+                )))
             }
         }
     }
@@ -201,8 +206,8 @@ impl GZipDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::{GzEncoder, ZlibEncoder, DeflateEncoder};
     use flate2::Compression;
+    use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
     use std::io::Write;
 
     #[test]

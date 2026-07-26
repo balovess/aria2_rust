@@ -21,13 +21,13 @@
 //!   - Supports both HTTP/FTP and BitTorrent downloads
 //! ```
 
-mod types;
-mod persistence;
-mod ext_trait;
 mod ext_impl;
+mod ext_trait;
+mod persistence;
 #[cfg(test)]
 mod tests;
+mod types;
 
 // Public re-exports — preserve the same API as the original single-file module
-pub use types::{ChecksumInfo, MirrorRestoreInfo, RestoreState, ResumeData, UriState};
 pub use ext_trait::ResumeDataExt;
+pub use types::{ChecksumInfo, MirrorRestoreInfo, RestoreState, ResumeData, UriState};

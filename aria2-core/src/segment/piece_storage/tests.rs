@@ -1,7 +1,7 @@
 //! Tests for the piece_storage module.
 
-use super::*;
 use super::super::bitfield_util;
+use super::*;
 
 #[test]
 fn test_bitfield_man_new() {
@@ -506,10 +506,10 @@ fn test_add_not_filter() {
     // addNotFilter selects everything EXCEPT the specified range
     bfman.add_not_filter(1024, 1024); // exclude piece 1
     bfman.enable_filter();
-    assert!(bfman.is_filter_bit_set(0));  // before range -> selected
+    assert!(bfman.is_filter_bit_set(0)); // before range -> selected
     assert!(!bfman.is_filter_bit_set(1)); // in range -> NOT selected
-    assert!(bfman.is_filter_bit_set(2));  // after range -> selected
-    assert!(bfman.is_filter_bit_set(3));  // after range -> selected
+    assert!(bfman.is_filter_bit_set(2)); // after range -> selected
+    assert!(bfman.is_filter_bit_set(3)); // after range -> selected
 }
 
 #[test]

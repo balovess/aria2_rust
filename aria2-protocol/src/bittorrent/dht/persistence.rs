@@ -144,7 +144,10 @@ impl DhtPersistence {
         } else if data[..8] == header_v2[..] {
             2
         } else {
-            return Err(format!("dht.dat invalid magic/version: {:02x?}", &data[..8]));
+            return Err(format!(
+                "dht.dat invalid magic/version: {:02x?}",
+                &data[..8]
+            ));
         };
 
         let mut offset = 8;

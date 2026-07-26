@@ -19,7 +19,9 @@ pub mod types;
 pub use bzip2::BZip2Decoder;
 pub use chunked::ChunkedDecoder;
 pub use deflate::DeflateDecoder;
-pub use filter::{detect_encoding_from_magic_bytes, flush_filters, process_filters, AutoFilterSelector};
+pub use filter::{
+    AutoFilterSelector, detect_encoding_from_magic_bytes, flush_filters, process_filters,
+};
 pub use gzip::GZipDecoder;
 pub use null_sink::NullSinkFilter;
 pub use types::StreamFilter;

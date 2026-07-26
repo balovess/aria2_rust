@@ -86,7 +86,8 @@ impl HttpWriteBuffer {
         let len = data.len();
         if len > 0 {
             self.total_remaining += len;
-            self.entries.push_back(BufferEntry::String { data, offset: 0 });
+            self.entries
+                .push_back(BufferEntry::String { data, offset: 0 });
         }
     }
 
@@ -95,7 +96,8 @@ impl HttpWriteBuffer {
         let len = data.len();
         if len > 0 {
             self.total_remaining += len;
-            self.entries.push_back(BufferEntry::Bytes { data, offset: 0 });
+            self.entries
+                .push_back(BufferEntry::Bytes { data, offset: 0 });
         }
     }
 

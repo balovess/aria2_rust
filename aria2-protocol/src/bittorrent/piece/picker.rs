@@ -192,7 +192,10 @@ impl PiecePicker {
     /// Panics if `index` is out of range in debug builds.
     pub fn mark_completed(&mut self, index: u32) {
         let i = index as usize;
-        debug_assert!(i < self.num_pieces as usize, "mark_completed: index out of range");
+        debug_assert!(
+            i < self.num_pieces as usize,
+            "mark_completed: index out of range"
+        );
         if i < self.num_pieces as usize {
             self.completed[i] = true;
         }
@@ -310,7 +313,10 @@ mod tests {
 
     #[test]
     fn test_piece_pick_strategy_variants() {
-        assert_ne!(PiecePickStrategy::Sequential, PiecePickStrategy::RarestFirst);
+        assert_ne!(
+            PiecePickStrategy::Sequential,
+            PiecePickStrategy::RarestFirst
+        );
         assert_ne!(PiecePickStrategy::Random, PiecePickStrategy::Geometric);
     }
 

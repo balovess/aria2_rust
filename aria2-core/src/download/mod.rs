@@ -8,4 +8,6 @@ pub mod download_context;
 pub mod file_entry;
 pub mod request;
 
-pub use download_context::{BtFileMode, ContextAttributeType, DownloadContext, NetStat, Signature, TorrentAttribute};
+pub use download_context::{
+    BtFileMode, ContextAttributeType, DownloadContext, NetStat, Signature, TorrentAttribute,
+};

@@ -6,12 +6,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::constants;
-use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::engine::command::ProgressUpdate;
+use crate::error::{Aria2Error, RecoverableError, Result};
 // Re-export score_source for convenience
-pub use crate::selector::adaptive_uri_selector::{
-    score_source_raw as score_source, score_source_raw,
-};
+pub use crate::selector::source_scorer::{score_source_raw as score_source, score_source_raw};
 
 /// A chunk of data to be written to disk at a specific offset.
 pub struct WriteChunk {
@@ -454,8 +452,7 @@ impl HttpSegmentDownloader {
 
             // Report per-chunk progress if a progress channel is provided
             if let Some(ref tx) = progress_tx {
-                if total_written - last_reported_progress
-                    >= constants::PROGRESS_UPDATE_BYTES as u64
+                if total_written - last_reported_progress >= constants::PROGRESS_UPDATE_BYTES as u64
                 {
                     let update = ProgressUpdate {
                         completed_bytes: offset + total_written,

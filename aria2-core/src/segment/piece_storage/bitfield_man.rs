@@ -162,7 +162,9 @@ impl BitfieldMan {
     /// Returns true if there are missing pieces that are not in-use.
     pub fn has_missing_piece(&self) -> bool {
         for i in 0..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i) && !test_bit(&self.use_bitfield, self.num_pieces, i) {
+            if !test_bit(&self.bitfield, self.num_pieces, i)
+                && !test_bit(&self.use_bitfield, self.num_pieces, i)
+            {
                 return true;
             }
         }
@@ -172,7 +174,9 @@ impl BitfieldMan {
     /// Returns the index of the first missing unused piece.
     pub fn get_missing_piece_index(&self) -> Option<usize> {
         for i in 0..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i) && !test_bit(&self.use_bitfield, self.num_pieces, i) {
+            if !test_bit(&self.bitfield, self.num_pieces, i)
+                && !test_bit(&self.use_bitfield, self.num_pieces, i)
+            {
                 return Some(i);
             }
         }
@@ -184,10 +188,7 @@ impl BitfieldMan {
     ///
     /// A piece is "ignored" if the corresponding bit is SET in `ignore_bitfield`.
     /// Pieces whose bit is set in the ignore bitfield are skipped.
-    pub fn get_missing_piece_index_with_ignore(
-        &self,
-        ignore_bitfield: &[u8],
-    ) -> Option<usize> {
+    pub fn get_missing_piece_index_with_ignore(&self, ignore_bitfield: &[u8]) -> Option<usize> {
         for i in 0..self.num_pieces {
             if !test_bit(&self.bitfield, self.num_pieces, i)
                 && !test_bit(&self.use_bitfield, self.num_pieces, i)
@@ -343,10 +344,7 @@ impl BitfieldMan {
         if self.num_pieces == 0 || length == 0 {
             return;
         }
-        let start_index = std::cmp::min(
-            (offset / self.piece_length) as usize,
-            self.num_pieces,
-        );
+        let start_index = std::cmp::min((offset / self.piece_length) as usize, self.num_pieces);
         let end_index = std::cmp::min(
             ((offset + length - 1) / self.piece_length) as usize,
             self.num_pieces - 1,
@@ -976,10 +974,7 @@ impl BitfieldMan {
 
         while (start as usize) + offset_index < self.num_pieces {
             // Search within [start+offset, end+offset) for a missing unused piece
-            let range_end = std::cmp::min(
-                self.num_pieces,
-                (end as usize) + offset_index,
-            );
+            let range_end = std::cmp::min(self.num_pieces, (end as usize) + offset_index);
             let mut found_index = self.num_pieces; // sentinel: not found
 
             for i in (start as usize) + offset_index..range_end {

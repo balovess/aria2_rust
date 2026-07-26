@@ -10,9 +10,7 @@ use tracing::{debug, warn};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::connection::negotiation::capabilities::ServerCapabilities;
 use crate::ftp::connection::negotiation::control::PooledControl;
-use crate::ftp::connection::negotiation::parsing::{
-    parse_epsv_response, parse_pasv_response,
-};
+use crate::ftp::connection::negotiation::parsing::{parse_epsv_response, parse_pasv_response};
 use crate::ftp::connection::negotiation::{FtpNegotiator, PasvResult};
 
 impl FtpNegotiator {
@@ -126,15 +124,11 @@ impl FtpNegotiator {
         connect_timeout: Duration,
         _caps: &ServerCapabilities,
     ) -> Result<TcpStream> {
-        let local_addr = ctrl
-            .reader
-            .get_ref()
-            .local_addr()
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Failed to get local address: {}", e),
-                })
-            })?;
+        let local_addr = ctrl.reader.get_ref().local_addr().map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Failed to get local address: {}", e),
+            })
+        })?;
 
         let local_ip = local_addr.ip();
 

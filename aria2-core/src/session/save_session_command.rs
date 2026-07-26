@@ -126,7 +126,10 @@ mod tests {
 
         assert!(path.exists(), "Target file should exist");
         let tmp_path = path.with_extension("sess.tmp");
-        assert!(!tmp_path.exists(), "Temp file should have been renamed away");
+        assert!(
+            !tmp_path.exists(),
+            "Temp file should have been renamed away"
+        );
 
         let _ = tokio::fs::remove_file(&path).await;
     }

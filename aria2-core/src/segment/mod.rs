@@ -1,6 +1,6 @@
-pub mod bitfield_util;
 #[cfg(feature = "bittorrent")]
 pub mod bitfield;
+pub mod bitfield_util;
 pub mod grow_segment;
 pub mod piece;
 #[cfg(feature = "bittorrent")]
@@ -17,13 +17,13 @@ pub mod unknown_length_piece_storage;
 pub mod segment;
 
 #[cfg(feature = "bittorrent")]
-pub use bitfield::{test_bit, Bitfield};
+pub use bitfield::{Bitfield, test_bit};
+pub use grow_segment::GrowSegment;
+pub use piece::Piece;
 #[cfg(feature = "bittorrent")]
 pub use piece_selector::{PieceSelectorKind, PriorityPieceSelector, RarestPieceSelector};
 #[cfg(feature = "bittorrent")]
 pub use piece_stat_man::PieceStatMan;
-pub use grow_segment::GrowSegment;
-pub use piece::Piece;
 pub use piece_storage::{BitfieldMan, DefaultPieceStorage, PieceStorage, StreamPieceSelectorKind};
 pub use pieced_segment::PiecedSegment;
 pub use segment::Segment;

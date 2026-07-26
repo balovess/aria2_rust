@@ -59,24 +59,17 @@ fn test_proxy_config_from_proxy_url_http() {
 
 #[test]
 fn test_proxy_config_from_proxy_url_https() {
-    let config = HttpProxyConfig::from_proxy_url(
-        "https://secure.proxy.com",
-        "target.com".into(),
-        443,
-    )
-    .unwrap();
+    let config =
+        HttpProxyConfig::from_proxy_url("https://secure.proxy.com", "target.com".into(), 443)
+            .unwrap();
     assert_eq!(config.proxy_host, "secure.proxy.com");
     assert_eq!(config.proxy_port, 443); // default HTTPS port
 }
 
 #[test]
 fn test_proxy_config_from_proxy_url_no_credentials() {
-    let config = HttpProxyConfig::from_proxy_url(
-        "http://proxy.local:8080",
-        "t".into(),
-        80,
-    )
-    .unwrap();
+    let config =
+        HttpProxyConfig::from_proxy_url("http://proxy.local:8080", "t".into(), 80).unwrap();
     assert!(config.proxy_username.is_none());
     assert!(config.proxy_password.is_none());
 }
@@ -84,12 +77,12 @@ fn test_proxy_config_from_proxy_url_no_credentials() {
 #[test]
 fn test_proxy_config_from_proxy_url_socks5_accepted() {
     // SOCKS5 proxy URLs are now supported (via socks_connector)
-    let result = HttpProxyConfig::from_proxy_url(
-        "socks5://proxy.local:1080",
-        "t".into(),
-        80,
+    let result = HttpProxyConfig::from_proxy_url("socks5://proxy.local:1080", "t".into(), 80);
+    assert!(
+        result.is_ok(),
+        "SOCKS5 proxy should be accepted: {:?}",
+        result.err()
     );
-    assert!(result.is_ok(), "SOCKS5 proxy should be accepted: {:?}", result.err());
     let config = result.unwrap();
     assert_eq!(config.proxy_host, "proxy.local");
     assert_eq!(config.proxy_port, 1080);
@@ -146,7 +139,10 @@ fn test_proxy_response_error_status() {
 
     let resp = ProxyResponse::from_head(head);
     match resp {
-        ProxyResponse::Error { status_code, reason } => {
+        ProxyResponse::Error {
+            status_code,
+            reason,
+        } => {
             assert_eq!(status_code, 403);
             assert_eq!(reason, "Forbidden");
         }
@@ -162,7 +158,10 @@ fn test_proxy_response_500_error() {
 
     let resp = ProxyResponse::from_head(head);
     match resp {
-        ProxyResponse::Error { status_code, reason } => {
+        ProxyResponse::Error {
+            status_code,
+            reason,
+        } => {
             assert_eq!(status_code, 500);
             assert_eq!(reason, "Internal Server Error");
         }
@@ -313,12 +312,7 @@ fn test_tunnel_get_credentials_username_only() {
 fn test_forward_build_request_no_auth() {
     let config = HttpProxyConfig::new("proxy.com".into(), 3128, "target.com".into(), 80);
     let forward = HttpProxyForward::new(config);
-    let req = forward.build_forward_request(
-        "GET",
-        "http://target.com:80/path",
-        "/path",
-        None,
-    );
+    let req = forward.build_forward_request("GET", "http://target.com:80/path", "/path", None);
 
     assert!(req.starts_with("GET http://target.com:80/path HTTP/1.1\r\n"));
     assert!(req.contains("Host: target.com:80\r\n"));
@@ -345,12 +339,7 @@ fn test_forward_build_request_with_auth() {
 fn test_forward_build_head_request() {
     let config = HttpProxyConfig::new("proxy.com".into(), 3128, "target.com".into(), 80);
     let forward = HttpProxyForward::new(config);
-    let req = forward.build_forward_request(
-        "HEAD",
-        "http://target.com:80/",
-        "/",
-        None,
-    );
+    let req = forward.build_forward_request("HEAD", "http://target.com:80/", "/", None);
 
     assert!(req.starts_with("HEAD http://target.com:80/ HTTP/1.1\r\n"));
 }
@@ -369,10 +358,8 @@ fn test_forward_get_credentials() {
 
 #[test]
 fn test_proxy_digest_auth_produces_header() {
-    let challenge = DigestAuthChallenge::parse(
-        r#"Digest realm="Proxy", nonce="abc123", qop="auth""#,
-    )
-    .unwrap();
+    let challenge =
+        DigestAuthChallenge::parse(r#"Digest realm="Proxy", nonce="abc123", qop="auth""#).unwrap();
 
     let auth = proxy_digest_auth("user", "pass", "CONNECT", "target.com:443", &challenge, 1);
     assert!(auth.starts_with("Digest "));

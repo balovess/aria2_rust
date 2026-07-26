@@ -35,9 +35,7 @@ pub trait ResumeDataExt: Sized {
     ///
     /// * `Ok(ResumeData)` - Fully populated resume data
     /// * `Err(String)` - Extraction error with context
-    fn from_request_group(
-        group: &RequestGroup,
-    ) -> Result<Self, String>;
+    fn from_request_group(group: &RequestGroup) -> Result<Self, String>;
 
     /// Convert ResumeData back to restorable state components
     ///

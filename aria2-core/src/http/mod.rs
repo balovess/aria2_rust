@@ -36,21 +36,24 @@ pub use header_processor::{HttpHeaderParseState, HttpHeaderProcessor, HttpRespon
 
 // Re-export Metalink/HTTP parser types for convenient access
 pub use metalink_http::{
-    MetalinkHttpLink, MetalinkHttpDigest, MetalinkHttpResult, MetalinkHttpParser,
+    MetalinkHttpDigest, MetalinkHttpLink, MetalinkHttpParser, MetalinkHttpResult,
 };
 
 // Re-export key types from proxy_tunnel for convenient access
 pub use proxy_tunnel::{
-    HttpProxyType, HttpProxyTunnelConfig, HttpProxyTunnelResult, establish_http_proxy_tunnel,
+    HttpProxyTunnelConfig, HttpProxyTunnelResult, HttpProxyType, establish_http_proxy_tunnel,
 };
 
 // Re-export key types from proxy module for convenient access
-pub use proxy::{HttpProxyConfig, HttpProxyForward, HttpProxyTunnel as HttpConnectProxyTunnel, ProxyResponse, ProxyType};
+pub use proxy::{
+    HttpProxyConfig, HttpProxyForward, HttpProxyTunnel as HttpConnectProxyTunnel, ProxyResponse,
+    ProxyType,
+};
 
 // Re-export key types from skip_response for convenient access
 pub use skip_response::{
-    AuthScheme, HttpAuthChallenge, HttpRedirectInfo, HttpSkipResponseHandler, RedirectType,
-    SkipResponseResult, MAX_REDIRECT_COUNT,
+    AuthScheme, HttpAuthChallenge, HttpRedirectInfo, HttpSkipResponseHandler, MAX_REDIRECT_COUNT,
+    RedirectType, SkipResponseResult,
 };
 
 // Re-export key types from auth module for convenient access
@@ -61,7 +64,7 @@ pub use auth::{
 
 // Re-export response processor types for convenient access
 pub use response_processor::{
-    HttpResponseProcessor, ResponseProcessResult, ResponseProcessorConfig,
-    ValidateRequestContext, determine_filename, should_inflate_content_encoding,
-    supports_persistent_connection, validate_response, validate_response_range,
+    HttpResponseProcessor, ResponseProcessResult, ResponseProcessorConfig, ValidateRequestContext,
+    determine_filename, should_inflate_content_encoding, supports_persistent_connection,
+    validate_response, validate_response_range,
 };

@@ -164,10 +164,8 @@ pub(super) fn parse_mdtm_timestamp(s: &str) -> Option<SystemTime> {
     }
 
     let days_since_epoch = days_from_civil(year, month, day)?;
-    let secs = days_since_epoch as u64 * 86400
-        + hour as u64 * 3600
-        + minute as u64 * 60
-        + second as u64;
+    let secs =
+        days_since_epoch as u64 * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
     Some(UNIX_EPOCH + Duration::from_secs(secs))
 }
 
@@ -211,9 +209,11 @@ pub(super) async fn authenticate(
             let pass_resp = ctrl.command(&format!("PASS {}", password)).await?;
             if pass_resp.0 == 530 {
                 // C++ aria2: FTP_PROTOCOL_ERROR for bad login credentials
-                return Err(Aria2Error::Fatal(crate::error::FatalError::PermissionDenied {
-                    path: format!("FTP authentication failed: {} {}", pass_resp.0, pass_resp.1),
-                }));
+                return Err(Aria2Error::Fatal(
+                    crate::error::FatalError::PermissionDenied {
+                        path: format!("FTP authentication failed: {} {}", pass_resp.0, pass_resp.1),
+                    },
+                ));
             }
             if !(200..300).contains(&pass_resp.0) {
                 return Err(Aria2Error::Recoverable(
@@ -225,17 +225,16 @@ pub(super) async fn authenticate(
             info!("FTP login successful");
         }
         530 => {
-            return Err(Aria2Error::Fatal(crate::error::FatalError::PermissionDenied {
-                path: format!("FTP USER rejected: {} {}", user_resp.0, user_resp.1),
-            }));
+            return Err(Aria2Error::Fatal(
+                crate::error::FatalError::PermissionDenied {
+                    path: format!("FTP USER rejected: {} {}", user_resp.0, user_resp.1),
+                },
+            ));
         }
         _ => {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::FtpProtocolError {
-                    message: format!(
-                        "Unexpected USER response: {} {}",
-                        user_resp.0, user_resp.1
-                    ),
+                    message: format!("Unexpected USER response: {} {}", user_resp.0, user_resp.1),
                 },
             ));
         }
@@ -404,10 +403,7 @@ pub(super) async fn query_mdtm(
 }
 
 /// Query SIZE for file size on a fresh control connection.
-pub(super) async fn query_size(
-    ctrl: &mut FreshControl,
-    file_path: &str,
-) -> Result<Option<u64>> {
+pub(super) async fn query_size(ctrl: &mut FreshControl, file_path: &str) -> Result<Option<u64>> {
     use tracing::{debug, info};
 
     debug!("Sending SIZE command for: {}", file_path);
@@ -451,10 +447,7 @@ pub(super) async fn send_rest(ctrl: &mut FreshControl, offset: u64) -> Result<()
     // C++ always sends REST, even REST 0 (FtpConnection.cc:234-245)
     let resp = ctrl.command(&format!("REST {}", offset)).await?;
     if resp.0 != 350 {
-        warn!(
-            "REST command not accepted by server: {} {}",
-            resp.0, resp.1
-        );
+        warn!("REST command not accepted by server: {} {}", resp.0, resp.1);
         // C++ aria2: CANNOT_RESUME if offset != 0 and server doesn't support REST
         if offset > 0 {
             return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));

@@ -84,11 +84,7 @@ impl UriSelector for InorderUriSelector {
     /// return nextURI;
     /// ```
     fn select(&self, uris: &[String], _used_hosts: &[(usize, String)]) -> Option<usize> {
-        if uris.is_empty() {
-            None
-        } else {
-            Some(0)
-        }
+        if uris.is_empty() { None } else { Some(0) }
     }
 
     fn tune_command(&self, _uris: &[String], _speed: u64) {}
@@ -101,7 +97,7 @@ impl UriSelector for InorderUriSelector {
 
 /// URI selector that sorts by explicit priority values
 pub struct PriorityUriSelector {
-    priorities: Vec<i32>,    // one per URI, lower number = higher preference (tried first)
+    priorities: Vec<i32>, // one per URI, lower number = higher preference (tried first)
     rr_counter: AtomicUsize, // round-robin counter for equal priority
 }
 

@@ -325,9 +325,7 @@ impl DhtClient {
         let socket = self.get_socket().await?;
 
         // Collect nodes to query first to avoid borrow conflicts
-        let nodes_to_query: Vec<DhtNode> = self
-            .routing_table
-            .find_closest(info_hash, 8);
+        let nodes_to_query: Vec<DhtNode> = self.routing_table.find_closest(info_hash, 8);
 
         for node in nodes_to_query {
             // Generate a token for announce (in real implementation, this should come from previous get_peers response)

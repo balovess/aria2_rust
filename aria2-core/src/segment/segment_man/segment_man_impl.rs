@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use crate::segment::piece_storage::BitfieldMan;
 use crate::segment::piece_storage::PieceStorage;
 
-use super::peer_stat::PeerStat;
 use super::TrackingEntry;
+use super::peer_stat::PeerStat;
 
 // ===========================================================================
 // SegmentMan — The main coordinator (struct definition)

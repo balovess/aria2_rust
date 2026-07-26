@@ -136,8 +136,13 @@ impl BtDownloadCommand {
             return Vec::new();
         }
 
-        let (added_v4, added_v6) = match update {
-            ExtensionUpdate::PeerExchange { added_v4, added_v6 } => (added_v4, added_v6),
+        let (added_v4, added_v6, dropped_v4, dropped_v6) = match update {
+            ExtensionUpdate::PeerExchange {
+                added_v4,
+                added_v6,
+                dropped_v4,
+                dropped_v6,
+            } => (added_v4, added_v6, dropped_v4, dropped_v6),
             _ => return Vec::new(),
         };
 
@@ -161,6 +166,27 @@ impl BtDownloadCommand {
                 self.add_pex_peer(addr.clone());
                 new_peers.push(addr);
             }
+        }
+
+        // Remove dropped peers from the known-peers list
+        let mut dropped_addrs = Vec::new();
+        for compact in dropped_v4 {
+            let ip = std::net::Ipv4Addr::from(compact.ip().clone());
+            let addr = PeerAddr::new(&ip.to_string(), compact.port());
+            dropped_addrs.push(addr);
+        }
+        for compact in dropped_v6 {
+            let ip = std::net::Ipv6Addr::from(compact.ip().clone());
+            let addr = PeerAddr::new(&ip.to_string(), compact.port());
+            dropped_addrs.push(addr);
+        }
+        if !dropped_addrs.is_empty() {
+            self.pex_known_peers.retain(|p| !dropped_addrs.contains(p));
+            debug!(
+                dropped = dropped_addrs.len(),
+                remaining = self.pex_known_peers.len(),
+                "[PEX] Removed dropped peers from known list"
+            );
         }
 
         if !new_peers.is_empty() {
@@ -221,10 +247,7 @@ impl BtDownloadCommand {
         for peer in &peers_to_connect {
             match BtPeerConn::connect_plain(peer, info_hash_raw).await {
                 Ok(_conn) => {
-                    debug!(
-                        "[PEX] Connected to {}:{}",
-                        peer.ip, peer.port
-                    );
+                    debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
                     connected += 1;
                 }
                 Err(e) => {
@@ -300,10 +323,7 @@ pub(super) async fn send_periodic_pex(
                 sent_count += 1;
                 trace!(
                     "[PEX] Sent PEX to peer {} ({}:{}) with {} known peers",
-                    peer_idx,
-                    conn.ip_addr,
-                    conn.port,
-                    pex_peers_count
+                    peer_idx, conn.ip_addr, conn.port, pex_peers_count
                 );
             }
         }
@@ -330,6 +350,17 @@ pub(super) async fn send_periodic_pex(
 ///
 /// This is the bridge between the BEP 10/11 dispatch in `BtPeerInteractive`
 /// and the download command's PEX state.
+///
+/// # Wiring path
+///
+/// When `BtPeerInteractive::do_interaction_processing()` returns
+/// `InteractionResult::Continue { pex_update: Some(..), .. }`, the caller
+/// should invoke this function to feed the discovered peers into the
+/// known-peers list. The current download loop (`download_pieces_loop`)
+/// uses raw `BtMessageHandler` calls rather than the full interaction
+/// loop, so this path will become active once the interaction loop is
+/// wired into the command execution framework.
+#[allow(dead_code)] // Will be called from interaction loop wiring (see doc above)
 pub(super) fn process_incoming_pex_update(
     cmd: &mut BtDownloadCommand,
     update: &ExtensionUpdate,

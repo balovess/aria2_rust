@@ -137,10 +137,7 @@ impl Default for FtpProxyConfig {
 pub fn resolve_proxy_method(config: &FtpProxyConfig, protocol: &str) -> ProxyMethod {
     // C++: if protocol == "https" || protocol == "sftp" -> V_TUNNEL
     if protocol.eq_ignore_ascii_case("https") || protocol.eq_ignore_ascii_case("sftp") {
-        debug!(
-            "Protocol {} requires Tunnel proxy method",
-            protocol
-        );
+        debug!("Protocol {} requires Tunnel proxy method", protocol);
         return ProxyMethod::Tunnel;
     }
 
@@ -253,10 +250,7 @@ impl FtpProxyGetRequestBuilder {
         request.push_str(&format!("Host: {}\r\n", host_header));
 
         // User-Agent header
-        request.push_str(&format!(
-            "User-Agent: {}\r\n",
-            self.proxy_config.user_agent
-        ));
+        request.push_str(&format!("User-Agent: {}\r\n", self.proxy_config.user_agent));
 
         // Accept header
         request.push_str("Accept: */*\r\n");
@@ -553,13 +547,19 @@ mod tests {
     #[test]
     fn test_build_host_header_default_port() {
         let url = Url::parse("ftp://ftp.example.com/pub/file").unwrap();
-        assert_eq!(FtpProxyGetRequestBuilder::build_host_header(&url), "ftp.example.com");
+        assert_eq!(
+            FtpProxyGetRequestBuilder::build_host_header(&url),
+            "ftp.example.com"
+        );
     }
 
     #[test]
     fn test_build_host_header_non_default_port() {
         let url = Url::parse("ftp://ftp.example.com:2121/pub/file").unwrap();
-        assert_eq!(FtpProxyGetRequestBuilder::build_host_header(&url), "ftp.example.com:2121");
+        assert_eq!(
+            FtpProxyGetRequestBuilder::build_host_header(&url),
+            "ftp.example.com:2121"
+        );
     }
 
     #[test]
@@ -582,7 +582,9 @@ mod tests {
             .unwrap();
 
         let s = String::from_utf8(result.request_bytes).unwrap();
-        assert!(s.contains("GET ftp://anonymous@ftp.example.com/pub/linux/file.tar.gz HTTP/1.1\r\n"));
+        assert!(
+            s.contains("GET ftp://anonymous@ftp.example.com/pub/linux/file.tar.gz HTTP/1.1\r\n")
+        );
         assert!(s.contains("Host: ftp.example.com\r\n"));
         assert!(s.contains("User-Agent: aria2-rust/2.0\r\n"));
         assert!(s.contains("Pragma: no-cache\r\n"));
@@ -590,6 +592,9 @@ mod tests {
         assert!(s.contains("Range: bytes=4096-\r\n"));
         assert!(s.contains("Proxy-Authorization: Basic"));
         assert!(s.ends_with("\r\n\r\n"));
-        assert_eq!(result.request_url, "ftp://anonymous@ftp.example.com/pub/linux/file.tar.gz");
+        assert_eq!(
+            result.request_url,
+            "ftp://anonymous@ftp.example.com/pub/linux/file.tar.gz"
+        );
     }
 }

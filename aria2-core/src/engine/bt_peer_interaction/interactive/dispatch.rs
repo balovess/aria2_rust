@@ -77,9 +77,11 @@ impl BtPeerInteractive {
                     warn!("Failed to send keepalive in metadata-get mode: {}", e);
                 }
             }
-            self.num_received_message =
-                self.receive_messages(conn, is_in_allowed_fast.clone()).await?;
-            return Ok(InteractionResult::Continue { pex_pending: false });
+            let (count, pex_update) = self
+                .receive_messages(conn, is_in_allowed_fast.clone())
+                .await?;
+            self.num_received_message = count;
+            return Ok(InteractionResult::Continue { pex_pending: false, pex_update });
         }
 
         // ── Step 1: checkActiveInteraction ──────────────────────────────
@@ -98,9 +100,11 @@ impl BtPeerInteractive {
             // Send Cancel messages for blocks acquired elsewhere
             for (index, begin, length) in &result.cancelled_blocks {
                 if let Err(e) = conn
-                    .send_cancel(&aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
-                        *index, *begin, *length,
-                    ))
+                    .send_cancel(
+                        &aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
+                            *index, *begin, *length,
+                        ),
+                    )
                     .await
                 {
                     warn!("Failed to send Cancel for piece {}: {}", index, e);
@@ -110,8 +114,10 @@ impl BtPeerInteractive {
         }
 
         // ── Step 3: receiveMessages ─────────────────────────────────────
-        self.num_received_message =
-            self.receive_messages(conn, is_in_allowed_fast.clone()).await?;
+        let (received_count, pex_update) = self
+            .receive_messages(conn, is_in_allowed_fast.clone())
+            .await?;
+        self.num_received_message = received_count;
 
         // ── Step 4: detectMessageFlooding ───────────────────────────────
         if self.detect_flooding() {
@@ -261,8 +267,7 @@ impl BtPeerInteractive {
         // ut_pex Extended message. Here we signal that PEX is due so the caller
         // (which has access to the peer list) can build and inject the message.
         let mut pex_pending = false;
-        if self.ut_pex_enabled
-            && self.pex_timer.elapsed() >= Duration::from_secs(PEX_INTERVAL_SECS)
+        if self.ut_pex_enabled && self.pex_timer.elapsed() >= Duration::from_secs(PEX_INTERVAL_SECS)
         {
             self.pex_timer = Instant::now();
             pex_pending = true;
@@ -282,7 +287,7 @@ impl BtPeerInteractive {
             warn!("Failed to flush send buffer: {}", e);
         }
 
-        Ok(InteractionResult::Continue { pex_pending })
+        Ok(InteractionResult::Continue { pex_pending, pex_update })
     }
 
     // ── Message dispatch ────────────────────────────────────────────────
@@ -390,7 +395,8 @@ impl BtPeerInteractive {
                 ref data,
             } => {
                 // Received piece data — remove matching request slot
-                self.handler.on_piece_received(index, begin, data.len() as u32);
+                self.handler
+                    .on_piece_received(index, begin, data.len() as u32);
                 // Record data exchange for active interaction checking
                 self.active_interaction_checker.record_data_exchange();
                 trace!(
@@ -462,7 +468,10 @@ impl BtPeerInteractive {
                 conn.seeder = false;
                 trace!("Dispatched HaveNone message");
             }
-            BtMessage::Extended { ext_id, ref payload } => {
+            BtMessage::Extended {
+                ext_id,
+                ref payload,
+            } => {
                 // BEP 10: extension protocol message.
                 // Dispatch via the extension registry which handles:
                 //   ext_id == 0 → Extension Handshake (BEP 10)
@@ -498,11 +507,18 @@ impl BtPeerInteractive {
                         ExtensionUpdate::MetadataReject { piece } => {
                             debug!("Dispatched Extended ut_metadata Reject(piece={})", piece);
                         }
-                        ExtensionUpdate::PeerExchange { added_v4, added_v6 } => {
+                        ExtensionUpdate::PeerExchange {
+                            added_v4,
+                            added_v6,
+                            dropped_v4,
+                            dropped_v6,
+                        } => {
                             debug!(
-                                "Dispatched Extended ut_pex ({} v4, {} v6 peers)",
+                                "Dispatched Extended ut_pex ({} v4 added, {} v6 added, {} v4 dropped, {} v6 dropped)",
                                 added_v4.len(),
-                                added_v6.len()
+                                added_v6.len(),
+                                dropped_v4.len(),
+                                dropped_v6.len()
                             );
                         }
                     }
@@ -528,16 +544,19 @@ impl BtPeerInteractive {
     /// [`dispatch_message()`], and resets the inactive timer on data
     /// messages.
     ///
-    /// Returns the number of messages received.
+    /// Returns the number of messages received and the last inbound
+    /// PEX `ExtensionUpdate` (if any) so the caller can add discovered
+    /// peers to the known-peers list.
     pub(crate) async fn receive_messages<F>(
         &mut self,
         conn: &mut BtPeerConn,
         is_in_allowed_fast: F,
-    ) -> Result<usize>
+    ) -> Result<(usize, Option<ExtensionUpdate>)>
     where
         F: Fn(u32) -> bool,
     {
         let mut count = 0usize;
+        let mut last_pex_update: Option<ExtensionUpdate> = None;
 
         // Read up to a reasonable batch of messages per iteration.
         // The C++ code reads in a loop while messages are available.
@@ -555,7 +574,9 @@ impl BtPeerInteractive {
                         if let Err(e) = conn
                             .send_cancel(
                                 &aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
-                                    slot.index, slot.begin, slot.length,
+                                    slot.index,
+                                    slot.begin,
+                                    slot.length,
                                 ),
                             )
                             .await
@@ -564,6 +585,13 @@ impl BtPeerInteractive {
                                 "Failed to send Cancel for piece {} begin {}: {}",
                                 slot.index, slot.begin, e
                             );
+                        }
+                    }
+
+                    // Collect inbound PEX updates for the caller.
+                    if let Some(ext) = &update.extension_update {
+                        if matches!(ext, ExtensionUpdate::PeerExchange { .. }) {
+                            last_pex_update = Some(ext.clone());
                         }
                     }
 
@@ -581,7 +609,6 @@ impl BtPeerInteractive {
             }
         }
 
-        Ok(count)
+        Ok((count, last_pex_update))
     }
-
 }

@@ -16,8 +16,7 @@ pub const MAX_BLOCK_READ_MESSAGES: u32 = constants::BT_MAX_BLOCK_READ_MESSAGES a
 
 /// Default maximum outstanding requests per peer.
 /// Matches C++ `DEFAULT_MAX_OUTSTANDING_REQUEST = 6` (BtConstants.h).
-pub const DEFAULT_MAX_OUTSTANDING_REQUEST: usize =
-    constants::BT_DEFAULT_MAX_OUTSTANDING_REQUEST;
+pub const DEFAULT_MAX_OUTSTANDING_REQUEST: usize = constants::BT_DEFAULT_MAX_OUTSTANDING_REQUEST;
 
 /// Upper bound for max outstanding request auto-scaling.
 /// Matches C++ `UB_MAX_OUTSTANDING_REQUEST = 256` (BtConstants.h).
@@ -60,17 +59,9 @@ pub enum PeerStateUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestResponse {
     /// Queue a Piece message with the given data.
-    Piece {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
+    Piece { index: u32, begin: u32, length: u32 },
     /// Queue a Reject message (fast extension).
-    Reject {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
+    Reject { index: u32, begin: u32, length: u32 },
     /// Drop the request silently (choking without fast extension).
     None,
 }

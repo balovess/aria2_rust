@@ -44,9 +44,12 @@ impl ControlFile {
         num_pieces: usize,
     ) -> Result<Self> {
         if ctrl_path.exists() {
-            Self::load(ctrl_path)
-                .await?
-                .ok_or_else(|| Aria2Error::Io(format!("Failed to load control file: {}", ctrl_path.display())))
+            Self::load(ctrl_path).await?.ok_or_else(|| {
+                Aria2Error::Io(format!(
+                    "Failed to load control file: {}",
+                    ctrl_path.display()
+                ))
+            })
         } else {
             let bitfield_len = num_pieces.div_ceil(8);
             Ok(Self {

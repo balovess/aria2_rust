@@ -168,10 +168,8 @@ impl HttpResponse {
     ///
     /// true if the status code is a recognized redirect code AND Location exists
     pub fn is_redirect(&self) -> bool {
-        matches!(
-            self.status_code,
-            300 | 301 | 302 | 303 | 307 | 308
-        ) && self.header("Location").is_some()
+        matches!(self.status_code, 300 | 301 | 302 | 303 | 307 | 308)
+            && self.header("Location").is_some()
     }
 
     /// Determine the HTTP method to use when following this redirect.
@@ -352,10 +350,9 @@ mod tests {
         assert!(!redirect_302_no_loc.is_redirect());
 
         // 302 WITH Location is a valid redirect
-        let redirect_302_with_loc = HttpResponse::from_bytes(
-            "HTTP/1.1 302 Found\r\nLocation: /other\r\n\r\n".as_bytes(),
-        )
-        .unwrap();
+        let redirect_302_with_loc =
+            HttpResponse::from_bytes("HTTP/1.1 302 Found\r\nLocation: /other\r\n\r\n".as_bytes())
+                .unwrap();
         assert!(redirect_302_with_loc.is_redirect());
 
         // Non-redirect status codes
@@ -371,10 +368,9 @@ mod tests {
     #[test]
     fn test_redirect_method_303_see_other() {
         // 303 always changes method to GET
-        let resp = HttpResponse::from_bytes(
-            "HTTP/1.1 303 See Other\r\nLocation: /new\r\n\r\n".as_bytes(),
-        )
-        .unwrap();
+        let resp =
+            HttpResponse::from_bytes("HTTP/1.1 303 See Other\r\nLocation: /new\r\n\r\n".as_bytes())
+                .unwrap();
         assert_eq!(resp.redirect_method(&HttpMethod::Post), HttpMethod::Get);
         assert_eq!(resp.redirect_method(&HttpMethod::Put), HttpMethod::Get);
         assert_eq!(resp.redirect_method(&HttpMethod::Get), HttpMethod::Get);
@@ -392,14 +388,16 @@ mod tests {
         assert_eq!(resp_301.redirect_method(&HttpMethod::Post), HttpMethod::Get);
         assert!(!resp_301.redirect_preserves_body(&HttpMethod::Post));
 
-        let resp_302 = HttpResponse::from_bytes(
-            "HTTP/1.1 302 Found\r\nLocation: /new\r\n\r\n".as_bytes(),
-        )
-        .unwrap();
+        let resp_302 =
+            HttpResponse::from_bytes("HTTP/1.1 302 Found\r\nLocation: /new\r\n\r\n".as_bytes())
+                .unwrap();
         assert_eq!(resp_302.redirect_method(&HttpMethod::Post), HttpMethod::Get);
         // Non-POST methods preserved for 301/302
         assert_eq!(resp_301.redirect_method(&HttpMethod::Get), HttpMethod::Get);
-        assert_eq!(resp_301.redirect_method(&HttpMethod::Head), HttpMethod::Head);
+        assert_eq!(
+            resp_301.redirect_method(&HttpMethod::Head),
+            HttpMethod::Head
+        );
         assert!(resp_301.redirect_preserves_body(&HttpMethod::Get));
     }
 
@@ -410,14 +408,20 @@ mod tests {
             "HTTP/1.1 307 Temporary Redirect\r\nLocation: /new\r\n\r\n".as_bytes(),
         )
         .unwrap();
-        assert_eq!(resp_307.redirect_method(&HttpMethod::Post), HttpMethod::Post);
+        assert_eq!(
+            resp_307.redirect_method(&HttpMethod::Post),
+            HttpMethod::Post
+        );
         assert!(resp_307.redirect_preserves_body(&HttpMethod::Post));
 
         let resp_308 = HttpResponse::from_bytes(
             "HTTP/1.1 308 Permanent Redirect\r\nLocation: /new\r\n\r\n".as_bytes(),
         )
         .unwrap();
-        assert_eq!(resp_308.redirect_method(&HttpMethod::Post), HttpMethod::Post);
+        assert_eq!(
+            resp_308.redirect_method(&HttpMethod::Post),
+            HttpMethod::Post
+        );
         assert_eq!(resp_308.redirect_method(&HttpMethod::Get), HttpMethod::Get);
         assert!(resp_308.redirect_preserves_body(&HttpMethod::Post));
     }

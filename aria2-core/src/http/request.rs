@@ -388,10 +388,7 @@ impl HttpRequestBuilder {
 
         // Accept-Encoding header (mirrors C++ contentEncodingEnabled_ + acceptGzip_)
         if self.accept_gzip && !final_headers.contains_key("Accept-Encoding") {
-            final_headers.insert(
-                "Accept-Encoding".to_string(),
-                "deflate, gzip".to_string(),
-            );
+            final_headers.insert("Accept-Encoding".to_string(), "deflate, gzip".to_string());
         }
 
         // Pragma and Cache-Control headers (mirrors C++ noCache_)

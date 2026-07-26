@@ -15,10 +15,16 @@ pub mod storage;
 mod tests;
 
 #[cfg(test)]
+mod tests_date;
+
+#[cfg(test)]
 mod tests_samesite;
 
 #[cfg(test)]
 mod tests_storage;
+
+#[cfg(test)]
+mod tests_storage_eviction;
 
 #[cfg(test)]
 mod tests_jar;
@@ -32,7 +38,7 @@ use parsing::{domain_matches, format_http_date, is_numeric_host, now_secs, parse
 
 // Re-export key types from sub-modules for convenient access
 pub use jar::{CookieJar, JarCookie};
-pub use storage::CookieStorage;
+pub use storage::{CookieStorage, DOMAIN_EVICTION_RATE, DOMAIN_EVICTION_TRIGGER};
 
 /// Maximum number of cookies per domain (matches C++ aria2 `MAX_COOKIE_PER_DOMAIN`).
 pub const MAX_COOKIE_PER_DOMAIN: usize = 50;
@@ -439,5 +445,12 @@ impl Cookie {
 impl PartialEq for Cookie {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.domain == other.domain && self.path == other.path
+    }
+}
+
+impl fmt::Display for Cookie {
+    /// Format as `name=value`, matching C++ `Cookie::toString()`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}={}", self.name, self.value)
     }
 }

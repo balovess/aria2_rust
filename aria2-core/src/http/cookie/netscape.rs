@@ -6,8 +6,8 @@
 
 use tracing::warn;
 
-use super::{Cookie, SameSite};
 use super::parsing::is_numeric_host;
+use super::{Cookie, SameSite};
 
 impl Cookie {
     /// Serialize cookie in Netscape/Mozilla cookies.txt format.
@@ -53,9 +53,9 @@ impl Cookie {
     /// `domain  include_subdomains  path  secure  expiry  name  value`
     ///
     /// Firefox extensions in the domain field are supported:
-    /// - `#HttpOnly_` prefix → `http_only = true`
-    /// - `#SameSite=1` suffix → `SameSite::Strict`
-    /// - `#SameSite=2` suffix → `SameSite::Lax`
+    /// - `#HttpOnly_` prefix -> `http_only = true`
+    /// - `#SameSite=1` suffix -> `SameSite::Strict`
+    /// - `#SameSite=2` suffix -> `SameSite::Lax`
     ///
     /// Returns `None` if the line is malformed, a comment, or empty.
     pub fn parse_netscape_line(line: &str) -> Option<Self> {
@@ -71,7 +71,9 @@ impl Cookie {
         }
 
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 7 {
+        // Per C++ NsCookieParser: minimum 6 fields (value is optional).
+        // Fields: domain, include_subdomains, path, secure, expiry, name[, value]
+        if parts.len() < 6 {
             return None;
         }
 
@@ -81,10 +83,20 @@ impl Cookie {
         let secure = parts[3] == "TRUE";
         // Field indices per Netscape cookie format:
         // 0: domain, 1: include_subdomains, 2: path, 3: secure,
-        // 4: expiry_time, 5: name, 6: value
-        let expiry: i64 = parts[4].trim().parse().ok()?;
+        // 4: expiry_time, 5: name, 6: value (optional)
+        // Per C++ NsCookieParser: Chrome extension uses subsecond resolution
+        // for expiry time (e.g., "1463304912.5"), so parse as f64 then truncate.
+        let expiry_f64: f64 = parts[4].trim().parse().ok()?;
+        if !expiry_f64.is_finite() {
+            return None;
+        }
+        let expiry = expiry_f64 as i64;
         let name = parts[5].trim().to_string();
-        let value = if parts.len() > 6 {
+        // Per C++ NsCookieParser: value field is optional (6th tab-separated part).
+        // If present, it may contain internal tabs (join remaining parts).
+        let value = if parts.len() > 7 {
+            parts[6..].join("\t")
+        } else if parts.len() == 7 {
             parts[6].trim().to_string()
         } else {
             String::new()
@@ -95,10 +107,10 @@ impl Cookie {
         }
 
         // Parse Firefox extensions in domain field:
-        // - `#HttpOnly_` prefix → http_only = true
-        // - `#SameSite=1` suffix → Strict
-        // - `#SameSite=2` suffix → Lax
-        // - No suffix → None (default per C++ aria2 compatibility)
+        // - `#HttpOnly_` prefix -> http_only = true
+        // - `#SameSite=1` suffix -> Strict
+        // - `#SameSite=2` suffix -> Lax
+        // - No suffix -> None (default per C++ aria2 compatibility)
         let mut http_only = false;
         let mut same_site = SameSite::None;
         let mut domain_field = raw_domain;
@@ -115,7 +127,10 @@ impl Cookie {
                 "1" => same_site = SameSite::Strict,
                 "2" => same_site = SameSite::Lax,
                 _ => {
-                    warn!(value = ss_val, "Unknown SameSite value in Netscape format, treating as None");
+                    warn!(
+                        value = ss_val,
+                        "Unknown SameSite value in Netscape format, treating as None"
+                    );
                 }
             }
         }

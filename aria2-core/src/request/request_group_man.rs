@@ -44,7 +44,8 @@ impl RequestGroupMan {
         let gid = self.generate_gid();
         let group = RequestGroup::new(gid, uris, options);
 
-        self.groups.insert(gid, Arc::new(std::sync::RwLock::new(group)));
+        self.groups
+            .insert(gid, Arc::new(std::sync::RwLock::new(group)));
 
         info!("Adding download task #{}", gid.value());
         debug!("Current total tasks: {}", self.groups.len());
@@ -67,7 +68,8 @@ impl RequestGroupMan {
             )));
         }
         let group = RequestGroup::new(gid, uris, options);
-        self.groups.insert(gid, Arc::new(std::sync::RwLock::new(group)));
+        self.groups
+            .insert(gid, Arc::new(std::sync::RwLock::new(group)));
         info!("Adding download task (RPC) #{}", gid.to_hex_string());
         Ok(())
     }
@@ -275,11 +277,7 @@ impl RequestGroupMan {
         self.get_active_groups().len()
     }
 
-    pub fn set_global_speed_limit(
-        &self,
-        download_limit: Option<u64>,
-        upload_limit: Option<u64>,
-    ) {
+    pub fn set_global_speed_limit(&self, download_limit: Option<u64>, upload_limit: Option<u64>) {
         *self.global_download_limit.recover_mut() = download_limit;
         *self.global_upload_limit.recover_mut() = upload_limit;
 

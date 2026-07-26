@@ -1,4 +1,4 @@
-use super::resource::{ResourceType, LOWEST_PRIORITY};
+use super::resource::{LOWEST_PRIORITY, ResourceType};
 use tracing::info;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,8 +281,12 @@ impl MetalinkFile {
     /// SHA-1 > MD5. When multiple hashes of the same algorithm exist,
     /// the first one is returned.
     pub fn strongest_hash(&self) -> Option<&HashEntry> {
-        const PRIORITY: &[HashAlgorithm] =
-            &[HashAlgorithm::Sha512, HashAlgorithm::Sha256, HashAlgorithm::Sha1, HashAlgorithm::Md5];
+        const PRIORITY: &[HashAlgorithm] = &[
+            HashAlgorithm::Sha512,
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Md5,
+        ];
         for algo in PRIORITY {
             if let Some(entry) = self.get_hash(*algo) {
                 return Some(entry);
@@ -835,12 +839,7 @@ impl MetalinkDocument {
     ///
     /// Mirrors C++ `Metalinker::queryEntry()`. Returns indices of matching files.
     /// Empty filter strings match everything.
-    pub fn query_entries(
-        &self,
-        version: &str,
-        language: &str,
-        os: &str,
-    ) -> Vec<usize> {
+    pub fn query_entries(&self, version: &str, language: &str, os: &str) -> Vec<usize> {
         self.files
             .iter()
             .enumerate()
@@ -1119,11 +1118,20 @@ mod tests {
     #[test]
     fn test_resource_type_from_url_type_str() {
         assert_eq!(ResourceType::from_url_type_str("http"), ResourceType::Http);
-        assert_eq!(ResourceType::from_url_type_str("HTTPS"), ResourceType::Https);
+        assert_eq!(
+            ResourceType::from_url_type_str("HTTPS"),
+            ResourceType::Https
+        );
         assert_eq!(ResourceType::from_url_type_str("ftp"), ResourceType::Ftp);
-        assert_eq!(ResourceType::from_url_type_str("bittorrent"), ResourceType::BitTorrent);
+        assert_eq!(
+            ResourceType::from_url_type_str("bittorrent"),
+            ResourceType::BitTorrent
+        );
         // Unknown type strings map to NotSupported per C++ MetalinkParserController::setTypeOfResource()
-        assert_eq!(ResourceType::from_url_type_str("unknown"), ResourceType::NotSupported);
+        assert_eq!(
+            ResourceType::from_url_type_str("unknown"),
+            ResourceType::NotSupported
+        );
     }
 
     #[test]
@@ -1194,12 +1202,19 @@ mod tests {
     #[test]
     fn test_drop_unsupported_resources() {
         let mut file = MetalinkFile::new("test.bin");
-        file.urls.push(UrlEntry::new("http://a.com/f").with_resource_type(ResourceType::Http));
-        file.urls.push(UrlEntry::new("https://b.com/f").with_resource_type(ResourceType::Https));
-        file.urls.push(UrlEntry::new("ftp://c.com/f").with_resource_type(ResourceType::Ftp));
-        file.urls.push(UrlEntry::new("magnet:?xt=urn:btih:abc").with_resource_type(ResourceType::BitTorrent));
-        file.urls.push(UrlEntry::new("http://d.com/f").with_resource_type(ResourceType::NotSupported));
-        file.urls.push(UrlEntry::new("http://e.com/f").with_resource_type(ResourceType::Unknown));
+        file.urls
+            .push(UrlEntry::new("http://a.com/f").with_resource_type(ResourceType::Http));
+        file.urls
+            .push(UrlEntry::new("https://b.com/f").with_resource_type(ResourceType::Https));
+        file.urls
+            .push(UrlEntry::new("ftp://c.com/f").with_resource_type(ResourceType::Ftp));
+        file.urls.push(
+            UrlEntry::new("magnet:?xt=urn:btih:abc").with_resource_type(ResourceType::BitTorrent),
+        );
+        file.urls
+            .push(UrlEntry::new("http://d.com/f").with_resource_type(ResourceType::NotSupported));
+        file.urls
+            .push(UrlEntry::new("http://e.com/f").with_resource_type(ResourceType::Unknown));
         file.drop_unsupported_resources();
         // Both NotSupported and Unknown are removed, matching C++ default case
         assert_eq!(file.urls.len(), 4);
@@ -1209,9 +1224,21 @@ mod tests {
     #[test]
     fn test_set_location_priority() {
         let mut file = MetalinkFile::new("test.bin");
-        file.urls.push(UrlEntry::new("http://a.com/f").with_location("cn").with_priority(10));
-        file.urls.push(UrlEntry::new("http://b.com/f").with_location("us").with_priority(10));
-        file.urls.push(UrlEntry::new("http://c.com/f").with_location("jp").with_priority(10));
+        file.urls.push(
+            UrlEntry::new("http://a.com/f")
+                .with_location("cn")
+                .with_priority(10),
+        );
+        file.urls.push(
+            UrlEntry::new("http://b.com/f")
+                .with_location("us")
+                .with_priority(10),
+        );
+        file.urls.push(
+            UrlEntry::new("http://c.com/f")
+                .with_location("jp")
+                .with_priority(10),
+        );
         file.urls.push(UrlEntry::new("http://d.com/f")); // no location
 
         // Boost cn and jp locations by -999999 (mirrors C++ usage)
@@ -1226,9 +1253,21 @@ mod tests {
     #[test]
     fn test_set_protocol_priority() {
         let mut file = MetalinkFile::new("test.bin");
-        file.urls.push(UrlEntry::new("http://a.com/f").with_resource_type(ResourceType::Http).with_priority(10));
-        file.urls.push(UrlEntry::new("https://b.com/f").with_resource_type(ResourceType::Https).with_priority(10));
-        file.urls.push(UrlEntry::new("ftp://c.com/f").with_resource_type(ResourceType::Ftp).with_priority(10));
+        file.urls.push(
+            UrlEntry::new("http://a.com/f")
+                .with_resource_type(ResourceType::Http)
+                .with_priority(10),
+        );
+        file.urls.push(
+            UrlEntry::new("https://b.com/f")
+                .with_resource_type(ResourceType::Https)
+                .with_priority(10),
+        );
+        file.urls.push(
+            UrlEntry::new("ftp://c.com/f")
+                .with_resource_type(ResourceType::Ftp)
+                .with_priority(10),
+        );
 
         // Boost https by -999999 (mirrors C++ usage with preferred protocol)
         file.set_protocol_priority("https", -999999);
@@ -1241,9 +1280,12 @@ mod tests {
     #[test]
     fn test_reorder_resources_by_priority() {
         let mut file = MetalinkFile::new("test.bin");
-        file.urls.push(UrlEntry::new("http://a.com/f").with_priority(30));
-        file.urls.push(UrlEntry::new("http://b.com/f").with_priority(10));
-        file.urls.push(UrlEntry::new("http://c.com/f").with_priority(20));
+        file.urls
+            .push(UrlEntry::new("http://a.com/f").with_priority(30));
+        file.urls
+            .push(UrlEntry::new("http://b.com/f").with_priority(10));
+        file.urls
+            .push(UrlEntry::new("http://c.com/f").with_priority(20));
 
         file.reorder_resources_by_priority();
 
@@ -1256,9 +1298,12 @@ mod tests {
     #[test]
     fn test_reorder_metaurls_by_priority() {
         let mut file = MetalinkFile::new("test.bin");
-        file.meta_urls.push(MetaUrlEntry::new("http://a.com/torrent", MediaType::Torrent).with_priority(30));
-        file.meta_urls.push(MetaUrlEntry::new("http://b.com/torrent", MediaType::Torrent).with_priority(10));
-        file.meta_urls.push(MetaUrlEntry::new("http://c.com/torrent", MediaType::Torrent).with_priority(20));
+        file.meta_urls
+            .push(MetaUrlEntry::new("http://a.com/torrent", MediaType::Torrent).with_priority(30));
+        file.meta_urls
+            .push(MetaUrlEntry::new("http://b.com/torrent", MediaType::Torrent).with_priority(10));
+        file.meta_urls
+            .push(MetaUrlEntry::new("http://c.com/torrent", MediaType::Torrent).with_priority(20));
 
         file.reorder_metaurls_by_priority();
 
@@ -1295,18 +1340,24 @@ mod tests {
         f1.size = Some(100);
         f1.size_known = true;
         f1.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_name("a.bin")
-                .with_priority(1),
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_name("a.bin")
+            .with_priority(1),
         );
 
         let mut f2 = MetalinkFile::new("b.bin");
         f2.size = Some(200);
         f2.size_known = true;
         f2.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_name("b.bin")
-                .with_priority(1),
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_name("b.bin")
+            .with_priority(1),
         );
 
         let groups = group_entry_by_metaurl_name(&[f1, f2]);
@@ -1322,8 +1373,11 @@ mod tests {
         f1.size = Some(100);
         f1.size_known = true;
         f1.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_priority(1),
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_priority(1),
             // name is None
         );
 
@@ -1331,9 +1385,12 @@ mod tests {
         f2.size = Some(200);
         f2.size_known = true;
         f2.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_name("b.bin")
-                .with_priority(1),
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_name("b.bin")
+            .with_priority(1),
         );
 
         let groups = group_entry_by_metaurl_name(&[f1, f2]);
@@ -1351,18 +1408,24 @@ mod tests {
         let mut f1 = MetalinkFile::new("a.bin");
         f1.size_known = false; // size unknown
         f1.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_name("a.bin")
-                .with_priority(1),
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_name("a.bin")
+            .with_priority(1),
         );
 
         let mut f2 = MetalinkFile::new("b.bin");
         f2.size = Some(200);
         f2.size_known = true;
         f2.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_name("b.bin")
-                .with_priority(1),
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_name("b.bin")
+            .with_priority(1),
         );
 
         let groups = group_entry_by_metaurl_name(&[f1, f2]);
@@ -1379,17 +1442,23 @@ mod tests {
         let mut f1 = MetalinkFile::new("a.bin");
         f1.size_known = false;
         f1.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_priority(1), // no name
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_priority(1), // no name
         );
 
         let mut f2 = MetalinkFile::new("b.bin");
         f2.size = Some(200);
         f2.size_known = true;
         f2.meta_urls.push(
-            MetaUrlEntry::new("http://torrent.example.com/meta.torrent", MediaType::Torrent)
-                .with_name("b.bin")
-                .with_priority(1),
+            MetaUrlEntry::new(
+                "http://torrent.example.com/meta.torrent",
+                MediaType::Torrent,
+            )
+            .with_name("b.bin")
+            .with_priority(1),
         );
 
         let groups = group_entry_by_metaurl_name(&[f1, f2]);

@@ -4,15 +4,14 @@ use url::Url;
 
 use crate::http::request_response::HttpMethod;
 
-use super::handler::{HttpSkipResponseHandler, HttpResponse};
+use super::handler::{HttpResponse, HttpSkipResponseHandler};
 use super::types::*;
 
 /// Helper to create an HttpResponse with a given status and optional Location header
 fn make_response(status_code: u16, location: Option<&str>) -> HttpResponse {
     let mut resp = HttpResponse::new(status_code, "OK".to_string());
     if let Some(loc) = location {
-        resp.headers
-            .push(("Location".to_string(), loc.to_string()));
+        resp.headers.push(("Location".to_string(), loc.to_string()));
     }
     resp
 }
@@ -20,10 +19,8 @@ fn make_response(status_code: u16, location: Option<&str>) -> HttpResponse {
 /// Helper to create an HttpResponse with a WWW-Authenticate header
 fn make_auth_response(status_code: u16, www_authenticate: &str) -> HttpResponse {
     let mut resp = HttpResponse::new(status_code, "OK".to_string());
-    resp.headers.push((
-        "WWW-Authenticate".to_string(),
-        www_authenticate.to_string(),
-    ));
+    resp.headers
+        .push(("WWW-Authenticate".to_string(), www_authenticate.to_string()));
     resp
 }
 
@@ -44,9 +41,7 @@ fn test_redirect_301_permanent() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(301, Some("https://example.com/new"));
     let url = Url::parse("http://example.com/old").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::Redirect(info) => {
@@ -64,9 +59,7 @@ fn test_redirect_301_post_changes_to_get() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(301, Some("/new"));
     let url = Url::parse("http://example.com/old").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Post, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Post, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::Redirect(info) => {
@@ -84,9 +77,7 @@ fn test_redirect_302_temporary_changes_post() {
     let url = Url::parse("http://example.com/start").unwrap();
 
     // 302 with POST -> change method
-    let result = handler
-        .handle(&resp, HttpMethod::Post, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Post, &url, 0).unwrap();
     match result {
         SkipResponseResult::Redirect(info) => {
             assert!(info.change_method); // 302 historically changes POST->GET
@@ -96,9 +87,7 @@ fn test_redirect_302_temporary_changes_post() {
     }
 
     // 302 with GET -> no change
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
     match result {
         SkipResponseResult::Redirect(info) => {
             assert!(!info.change_method);
@@ -113,9 +102,7 @@ fn test_redirect_303_always_changes_method() {
     let resp = make_response(303, Some("/result"));
     let url = Url::parse("http://example.com/submit").unwrap();
 
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
     match result {
         SkipResponseResult::Redirect(info) => {
             assert!(info.change_method); // 303 always changes method
@@ -130,9 +117,7 @@ fn test_redirect_307_preserves_method() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(307, Some("/temp"));
     let url = Url::parse("http://example.com/submit").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Post, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Post, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::Redirect(info) => {
@@ -148,9 +133,7 @@ fn test_redirect_308_preserves_method() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(308, Some("/perm"));
     let url = Url::parse("http://example.com/submit").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Post, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Post, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::Redirect(info) => {
@@ -188,9 +171,7 @@ fn test_redirect_relative_url_resolution() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(302, Some("/new-path?q=1"));
     let url = Url::parse("http://example.com/old-path").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::Redirect(info) => {
@@ -204,13 +185,10 @@ fn test_redirect_relative_url_resolution() {
 
 #[test]
 fn test_error_401_with_basic_challenge() {
-    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT)
-        .with_http_auth_challenge(true);
+    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_http_auth_challenge(true);
     let resp = make_auth_response(401, r#"Basic realm="Secure Area""#);
     let url = Url::parse("http://example.com/protected").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::AuthChallenge(challenge) => {
@@ -230,9 +208,7 @@ fn test_error_401_with_digest_challenge() {
         r#"Digest realm="Downloads", nonce="abc123", qop="auth", algorithm="MD5""#,
     );
     let url = Url::parse("http://example.com/protected").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::AuthChallenge(challenge) => {
@@ -252,9 +228,7 @@ fn test_error_407_proxy_auth() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_proxy_auth_response(407, r#"Basic realm="Proxy""#);
     let url = Url::parse("http://example.com/file").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::AuthChallenge(challenge) => {
@@ -268,13 +242,10 @@ fn test_error_407_proxy_auth() {
 
 #[test]
 fn test_error_401_no_auth_header_with_challenge_enabled() {
-    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT)
-        .with_http_auth_challenge(true);
+    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_http_auth_challenge(true);
     let resp = HttpResponse::new(401, "Unauthorized".to_string());
     let url = Url::parse("http://example.com/protected").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::AuthChallenge(challenge) => {
@@ -287,13 +258,10 @@ fn test_error_401_no_auth_header_with_challenge_enabled() {
 
 #[test]
 fn test_error_401_no_auth_header_without_challenge_enabled() {
-    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT)
-        .with_http_auth_challenge(false);
+    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_http_auth_challenge(false);
     let resp = HttpResponse::new(401, "Unauthorized".to_string());
     let url = Url::parse("http://example.com/protected").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
@@ -310,9 +278,7 @@ fn test_error_404_fatal_when_max_is_zero() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_max_file_not_found(0);
     let resp = make_response(404, None);
     let url = Url::parse("http://example.com/missing").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
@@ -324,13 +290,10 @@ fn test_error_404_fatal_when_max_is_zero() {
 
 #[test]
 fn test_error_404_retryable_when_max_is_nonzero() {
-    let handler =
-        HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_max_file_not_found(3);
+    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_max_file_not_found(3);
     let resp = make_response(404, None);
     let url = Url::parse("http://example.com/missing").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::RetryableError { status_code, .. } => {
@@ -345,9 +308,7 @@ fn test_error_502_retryable_when_retry_wait_set() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_retry_wait(5);
     let resp = make_response(502, None);
     let url = Url::parse("http://example.com/file").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::RetryableError { status_code, .. } => {
@@ -362,9 +323,7 @@ fn test_error_502_fatal_when_retry_wait_zero() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_retry_wait(0);
     let resp = make_response(502, None);
     let url = Url::parse("http://example.com/file").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
@@ -379,9 +338,7 @@ fn test_error_503_same_as_502() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_retry_wait(2);
     let resp = make_response(503, None);
     let url = Url::parse("http://example.com/file").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::RetryableError { status_code, .. } => {
@@ -396,9 +353,7 @@ fn test_error_504_always_retryable() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT).with_retry_wait(0);
     let resp = make_response(504, None);
     let url = Url::parse("http://example.com/file").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::RetryableError { status_code, .. } => {
@@ -413,12 +368,13 @@ fn test_error_500_fatal() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(500, None);
     let url = Url::parse("http://example.com/file").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
-        SkipResponseResult::FatalError { status_code, message } => {
+        SkipResponseResult::FatalError {
+            status_code,
+            message,
+        } => {
             assert_eq!(status_code, 500);
             assert!(message.contains("500"));
         }
@@ -431,9 +387,7 @@ fn test_error_403_forbidden() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(403, None);
     let url = Url::parse("http://example.com/forbidden").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
@@ -448,9 +402,7 @@ fn test_success_status_consumed() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(200, None);
     let url = Url::parse("http://example.com/file").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     assert!(matches!(result, SkipResponseResult::Consumed));
 }
@@ -464,9 +416,7 @@ fn test_consume_body_with_data() {
     resp.body = b"Error body content here".to_vec();
     let url = Url::parse("http://example.com/file").unwrap();
 
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
@@ -482,9 +432,7 @@ fn test_consume_body_empty() {
     let resp = HttpResponse::new(404, "Not Found".to_string());
     let url = Url::parse("http://example.com/missing").unwrap();
 
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
             assert_eq!(status_code, 404);
@@ -515,8 +463,7 @@ fn test_extract_realm_missing() {
 
 #[test]
 fn test_extract_realm_with_trailing_params() {
-    let realm =
-        HttpSkipResponseHandler::extract_realm(r#"Digest realm="test", nonce="abc""#);
+    let realm = HttpSkipResponseHandler::extract_realm(r#"Digest realm="test", nonce="abc""#);
     assert_eq!(realm, "test");
 }
 
@@ -565,9 +512,7 @@ fn test_300_with_location_redirects() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = make_response(300, Some("http://example.com/choice1"));
     let url = Url::parse("http://example.com/list").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::Redirect(info) => {
@@ -583,15 +528,16 @@ fn test_300_without_location_is_fatal() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = HttpResponse::new(300, "Multiple Choices".to_string());
     let url = Url::parse("http://example.com/list").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Get, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Get, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
             assert_eq!(status_code, 300);
         }
-        _ => panic!("Expected FatalError for 300 without Location, got {:?}", result),
+        _ => panic!(
+            "Expected FatalError for 300 without Location, got {:?}",
+            result
+        ),
     }
 }
 
@@ -604,15 +550,16 @@ fn test_413_with_retry_after_is_retryable() {
     resp.headers
         .push(("Retry-After".to_string(), "60".to_string()));
     let url = Url::parse("http://example.com/upload").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Post, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Post, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::RetryableError { status_code, .. } => {
             assert_eq!(status_code, 413);
         }
-        _ => panic!("Expected RetryableError for 413 with Retry-After, got {:?}", result),
+        _ => panic!(
+            "Expected RetryableError for 413 with Retry-After, got {:?}",
+            result
+        ),
     }
 }
 
@@ -621,14 +568,15 @@ fn test_413_without_retry_after_is_fatal() {
     let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
     let resp = HttpResponse::new(413, "Payload Too Large".to_string());
     let url = Url::parse("http://example.com/upload").unwrap();
-    let result = handler
-        .handle(&resp, HttpMethod::Post, &url, 0)
-        .unwrap();
+    let result = handler.handle(&resp, HttpMethod::Post, &url, 0).unwrap();
 
     match result {
         SkipResponseResult::FatalError { status_code, .. } => {
             assert_eq!(status_code, 413);
         }
-        _ => panic!("Expected FatalError for 413 without Retry-After, got {:?}", result),
+        _ => panic!(
+            "Expected FatalError for 413 without Retry-After, got {:?}",
+            result
+        ),
     }
 }

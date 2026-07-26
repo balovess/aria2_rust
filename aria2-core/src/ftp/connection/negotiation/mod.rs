@@ -48,11 +48,11 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::connection::negotiation::control::PooledControl;
-use crate::ftp::connection::types::FtpMode;
 use crate::ftp::connection::negotiation::parsing::{
     cwd_traversal_pooled, extract_directory_part, extract_file_part, query_mdtm_pooled,
     query_size_pooled, send_rest_pooled, send_retr_pooled,
 };
+use crate::ftp::connection::types::FtpMode;
 
 // Re-export public types from submodules
 pub use capabilities::ServerCapabilities;
@@ -265,7 +265,10 @@ impl FtpNegotiator {
             FtpMode::Passive => {
                 // Get the PASV port first
                 let pasv_result = Self::enter_passive_mode_get_port(
-                    &mut ctrl, &host, connect_timeout, &capabilities,
+                    &mut ctrl,
+                    &host,
+                    connect_timeout,
+                    &capabilities,
                 )
                 .await?;
 
@@ -274,7 +277,10 @@ impl FtpNegotiator {
                     // SEQ_RECV_TUNNEL_RESPONSE: tunnel the PASV data
                     // connection through the HTTP proxy via CONNECT.
                     Self::establish_pasv_data_via_proxy(
-                        proxy, &host, pasv_result.port, connect_timeout,
+                        proxy,
+                        &host,
+                        pasv_result.port,
+                        connect_timeout,
                     )
                     .await?
                 } else {
@@ -372,13 +378,19 @@ impl FtpNegotiator {
         let data_stream = match mode {
             FtpMode::Passive => {
                 let pasv_result = Self::enter_passive_mode_pooled_get_port(
-                    &mut ctrl, &host, connect_timeout, &capabilities,
+                    &mut ctrl,
+                    &host,
+                    connect_timeout,
+                    &capabilities,
                 )
                 .await?;
 
                 let data_stream = if let Some(proxy) = &data_proxy {
                     Self::establish_pasv_data_via_proxy(
-                        proxy, &host, pasv_result.port, connect_timeout,
+                        proxy,
+                        &host,
+                        pasv_result.port,
+                        connect_timeout,
                     )
                     .await?
                 } else {
@@ -460,9 +472,11 @@ impl FtpNegotiator {
             Ok(0) => {
                 // Connection closed by peer (0 bytes read, no error)
                 warn!("Data connection closed by peer before REST command");
-                Err(Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
-                    message: "Data connection establishment failed (peer closed)".into(),
-                }))
+                Err(Aria2Error::Recoverable(
+                    RecoverableError::FtpProtocolError {
+                        message: "Data connection establishment failed (peer closed)".into(),
+                    },
+                ))
             }
             Ok(_) => Ok(()),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -471,9 +485,11 @@ impl FtpNegotiator {
             }
             Err(e) => {
                 warn!("Data connection error before REST: {}", e);
-                Err(Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
-                    message: format!("Data connection error: {}", e),
-                }))
+                Err(Aria2Error::Recoverable(
+                    RecoverableError::FtpProtocolError {
+                        message: format!("Data connection error: {}", e),
+                    },
+                ))
             }
         }
     }

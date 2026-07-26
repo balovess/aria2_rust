@@ -1,7 +1,7 @@
 //! Unit Tests for Resume Data system
 
-use super::types::{ChecksumInfo, RestoreState, ResumeData, UriState};
 use super::ext_trait::ResumeDataExt;
+use super::types::{ChecksumInfo, RestoreState, ResumeData, UriState};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use std::collections::HashMap;
 use std::fs;
@@ -949,8 +949,7 @@ fn test_resume_data_corrupt_json_returns_error() {
     );
 
     // Test case 2: Truncated JSON
-    fs::write(&file_path, "{\"gid\":\"test\",\"uris\":[]")
-        .expect("Failed to write truncated JSON");
+    fs::write(&file_path, "{\"gid\":\"test\",\"uris\":[]").expect("Failed to write truncated JSON");
     let result = ResumeData::load_from_file(&file_path);
     assert!(result.is_err(), "Truncated JSON should return error");
 
@@ -1389,8 +1388,7 @@ async fn test_integration_from_request_group_roundtrip() {
                 out: Some("test-file.bin".to_string()),
                 checksum: Some((
                     "sha-256".to_string(),
-                    "abc123def4567890abcdef1234567890abcdef1234567890abcdef1234567890"
-                        .to_string(),
+                    "abc123def4567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
                 )),
                 ..DownloadOptions::default()
             }
@@ -1473,8 +1471,7 @@ async fn test_integration_bt_request_group_extraction() {
     group.set_total_length_atomic(1073741824); // 1 GB
     group.set_completed_length(536870912); // 512 MB
     group.set_uploaded_length(134217728); // 128 MB seeded
-    group
-        .set_bt_bitfield(Some(vec![0xFF, 0xFF, 0x00, 0x00]));
+    group.set_bt_bitfield(Some(vec![0xFF, 0xFF, 0x00, 0x00]));
 
     // Extract
     let resume_data: ResumeData = <ResumeData as ResumeDataExt>::from_request_group(&group)

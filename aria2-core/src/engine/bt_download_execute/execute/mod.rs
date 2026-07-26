@@ -1,8 +1,8 @@
 mod bep6;
 mod finalization;
 mod peer_management;
-mod piece_download;
 mod pex;
+mod piece_download;
 mod web_seed;
 
 use async_trait::async_trait;
@@ -41,7 +41,9 @@ impl Command for BtDownloadCommand {
                     if let Some(attr) = ctx.get_attribute(ContextAttributeType::BitTorrent) {
                         if let Some(ta) = attr.downcast_ref::<TorrentAttribute>() {
                             let list = &ta.announce_list;
-                            let url = ta.announce_list.first()
+                            let url = ta
+                                .announce_list
+                                .first()
                                 .and_then(|tier| tier.first())
                                 .cloned();
                             (list.clone(), url)
@@ -69,7 +71,10 @@ impl Command for BtDownloadCommand {
                 .build();
             if let Ok(mut reg) = registry.write() {
                 reg.put(gid, bt_object);
-                info!(gid, "Registered BT download into BtRegistry with BtAnnounce");
+                info!(
+                    gid,
+                    "Registered BT download into BtRegistry with BtAnnounce"
+                );
             }
         }
 
@@ -185,7 +190,10 @@ impl Command for BtDownloadCommand {
                 if !fast_pieces.is_empty() {
                     let mut sent = HashSet::new();
                     for piece_idx in &fast_pieces {
-                        let msg_bytes = aria2_protocol::bittorrent::message::serializer::serialize_allowed_fast(*piece_idx);
+                        let msg_bytes =
+                            aria2_protocol::bittorrent::message::serializer::serialize_allowed_fast(
+                                *piece_idx,
+                            );
                         conn.queue_message(msg_bytes);
                         sent.insert(*piece_idx);
                     }

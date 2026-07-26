@@ -212,9 +212,7 @@ impl MseHandshake {
     /// is processed, using a different detection mechanism (the first byte
     /// of the stream is checked to see if it's a valid pstrlen=19).
     pub fn should_negotiate(local_supports_mse: bool, remote_reserved: &[u8]) -> bool {
-        local_supports_mse
-            && remote_reserved.len() >= 8
-            && (remote_reserved[7] & 0x01) != 0
+        local_supports_mse && remote_reserved.len() >= 8 && (remote_reserved[7] & 0x01) != 0
     }
 
     pub fn phase(&self) -> &MseHandshakePhase {

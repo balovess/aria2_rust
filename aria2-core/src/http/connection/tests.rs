@@ -145,7 +145,13 @@ fn test_follow_redirects_loop_detection() {
     // Attempt redirect back to a visited URL (circular)
     let result = manager.follow_redirects(&response, &url_b, &chain, 2);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().to_lowercase().contains("circular redirect"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("circular redirect")
+    );
 }
 
 #[test]
@@ -265,14 +271,20 @@ async fn test_connection_pool_reuse() {
     let url = Url::parse(&format!("http://{}", addr)).unwrap();
 
     // First connection acquisition
-    let conn1 = manager.acquire(&url, None).await.expect("First acquisition should succeed");
+    let conn1 = manager
+        .acquire(&url, None)
+        .await
+        .expect("First acquisition should succeed");
     assert_eq!(manager.active_count(), 1);
 
     // Return the connection (move ownership)
     manager.release(conn1).await;
 
     // Second connection acquisition (should succeed)
-    let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should succeed");
+    let conn2 = manager
+        .acquire(&url, None)
+        .await
+        .expect("Second acquisition should succeed");
     assert!(manager.active_count() >= 1); // Connection count should be >= 1
 
     // Cleanup
@@ -340,7 +352,13 @@ async fn test_redirect_loop_detection() {
     let result = manager.follow_redirects(&response, &url_c, &chain, 3);
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().to_lowercase().contains("circular redirect"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("circular redirect")
+    );
 }
 
 #[test]
@@ -438,7 +456,10 @@ async fn test_max_connections_limit() {
 
     // Attempt to acquire a third connection (should fail due to limit)
     let result = manager.acquire(&url, None).await;
-    assert!(result.is_err(), "Should return error when max connection limit exceeded");
+    assert!(
+        result.is_err(),
+        "Should return error when max connection limit exceeded"
+    );
 
     // Verify error type
     if let Err(e) = result {
@@ -453,11 +474,17 @@ async fn test_max_connections_limit() {
     // Note: since the connection may still be counted in the pool, we only verify no panic
     match manager.acquire(&url, None).await {
         Ok(conn3) => {
-            println!("Successfully acquired new connection after release: id={}", conn3.id);
+            println!(
+                "Successfully acquired new connection after release: id={}",
+                conn3.id
+            );
             manager.release(conn3).await;
         }
         Err(e) => {
-            println!("Acquisition failed after release (may be connection reuse limit): {}", e);
+            println!(
+                "Acquisition failed after release (may be connection reuse limit): {}",
+                e
+            );
             // This is also acceptable behavior
         }
     }

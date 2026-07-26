@@ -9,12 +9,12 @@ use crate::rate_limiter::RateLimiter;
 use crate::segment::Segment;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::progress::AtomicProgress;
-use super::status::DownloadStatus;
 use super::group_id::GroupId;
-use super::options::DownloadOptions;
 use super::halt_reason::{DownloadControlFlags, HaltReason};
-use super::result_code::{DownloadResultCode, DownloadResult};
+use super::options::DownloadOptions;
+use super::progress::AtomicProgress;
+use super::result_code::{DownloadResult, DownloadResultCode};
+use super::status::DownloadStatus;
 
 pub struct RequestGroup {
     pub(super) gid: GroupId,
@@ -53,7 +53,6 @@ pub struct RequestGroup {
     pub rate_limiter: std::sync::RwLock<Option<RateLimiter>>,
 
     // ── Lifecycle control flags (C++ haltRequested_/forceHaltRequested_/pauseRequested_) ──
-
     /// Atomic control flags for halt/pause/force-halt/restart signals.
     /// Checked by hot download loops without acquiring the `RwLock` on status.
     /// Separates *intent* (halt requested) from *observed status* (Paused, etc.).
@@ -806,12 +805,8 @@ impl RequestGroup {
                     DownloadResult::finished()
                 }
             }
-            DownloadStatus::Removed => {
-                DownloadResult::removed()
-            }
-            DownloadStatus::Paused => {
-                DownloadResult::paused()
-            }
+            DownloadStatus::Removed => DownloadResult::removed(),
+            DownloadStatus::Paused => DownloadResult::paused(),
             DownloadStatus::Error(_) => {
                 // Use structured error code if available
                 if last_code != DownloadResultCode::UnknownError {

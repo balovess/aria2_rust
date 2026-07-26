@@ -126,7 +126,11 @@ impl RawFtpControl {
 
     /// Send command and read response in one operation.
     #[allow(dead_code)]
-    pub(super) async fn command(&mut self, cmd: &str, timeout_dur: Duration) -> Result<(u16, String)> {
+    pub(super) async fn command(
+        &mut self,
+        cmd: &str,
+        timeout_dur: Duration,
+    ) -> Result<(u16, String)> {
         self.send_command(cmd).await?;
         self.read_response(timeout_dur).await
     }
@@ -273,12 +277,11 @@ async fn read_response_impl(
         // Check buffer size limit – mirrors C++ FtpConnection strbuf_.size()+size guard
         total_bytes += bytes_read;
         if total_bytes > MAX_RECV_BUFFER {
-            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Max FTP recv buffer reached. length={}",
-                    total_bytes
-                ),
-            }));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: format!("Max FTP recv buffer reached. length={}", total_bytes),
+                },
+            ));
         }
 
         let trimmed = line.trim_end();

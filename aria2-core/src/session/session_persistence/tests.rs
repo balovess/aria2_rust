@@ -35,7 +35,11 @@ fn create_test_groups(count: usize) -> Vec<Arc<std::sync::RwLock<RequestGroup>>>
             split: Some(4),
             ..Default::default()
         };
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(gid, vec![uri], options)));
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            vec![uri],
+            options,
+        )));
         groups.push(group);
     }
     groups
@@ -515,8 +519,8 @@ fn test_dht_snapshot_roundtrip() {
     let empty_json = empty
         .to_json_string()
         .expect("Empty serialization should succeed");
-    let empty_restored = DhtStateSnapshot::from_json_string(&empty_json)
-        .expect("Empty deserialization should work");
+    let empty_restored =
+        DhtStateSnapshot::from_json_string(&empty_json).expect("Empty deserialization should work");
     assert_eq!(
         empty_restored.total_nodes, 0,
         "Restored empty should still be empty"

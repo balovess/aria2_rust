@@ -7,10 +7,10 @@ use crate::segment::grow_segment::GrowSegment;
 use crate::segment::piece::Piece;
 use crate::segment::pieced_segment::PiecedSegment;
 
+use super::SegmentMan;
+use super::TrackingEntry;
 use super::peer_stat::PeerStatus;
 use super::segment_kind::SegmentKind;
-use super::TrackingEntry;
-use super::SegmentMan;
 
 impl SegmentMan {
     // ── Segment checkout ───────────────────────────────────────────────
@@ -34,9 +34,10 @@ impl SegmentMan {
         let ignore_bf = self.ignore_bitfield.get_filter_bitfield().to_vec();
         let bf_len = self.ignore_bitfield.get_bitfield_length();
 
-        let piece = self.piece_storage.as_mut().and_then(|ps| {
-            ps.get_missing_piece(min_split_size, &ignore_bf, bf_len as u64, cuid)
-        });
+        let piece = self
+            .piece_storage
+            .as_mut()
+            .and_then(|ps| ps.get_missing_piece(min_split_size, &ignore_bf, bf_len as u64, cuid));
 
         self.checkout_segment(cuid, piece)
     }
@@ -267,16 +268,16 @@ impl SegmentMan {
     /// 3. Records tracking entry (cuid, index)
     /// 4. Checks `segment_written_length_memo` for resume support
     /// 5. Returns the `SegmentKind`
-    pub(crate) fn checkout_segment(&mut self, cuid: u64, piece: Option<Piece>) -> Option<SegmentKind> {
+    pub(crate) fn checkout_segment(
+        &mut self,
+        cuid: u64,
+        piece: Option<Piece>,
+    ) -> Option<SegmentKind> {
         let mut piece = piece?;
         let piece_index = piece.index();
         let piece_len = piece.length();
 
-        trace!(
-            index = piece_index,
-            cuid,
-            "SegmentMan: attaching segment"
-        );
+        trace!(index = piece_index, cuid, "SegmentMan: attaching segment");
 
         // TODO: Flush WrDiskCache when implemented
 
@@ -304,17 +305,13 @@ impl SegmentMan {
                 let current_written = segment.written_length();
                 trace!(
                     index = segment.index(),
-                    memo_written,
-                    current_written,
-                    "SegmentMan: checking written length memo"
+                    memo_written, current_written, "SegmentMan: checking written length memo"
                 );
                 // If the memo has more written length than current, and the
                 // difference is less than one block, assume those bytes are
                 // already downloaded (matching C++ behavior)
                 if current_written < memo_written {
-                    let block_length = segment
-                        .piece()
-                        .map_or(0, |p| p.block_length() as u64);
+                    let block_length = segment.piece().map_or(0, |p| p.block_length() as u64);
                     if block_length > 0 && memo_written - current_written < block_length {
                         segment.update_written_length(memo_written - current_written);
                     }
@@ -340,11 +337,7 @@ impl SegmentMan {
     /// multi-CUID case (end-game mode), there may be minor inaccuracies
     /// that self-correct on the next checkout.
     pub(crate) fn cancel_segment_internal(&mut self, cuid: u64, segment_index: usize) {
-        trace!(
-            index = segment_index,
-            cuid,
-            "SegmentMan: canceling segment"
-        );
+        trace!(index = segment_index, cuid, "SegmentMan: canceling segment");
 
         if let Some(ref mut ps) = self.piece_storage {
             // Create a minimal Piece with just the index for cancel_piece.

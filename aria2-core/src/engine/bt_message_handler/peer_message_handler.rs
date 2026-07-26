@@ -27,8 +27,8 @@ use crate::engine::bt_message_dispatcher::{
 use tracing::{debug, trace, warn};
 
 use super::types::{
-    DEFAULT_MAX_OUTSTANDING_REQUEST, UB_MAX_OUTSTANDING_REQUEST, PeerStateUpdate, RequestResponse,
-    BLOCK_SIZE,
+    BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, PeerStateUpdate, RequestResponse,
+    UB_MAX_OUTSTANDING_REQUEST,
 };
 
 pub struct BtPeerMessageHandler {
@@ -150,15 +150,13 @@ impl BtPeerMessageHandler {
         // Return a freshly serialized copy for the caller to send immediately.
         // The original bytes were moved into the queue; re-serializing avoids
         // cloning the entire buffer.
-        Some(
-            aria2_protocol::bittorrent::message::serializer::serialize(
-                &aria2_protocol::bittorrent::message::types::BtMessage::Request {
-                    request: aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
-                        index, begin, length,
-                    ),
-                },
-            ),
-        )
+        Some(aria2_protocol::bittorrent::message::serializer::serialize(
+            &aria2_protocol::bittorrent::message::types::BtMessage::Request {
+                request: aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
+                    index, begin, length,
+                ),
+            },
+        ))
     }
 
     /// Handle receiving a Piece message from the peer.
@@ -169,7 +167,12 @@ impl BtPeerMessageHandler {
     ///
     /// Mirrors C++ `BtPieceMessage::doReceivedAction()` which calls
     /// `dispatcher_->removeOutstandingRequest()`.
-    pub fn on_piece_received(&mut self, index: u32, begin: u32, length: u32) -> Option<RequestSlot> {
+    pub fn on_piece_received(
+        &mut self,
+        index: u32,
+        begin: u32,
+        length: u32,
+    ) -> Option<RequestSlot> {
         if self.dispatcher.remove_request_slot(index, begin, length) {
             debug!(
                 "PeerHandler: piece received matched outstanding request (piece={}, begin={})",
@@ -273,9 +276,7 @@ impl BtPeerMessageHandler {
     ) -> Vec<PeerStateUpdate> {
         trace!("PeerHandler: Have received for piece {}", piece_index);
 
-        let mut updates = vec![PeerStateUpdate::HavePiece {
-            index: piece_index,
-        }];
+        let mut updates = vec![PeerStateUpdate::HavePiece { index: piece_index }];
 
         if is_seeder_after && download_finished {
             debug!(
@@ -307,14 +308,10 @@ impl BtPeerMessageHandler {
             is_seeder
         );
 
-        let mut updates = vec![PeerStateUpdate::SetBitfield {
-            data: bitfield,
-        }];
+        let mut updates = vec![PeerStateUpdate::SetBitfield { data: bitfield }];
 
         if is_seeder && download_finished {
-            debug!(
-                "PeerHandler: peer is seeder per Bitfield and download finished — disconnect"
-            );
+            debug!("PeerHandler: peer is seeder per Bitfield and download finished — disconnect");
             updates.push(PeerStateUpdate::DisconnectSeeder);
         }
 
@@ -533,7 +530,10 @@ impl BtPeerMessageHandler {
     /// Mirrors C++ `BtPortMessage::doReceivedAction()`.
     pub fn on_port_received(&mut self, port: u16) {
         if port != 0 {
-            trace!("PeerHandler: Port received (port={}), DHT action delegated to caller", port);
+            trace!(
+                "PeerHandler: Port received (port={}), DHT action delegated to caller",
+                port
+            );
         } else {
             trace!("PeerHandler: Port received (port=0), ignoring");
         }
@@ -712,8 +712,7 @@ impl BtPeerMessageHandler {
             let satisfied = old_outstanding - current_outstanding;
             // If >= 25% of max outstanding were satisfied, double the limit
             if satisfied * 4 >= self.max_outstanding_requests {
-                let new_max = (self.max_outstanding_requests * 2)
-                    .min(UB_MAX_OUTSTANDING_REQUEST);
+                let new_max = (self.max_outstanding_requests * 2).min(UB_MAX_OUTSTANDING_REQUEST);
                 if new_max != self.max_outstanding_requests {
                     debug!(
                         "PeerHandler: scaling max outstanding from {} to {} ({} satisfied)",
@@ -742,7 +741,8 @@ impl BtPeerMessageHandler {
 
     /// Add a Piece upload message to the outgoing queue.
     pub fn queue_upload_message(&mut self, data: Vec<u8>, index: u32, begin: u32, length: u32) {
-        self.dispatcher.add_upload_message(data, index, begin, length);
+        self.dispatcher
+            .add_upload_message(data, index, begin, length);
     }
 
     /// Check if there are pending messages in the queue.

@@ -136,7 +136,10 @@ impl BtRequestFactory {
     /// The caller should call `BtMessageDispatcher::do_abort_outstanding_request_action()`
     /// for the returned piece index.
     pub fn remove_target_piece(&mut self, piece_index: u32) -> Option<Piece> {
-        let pos = self.pieces.iter().position(|p| p.index() == piece_index as usize)?;
+        let pos = self
+            .pieces
+            .iter()
+            .position(|p| p.index() == piece_index as usize)?;
         let piece = self.pieces.remove(pos)?;
 
         debug!(
@@ -187,10 +190,7 @@ impl BtRequestFactory {
     ///
     /// Mirrors C++ `countMissingBlock()`.
     pub fn count_missing_block(&self) -> usize {
-        self.pieces
-            .iter()
-            .map(|p| p.count_missing_blocks())
-            .sum()
+        self.pieces.iter().map(|p| p.count_missing_blocks()).sum()
     }
 
     /// Remove completed pieces from the target list.
@@ -794,10 +794,9 @@ mod tests {
         factory.add_target_piece(make_piece(0, 65536)); // 4 blocks
 
         // Block 1 is outstanding (already requested by another peer)
-        let requests =
-            factory.create_request_messages(10, true, |piece_idx, block_idx| {
-                piece_idx == 0 && block_idx == 1
-            });
+        let requests = factory.create_request_messages(10, true, |piece_idx, block_idx| {
+            piece_idx == 0 && block_idx == 1
+        });
 
         // Should get requests for blocks 0, 2, 3 (block 1 is outstanding)
         assert_eq!(requests.len(), 3);

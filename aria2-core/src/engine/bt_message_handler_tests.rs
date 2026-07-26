@@ -5,7 +5,7 @@
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::engine::bt_message_handler::{
-        BtPeerMessageHandler, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST,
+        BLOCK_SIZE, BtPeerMessageHandler, DEFAULT_MAX_OUTSTANDING_REQUEST,
         UB_MAX_OUTSTANDING_REQUEST,
     };
     use std::time::{Duration, Instant};
@@ -20,7 +20,10 @@ pub(crate) mod tests {
         assert!(!handler.has_outstanding_requests());
         assert_eq!(handler.count_outstanding_requests(), 0);
         assert!(handler.can_send_request());
-        assert_eq!(handler.max_outstanding_requests(), DEFAULT_MAX_OUTSTANDING_REQUEST);
+        assert_eq!(
+            handler.max_outstanding_requests(),
+            DEFAULT_MAX_OUTSTANDING_REQUEST
+        );
     }
 
     #[test]
@@ -313,7 +316,10 @@ pub(crate) mod tests {
             handler.on_piece_received(i, 0, BLOCK_SIZE);
         }
         handler.scale_max_outstanding_requests(old);
-        assert_eq!(handler.max_outstanding_requests(), UB_MAX_OUTSTANDING_REQUEST);
+        assert_eq!(
+            handler.max_outstanding_requests(),
+            UB_MAX_OUTSTANDING_REQUEST
+        );
     }
 
     #[test]

@@ -52,6 +52,18 @@ impl DhtSocket {
     pub fn shared_socket(&self) -> Arc<UdpSocket> {
         self.socket.clone()
     }
+
+    /// Create a DhtSocket for testing without binding a real port.
+    ///
+    /// This creates a socket bound to 127.0.0.1:0 (OS-assigned port).
+    /// Used in unit tests where a real UDP socket is needed but no
+    /// specific port is required.
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        rt.block_on(Self::bind(0))
+            .expect("test bind should succeed")
+    }
 }
 
 impl Clone for DhtSocket {

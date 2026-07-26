@@ -148,11 +148,8 @@ pub trait PieceStorage: Send + Sync {
     /// Get piece indexes advertised since `last_have_index` by CUIDs
     /// other than `my_cuid`. Returns the new `last_have_index`.
     /// C++: `getAdvertisedPieceIndexes(indexes, myCuid, lastHaveIndex)`
-    fn get_advertised_piece_indexes(
-        &self,
-        my_cuid: u64,
-        last_have_index: u64,
-    ) -> (Vec<usize>, u64);
+    fn get_advertised_piece_indexes(&self, my_cuid: u64, last_have_index: u64)
+    -> (Vec<usize>, u64);
 
     /// Remove have entries older than `expiry` (in millis since epoch).
     /// C++: `removeAdvertisedPiece(expiry)`

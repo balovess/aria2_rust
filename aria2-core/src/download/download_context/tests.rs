@@ -3,9 +3,9 @@
 use std::thread;
 use std::time::Duration;
 
-use crate::download::file_entry::FileEntry;
 use super::context::DownloadContext;
 use super::types::{ContextAttributeType, Signature};
+use crate::download::file_entry::FileEntry;
 
 // Helper: create a FileEntry with given path, length, offset
 fn make_file_entry(path: &str, length: u64, offset: u64) -> FileEntry {
@@ -481,10 +481,16 @@ fn test_set_file_path_with_index() {
         make_file_entry("file2.bin", 2000, 1000),
     ]);
 
-    assert!(ctx.set_file_path_with_index(1, "/new/path1.bin".into()).is_ok());
+    assert!(
+        ctx.set_file_path_with_index(1, "/new/path1.bin".into())
+            .is_ok()
+    );
     assert_eq!(ctx.get_file_entries()[0].path(), "/new/path1.bin");
 
-    assert!(ctx.set_file_path_with_index(2, "/new/path2.bin".into()).is_ok());
+    assert!(
+        ctx.set_file_path_with_index(2, "/new/path2.bin".into())
+            .is_ok()
+    );
     assert_eq!(ctx.get_file_entries()[1].path(), "/new/path2.bin");
 }
 

@@ -193,8 +193,8 @@ impl crate::config::OptionRegistry {
             name: "log-max-size".into(),
             opt_type: OptionType::Size,
             default_value: OptionValue::Int(10 * 1024 * 1024), // 10 MiB
-            min: Some(1024),                                     // 1 KiB
-            max: Some(1024 * 1024 * 1024),                      // 1 GiB
+            min: Some(1024),                                   // 1 KiB
+            max: Some(1024 * 1024 * 1024),                     // 1 GiB
             description: "Max log file size in bytes before rotation (default 10 MiB)".into(),
             category: OptionCategory::Advanced,
             ..Default::default()

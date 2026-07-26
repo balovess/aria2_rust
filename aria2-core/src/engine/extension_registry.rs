@@ -263,12 +263,16 @@ pub enum ExtensionUpdate {
         piece: u32,
     },
 
-    /// Received ut_pex message with new peers.
+    /// Received ut_pex message with new and dropped peers (BEP 11).
     PeerExchange {
         /// Newly discovered IPv4 peers in compact format (6 bytes each).
         added_v4: Vec<CompactPeerV4>,
         /// Newly discovered IPv6 peers in compact format (18 bytes each).
         added_v6: Vec<CompactPeerV6>,
+        /// Disconnected IPv4 peers in compact format (6 bytes each).
+        dropped_v4: Vec<CompactPeerV4>,
+        /// Disconnected IPv6 peers in compact format (18 bytes each).
+        dropped_v6: Vec<CompactPeerV6>,
     },
 }
 
@@ -388,10 +392,7 @@ fn try_dispatch_pex(
                 ext_id
             );
         } else {
-            warn!(
-                "Received unknown extension message with ext_id={}",
-                ext_id
-            );
+            warn!("Received unknown extension message with ext_id={}", ext_id);
         }
         return None;
     }
@@ -400,13 +401,17 @@ fn try_dispatch_pex(
     match UtPexMessage::from_payload(payload) {
         Ok(msg) => {
             trace!(
-                "ut_pex: {} IPv4 peers, {} IPv6 peers",
+                "ut_pex: {} IPv4 added, {} IPv6 added, {} IPv4 dropped, {} IPv6 dropped",
                 msg.added.len(),
-                msg.added6.len()
+                msg.added6.len(),
+                msg.dropped.len(),
+                msg.dropped6.len()
             );
             Some(ExtensionUpdate::PeerExchange {
                 added_v4: msg.added,
                 added_v6: msg.added6,
+                dropped_v4: msg.dropped,
+                dropped_v6: msg.dropped6,
             })
         }
         Err(e) => {
@@ -729,9 +734,16 @@ mod tests {
         assert!(result.is_some());
 
         match result.unwrap() {
-            ExtensionUpdate::PeerExchange { added_v4, added_v6 } => {
+            ExtensionUpdate::PeerExchange {
+                added_v4,
+                added_v6,
+                dropped_v4,
+                dropped_v6,
+            } => {
                 assert_eq!(added_v4.len(), 1);
                 assert!(added_v6.is_empty());
+                assert!(dropped_v4.is_empty());
+                assert!(dropped_v6.is_empty());
                 assert_eq!(added_v4[0], CompactPeerV4(peer1));
             }
             other => panic!("Expected PeerExchange, got {:?}", other),
@@ -801,9 +813,16 @@ mod tests {
         assert!(result.is_some());
 
         match result.unwrap() {
-            ExtensionUpdate::PeerExchange { added_v4, added_v6 } => {
+            ExtensionUpdate::PeerExchange {
+                added_v4,
+                added_v6,
+                dropped_v4,
+                dropped_v6,
+            } => {
                 assert!(added_v4.is_empty());
                 assert!(added_v6.is_empty());
+                assert!(dropped_v4.is_empty());
+                assert!(dropped_v6.is_empty());
             }
             other => panic!("Expected PeerExchange, got {:?}", other),
         }
@@ -886,6 +905,8 @@ mod tests {
         let update = ExtensionUpdate::PeerExchange {
             added_v4: Vec::new(),
             added_v6: Vec::new(),
+            dropped_v4: Vec::new(),
+            dropped_v6: Vec::new(),
         };
         let s = format!("{:?}", update);
         assert!(s.contains("PeerExchange"));

@@ -74,7 +74,8 @@ impl ResumeHelper {
             // have total_length bytes on disk regardless of actual progress.
             (Some(cf), _) if cf.completed_pieces() > 0 || cf.completed_length() > 0 => {
                 let offset = cf.completed_length();
-                let complete = cf.completed_length() >= total_length && cf.total_length() == total_length;
+                let complete =
+                    cf.completed_length() >= total_length && cf.total_length() == total_length;
                 (offset, true, complete)
             }
             // No control file — if the file already exists at full size,
@@ -260,9 +261,18 @@ mod tests {
         let state = helper.detect(total_length).await.unwrap();
 
         // MUST resume from offset 4000, NOT mark as complete.
-        assert!(state.should_resume, "should_resume must be true when control file has completed_length > 0");
-        assert!(!state.is_complete, "is_complete must be false — only 4000/10000 bytes downloaded");
-        assert_eq!(state.start_offset, 4000, "start_offset should be the control file's completed_length");
+        assert!(
+            state.should_resume,
+            "should_resume must be true when control file has completed_length > 0"
+        );
+        assert!(
+            !state.is_complete,
+            "is_complete must be false — only 4000/10000 bytes downloaded"
+        );
+        assert_eq!(
+            state.start_offset, 4000,
+            "start_offset should be the control file's completed_length"
+        );
     }
 
     /// When a control file exists with completed_length == total_length and
@@ -288,6 +298,9 @@ mod tests {
         let helper = ResumeHelper::new(&out_path, true);
         let state = helper.detect(total_length).await.unwrap();
 
-        assert!(state.is_complete, "is_complete must be true when completed_length >= total_length");
+        assert!(
+            state.is_complete,
+            "is_complete must be true when completed_length >= total_length"
+        );
     }
 }

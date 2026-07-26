@@ -1,4 +1,4 @@
-﻿//! HTTP forward proxy for non-HTTPS downloads.
+//! HTTP forward proxy for non-HTTPS downloads.
 //!
 //! Also provides the [orward_get_with_auth] convenience function that
 //! combines proxy connection, request sending, and auth handling.
@@ -11,7 +11,7 @@ use crate::http::header_processor::HttpResponseHead;
 
 use super::auth::build_proxy_auth_header;
 use super::config::HttpProxyConfig;
-use super::io::{connect_to_proxy, read_proxy_response, write_all_timeout, MAX_AUTH_RETRIES};
+use super::io::{MAX_AUTH_RETRIES, connect_to_proxy, read_proxy_response, write_all_timeout};
 use super::response::ProxyResponse;
 
 /// HTTP forward proxy for non-HTTPS downloads.
@@ -72,7 +72,12 @@ impl HttpProxyForward {
         );
         let probe_request = self.build_forward_request("HEAD", &target_url, "/", None);
         debug!("Sending probe HEAD request to proxy for {}", target_url);
-        write_all_timeout(&mut stream, probe_request.as_bytes(), self.config.write_timeout).await?;
+        write_all_timeout(
+            &mut stream,
+            probe_request.as_bytes(),
+            self.config.write_timeout,
+        )
+        .await?;
 
         let mut auth_nc = 1u32;
 
@@ -105,23 +110,36 @@ impl HttpProxyForward {
                         "HEAD",
                         &target_url,
                         auth_nc,
-                    ).ok_or_else(|| {
+                    )
+                    .ok_or_else(|| {
                         Aria2Error::Network(
                             "Proxy requires auth but no supported scheme found".to_string(),
                         )
                     })?;
 
                     auth_nc += 1;
-                    warn!("Proxy returned 407, retrying with authentication (attempt {})", auth_nc);
+                    warn!(
+                        "Proxy returned 407, retrying with authentication (attempt {})",
+                        auth_nc
+                    );
 
                     // Close this connection and open a new one for the retry
                     drop(stream);
                     stream = connect_to_proxy(&self.config).await?;
 
-                    let retry_request = self.build_forward_request("HEAD", &target_url, "/", Some(&auth_value));
-                    write_all_timeout(&mut stream, retry_request.as_bytes(), self.config.write_timeout).await?;
+                    let retry_request =
+                        self.build_forward_request("HEAD", &target_url, "/", Some(&auth_value));
+                    write_all_timeout(
+                        &mut stream,
+                        retry_request.as_bytes(),
+                        self.config.write_timeout,
+                    )
+                    .await?;
                 }
-                ProxyResponse::Error { status_code, reason } => {
+                ProxyResponse::Error {
+                    status_code,
+                    reason,
+                } => {
                     // Some proxies return 403 or other errors for HEAD probes
                     // but work fine for actual GET requests. Log a warning
                     // and return the stream anyway so the caller can try.
@@ -256,13 +274,9 @@ pub async fn forward_get_with_auth(
                 }
 
                 let auth_value = build_proxy_auth_header(
-                    &response,
-                    username,
-                    password,
-                    "GET",
-                    &full_url,
-                    auth_nc,
-                ).ok_or_else(|| {
+                    &response, username, password, "GET", &full_url, auth_nc,
+                )
+                .ok_or_else(|| {
                     Aria2Error::Network(
                         "Proxy requires auth but no supported scheme found".to_string(),
                     )
@@ -271,13 +285,19 @@ pub async fn forward_get_with_auth(
                 auth_nc += 1;
                 current_auth = Some(auth_value);
 
-                warn!("Proxy returned 407, retrying GET with auth (attempt {})", auth_nc);
+                warn!(
+                    "Proxy returned 407, retrying GET with auth (attempt {})",
+                    auth_nc
+                );
 
                 // Open a new connection for the retry
                 drop(stream);
                 stream = connect_to_proxy(config).await?;
             }
-            ProxyResponse::Error { status_code, reason } => {
+            ProxyResponse::Error {
+                status_code,
+                reason,
+            } => {
                 return Err(Aria2Error::Network(format!(
                     "Proxy returned error {} {} for GET {}",
                     status_code, reason, full_url

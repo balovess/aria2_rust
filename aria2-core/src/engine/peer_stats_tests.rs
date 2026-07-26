@@ -6,7 +6,7 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use crate::engine::peer_stats::{PeerStats, BAD_DATA_THRESHOLD};
+    use crate::engine::peer_stats::{BAD_DATA_THRESHOLD, PeerStats};
 
     fn make_test_peer() -> PeerStats {
         let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();

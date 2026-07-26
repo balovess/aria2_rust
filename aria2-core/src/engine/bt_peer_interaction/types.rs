@@ -121,17 +121,24 @@ impl std::fmt::Display for PeerConnectionState {
 ///
 /// In C++ the interaction loop throws exceptions on errors. In Rust we
 /// return a result enum so the caller can decide how to handle each case.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum InteractionResult {
     /// Normal processing completed; continue next iteration.
     /// `pex_pending` is true when the PEX timer fired and the caller should
     /// build and send a PEX message (BEP 11) to this peer.
+    /// `pex_update` carries an inbound `ExtensionUpdate::PeerExchange` if one
+    /// was received during this tick; the caller should add the discovered
+    /// peers to its known-peers list.
     Continue {
         /// Whether a PEX (Peer Exchange) message is due for this peer.
         /// When true, the caller should build a PEX message from the known
         /// peers list and queue it for sending. This matches C++
         /// `DefaultBtInteractive::addPeerExchangeMessage()`.
         pex_pending: bool,
+        /// Inbound PEX update (BEP 11) received during this tick, if any.
+        /// The caller should extract discovered peers and add them to the
+        /// known-peers list for potential connection.
+        pex_update: Option<crate::engine::extension_registry::ExtensionUpdate>,
     },
     /// Peer should be disconnected due to inactivity.
     Disconnect(InactiveReason),

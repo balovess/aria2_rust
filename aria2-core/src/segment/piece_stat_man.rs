@@ -342,8 +342,11 @@ mod tests {
         man.subtract_piece_stats(&[0b10000000]);
         man.update_piece_stats(&[0b11000000], &[0b10100000]);
 
-        assert_eq!(man.order(), original_order.as_slice(),
-            "order should never change after construction");
+        assert_eq!(
+            man.order(),
+            original_order.as_slice(),
+            "order should never change after construction"
+        );
     }
 
     // -- Empty bitfield -----------------------------------------------------

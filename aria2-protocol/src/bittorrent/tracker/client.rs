@@ -134,10 +134,14 @@ impl TrackerClient {
         let response = client.execute(request).await?;
 
         if !response.is_success() {
-            return Err(format!("Tracker returned error status code: {}", response.status_code));
+            return Err(format!(
+                "Tracker returned error status code: {}",
+                response.status_code
+            ));
         }
 
-        TrackerResponse::parse(&response.body).map_err(|e| format!("Failed to parse tracker response: {}", e))
+        TrackerResponse::parse(&response.body)
+            .map_err(|e| format!("Failed to parse tracker response: {}", e))
     }
 
     /// Announce to a UDP tracker

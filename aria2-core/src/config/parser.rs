@@ -85,9 +85,16 @@ impl ConfigParser {
             if def.cumulative_delimiter.is_some() && self.options.contains_key(&key) {
                 match def.parse_value(&val_str) {
                     Ok(new_parsed) => {
-                        let existing = self.options.get(&key).cloned().unwrap_or(new_parsed.clone());
+                        let existing = self
+                            .options
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or(new_parsed.clone());
                         match (existing, new_parsed) {
-                            (OptionValue::List(mut existing_list), OptionValue::List(new_items)) => {
+                            (
+                                OptionValue::List(mut existing_list),
+                                OptionValue::List(new_items),
+                            ) => {
                                 existing_list.extend(new_items);
                                 self.options.insert(key, OptionValue::List(existing_list));
                             }

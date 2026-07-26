@@ -398,10 +398,7 @@ impl FtpConnectionPool {
         let matching_key = connections
             .iter()
             .filter(|(k, _)| {
-                k.host == host
-                    && k.port == port
-                    && k.username == username
-                    && k.password == password
+                k.host == host && k.port == port && k.username == username && k.password == password
             })
             .find(|(_, conn)| conn.is_healthy(self.config.max_idle_time))
             .map(|(k, _)| k.clone());
@@ -452,12 +449,7 @@ impl FtpConnectionPool {
             base_working_dir,
         );
 
-        let pooled = PooledConnection::new(
-            stream,
-            key.clone(),
-            mode,
-            self.config.read_timeout,
-        );
+        let pooled = PooledConnection::new(stream, key.clone(), mode, self.config.read_timeout);
 
         let mut connections = self.connections.lock().await;
         connections.insert(key.clone(), pooled);
@@ -520,7 +512,10 @@ impl FtpConnectionPool {
         let mut stats = self.stats.lock().await;
         stats.current_size = connections.len();
 
-        debug!("Returned FTP connection to pool: {}", key.to_pool_key_string());
+        debug!(
+            "Returned FTP connection to pool: {}",
+            key.to_pool_key_string()
+        );
     }
 
     /// Evict connections if pool is full
@@ -791,7 +786,9 @@ mod tests {
     #[tokio::test]
     async fn test_try_get_relaxed_returns_none_when_empty() {
         let pool = FtpConnectionPool::new(10);
-        let result = pool.try_get_relaxed("example.com", 21, "user", "pass").await;
+        let result = pool
+            .try_get_relaxed("example.com", 21, "user", "pass")
+            .await;
         assert!(result.is_none());
     }
 }

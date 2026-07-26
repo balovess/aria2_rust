@@ -1,7 +1,7 @@
 //! Tests for BT message handler module.
 
-use super::types::*;
 use super::peer_message_handler::BtPeerMessageHandler;
+use super::types::*;
 
 // ── Legacy BtMessageHandler tests (preserved) ───────────────────────
 
@@ -438,9 +438,7 @@ fn test_request_response_equality() {
 fn test_peer_state_update_debug_format() {
     let u = PeerStateUpdate::HavePiece { index: 42 };
     assert!(format!("{:?}", u).contains("42"));
-    let u = PeerStateUpdate::SetBitfield {
-        data: vec![0xFF],
-    };
+    let u = PeerStateUpdate::SetBitfield { data: vec![0xFF] };
     assert!(format!("{:?}", u).contains("255"));
     let u = PeerStateUpdate::MarkSeeder;
     assert!(format!("{:?}", u).contains("MarkSeeder"));

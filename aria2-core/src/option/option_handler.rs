@@ -403,9 +403,7 @@ impl OptionHandler {
             let v = self.get(key).as_usize();
             if v > 0 { Some(v as u64) } else { None }
         };
-        let get_f64 = |key: &str| -> Option<f64> {
-            self.get(key).as_f64().filter(|&v| v > 0.0)
-        };
+        let get_f64 = |key: &str| -> Option<f64> { self.get(key).as_f64().filter(|&v| v > 0.0) };
         let get_str = |key: &str| -> Option<String> {
             self.get(key)
                 .as_str()

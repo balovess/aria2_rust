@@ -22,9 +22,9 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::error::Result;
+use crate::ftp::connection::FtpMode;
 use crate::ftp::connection::negotiation::RawFtpControl;
 use crate::ftp::connection_pool::FtpConnectionPool;
-use crate::ftp::connection::FtpMode;
 
 /// Configuration for the FTP finish-download operation.
 #[derive(Debug, Clone)]
@@ -118,8 +118,7 @@ impl FtpFinishHandler {
         // Per C++ FtpFinishDownloadCommand, we wait for the server to send
         // the transfer-complete response. If data is available, read it.
         // If timeout, that's OK too — the download was already successful.
-        match timeout(config.finish_timeout, control.read_transfer_complete()).await
-        {
+        match timeout(config.finish_timeout, control.read_transfer_complete()).await {
             Ok(Ok(true)) => {
                 // 226 received — transfer complete
                 transfer_complete = true;

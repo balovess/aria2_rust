@@ -1,4 +1,4 @@
-﻿//! HTTP CONNECT tunnel through a proxy for HTTPS downloads.
+//! HTTP CONNECT tunnel through a proxy for HTTPS downloads.
 
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
@@ -7,7 +7,7 @@ use crate::error::{Aria2Error, Result};
 
 use super::auth::build_proxy_auth_header;
 use super::config::HttpProxyConfig;
-use super::io::{connect_to_proxy, read_proxy_response, write_all_timeout, MAX_AUTH_RETRIES};
+use super::io::{MAX_AUTH_RETRIES, connect_to_proxy, read_proxy_response, write_all_timeout};
 use super::response::ProxyResponse;
 
 /// HTTP CONNECT tunnel through a proxy for HTTPS downloads.
@@ -64,10 +64,7 @@ impl HttpProxyTunnel {
 
             match proxy_resp {
                 ProxyResponse::Connected(head) => {
-                    info!(
-                        "CONNECT tunnel established to {} via proxy",
-                        target
-                    );
+                    info!("CONNECT tunnel established to {} via proxy", target);
                     debug!("Proxy response: {:?}", head);
                     return Ok(stream);
                 }
@@ -82,26 +79,29 @@ impl HttpProxyTunnel {
 
                     // Build Proxy-Authorization header for the CONNECT method
                     let auth_value = build_proxy_auth_header(
-                        &response,
-                        &username,
-                        &password,
-                        "CONNECT",
-                        &target,
-                        auth_nc,
-                    ).ok_or_else(|| {
+                        &response, &username, &password, "CONNECT", &target, auth_nc,
+                    )
+                    .ok_or_else(|| {
                         Aria2Error::Network(
                             "Proxy requires auth but no supported scheme found".to_string(),
                         )
                     })?;
 
                     auth_nc += 1;
-                    warn!("Proxy returned 407, retrying CONNECT with authentication (attempt {})", auth_nc);
+                    warn!(
+                        "Proxy returned 407, retrying CONNECT with authentication (attempt {})",
+                        auth_nc
+                    );
 
                     // Re-send CONNECT with Proxy-Authorization
                     let request = self.build_connect_request(Some(&auth_value));
-                    write_all_timeout(&mut stream, request.as_bytes(), self.config.write_timeout).await?;
+                    write_all_timeout(&mut stream, request.as_bytes(), self.config.write_timeout)
+                        .await?;
                 }
-                ProxyResponse::Error { status_code, reason } => {
+                ProxyResponse::Error {
+                    status_code,
+                    reason,
+                } => {
                     return Err(Aria2Error::Network(format!(
                         "Proxy returned error {} {} for CONNECT to {}",
                         status_code, reason, target
@@ -114,10 +114,7 @@ impl HttpProxyTunnel {
     /// Build the CONNECT request string.
     pub(crate) fn build_connect_request(&self, proxy_auth: Option<&str>) -> String {
         let target = self.config.target_host_port();
-        let mut req = format!(
-            "CONNECT {} HTTP/1.1\r\nHost: {}\r\n",
-            target, target
-        );
+        let mut req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n", target, target);
 
         if let Some(auth) = proxy_auth {
             req.push_str(&format!("Proxy-Authorization: {}\r\n", auth));

@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, trace};
 
+use super::super::piece::Piece;
 use super::bitfield_man::BitfieldMan;
 use super::trait_def::PieceStorage;
-use super::types::{HaveEntry, StreamPieceSelectorKind, END_GAME_PIECE_NUM};
-use super::super::piece::Piece;
+use super::types::{END_GAME_PIECE_NUM, HaveEntry, StreamPieceSelectorKind};
 
 #[cfg(feature = "bittorrent")]
 use super::super::piece_selector::{PieceSelectorKind, RarestPieceSelector};
@@ -82,9 +82,8 @@ impl DefaultPieceStorage {
         #[cfg(feature = "bittorrent")]
         let piece_stat_man = Arc::new(PieceStatMan::new(num_pieces, true));
         #[cfg(feature = "bittorrent")]
-        let piece_selector = PieceSelectorKind::Rarest(
-            RarestPieceSelector::new(Arc::clone(&piece_stat_man)),
-        );
+        let piece_selector =
+            PieceSelectorKind::Rarest(RarestPieceSelector::new(Arc::clone(&piece_stat_man)));
 
         DefaultPieceStorage {
             bfman: BitfieldMan::new(piece_length, total_length),
@@ -125,12 +124,17 @@ impl DefaultPieceStorage {
     /// construction. Here we use `Arc<Mutex<dyn DiskAdaptor>>` for async-safe
     /// shared access. The disk adaptor is used by `read_data()` for integrity
     /// checking and by other I/O operations.
-    pub fn set_disk_adaptor(&mut self, adaptor: Arc<tokio::sync::Mutex<dyn crate::filesystem::disk_adaptor::DiskAdaptor>>) {
+    pub fn set_disk_adaptor(
+        &mut self,
+        adaptor: Arc<tokio::sync::Mutex<dyn crate::filesystem::disk_adaptor::DiskAdaptor>>,
+    ) {
         self.disk_adaptor = Some(adaptor);
     }
 
     /// Get a reference to the disk adaptor.
-    pub fn get_disk_adaptor(&self) -> Option<&Arc<tokio::sync::Mutex<dyn crate::filesystem::disk_adaptor::DiskAdaptor>>> {
+    pub fn get_disk_adaptor(
+        &self,
+    ) -> Option<&Arc<tokio::sync::Mutex<dyn crate::filesystem::disk_adaptor::DiskAdaptor>>> {
         self.disk_adaptor.as_ref()
     }
 
@@ -165,7 +169,8 @@ impl PieceStorage for DefaultPieceStorage {
         let index = match self.stream_piece_selector {
             StreamPieceSelectorKind::Default => {
                 // C++ DefaultStreamPieceSelector: calls getSparseMissingUnusedIndex
-                self.bfman.get_sparse_missing_unused_index(min_split_size, ignore_bitfield)
+                self.bfman
+                    .get_sparse_missing_unused_index(min_split_size, ignore_bitfield)
             }
             StreamPieceSelectorKind::Inorder => {
                 // C++ InorderStreamPieceSelector: calls getInorderMissingUnusedIndex
@@ -227,7 +232,10 @@ impl PieceStorage for DefaultPieceStorage {
         self.bfman.set_use_piece(index);
 
         let piece_start = index as u64 * self.piece_length;
-        let piece_len = std::cmp::min(self.piece_length, self.total_length.saturating_sub(piece_start));
+        let piece_len = std::cmp::min(
+            self.piece_length,
+            self.total_length.saturating_sub(piece_start),
+        );
 
         let mut piece = Piece::new(index, piece_len);
         piece.add_user(cuid);
@@ -253,7 +261,10 @@ impl PieceStorage for DefaultPieceStorage {
         self.bfman.set_use_piece(index);
 
         let piece_start = index as u64 * self.piece_length;
-        let piece_len = std::cmp::min(self.piece_length, self.total_length.saturating_sub(piece_start));
+        let piece_len = std::cmp::min(
+            self.piece_length,
+            self.total_length.saturating_sub(piece_start),
+        );
 
         let mut piece = Piece::new(index, piece_len);
         piece.add_user(cuid);
@@ -274,7 +285,10 @@ impl PieceStorage for DefaultPieceStorage {
         }
         // Return a new Piece without marking it as used
         let piece_start = index as u64 * self.piece_length;
-        let piece_len = std::cmp::min(self.piece_length, self.total_length.saturating_sub(piece_start));
+        let piece_len = std::cmp::min(
+            self.piece_length,
+            self.total_length.saturating_sub(piece_start),
+        );
         Some(Piece::new(index, piece_len))
     }
 
@@ -327,7 +341,11 @@ impl PieceStorage for DefaultPieceStorage {
     fn get_completed_length(&self) -> u64 {
         // C++ adds in-flight piece completed lengths, capped at total
         let bfman_completed = self.bfman.get_total_completed_length();
-        let in_flight_completed: u64 = self.used_pieces.values().map(|p| p.completed_length()).sum();
+        let in_flight_completed: u64 = self
+            .used_pieces
+            .values()
+            .map(|p| p.completed_length())
+            .sum();
         let total = self.total_length;
         std::cmp::min(bfman_completed + in_flight_completed, total)
     }
@@ -406,7 +424,10 @@ impl PieceStorage for DefaultPieceStorage {
         // This method ensures the bit is set (idempotent).
         if index < self.bfman.num_pieces() && !self.bfman.has_piece(index) {
             self.bfman.set_piece(index);
-            trace!("mark_piece_verified: piece {} verified and marked complete", index);
+            trace!(
+                "mark_piece_verified: piece {} verified and marked complete",
+                index
+            );
         }
     }
 
@@ -415,13 +436,20 @@ impl PieceStorage for DefaultPieceStorage {
         // Equivalent to mark_piece_missing() but with different trace semantics.
         if index < self.bfman.num_pieces() && self.bfman.has_piece(index) {
             self.bfman.clear_piece(index);
-            trace!("mark_piece_failed: piece {} hash check failed, marked for re-download", index);
+            trace!(
+                "mark_piece_failed: piece {} hash check failed, marked for re-download",
+                index
+            );
         }
     }
 
     fn read_data(&self, piece_index: usize) -> std::result::Result<Vec<u8>, String> {
         if piece_index >= self.bfman.num_pieces() {
-            return Err(format!("Piece index {} out of range (max {})", piece_index, self.bfman.num_pieces()));
+            return Err(format!(
+                "Piece index {} out of range (max {})",
+                piece_index,
+                self.bfman.num_pieces()
+            ));
         }
 
         // Calculate piece offset and length.
@@ -450,10 +478,15 @@ impl PieceStorage for DefaultPieceStorage {
                         Ok(handle) => {
                             match handle.block_on(adaptor.read(piece_offset, piece_len)) {
                                 Ok(data) => Ok(data),
-                                Err(e) => Err(format!("Disk read error at offset {}: {}", piece_offset, e)),
+                                Err(e) => Err(format!(
+                                    "Disk read error at offset {}: {}",
+                                    piece_offset, e
+                                )),
                             }
                         }
-                        Err(_) => Err("No tokio runtime available for synchronous read".to_string()),
+                        Err(_) => {
+                            Err("No tokio runtime available for synchronous read".to_string())
+                        }
                     }
                 }
                 Err(_) => Err("Disk adaptor is busy (locked by another task)".to_string()),
@@ -522,15 +555,13 @@ impl PieceStorage for DefaultPieceStorage {
         }
         // C++ returns the haveIndex of the last entry in the vector
         // (i.e., the maximum haveIndex), or lastHaveIndex if no entries match.
-        let new_last = self
-            .haves
-            .last()
-            .map_or(last_have_index, |e| e.have_index);
+        let new_last = self.haves.last().map_or(last_have_index, |e| e.have_index);
         (indexes, new_last)
     }
 
     fn remove_advertised_piece(&mut self, expiry_ms: u64) {
-        self.haves.retain(|entry| entry.registered_time_ms > expiry_ms);
+        self.haves
+            .retain(|entry| entry.registered_time_ms > expiry_ms);
     }
 
     // ── In-flight pieces ─────────────────────────────────────────────────
@@ -585,7 +616,8 @@ impl PieceStorage for DefaultPieceStorage {
     fn update_piece_stats(&mut self, new_bitfield: &[u8], old_bitfield: &[u8]) {
         #[cfg(feature = "bittorrent")]
         {
-            self.piece_stat_man.update_piece_stats(new_bitfield, old_bitfield);
+            self.piece_stat_man
+                .update_piece_stats(new_bitfield, old_bitfield);
         }
         #[cfg(not(feature = "bittorrent"))]
         {

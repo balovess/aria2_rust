@@ -23,11 +23,11 @@
 
 use tracing::{debug, info, warn};
 
+use crate::engine::metalink_download_command::MetalinkDownloadCommand;
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadOptions;
-use crate::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_protocol::metalink::parser::{
-    group_entry_by_metaurl_name, MetalinkDocument, MetalinkFile,
+    MetalinkDocument, MetalinkFile, group_entry_by_metaurl_name,
 };
 use aria2_protocol::metalink::resource::LOWEST_PRIORITY;
 
@@ -142,8 +142,7 @@ impl MetalinkToRequestGroup {
         path: &std::path::Path,
         options: &DownloadOptions,
     ) -> Result<Vec<MetalinkDownloadCommand>> {
-        let data = std::fs::read(path)
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+        let data = std::fs::read(path).map_err(|e| Aria2Error::Io(e.to_string()))?;
         self.generate_from_bytes(&data, options)
     }
 
@@ -167,8 +166,7 @@ impl MetalinkToRequestGroup {
             doc.base_uri = Some(base.clone());
             doc
         } else {
-            MetalinkDocument::parse(metalink_data, None)
-                .map_err(|e| Aria2Error::Parse(e))?
+            MetalinkDocument::parse(metalink_data, None).map_err(|e| Aria2Error::Parse(e))?
         };
 
         self.create_request_groups(doc, options)
@@ -270,7 +268,11 @@ impl MetalinkToRequestGroup {
         // (mirrors C++ metalink::groupEntryByMetaurlName)
         let groups = group_entry_by_metaurl_name(&files);
 
-        debug!("Metalink: {} files grouped into {} request groups", files.len(), groups.len());
+        debug!(
+            "Metalink: {} files grouped into {} request groups",
+            files.len(),
+            groups.len()
+        );
 
         // Step 8: Create download commands for each group
         let mut commands = Vec::with_capacity(groups.len());

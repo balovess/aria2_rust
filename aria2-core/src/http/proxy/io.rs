@@ -83,10 +83,7 @@ pub(crate) async fn connect_to_proxy(config: &HttpProxyConfig) -> Result<TcpStre
             ))
         })?
         .map_err(|e| {
-            Aria2Error::Network(format!(
-                "Failed to connect to proxy '{}': {}",
-                addr, e
-            ))
+            Aria2Error::Network(format!("Failed to connect to proxy '{}': {}", addr, e))
         })?;
 
     info!("Connected to proxy at {}", addr);

@@ -380,7 +380,10 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 ///     save_to_file(path, &groups).await.unwrap();
 /// }
 /// ```
-pub async fn save_to_file(path: &Path, groups: &[Arc<std::sync::RwLock<RequestGroup>>]) -> Result<()> {
+pub async fn save_to_file(
+    path: &Path,
+    groups: &[Arc<std::sync::RwLock<RequestGroup>>],
+) -> Result<()> {
     let content = serialize_groups(groups)?;
     let tmp_path = path.with_extension("sess.tmp");
 

@@ -313,7 +313,10 @@ impl PieceStorage for UnknownLengthPieceStorage {
     fn read_data(&self, piece_index: usize) -> std::result::Result<Vec<u8>, String> {
         // Only piece 0 is valid
         if piece_index != 0 {
-            return Err(format!("Piece index {} out of range for unknown-length storage", piece_index));
+            return Err(format!(
+                "Piece index {} out of range for unknown-length storage",
+                piece_index
+            ));
         }
 
         // Read piece data from disk via DiskAdaptor.
@@ -323,13 +326,13 @@ impl PieceStorage for UnknownLengthPieceStorage {
                 Ok(mut adaptor) => {
                     let rt = tokio::runtime::Handle::try_current();
                     match rt {
-                        Ok(handle) => {
-                            match handle.block_on(adaptor.read(0, self.total_length)) {
-                                Ok(data) => Ok(data),
-                                Err(e) => Err(format!("Disk read error: {}", e)),
-                            }
+                        Ok(handle) => match handle.block_on(adaptor.read(0, self.total_length)) {
+                            Ok(data) => Ok(data),
+                            Err(e) => Err(format!("Disk read error: {}", e)),
+                        },
+                        Err(_) => {
+                            Err("No tokio runtime available for synchronous read".to_string())
                         }
-                        Err(_) => Err("No tokio runtime available for synchronous read".to_string()),
                     }
                 }
                 Err(_) => Err("Disk adaptor is busy (locked by another task)".to_string()),
@@ -533,7 +536,10 @@ mod tests {
         assert!(!bf.is_empty());
         // With 2 pieces (2MB / 1MB piece_length), first byte should have
         // bits 0 and 1 set: 0b11000000 = 192
-        assert_eq!(bf[0], 0b11000000, "First byte should have bits 0,1 set for 2 pieces");
+        assert_eq!(
+            bf[0], 0b11000000,
+            "First byte should have bits 0,1 set for 2 pieces"
+        );
     }
 
     #[test]

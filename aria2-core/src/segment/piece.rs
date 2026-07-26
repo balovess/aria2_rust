@@ -69,7 +69,10 @@ impl BlockBitfield {
     }
 
     fn count_set(&self) -> usize {
-        self.data.iter().map(|b| b.count_ones() as usize).sum::<usize>()
+        self.data
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum::<usize>()
             - if self.num_bits % 8 != 0 {
                 // Count extra bits in the last byte that are beyond num_bits
                 let extra = 8 - (self.num_bits % 8);
@@ -656,9 +659,7 @@ impl Piece {
         if begin != self.next_begin {
             trace!(
                 "Piece::update_hash: offset mismatch, expected={}, got={}, piece={}",
-                self.next_begin,
-                begin,
-                self.index
+                self.next_begin, begin, self.index
             );
             return false;
         }

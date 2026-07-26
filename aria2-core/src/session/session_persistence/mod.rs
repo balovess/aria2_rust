@@ -25,4 +25,4 @@ mod persistence;
 mod tests;
 
 pub use dht::{DhtNodeInfo, DhtStateSnapshot};
-pub use persistence::{SessionPersistence, DEFAULT_AUTO_SAVE_INTERVAL_SECS};
+pub use persistence::{DEFAULT_AUTO_SAVE_INTERVAL_SECS, SessionPersistence};

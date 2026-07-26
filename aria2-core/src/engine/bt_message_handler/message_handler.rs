@@ -18,7 +18,7 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use tracing::{debug, info, trace, warn};
 
 use super::types::{
-    BlockDownloadResult, BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, MAX_BLOCK_READ_MESSAGES,
+    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_BLOCK_READ_MESSAGES,
     MAX_RETRIES,
 };
 
@@ -162,7 +162,10 @@ impl BtMessageHandler {
                                 index, begin, expected_index, expected_begin
                             );
                         }
-                        BtMessage::Extended { ext_id, ref payload } => {
+                        BtMessage::Extended {
+                            ext_id,
+                            ref payload,
+                        } => {
                             // BEP 10/11: process Extended messages received
                             // during block reads. For ut_pex (BEP 11), decode
                             // the compact peers and stash them on the connection
@@ -257,11 +260,7 @@ impl BtMessageHandler {
     /// for the download loop to drain and connect. On parse failure, the
     /// message is silently ignored (it might be ut_metadata or another
     /// extension we don't handle here).
-    fn try_process_pex_during_read(
-        conn: &mut BtPeerConn,
-        ext_id: u8,
-        payload: &[u8],
-    ) {
+    fn try_process_pex_during_read(conn: &mut BtPeerConn, ext_id: u8, payload: &[u8]) {
         use aria2_protocol::bittorrent::message::extension::UtPexMessage;
         use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 

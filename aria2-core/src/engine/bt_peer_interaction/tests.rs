@@ -10,15 +10,17 @@ use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::extension_registry::ExtensionUpdate;
 use crate::segment::piece::Piece;
 
+use super::BtPeerInteractive;
 use super::piece_provider::PieceProvider;
 use super::types::*;
-use super::BtPeerInteractive;
 
 /// Helper to create an `Instant` representing a point in the past.
 /// Uses `checked_sub` to avoid panicking on platforms where `Instant`
 /// origin is near zero (e.g., shortly after system boot on Windows).
 fn instant_past(secs: u64) -> Instant {
-    Instant::now().checked_sub(Duration::from_secs(secs)).unwrap_or(Instant::now())
+    Instant::now()
+        .checked_sub(Duration::from_secs(secs))
+        .unwrap_or(Instant::now())
 }
 
 // ── Legacy tests (preserved) ──────────────────────────────────────
@@ -116,39 +118,50 @@ fn test_peer_connection_state_equality() {
 
 #[test]
 fn test_interaction_result_variants() {
-    let r = InteractionResult::Continue { pex_pending: false };
-    assert_eq!(r, InteractionResult::Continue { pex_pending: false });
+    let r = InteractionResult::Continue { pex_pending: false, pex_update: None };
+    match r {
+        InteractionResult::Continue { pex_pending, pex_update } => {
+            assert!(!pex_pending);
+            assert!(pex_update.is_none());
+        }
+        _ => panic!("Expected Continue variant"),
+    }
 
-    let r = InteractionResult::Continue { pex_pending: true };
-    assert_eq!(r, InteractionResult::Continue { pex_pending: true });
-    assert_ne!(
-        InteractionResult::Continue { pex_pending: false },
-        InteractionResult::Continue { pex_pending: true }
-    );
+    let r = InteractionResult::Continue { pex_pending: true, pex_update: None };
+    match r {
+        InteractionResult::Continue { pex_pending, .. } => {
+            assert!(pex_pending);
+        }
+        _ => panic!("Expected Continue variant"),
+    }
 
     let r = InteractionResult::Disconnect(InactiveReason::MutualUninterested);
-    assert_eq!(
-        r,
-        InteractionResult::Disconnect(InactiveReason::MutualUninterested)
-    );
+    match r {
+        InteractionResult::Disconnect(InactiveReason::MutualUninterested) => {}
+        _ => panic!("Expected Disconnect(MutualUninterested)"),
+    }
 
     let r = InteractionResult::Disconnect(InactiveReason::NoDataExchange);
-    assert_eq!(
-        r,
-        InteractionResult::Disconnect(InactiveReason::NoDataExchange)
-    );
+    match r {
+        InteractionResult::Disconnect(InactiveReason::NoDataExchange) => {}
+        _ => panic!("Expected Disconnect(NoDataExchange)"),
+    }
 
     let r = InteractionResult::Disconnect(InactiveReason::SeederToSeeder);
-    assert_eq!(
-        r,
-        InteractionResult::Disconnect(InactiveReason::SeederToSeeder)
-    );
+    match r {
+        InteractionResult::Disconnect(InactiveReason::SeederToSeeder) => {}
+        _ => panic!("Expected Disconnect(SeederToSeeder)"),
+    }
 
-    let r = InteractionResult::FloodingDetected;
-    assert_eq!(r, InteractionResult::FloodingDetected);
+    match InteractionResult::FloodingDetected {
+        InteractionResult::FloodingDetected => {}
+        _ => panic!("Expected FloodingDetected"),
+    }
 
-    let r = InteractionResult::WaitingForHandshake;
-    assert_eq!(r, InteractionResult::WaitingForHandshake);
+    match InteractionResult::WaitingForHandshake {
+        InteractionResult::WaitingForHandshake => {}
+        _ => panic!("Expected WaitingForHandshake"),
+    }
 }
 
 // ── ChokingDecision / InterestDecision tests ───────────────────────
@@ -167,10 +180,7 @@ fn test_interest_decision_variants() {
         InterestDecision::Interested,
         InterestDecision::NotInterested
     );
-    assert_ne!(
-        InterestDecision::NotInterested,
-        InterestDecision::NoChange
-    );
+    assert_ne!(InterestDecision::NotInterested, InterestDecision::NoChange);
 }
 
 // ── BtPeerInteractive creation tests ───────────────────────────────
@@ -180,9 +190,15 @@ fn test_bt_peer_interactive_creation() {
     let info_hash = [0u8; 20];
     let interactive = BtPeerInteractive::new(info_hash, 100);
 
-    assert_eq!(interactive.state(), PeerConnectionState::InitiatorSendHandshake);
+    assert_eq!(
+        interactive.state(),
+        PeerConnectionState::InitiatorSendHandshake
+    );
     assert_eq!(interactive.count_received_message_in_iteration(), 0);
-    assert_eq!(interactive.max_outstanding_request(), DEFAULT_MAX_OUTSTANDING_REQUEST);
+    assert_eq!(
+        interactive.max_outstanding_request(),
+        DEFAULT_MAX_OUTSTANDING_REQUEST
+    );
     assert_eq!(interactive.info_hash(), &[0u8; 20]);
     assert!(!interactive.is_metadata_get_mode());
     assert_eq!(interactive.last_have_index(), 0);
@@ -224,7 +240,10 @@ fn test_bt_peer_interactive_configuration() {
     assert_eq!(interactive.max_outstanding_request(), 1);
 
     interactive.set_max_outstanding_request(9999); // clamped to UB
-    assert_eq!(interactive.max_outstanding_request(), UB_MAX_OUTSTANDING_REQUEST);
+    assert_eq!(
+        interactive.max_outstanding_request(),
+        UB_MAX_OUTSTANDING_REQUEST
+    );
 
     // Allowed fast set size
     interactive.set_allowed_fast_set_size(20);
@@ -296,8 +315,7 @@ fn test_advance_to_wired_from_receiver_wait() {
 #[should_panic(expected = "Cannot advance to WIRED from WIRED")]
 fn test_advance_to_wired_invalid() {
     let info_hash = [0u8; 20];
-    let mut interactive =
-        BtPeerInteractive::with_state(info_hash, 100, PeerConnectionState::Wired);
+    let mut interactive = BtPeerInteractive::with_state(info_hash, 100, PeerConnectionState::Wired);
     interactive.advance_to_wired();
 }
 
@@ -489,7 +507,10 @@ fn test_scale_max_outstanding_request_capped() {
 
     // Would go to 400, capped at UB=256
     interactive.scale_max_outstanding_request(200, 100, false);
-    assert_eq!(interactive.max_outstanding_request(), UB_MAX_OUTSTANDING_REQUEST);
+    assert_eq!(
+        interactive.max_outstanding_request(),
+        UB_MAX_OUTSTANDING_REQUEST
+    );
 }
 
 #[test]
@@ -539,10 +560,22 @@ fn test_check_have_returns_empty() {
 
 #[test]
 fn test_inactive_reason_variants() {
-    assert_eq!(InactiveReason::SeederToSeeder, InactiveReason::SeederToSeeder);
-    assert_eq!(InactiveReason::MutualUninterested, InactiveReason::MutualUninterested);
-    assert_eq!(InactiveReason::NoDataExchange, InactiveReason::NoDataExchange);
-    assert_ne!(InactiveReason::SeederToSeeder, InactiveReason::MutualUninterested);
+    assert_eq!(
+        InactiveReason::SeederToSeeder,
+        InactiveReason::SeederToSeeder
+    );
+    assert_eq!(
+        InactiveReason::MutualUninterested,
+        InactiveReason::MutualUninterested
+    );
+    assert_eq!(
+        InactiveReason::NoDataExchange,
+        InactiveReason::NoDataExchange
+    );
+    assert_ne!(
+        InactiveReason::SeederToSeeder,
+        InactiveReason::MutualUninterested
+    );
 }
 
 // ==================================================================
@@ -664,8 +697,7 @@ fn test_decide_interest_becomes_interested() {
     conn.allocate_session_resource(256 * 1024, 1024 * 1024);
 
     // has_missing_piece returns true, am_interested is false → Interested
-    let decision =
-        interactive.decide_interest_with_callback(&conn, &|_| true);
+    let decision = interactive.decide_interest_with_callback(&conn, &|_| true);
     assert_eq!(decision, InterestDecision::Interested);
 }
 
@@ -678,8 +710,7 @@ fn test_decide_interest_becomes_not_interested() {
     let conn = make_test_conn();
 
     // has_missing_piece returns false, am_interested is true → NotInterested
-    let decision =
-        interactive.decide_interest_with_callback(&conn, &|_| false);
+    let decision = interactive.decide_interest_with_callback(&conn, &|_| false);
     assert_eq!(decision, InterestDecision::NotInterested);
 }
 
@@ -692,8 +723,7 @@ fn test_decide_interest_no_change() {
     let conn = make_test_conn();
 
     // has_missing_piece returns true, am_interested is true → NoChange
-    let decision =
-        interactive.decide_interest_with_callback(&conn, &|_| true);
+    let decision = interactive.decide_interest_with_callback(&conn, &|_| true);
     assert_eq!(decision, InterestDecision::NoChange);
 }
 
@@ -849,11 +879,8 @@ fn test_dispatch_have_updates_bitfield() {
     let mut conn = make_test_conn();
     conn.allocate_session_resource(256 * 1024, 1024 * 1024);
 
-    let update = interactive.dispatch_message(
-        BtMessage::Have { piece_index: 0 },
-        &mut conn,
-        |_| false,
-    );
+    let update =
+        interactive.dispatch_message(BtMessage::Have { piece_index: 0 }, &mut conn, |_| false);
 
     assert_eq!(update.have_index, Some(0));
     // The peer should now have piece 0
@@ -954,12 +981,9 @@ fn test_handler_access() {
     assert_eq!(interactive.handler().count_outstanding_requests(), 0);
 
     // Mut access
-    interactive.handler_mut().send_request(
-        5,
-        0,
-        constants::BT_BLOCK_SIZE as u32,
-        vec![1],
-    );
+    interactive
+        .handler_mut()
+        .send_request(5, 0, constants::BT_BLOCK_SIZE as u32, vec![1]);
     assert_eq!(interactive.handler().count_outstanding_requests(), 1);
 }
 
@@ -998,7 +1022,12 @@ fn test_extension_registry_initial_state() {
     let interactive = BtPeerInteractive::new(info_hash, 100);
     assert_eq!(interactive.extension_registry().local_ut_metadata_id(), 1);
     assert_eq!(interactive.extension_registry().local_ut_pex_id(), 2);
-    assert!(interactive.extension_registry().peer_ut_metadata_id().is_none());
+    assert!(
+        interactive
+            .extension_registry()
+            .peer_ut_metadata_id()
+            .is_none()
+    );
     assert!(interactive.extension_registry().peer_ut_pex_id().is_none());
 }
 
@@ -1013,10 +1042,7 @@ fn test_dispatch_extended_handshake() {
     // Build and dispatch an extension handshake message
     let hs = ExtensionHandshake::new();
     let payload = hs.to_bytes();
-    let msg = BtMessage::Extended {
-        ext_id: 0,
-        payload,
-    };
+    let msg = BtMessage::Extended { ext_id: 0, payload };
 
     let update = interactive.dispatch_message(msg, &mut conn, |_| false);
 
@@ -1036,7 +1062,10 @@ fn test_dispatch_extended_handshake() {
     }
 
     // Verify the registry was updated
-    assert_eq!(interactive.extension_registry().peer_ut_metadata_id(), Some(1));
+    assert_eq!(
+        interactive.extension_registry().peer_ut_metadata_id(),
+        Some(1)
+    );
     assert_eq!(interactive.extension_registry().peer_ut_pex_id(), Some(2));
 
     // PEX should be auto-enabled after handshake
@@ -1045,9 +1074,7 @@ fn test_dispatch_extended_handshake() {
 
 #[test]
 fn test_dispatch_extended_ut_metadata_request() {
-    use aria2_protocol::bittorrent::message::extension::{
-        ExtensionHandshake, UtMetadataMessage,
-    };
+    use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 
     let info_hash = [0u8; 20];
     let mut interactive = BtPeerInteractive::new(info_hash, 100);
@@ -1069,10 +1096,7 @@ fn test_dispatch_extended_ut_metadata_request() {
     let msg = UtMetadataMessage::Request { piece: 0 };
     let payload = msg.to_payload();
     let update = interactive.dispatch_message(
-        BtMessage::Extended {
-            ext_id: 1,
-            payload,
-        },
+        BtMessage::Extended { ext_id: 1, payload },
         &mut conn,
         |_| false,
     );
@@ -1088,9 +1112,7 @@ fn test_dispatch_extended_ut_metadata_request() {
 
 #[test]
 fn test_dispatch_extended_ut_metadata_data() {
-    use aria2_protocol::bittorrent::message::extension::{
-        ExtensionHandshake, UtMetadataMessage,
-    };
+    use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 
     let info_hash = [0u8; 20];
     let mut interactive = BtPeerInteractive::new(info_hash, 100);
@@ -1114,10 +1136,7 @@ fn test_dispatch_extended_ut_metadata_data() {
     };
     let payload = msg.to_payload();
     let update = interactive.dispatch_message(
-        BtMessage::Extended {
-            ext_id: 1,
-            payload,
-        },
+        BtMessage::Extended { ext_id: 1, payload },
         &mut conn,
         |_| false,
     );
@@ -1168,19 +1187,23 @@ fn test_dispatch_extended_ut_pex() {
     let payload = pex.to_payload();
     // Peer's ut_pex id = 2
     let update = interactive.dispatch_message(
-        BtMessage::Extended {
-            ext_id: 2,
-            payload,
-        },
+        BtMessage::Extended { ext_id: 2, payload },
         &mut conn,
         |_| false,
     );
 
     assert!(update.extension_update.is_some());
     match update.extension_update.unwrap() {
-        ExtensionUpdate::PeerExchange { added_v4, added_v6 } => {
+        ExtensionUpdate::PeerExchange {
+            added_v4,
+            added_v6,
+            dropped_v4,
+            dropped_v6,
+        } => {
             assert_eq!(added_v4.len(), 1);
             assert!(added_v6.is_empty());
+            assert!(dropped_v4.is_empty());
+            assert!(dropped_v6.is_empty());
             assert_eq!(added_v4[0], CompactPeerV4(peer_bytes));
         }
         other => panic!("Expected PeerExchange, got {:?}", other),
@@ -1329,7 +1352,9 @@ impl PieceProvider for MockPieceProvider {
         _target_piece_indexes: &[u32],
         _cuid: u64,
     ) -> Vec<Piece> {
-        self.missing_pieces.drain(..count.min(self.missing_pieces.len())).collect()
+        self.missing_pieces
+            .drain(..count.min(self.missing_pieces.len()))
+            .collect()
     }
 
     fn get_missing_fast_pieces(
@@ -1339,7 +1364,9 @@ impl PieceProvider for MockPieceProvider {
         _target_piece_indexes: &[u32],
         _cuid: u64,
     ) -> Vec<Piece> {
-        self.fast_pieces.drain(..count.min(self.fast_pieces.len())).collect()
+        self.fast_pieces
+            .drain(..count.min(self.fast_pieces.len()))
+            .collect()
     }
 
     fn is_end_game(&self) -> bool {
@@ -1400,7 +1427,9 @@ fn test_fill_piece_adds_piece_when_below_max() {
     interactive.peer_choking = false;
 
     // Add 1 piece with 4 missing blocks, below max_outstanding_request (6)
-    interactive.request_factory_mut().add_target_piece(Piece::new(0, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(0, 65536));
 
     let conn = make_test_conn();
     let mut mock = MockPieceProvider::new();
@@ -1449,7 +1478,10 @@ fn test_fill_piece_choking_with_fast_extension() {
 
     let mut conn = make_test_conn();
     conn.allocate_session_resource(65536, 655360);
-    conn.session_resource.as_mut().unwrap().set_fast_extension_enabled(true);
+    conn.session_resource
+        .as_mut()
+        .unwrap()
+        .set_fast_extension_enabled(true);
 
     let mut mock = MockPieceProvider::new();
     mock.fast_pieces = vec![Piece::new(0, 65536)];
@@ -1465,8 +1497,12 @@ fn test_fill_piece_enough_blocks_already() {
     interactive.peer_choking = false;
 
     // Add 2 pieces with 4 blocks each = 8 missing blocks >= max_outstanding (6)
-    interactive.request_factory_mut().add_target_piece(Piece::new(0, 65536));
-    interactive.request_factory_mut().add_target_piece(Piece::new(1, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(0, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(1, 65536));
 
     let conn = make_test_conn();
     let mut mock = MockPieceProvider::new();
@@ -1524,7 +1560,10 @@ fn test_add_requests_no_requests_when_max_outstanding_reached() {
     // Add pieces and make the handler think we already have max outstanding requests
     // by adding request slots directly
     for i in 0..DEFAULT_MAX_OUTSTANDING_REQUEST {
-        interactive.handler_mut().dispatcher.add_request_slot(i as u32, 0, 16384);
+        interactive
+            .handler_mut()
+            .dispatcher
+            .add_request_slot(i as u32, 0, 16384);
     }
 
     let conn = make_test_conn();
@@ -1563,8 +1602,12 @@ fn test_add_requests_creates_requests_for_new_pieces() {
 fn test_cancel_all_piece() {
     let info_hash = [0u8; 20];
     let mut interactive = BtPeerInteractive::new(info_hash, 10);
-    interactive.request_factory_mut().add_target_piece(Piece::new(0, 65536));
-    interactive.request_factory_mut().add_target_piece(Piece::new(1, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(0, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(1, 65536));
 
     let removed = interactive.cancel_all_piece();
     assert_eq!(removed, vec![0, 1]);
@@ -1589,7 +1632,9 @@ fn test_remove_completed_piece() {
     let mut piece0 = Piece::new(0, 65536);
     piece0.set_all_blocks(); // Mark as complete
     interactive.request_factory_mut().add_target_piece(piece0);
-    interactive.request_factory_mut().add_target_piece(Piece::new(1, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(1, 65536));
 
     let completed = interactive.remove_completed_piece();
     assert_eq!(completed, vec![0]);
@@ -1600,7 +1645,9 @@ fn test_remove_completed_piece() {
 fn test_remove_completed_piece_none() {
     let info_hash = [0u8; 20];
     let mut interactive = BtPeerInteractive::new(info_hash, 10);
-    interactive.request_factory_mut().add_target_piece(Piece::new(0, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(0, 65536));
 
     let completed = interactive.remove_completed_piece();
     assert!(completed.is_empty());
@@ -1624,7 +1671,9 @@ fn test_request_factory_accessors() {
 
     assert_eq!(interactive.request_factory().count_target_piece(), 0);
 
-    interactive.request_factory_mut().add_target_piece(Piece::new(0, 65536));
+    interactive
+        .request_factory_mut()
+        .add_target_piece(Piece::new(0, 65536));
     assert_eq!(interactive.request_factory().count_target_piece(), 1);
 }
 
@@ -1650,10 +1699,10 @@ fn test_check_have_result_none_when_no_indexes() {
     let mut interactive = BtPeerInteractive::new([0u8; 20], 100);
     let result = interactive.check_have_optimized(
         &|_last| (Vec::new(), 0u64), // no new pieces
-        100, // bitfield_length
-        false, // fast_ext
-        false, // all_done
-        0, // completed_len
+        100,                         // bitfield_length
+        false,                       // fast_ext
+        false,                       // all_done
+        0,                           // completed_len
     );
     assert_eq!(result, CheckHaveResult::None);
 }
@@ -1667,10 +1716,10 @@ fn test_check_have_result_bitfield_when_many_indexes() {
     let indexes: Vec<usize> = (0..20).collect();
     let result = interactive.check_have_optimized(
         &|_last| (indexes.clone(), 20u64),
-        10, // bitfield_length=10 → 5+10=15 <= 180
+        10,    // bitfield_length=10 → 5+10=15 <= 180
         false, // fast_ext
         false, // all_done
-        1024, // completed_len > 0
+        1024,  // completed_len > 0
     );
     assert_eq!(result, CheckHaveResult::Bitfield);
 }
@@ -1682,8 +1731,8 @@ fn test_check_have_result_have_all_when_fast_ext_and_complete() {
     let result = interactive.check_have_optimized(
         &|_last| (indexes.clone(), 20u64),
         10,
-        true,  // fast_ext enabled
-        true,  // all done
+        true, // fast_ext enabled
+        true, // all done
         1024,
     );
     assert_eq!(result, CheckHaveResult::HaveAll);

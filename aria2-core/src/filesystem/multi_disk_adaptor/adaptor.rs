@@ -312,7 +312,11 @@ impl MultiDiskAdaptor {
                 match tokio::fs::metadata(entry.file_entry.get_path()).await {
                     Ok(meta) => total += meta.len(),
                     Err(e) => {
-                        warn!("Failed to get metadata for {:?}: {}", entry.file_entry.get_path(), e);
+                        warn!(
+                            "Failed to get metadata for {:?}: {}",
+                            entry.file_entry.get_path(),
+                            e
+                        );
                     }
                 }
             }

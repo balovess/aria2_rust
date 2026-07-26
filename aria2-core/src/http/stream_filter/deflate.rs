@@ -147,7 +147,10 @@ impl StreamFilter for DeflateDecoder {
                 }
                 Err(e) => {
                     self.input_buffer = data;
-                    Err(Aria2Error::Io(format!("Deflate decompression failed: {}", e)))
+                    Err(Aria2Error::Io(format!(
+                        "Deflate decompression failed: {}",
+                        e
+                    )))
                 }
             }
         } else if !self.tried_zlib {
@@ -248,8 +251,8 @@ impl StreamFilter for DeflateDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::{DeflateEncoder, ZlibEncoder};
     use flate2::Compression;
+    use flate2::write::{DeflateEncoder, ZlibEncoder};
     use std::io::Write;
 
     #[test]

@@ -444,9 +444,9 @@ impl DownloadCommand {
             Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
                 "Download cancelled by user".into(),
             )),
-            Ok(g) if g.is_paused_flag() => Err(Aria2Error::DownloadFailed(
-                "Download paused".into(),
-            )),
+            Ok(g) if g.is_paused_flag() => {
+                Err(Aria2Error::DownloadFailed("Download paused".into()))
+            }
             _ => Ok(()),
         }
     }
@@ -714,10 +714,7 @@ impl Command for DownloadCommand {
                 let mut buf = vec![0u8; 65536];
                 loop {
                     let n = reader.read(&mut buf).await.map_err(|e| {
-                        Aria2Error::Io(format!(
-                            "Read error during checksum verification: {}",
-                            e
-                        ))
+                        Aria2Error::Io(format!("Read error during checksum verification: {}", e))
                     })?;
                     if n == 0 {
                         break;
@@ -914,9 +911,9 @@ mod tests {
             g.remove().unwrap();
         }
 
-        let err = cmd.check_cancelled().expect_err(
-            "check_cancelled() should return Err after the group is marked Removed",
-        );
+        let err = cmd
+            .check_cancelled()
+            .expect_err("check_cancelled() should return Err after the group is marked Removed");
         assert!(
             matches!(err, Aria2Error::DownloadFailed(_)),
             "expected DownloadFailed error, got {:?}",

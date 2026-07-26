@@ -18,8 +18,8 @@
 //! | `can_handle()` | `PostDownloadHandler::criteria()` |
 //! | `get_next_request_groups()` | `getNextRequestGroups()` |
 
-use crate::error::{Aria2Error, Result};
 use crate::engine::metalink_download_command::MetalinkDownloadCommand;
+use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadOptions;
 
 /// Known Metalink MIME content types.
@@ -82,7 +82,10 @@ impl MetalinkPostDownloadHandler {
         // Check file extension
         if let Some(path) = file_path {
             let path_lower = path.to_lowercase();
-            if METALINK_EXTENSIONS.iter().any(|ext| path_lower.ends_with(ext)) {
+            if METALINK_EXTENSIONS
+                .iter()
+                .any(|ext| path_lower.ends_with(ext))
+            {
                 return true;
             }
         }
@@ -123,8 +126,7 @@ impl MetalinkPostDownloadHandler {
             ));
         }
 
-        let doc = MetalinkDocument::parse(metalink_data, None)
-            .map_err(|e| Aria2Error::Parse(e))?;
+        let doc = MetalinkDocument::parse(metalink_data, None).map_err(|e| Aria2Error::Parse(e))?;
 
         if doc.files.is_empty() {
             tracing::info!("Metalink document contains no downloadable files");
@@ -144,10 +146,8 @@ impl MetalinkPostDownloadHandler {
             1, // GID start
         )?;
 
-        let commands: Vec<MetalinkDownloadCommand> = file_infos
-            .into_iter()
-            .map(|fi| fi.command)
-            .collect();
+        let commands: Vec<MetalinkDownloadCommand> =
+            file_infos.into_iter().map(|fi| fi.command).collect();
 
         tracing::info!(
             count = commands.len(),

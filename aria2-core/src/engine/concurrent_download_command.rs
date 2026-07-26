@@ -39,8 +39,8 @@ impl ConcurrentDownloadCommand {
     ) -> Result<Self> {
         let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
-            })?;
+            Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
+        })?;
 
         if doc.files.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -75,17 +75,17 @@ impl ConcurrentDownloadCommand {
         let client = {
             crate::http::client_pool::ensure_rustls_provider();
             reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(300))
-            .user_agent("aria2-rust/0.1.0")
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!(
-                    "HTTP client build failed: {}",
-                    e
-                )))
-            })?
+                .connect_timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(300))
+                .user_agent("aria2-rust/0.1.0")
+                .redirect(reqwest::redirect::Policy::limited(5))
+                .build()
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!(
+                        "HTTP client build failed: {}",
+                        e
+                    )))
+                })?
         };
 
         let alloc = "prealloc".to_string();
@@ -126,10 +126,11 @@ impl Command for ConcurrentDownloadCommand {
             self.started = true;
         }
 
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data, None)
-            .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
-            })?;
+        let doc =
+            aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data, None)
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
+                })?;
 
         // Use the first file for single-file mode
         let file = &doc.files[0];

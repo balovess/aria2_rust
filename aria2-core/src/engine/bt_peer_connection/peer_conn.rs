@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::engine::peer_stats::PeerStats;
+use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 
+use super::session_resource::PeerSessionResource;
 use super::types::{ConnectionType, SendBuffer};
 use super::utp_connection::UtpPeerConnection;
-use super::session_resource::PeerSessionResource;
 
 // ---------------------------------------------------------------------------
 // Keep-alive / timeout constants
@@ -193,10 +193,15 @@ impl BtPeerConn {
                     send_buffer: SendBuffer::new(),
                     last_keepalive_sent: now,
                     last_message_received: now,
-                    stats: PeerStats::new([0u8; 20], std::net::SocketAddr::new(
-                        addr.ip.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-                        addr.port,
-                    )),
+                    stats: PeerStats::new(
+                        [0u8; 20],
+                        std::net::SocketAddr::new(
+                            addr.ip
+                                .parse()
+                                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                            addr.port,
+                        ),
+                    ),
                     pending_pex_peers: Vec::new(),
                 })
             }
@@ -230,8 +235,7 @@ impl BtPeerConn {
 
         let peer_conn =
             aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-                stream,
-                [0u8; 20],
+                stream, [0u8; 20],
             );
 
         Self {
@@ -314,10 +318,10 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
-            stats: PeerStats::new([0u8; 20], std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                0,
-            )),
+            stats: PeerStats::new(
+                [0u8; 20],
+                std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+            ),
             pending_pex_peers: Vec::new(),
         }
     }
@@ -540,7 +544,9 @@ impl BtPeerConn {
     ///
     /// Called by the download loop after each iteration to process peers
     /// discovered via incoming ut_pex messages during block reads.
-    pub fn drain_pex_peers(&mut self) -> Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> {
+    pub fn drain_pex_peers(
+        &mut self,
+    ) -> Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> {
         std::mem::take(&mut self.pending_pex_peers)
     }
 
@@ -714,16 +720,12 @@ impl BtPeerConn {
         use aria2_protocol::bittorrent::message::types::BtMessage;
         let msg = BtMessage::HaveAll;
         match &mut self.inner {
-            InnerConnection::Plain(c) => {
-                c.send_message(&msg).await.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-                })
-            }
-            InnerConnection::Encrypted(c) => {
-                c.send_message(&msg).await.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-                })
-            }
+            InnerConnection::Plain(c) => c.send_message(&msg).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            InnerConnection::Encrypted(c) => c.send_message(&msg).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
             InnerConnection::Utp(c) => c.send_message(&serialize(&msg)).await,
         }
     }
@@ -735,16 +737,12 @@ impl BtPeerConn {
         use aria2_protocol::bittorrent::message::types::BtMessage;
         let msg = BtMessage::HaveNone;
         match &mut self.inner {
-            InnerConnection::Plain(c) => {
-                c.send_message(&msg).await.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-                })
-            }
-            InnerConnection::Encrypted(c) => {
-                c.send_message(&msg).await.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-                })
-            }
+            InnerConnection::Plain(c) => c.send_message(&msg).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            InnerConnection::Encrypted(c) => c.send_message(&msg).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
             InnerConnection::Utp(c) => c.send_message(&serialize(&msg)).await,
         }
     }
@@ -767,8 +765,7 @@ impl BtPeerConn {
                 let msg_bytes = c.recv_message().await?;
                 if let Some(bytes) = msg_bytes {
                     use aria2_protocol::bittorrent::message::factory::parse_message;
-                    parse_message(&bytes)
-                        .map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
+                    parse_message(&bytes).map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
                 } else {
                     Ok(None)
                 }
@@ -814,12 +811,8 @@ impl BtPeerConn {
                 // acceptable because flush is called infrequently.
                 Self::flush_raw_to_plain(c, data).await
             }
-            InnerConnection::Encrypted(c) => {
-                Self::flush_raw_to_encrypted(c, data).await
-            }
-            InnerConnection::Utp(c) => {
-                c.send_message(data).await
-            }
+            InnerConnection::Encrypted(c) => Self::flush_raw_to_encrypted(c, data).await,
+            InnerConnection::Utp(c) => c.send_message(data).await,
         }
     }
 

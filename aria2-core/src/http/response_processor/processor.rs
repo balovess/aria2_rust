@@ -11,7 +11,7 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::header_processor::HttpResponseHead;
 use crate::http::metalink_http::MetalinkHttpParser;
 use crate::http::request_response::HttpMethod;
-use crate::http::skip_response::{HttpSkipResponseHandler, SkipResponseResult, MAX_REDIRECT_COUNT};
+use crate::http::skip_response::{HttpSkipResponseHandler, MAX_REDIRECT_COUNT, SkipResponseResult};
 
 use super::connection::{should_inflate_content_encoding, supports_persistent_connection};
 use super::conversion;

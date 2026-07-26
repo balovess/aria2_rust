@@ -130,7 +130,10 @@ impl BtPeerInteractive {
     /// which should return piece indexes completed since `lastHaveIndex_`.
     ///
     /// After sending these Have messages, `lastHaveIndex_` is updated.
-    pub(crate) fn check_have_with_callback(&mut self, get_advertised_pieces: &impl Fn() -> Vec<u32>) -> Vec<u32> {
+    pub(crate) fn check_have_with_callback(
+        &mut self,
+        get_advertised_pieces: &impl Fn() -> Vec<u32>,
+    ) -> Vec<u32> {
         let pieces = get_advertised_pieces();
         if !pieces.is_empty() {
             // Update last_have_index to the maximum advertised index
@@ -313,12 +316,7 @@ impl BtPeerInteractive {
         } else {
             // Peer is not choking us — get regular pieces.
             // C++: else { pieceStorage_->getMissingPiece(...) }
-            piece_storage.get_missing_pieces(
-                diff_missing_block,
-                conn,
-                &target_indexes,
-                cuid,
-            )
+            piece_storage.get_missing_pieces(diff_missing_block, conn, &target_indexes, cuid)
         };
 
         for piece in pieces {
@@ -400,12 +398,10 @@ impl BtPeerInteractive {
                 );
 
                 // Queue through the handler (tracks request slots + outgoing queue)
-                if let Some(_msg_bytes) = self.handler.send_request(
-                    req.index,
-                    req.begin,
-                    req.length,
-                    serialized,
-                ) {
+                if let Some(_msg_bytes) = self
+                    .handler
+                    .send_request(req.index, req.begin, req.length, serialized)
+                {
                     trace!(
                         "addRequests: queued request piece={} begin={} len={}",
                         req.index, req.begin, req.length
@@ -503,8 +499,8 @@ impl BtPeerInteractive {
             && old_outstanding > new_outstanding
             && (old_outstanding - new_outstanding) * 4 >= self.max_outstanding_request
         {
-            self.max_outstanding_request = (self.max_outstanding_request * 2)
-                .min(UB_MAX_OUTSTANDING_REQUEST);
+            self.max_outstanding_request =
+                (self.max_outstanding_request * 2).min(UB_MAX_OUTSTANDING_REQUEST);
             debug!(
                 "Scaled max_outstanding_request to {}",
                 self.max_outstanding_request

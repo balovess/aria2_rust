@@ -130,11 +130,17 @@ pub async fn establish_http_proxy_tunnel(
     match proxy_type {
         HttpProxyType::Tunnel => {
             let stream = HttpProxyTunnel::establish_tunnel(config).await?;
-            Ok(HttpProxyTunnelResult { stream, proxy_type: HttpProxyType::Tunnel })
+            Ok(HttpProxyTunnelResult {
+                stream,
+                proxy_type: HttpProxyType::Tunnel,
+            })
         }
         HttpProxyType::Forward => {
             let stream = HttpProxyTunnel::establish_forward(config).await?;
-            Ok(HttpProxyTunnelResult { stream, proxy_type: HttpProxyType::Forward })
+            Ok(HttpProxyTunnelResult {
+                stream,
+                proxy_type: HttpProxyType::Forward,
+            })
         }
     }
 }
@@ -152,32 +158,43 @@ impl HttpProxyTunnel {
     async fn establish_tunnel(config: &HttpProxyTunnelConfig) -> Result<TcpStream> {
         let stream = Self::connect_to_proxy(config).await?;
         let stream = Self::tunnel_handshake(stream, config, 0).await?;
-        info!("HTTP proxy tunnel established: {}:{} -> {}:{}",
-            config.proxy_host, config.proxy_port, config.target_host, config.target_port);
+        info!(
+            "HTTP proxy tunnel established: {}:{} -> {}:{}",
+            config.proxy_host, config.proxy_port, config.target_host, config.target_port
+        );
         Ok(stream)
     }
 
     async fn establish_forward(config: &HttpProxyTunnelConfig) -> Result<TcpStream> {
         let stream = Self::connect_to_proxy(config).await?;
-        info!("HTTP forward-proxy connection: {}:{} for target {}:{}",
-            config.proxy_host, config.proxy_port, config.target_host, config.target_port);
+        info!(
+            "HTTP forward-proxy connection: {}:{} for target {}:{}",
+            config.proxy_host, config.proxy_port, config.target_host, config.target_port
+        );
         Ok(stream)
     }
 
     // -- Connection & handshake ------------------------------------------------
 
     async fn connect_to_proxy(config: &HttpProxyTunnelConfig) -> Result<TcpStream> {
-        debug!("Connecting to proxy {}:{} for {}:{}",
-            config.proxy_host, config.proxy_port, config.target_host, config.target_port);
+        debug!(
+            "Connecting to proxy {}:{} for {}:{}",
+            config.proxy_host, config.proxy_port, config.target_host, config.target_port
+        );
         let stream = timeout(
             config.connect_timeout,
             TcpStream::connect((config.proxy_host.as_str(), config.proxy_port)),
         )
         .await
         .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
-        .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-            message: format!("Failed to connect to proxy {}:{}: {}", config.proxy_host, config.proxy_port, e),
-        }))?;
+        .map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!(
+                    "Failed to connect to proxy {}:{}: {}",
+                    config.proxy_host, config.proxy_port, e
+                ),
+            })
+        })?;
         stream.set_nodelay(true).map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("set_nodelay failed: {}", e),
@@ -191,7 +208,9 @@ impl HttpProxyTunnel {
     /// Uses a loop instead of recursion to avoid `Pin<Box<dyn Future>>`
     /// lifetime issues. Max auth retries bounded by `MAX_AUTH_RETRIES`.
     async fn tunnel_handshake(
-        mut stream: TcpStream, config: &HttpProxyTunnelConfig, _auth_retry: u32,
+        mut stream: TcpStream,
+        config: &HttpProxyTunnelConfig,
+        _auth_retry: u32,
     ) -> Result<TcpStream> {
         let auth_header = Self::maybe_preemptive_basic_auth(config);
         let request = Self::build_connect_request(config, auth_header.as_deref());
@@ -206,15 +225,22 @@ impl HttpProxyTunnel {
                     remaining_retries -= 1;
                     let has_creds = config.username.as_ref().is_some_and(|u| !u.is_empty());
                     if !has_creds {
-                        return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                            message: format!("Proxy {}:{} requires auth but no credentials provided",
-                                config.proxy_host, config.proxy_port),
-                        }));
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: format!(
+                                    "Proxy {}:{} requires auth but no credentials provided",
+                                    config.proxy_host, config.proxy_port
+                                ),
+                            },
+                        ));
                     }
                     Self::consume_response_body(&mut stream, config.read_timeout).await?;
-                    let proxy_authenticate = response.headers.iter()
+                    let proxy_authenticate = response
+                        .headers
+                        .iter()
                         .find(|(k, _)| k.eq_ignore_ascii_case("proxy-authenticate"))
-                        .map(|(_, v)| v.as_str()).unwrap_or("");
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("");
                     let username = config.username.as_deref().unwrap_or("");
                     let password = config.password.as_deref().unwrap_or("");
                     let uri = format!("{}:{}", config.target_host, config.target_port);
@@ -224,25 +250,40 @@ impl HttpProxyTunnel {
                         basic_auth(username, password)
                     } else {
                         warn!("Unsupported proxy auth scheme: {}", proxy_authenticate);
-                        return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                            message: format!("Unsupported proxy auth: {}", proxy_authenticate),
-                        }));
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: format!("Unsupported proxy auth: {}", proxy_authenticate),
+                            },
+                        ));
                     };
                     let request = Self::build_connect_request(config, Some(&auth_header));
                     Self::send_request(&mut stream, &request, config.write_timeout).await?;
                     // Loop back to read the response to the auth'd request
                 }
                 407 => {
-                    return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("Proxy auth failed for {}:{}", config.proxy_host, config.proxy_port),
-                    }));
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: format!(
+                                "Proxy auth failed for {}:{}",
+                                config.proxy_host, config.proxy_port
+                            ),
+                        },
+                    ));
                 }
                 status => {
-                    return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("Proxy {}:{} rejected CONNECT to {}:{}: {} {}",
-                            config.proxy_host, config.proxy_port,
-                            config.target_host, config.target_port, status, response.reason_phrase),
-                    }));
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: format!(
+                                "Proxy {}:{} rejected CONNECT to {}:{}: {} {}",
+                                config.proxy_host,
+                                config.proxy_port,
+                                config.target_host,
+                                config.target_port,
+                                status,
+                                response.reason_phrase
+                            ),
+                        },
+                    ));
                 }
             }
         }
@@ -251,11 +292,17 @@ impl HttpProxyTunnel {
     // -- Request building ------------------------------------------------------
 
     /// Build the CONNECT request string (matches C++ `HttpRequest::createProxyRequest`).
-    pub fn build_connect_request(config: &HttpProxyTunnelConfig, auth_header: Option<&str>) -> String {
+    pub fn build_connect_request(
+        config: &HttpProxyTunnelConfig,
+        auth_header: Option<&str>,
+    ) -> String {
         let mut request = format!(
             "CONNECT {}:{} HTTP/1.1\r\nUser-Agent: {}\r\nHost: {}:{}\r\n",
-            config.target_host, config.target_port, config.user_agent,
-            config.target_host, config.target_port
+            config.target_host,
+            config.target_port,
+            config.user_agent,
+            config.target_host,
+            config.target_port
         );
         if let Some(auth) = auth_header {
             request.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
@@ -274,12 +321,22 @@ impl HttpProxyTunnel {
     /// Return pre-emptive Basic auth header if credentials are configured.
     fn maybe_preemptive_basic_auth(config: &HttpProxyTunnelConfig) -> Option<String> {
         let username = config.username.as_deref()?;
-        if username.is_empty() { return None; }
-        Some(basic_auth(username, config.password.as_deref().unwrap_or("")))
+        if username.is_empty() {
+            return None;
+        }
+        Some(basic_auth(
+            username,
+            config.password.as_deref().unwrap_or(""),
+        ))
     }
 
     /// Build a Digest Proxy-Authorization header value.
-    fn build_digest_auth_header(username: &str, password: &str, challenge_header: &str, uri: &str) -> String {
+    fn build_digest_auth_header(
+        username: &str,
+        password: &str,
+        challenge_header: &str,
+        uri: &str,
+    ) -> String {
         let challenge = match DigestAuthChallenge::parse(challenge_header) {
             Ok(c) => c,
             Err(e) => {
@@ -290,14 +347,19 @@ impl HttpProxyTunnel {
         let ha1 = md5_hex(&format!("{}:{}:{}", username, challenge.realm, password));
         let ha1 = if challenge.algorithm.eq_ignore_ascii_case("MD5-sess") {
             md5_hex(&format!("{}:{}:{}", ha1, challenge.nonce, "00000001"))
-        } else { ha1 };
+        } else {
+            ha1
+        };
         let ha2 = md5_hex(&format!("CONNECT:{}", uri));
         let qop_value = challenge.qop.as_deref().unwrap_or("");
         let cnonce = "aria2rustcnonce";
         let response_hash = if qop_value.is_empty() {
             md5_hex(&format!("{}:{}:{}", ha1, challenge.nonce, ha2))
         } else {
-            md5_hex(&format!("{}:{}:00000001:{}:{}:{}", ha1, challenge.nonce, cnonce, qop_value, ha2))
+            md5_hex(&format!(
+                "{}:{}:00000001:{}:{}:{}",
+                ha1, challenge.nonce, cnonce, qop_value, ha2
+            ))
         };
         let mut header = format!(
             "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\"",
@@ -307,7 +369,10 @@ impl HttpProxyTunnel {
             header.push_str(&format!(", opaque=\"{}\"", opaque));
         }
         if !qop_value.is_empty() {
-            header.push_str(&format!(", qop={}, nc=00000001, cnonce=\"{}\"", qop_value, cnonce));
+            header.push_str(&format!(
+                ", qop={}, nc=00000001, cnonce=\"{}\"",
+                qop_value, cnonce
+            ));
         }
         header.push_str(&format!(", algorithm={}", challenge.algorithm));
         header
@@ -315,14 +380,20 @@ impl HttpProxyTunnel {
 
     // -- I/O helpers -----------------------------------------------------------
 
-    async fn send_request(stream: &mut TcpStream, request: &str, write_timeout: Duration) -> Result<()> {
+    async fn send_request(
+        stream: &mut TcpStream,
+        request: &str,
+        write_timeout: Duration,
+    ) -> Result<()> {
         debug!("Sending proxy request:\n{}", request.trim_end());
         timeout(write_timeout, stream.write_all(request.as_bytes()))
             .await
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
-            .map_err(|e| Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Failed to send proxy request: {}", e),
-            }))?;
+            .map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("Failed to send proxy request: {}", e),
+                })
+            })?;
         stream.flush().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("Failed to flush proxy request: {}", e),
@@ -332,15 +403,21 @@ impl HttpProxyTunnel {
 
     /// Read proxy response using streaming `HttpHeaderProcessor`.
     /// Skips 1xx informational responses (matching C++ behavior).
-    async fn read_proxy_response(stream: &mut TcpStream, read_timeout: Duration) -> Result<ProxyResponse> {
+    async fn read_proxy_response(
+        stream: &mut TcpStream,
+        read_timeout: Duration,
+    ) -> Result<ProxyResponse> {
         // Carry over unconsumed bytes between 1xx skips so that when a
         // 1xx and the final response arrive in the same TCP segment, the
         // second response is not lost.
         let mut leftover: Vec<u8> = Vec::new();
         loop {
-            let response = timeout(read_timeout, Self::parse_with_processor(stream, &mut leftover))
-                .await
-                .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))??;
+            let response = timeout(
+                read_timeout,
+                Self::parse_with_processor(stream, &mut leftover),
+            )
+            .await
+            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))??;
             if (100..200).contains(&response.status_code) {
                 debug!("Skipping 1xx informational: {}", response.status_code);
                 continue;
@@ -349,7 +426,10 @@ impl HttpProxyTunnel {
         }
     }
 
-    async fn parse_with_processor(stream: &mut TcpStream, leftover: &mut Vec<u8>) -> Result<ProxyResponse> {
+    async fn parse_with_processor(
+        stream: &mut TcpStream,
+        leftover: &mut Vec<u8>,
+    ) -> Result<ProxyResponse> {
         let mut processor = HttpHeaderProcessor::new();
         let mut buf = [0u8; 4096];
 
@@ -361,9 +441,15 @@ impl HttpProxyTunnel {
                 let remaining = leftover[bytes_used..].to_vec();
                 *leftover = remaining;
                 let head = processor.get_result()?;
-                let headers: Vec<(String, String)> = head.iter_headers()
-                    .map(|(k, v)| (k.to_string(), v.to_string())).collect();
-                return Ok(ProxyResponse { status_code: head.status_code, reason_phrase: head.reason_phrase, headers });
+                let headers: Vec<(String, String)> = head
+                    .iter_headers()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                return Ok(ProxyResponse {
+                    status_code: head.status_code,
+                    reason_phrase: head.reason_phrase,
+                    headers,
+                });
             }
             leftover.clear();
         }
@@ -375,9 +461,11 @@ impl HttpProxyTunnel {
                 })
             })?;
             if n == 0 {
-                return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "Connection closed while reading proxy response".to_string(),
-                }));
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: "Connection closed while reading proxy response".to_string(),
+                    },
+                ));
             }
             let state = processor.feed(&buf[..n]);
             if state.is_complete() {
@@ -389,22 +477,39 @@ impl HttpProxyTunnel {
                 break;
             }
             if state.is_error() {
-                return Err(Aria2Error::Parse("Failed to parse proxy response".to_string()));
+                return Err(Aria2Error::Parse(
+                    "Failed to parse proxy response".to_string(),
+                ));
             }
         }
         let head = processor.get_result()?;
-        let headers: Vec<(String, String)> = head.iter_headers()
-            .map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        Ok(ProxyResponse { status_code: head.status_code, reason_phrase: head.reason_phrase, headers })
+        let headers: Vec<(String, String)> = head
+            .iter_headers()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Ok(ProxyResponse {
+            status_code: head.status_code,
+            reason_phrase: head.reason_phrase,
+            headers,
+        })
     }
 
     /// Consume any remaining response body (for 407 responses).
     async fn consume_response_body(stream: &mut TcpStream, _read_timeout: Duration) -> Result<()> {
         let mut buf = [0u8; 4096];
         match timeout(Duration::from_secs(2), stream.read(&mut buf)).await {
-            Ok(Ok(n)) => { debug!("Consumed {} bytes of proxy response body", n); Ok(()) }
-            Ok(Err(e)) => { debug!("Error consuming proxy response body: {}", e); Ok(()) }
-            Err(_) => { debug!("Timeout consuming proxy response body (acceptable)"); Ok(()) }
+            Ok(Ok(n)) => {
+                debug!("Consumed {} bytes of proxy response body", n);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                debug!("Error consuming proxy response body: {}", e);
+                Ok(())
+            }
+            Err(_) => {
+                debug!("Timeout consuming proxy response body (acceptable)");
+                Ok(())
+            }
         }
     }
 }
@@ -484,8 +589,10 @@ mod tests {
 
     #[test]
     fn test_forward_request_line_get() {
-        assert_eq!(HttpProxyTunnel::build_forward_request_line("GET", "http://t.com/p"),
-            "GET http://t.com/p HTTP/1.1\r\n");
+        assert_eq!(
+            HttpProxyTunnel::build_forward_request_line("GET", "http://t.com/p"),
+            "GET http://t.com/p HTTP/1.1\r\n"
+        );
     }
 
     #[test]
@@ -511,7 +618,11 @@ mod tests {
 
     #[test]
     fn test_preemptive_auth_with_credentials() {
-        let config = HttpProxyTunnelConfig { username: Some("u".into()), password: Some("p".into()), ..test_config() };
+        let config = HttpProxyTunnelConfig {
+            username: Some("u".into()),
+            password: Some("p".into()),
+            ..test_config()
+        };
         assert!(HttpProxyTunnel::maybe_preemptive_basic_auth(&config).is_some());
     }
 
@@ -522,7 +633,11 @@ mod tests {
 
     #[test]
     fn test_preemptive_auth_empty_username() {
-        let config = HttpProxyTunnelConfig { username: Some(String::new()), password: Some("p".into()), ..test_config() };
+        let config = HttpProxyTunnelConfig {
+            username: Some(String::new()),
+            password: Some("p".into()),
+            ..test_config()
+        };
         assert!(HttpProxyTunnel::maybe_preemptive_basic_auth(&config).is_none());
     }
 
@@ -541,7 +656,10 @@ mod tests {
         proc.feed(raw);
         let head = proc.get_result().unwrap();
         assert_eq!(head.status_code, 407);
-        assert_eq!(head.header("proxy-authenticate"), Some("Basic realm=\"proxy\""));
+        assert_eq!(
+            head.header("proxy-authenticate"),
+            Some("Basic realm=\"proxy\"")
+        );
     }
 
     #[test]
@@ -598,7 +716,9 @@ mod tests {
             let n = AsyncReadExt::read(&mut sock, &mut buf).await.unwrap();
             let req = String::from_utf8_lossy(&buf[..n]);
             assert!(req.starts_with("CONNECT target.example.com:443"));
-            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
+            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
         });
         let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
         assert!(result.is_ok(), "Expected tunnel success, got: {:?}", result);
@@ -614,13 +734,19 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 4096];
             let _ = AsyncReadExt::read(&mut sock, &mut buf).await;
-            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 403 Forbidden\r\n\r\n").await.unwrap();
+            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                .await
+                .unwrap();
         });
         let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("403"), "Expected 403, got: {}", msg);
-        assert!(msg.contains("rejected CONNECT"), "Expected 'rejected CONNECT', got: {}", msg);
+        assert!(
+            msg.contains("rejected CONNECT"),
+            "Expected 'rejected CONNECT', got: {}",
+            msg
+        );
         server.await.unwrap();
     }
 
@@ -628,7 +754,9 @@ mod tests {
     async fn test_tunnel_407_basic_auth_success() {
         let (listener, port) = start_mock_proxy().await;
         let config = HttpProxyTunnelConfig {
-            username: Some("user".into()), password: Some("pass".into()), ..config_for_mock(port)
+            username: Some("user".into()),
+            password: Some("pass".into()),
+            ..config_for_mock(port)
         };
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -641,7 +769,9 @@ mod tests {
             let n2 = AsyncReadExt::read(&mut sock, &mut buf).await.unwrap();
             let req2 = String::from_utf8_lossy(&buf[..n2]);
             assert!(req2.contains("Proxy-Authorization: Basic dXNlcjpwYXNz"));
-            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
+            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
         });
         let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
         assert!(result.is_ok(), "Expected auth success, got: {:?}", result);
@@ -671,7 +801,9 @@ mod tests {
     async fn test_tunnel_407_wrong_credentials_fails() {
         let (listener, port) = start_mock_proxy().await;
         let config = HttpProxyTunnelConfig {
-            username: Some("wrong".into()), password: Some("creds".into()), ..config_for_mock(port)
+            username: Some("wrong".into()),
+            password: Some("creds".into()),
+            ..config_for_mock(port)
         };
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -681,9 +813,12 @@ mod tests {
                 b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"test\"\r\nContent-Length: 0\r\n\r\n"
             ).await.unwrap();
             let _ = AsyncReadExt::read(&mut sock, &mut buf).await;
-            AsyncWriteExt::write_all(&mut sock,
-                b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n"
-            ).await.unwrap();
+            AsyncWriteExt::write_all(
+                &mut sock,
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
         });
         let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
         assert!(result.is_err());
@@ -699,7 +834,11 @@ mod tests {
             let (_sock, _) = listener.accept().await.unwrap();
         });
         let result = establish_http_proxy_tunnel(&config, HttpProxyType::Forward).await;
-        assert!(result.is_ok(), "Expected forward success, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected forward success, got: {:?}",
+            result
+        );
         assert_eq!(result.unwrap().proxy_type, HttpProxyType::Forward);
         server.await.unwrap();
     }
@@ -714,20 +853,31 @@ mod tests {
             let _ = AsyncReadExt::read(&mut sock, &mut buf).await;
             // Send both responses; the client's read_proxy_response must
             // handle them even if they arrive in the same TCP segment.
-            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 100 Continue\r\n\r\n").await.unwrap();
-            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
+            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 100 Continue\r\n\r\n")
+                .await
+                .unwrap();
+            AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
         });
         let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
-        assert!(result.is_ok(), "Expected success after 1xx skip, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected success after 1xx skip, got: {:?}",
+            result
+        );
         server.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_tunnel_connection_refused() {
         let config = HttpProxyTunnelConfig {
-            proxy_host: "127.0.0.1".into(), proxy_port: 1,
-            target_host: "t.example.com".into(), target_port: 443,
-            connect_timeout: Duration::from_millis(500), ..Default::default()
+            proxy_host: "127.0.0.1".into(),
+            proxy_port: 1,
+            target_host: "t.example.com".into(),
+            target_port: 443,
+            connect_timeout: Duration::from_millis(500),
+            ..Default::default()
         };
         let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
         assert!(result.is_err());
@@ -736,7 +886,10 @@ mod tests {
     #[tokio::test]
     async fn test_tunnel_timeout() {
         let (listener, port) = start_mock_proxy().await;
-        let config = HttpProxyTunnelConfig { read_timeout: Duration::from_millis(200), ..config_for_mock(port) };
+        let config = HttpProxyTunnelConfig {
+            read_timeout: Duration::from_millis(200),
+            ..config_for_mock(port)
+        };
         let server = tokio::spawn(async move {
             let (_sock, _) = listener.accept().await.unwrap();
             tokio::time::sleep(Duration::from_secs(10)).await;

@@ -16,9 +16,7 @@ use tracing::debug;
 
 use super::bucket::Bucket;
 use super::bucket_tree::{
-    BucketTreeNode,
-    enumerate_buckets, find_bucket_for,
-    find_bucket_for_mut, find_closest_k_nodes,
+    BucketTreeNode, enumerate_buckets, find_bucket_for, find_bucket_for_mut, find_closest_k_nodes,
     find_tree_node_for_mut,
 };
 use super::node::DhtNode;
@@ -176,7 +174,10 @@ impl RoutingTable {
 
     /// Return the number of good (non-bad) nodes across all buckets.
     pub fn good_node_count(&self) -> usize {
-        self.get_all_buckets().iter().map(|b| b.good_node_count()).sum()
+        self.get_all_buckets()
+            .iter()
+            .map(|b| b.good_node_count())
+            .sum()
     }
 
     /// Return the number of buckets in the tree.
@@ -239,7 +240,10 @@ impl RoutingTable {
 
     /// Count questionable nodes in the routing table.
     pub fn questionable_node_count(&self) -> usize {
-        self.get_all_buckets().iter().map(|b| b.questionable_count()).sum()
+        self.get_all_buckets()
+            .iter()
+            .map(|b| b.questionable_count())
+            .sum()
     }
 
     /// Count bad nodes in the routing table.
@@ -315,10 +319,7 @@ impl RoutingTable {
         Self::for_each_bucket_mut_recursive(&mut self.root, f);
     }
 
-    fn for_each_bucket_mut_recursive(
-        node: &mut BucketTreeNode,
-        f: &mut impl FnMut(&mut Bucket),
-    ) {
+    fn for_each_bucket_mut_recursive(node: &mut BucketTreeNode, f: &mut impl FnMut(&mut Bucket)) {
         match node {
             BucketTreeNode::Leaf { bucket } => {
                 f(bucket);
@@ -497,7 +498,10 @@ mod tests {
         // Check that at least one bucket has cached nodes.
         let buckets = table.get_all_buckets();
         let has_cached = buckets.iter().any(|b| !b.cached_nodes().is_empty());
-        assert!(has_cached, "Expected at least one bucket to have cached nodes");
+        assert!(
+            has_cached,
+            "Expected at least one bucket to have cached nodes"
+        );
     }
 
     #[test]

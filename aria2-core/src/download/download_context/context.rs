@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, trace};
 
-use crate::download::file_entry::FileEntry;
 use super::net_stat::NetStat;
 use super::types::{ContextAttributeType, Signature, TorrentAttribute};
+use crate::download::file_entry::FileEntry;
 
 /// Central metadata object binding file entries, URIs, and download metadata.
 ///
@@ -233,7 +233,10 @@ impl DownloadContext {
 
     /// Count the number of file entries whose `is_requested()` is true.
     pub fn count_requested_file_entry(&self) -> usize {
-        self.file_entries.iter().filter(|fe| fe.is_requested()).count()
+        self.file_entries
+            .iter()
+            .filter(|fe| fe.is_requested())
+            .count()
     }
 
     /// Replace the file entry list with a new vector.
@@ -323,7 +326,10 @@ impl DownloadContext {
     /// Matches C++ `getPieceHash` which returns `A2STR::NIL` for invalid
     /// indices. We return a static `&str` to avoid allocation.
     pub fn get_piece_hash(&self, index: usize) -> &str {
-        self.piece_hashes.get(index).map(|s| s.as_str()).unwrap_or(EMPTY_STRING)
+        self.piece_hashes
+            .get(index)
+            .map(|s| s.as_str())
+            .unwrap_or(EMPTY_STRING)
     }
 
     /// Return a reference to all piece hashes.
@@ -682,7 +688,10 @@ impl DownloadContext {
             fe.put_back_request();
             fe.release_runtime_resource();
         }
-        debug!(count = self.file_entries.len(), "Runtime resources released");
+        debug!(
+            count = self.file_entries.len(),
+            "Runtime resources released"
+        );
     }
 }
 

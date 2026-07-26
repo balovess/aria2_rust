@@ -976,8 +976,7 @@ mod tests {
         mgr.allocate_segments();
 
         // Report completion with 1 MB/s speed
-        let success =
-            mgr.report_segment_complete(0, 100, 1_000_000, false);
+        let success = mgr.report_segment_complete(0, 100, 1_000_000, false);
         assert!(success);
 
         // Check that stats were updated

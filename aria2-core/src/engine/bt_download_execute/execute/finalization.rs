@@ -26,7 +26,9 @@ impl BtDownloadCommand {
             self.progress.set_completed_length(self.completed_bytes);
             self.progress.set_download_speed(final_speed);
             self.progress.set_upload_speed(self.total_uploaded);
-            self.group.recover().set_uploaded_length(self.total_uploaded);
+            self.group
+                .recover()
+                .set_uploaded_length(self.total_uploaded);
             let mut g = self.group.recover_mut();
             g.complete()?;
         }

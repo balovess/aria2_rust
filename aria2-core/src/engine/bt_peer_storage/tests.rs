@@ -10,8 +10,8 @@ use crate::engine::peer_stats::PeerStats;
 
 use super::constants::*;
 use super::peer_entry::PeerEntry;
-use super::storage::DefaultPeerStorage;
 use super::peer_storage_trait::PeerStorage;
+use super::storage::DefaultPeerStorage;
 
 // Compile-time verification: DefaultPeerStorage satisfies PeerStorage's
 // Send + Sync bounds, so Arc<dyn PeerStorage> is constructible.
@@ -24,7 +24,9 @@ const _: () = {
 
 /// Helper to create an `Instant` in the past without panicking.
 fn instant_past(secs: u64) -> Instant {
-    Instant::now().checked_sub(Duration::from_secs(secs)).unwrap_or(Instant::now())
+    Instant::now()
+        .checked_sub(Duration::from_secs(secs))
+        .unwrap_or(Instant::now())
 }
 
 // ------------------------------------------------------------------
@@ -66,7 +68,11 @@ fn test_add_peer_single() {
     assert!(storage.is_peer_available());
     assert_eq!(storage.unused_peers.len(), 1);
     assert_eq!(storage.count_all_peers(), 1);
-    assert!(storage.uniq_peers.contains(&("192.168.1.1".to_string(), 6881)));
+    assert!(
+        storage
+            .uniq_peers
+            .contains(&("192.168.1.1".to_string(), 6881))
+    );
     storage.verify_invariant();
 }
 
@@ -142,7 +148,10 @@ fn test_add_peer_respects_max_list_size() {
     assert!(storage.add_peer(make_peer("10.0.0.1", 6881)));
     assert!(storage.add_peer(make_peer("10.0.0.2", 6881)));
     assert!(storage.add_peer(make_peer("10.0.0.3", 6881)));
-    assert!(!storage.add_peer(make_peer("10.0.0.4", 6881)), "should reject when full");
+    assert!(
+        !storage.add_peer(make_peer("10.0.0.4", 6881)),
+        "should reject when full"
+    );
 
     assert_eq!(storage.unused_peers.len(), 3);
     storage.verify_invariant();
@@ -280,7 +289,10 @@ fn test_return_peer_no_drop_for_incoming() {
     let checked = storage.checkout_peer(1).unwrap();
     storage.return_peer(&checked);
 
-    assert!(storage.dropped_peers.is_empty(), "incoming peers should not be dropped");
+    assert!(
+        storage.dropped_peers.is_empty(),
+        "incoming peers should not be dropped"
+    );
 }
 
 #[test]
@@ -301,7 +313,10 @@ fn test_return_peer_no_drop_for_not_graceful() {
     let checked = storage.checkout_peer(1).unwrap();
     storage.return_peer(&checked);
 
-    assert!(storage.dropped_peers.is_empty(), "non-graceful disconnect should not be dropped");
+    assert!(
+        storage.dropped_peers.is_empty(),
+        "non-graceful disconnect should not be dropped"
+    );
 }
 
 #[test]
@@ -388,9 +403,11 @@ fn test_temporary_rejection_expiry() {
 
     // Should return false and remove the entry.
     assert!(!storage.is_temporarily_rejected("192.168.1.1"));
-    assert!(!storage
-        .temporarily_rejected_peers
-        .contains_key("192.168.1.1"));
+    assert!(
+        !storage
+            .temporarily_rejected_peers
+            .contains_key("192.168.1.1")
+    );
 }
 
 #[test]
@@ -399,7 +416,10 @@ fn test_add_peer_rejects_temporarily_rejected() {
     storage.reject_peer_temporarily("192.168.1.1");
 
     let peer = make_peer("192.168.1.1", 6881);
-    assert!(!storage.add_peer(peer), "temporarily rejected peer should be rejected");
+    assert!(
+        !storage.add_peer(peer),
+        "temporarily rejected peer should be rejected"
+    );
 }
 
 #[test]
@@ -418,21 +438,18 @@ fn test_reject_peer_temporarily_cleanup() {
     // manipulation: just call cleanup directly.
     let now = Instant::now();
     // Manually trigger the cleanup logic (same as in reject_peer_temporarily)
-    storage.temporarily_rejected_peers
-        .retain(|ip, timeout| {
-            if *timeout <= now {
-                debug!("Purge temporarily rejected peer {}", ip);
-                false
-            } else {
-                true
-            }
-        });
+    storage.temporarily_rejected_peers.retain(|ip, timeout| {
+        if *timeout <= now {
+            debug!("Purge temporarily rejected peer {}", ip);
+            false
+        } else {
+            true
+        }
+    });
     storage.last_temp_peer_cleanup = now;
 
     // Expired entry should have been purged.
-    assert!(!storage
-        .temporarily_rejected_peers
-        .contains_key("10.0.0.1"));
+    assert!(!storage.temporarily_rejected_peers.contains_key("10.0.0.1"));
 }
 
 // ------------------------------------------------------------------
@@ -477,7 +494,11 @@ fn test_count_all_peers() {
     assert_eq!(storage.count_all_peers(), 2);
 
     let _p1 = storage.checkout_peer(1);
-    assert_eq!(storage.count_all_peers(), 2, "checkout moves from unused to used, total unchanged");
+    assert_eq!(
+        storage.count_all_peers(),
+        2,
+        "checkout moves from unused to used, total unchanged"
+    );
 }
 
 // ------------------------------------------------------------------
@@ -555,7 +576,10 @@ fn test_delete_unused_peers() {
 
     storage.delete_unused_peers(2);
     assert_eq!(storage.unused_peers.len(), 1);
-    assert_eq!(storage.unused_peers[0].ip, "10.0.0.1", "should keep front peers");
+    assert_eq!(
+        storage.unused_peers[0].ip, "10.0.0.1",
+        "should keep front peers"
+    );
     storage.verify_invariant();
 }
 
@@ -643,7 +667,11 @@ fn test_add_peer_rejected_by_blocklist() {
     // Blocked peer should be rejected.
     assert!(!storage.add_peer(make_peer("10.0.0.1", 6881)));
     assert_eq!(storage.blocklist_reject_count(), 1);
-    assert_eq!(storage.count_all_peers(), 0, "blocked peer should not be added");
+    assert_eq!(
+        storage.count_all_peers(),
+        0,
+        "blocked peer should not be added"
+    );
     storage.verify_invariant();
 }
 
@@ -671,14 +699,18 @@ fn test_add_peers_batch_blocklist_filtering() {
     storage.set_peer_blocklist(Arc::new(bl));
 
     let peers = vec![
-        make_peer("10.0.0.1", 6881),  // blocked
+        make_peer("10.0.0.1", 6881),    // blocked
         make_peer("192.168.1.1", 6881), // allowed
-        make_peer("10.0.0.2", 6881),  // blocked
-        make_peer("8.8.8.8", 6881),    // allowed
+        make_peer("10.0.0.2", 6881),    // blocked
+        make_peer("8.8.8.8", 6881),     // allowed
     ];
 
     storage.add_peers(peers);
-    assert_eq!(storage.count_all_peers(), 2, "only non-blocked peers should be added");
+    assert_eq!(
+        storage.count_all_peers(),
+        2,
+        "only non-blocked peers should be added"
+    );
     assert_eq!(storage.blocklist_reject_count(), 2);
     storage.verify_invariant();
 }
@@ -765,10 +797,18 @@ fn test_on_erasing_peer_removes_from_uniq() {
     let mut storage = DefaultPeerStorage::new();
     let peer = make_peer("192.168.1.1", 6881);
     storage.add_peer(peer.clone());
-    assert!(storage.uniq_peers.contains(&("192.168.1.1".to_string(), 6881)));
+    assert!(
+        storage
+            .uniq_peers
+            .contains(&("192.168.1.1".to_string(), 6881))
+    );
 
     storage.on_erasing_peer(&peer);
-    assert!(!storage.uniq_peers.contains(&("192.168.1.1".to_string(), 6881)));
+    assert!(
+        !storage
+            .uniq_peers
+            .contains(&("192.168.1.1".to_string(), 6881))
+    );
 }
 
 #[test]
@@ -780,5 +820,9 @@ fn test_on_returning_peer_adds_to_dropped() {
     peer.is_incoming = false;
 
     storage.on_returning_peer(&peer);
-    assert_eq!(storage.dropped_peers.len(), 1, "graceful outgoing peer should be added to dropped list");
+    assert_eq!(
+        storage.dropped_peers.len(),
+        1,
+        "graceful outgoing peer should be added to dropped list"
+    );
 }

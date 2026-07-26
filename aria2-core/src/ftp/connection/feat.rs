@@ -142,7 +142,10 @@ impl FtpFeatures {
                 }
                 // If neither TLS nor SSL is mentioned, record as generic AUTH
                 if !upper.contains("TLS") && !upper.contains("SSL") {
-                    debug!("FEAT: AUTH support detected (type unspecified): {}", full_line);
+                    debug!(
+                        "FEAT: AUTH support detected (type unspecified): {}",
+                        full_line
+                    );
                 }
             }
             "EPSV" => {

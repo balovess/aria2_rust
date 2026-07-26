@@ -12,10 +12,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, timeout};
 
 use crate::error::Aria2Error;
-use crate::http::connection::{
-    HttpConfig, HttpConnectionManager,
-};
 use crate::http::connection::HttpResponse;
+use crate::http::connection::{HttpConfig, HttpConnectionManager};
 
 /// Create HTTP config for testing
 fn create_test_config() -> HttpConfig {
@@ -66,8 +64,7 @@ async fn test_connection_pool_reuse() {
         let addr_clone = addr_clone.clone();
         tokio::spawn(async move {
             // Save address
-            *addr_clone.lock().unwrap() =
-                stream.peer_addr().unwrap().to_string();
+            *addr_clone.lock().unwrap() = stream.peer_addr().unwrap().to_string();
 
             // Simple HTTP response
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
@@ -81,7 +78,10 @@ async fn test_connection_pool_reuse() {
     let url = url::Url::parse(&format!("http://{}", addr)).unwrap();
 
     // First connection acquisition
-    let conn1 = manager.acquire(&url, None).await.expect("First connection acquisition should succeed");
+    let conn1 = manager
+        .acquire(&url, None)
+        .await
+        .expect("First connection acquisition should succeed");
     assert!(manager.active_count() >= 1);
     println!("First connection acquired: id={}", conn1.id);
 
@@ -93,7 +93,10 @@ async fn test_connection_pool_reuse() {
     println!("Connection returned to pool");
 
     // Second connection acquisition (should succeed, may create new or reuse)
-    let conn2 = manager.acquire(&url, None).await.expect("Second acquisition should succeed");
+    let conn2 = manager
+        .acquire(&url, None)
+        .await
+        .expect("Second acquisition should succeed");
     assert!(manager.active_count() >= 1);
     println!("Connection pool reuse test: conn2 id={}", conn2.id);
 
@@ -126,7 +129,9 @@ async fn test_redirect_follow_5_jumps() {
     let mut current = current_url;
     for (i, target) in urls.iter().enumerate() {
         let mut response = HttpResponse::new(302, "Found".to_string());
-        response.headers.push(("Location".to_string(), target.to_string()));
+        response
+            .headers
+            .push(("Location".to_string(), target.to_string()));
 
         redirect_chain.insert(current.clone());
 
@@ -168,7 +173,9 @@ async fn test_redirect_loop_detection() {
 
     // Try redirecting from C back to A (forming a loop)
     let mut response = HttpResponse::new(301, "Moved".to_string());
-    response.headers.push(("Location".to_string(), "http://example.com/a".to_string()));
+    response
+        .headers
+        .push(("Location".to_string(), "http://example.com/a".to_string()));
 
     let result = manager.follow_redirects(&response, &url_c, &chain, 3);
 
@@ -209,19 +216,26 @@ fn test_range_request_build() {
     // Test 4: Large offset
     let range4 = manager.build_range_header(1024 * 1024, Some(1024 * 1024 + 512));
     assert_eq!(
-        range4,
-        "bytes=1048576-1049088",
+        range4, "bytes=1048576-1049088",
         "Large offset range format incorrect"
     );
     println!("Large offset range: {}", range4);
 
     // Test 5: Content-Range parsing
     let parsed1 = manager.parse_content_range("bytes 0-499/1000");
-    assert_eq!(parsed1, Some((0, 499, 1000)), "Content-Range parsing failed");
+    assert_eq!(
+        parsed1,
+        Some((0, 499, 1000)),
+        "Content-Range parsing failed"
+    );
     println!("Content-Range parsed (known total): {:?}", parsed1);
 
     let parsed2 = manager.parse_content_range("bytes 500-999/*");
-    assert_eq!(parsed2, Some((500, 999, u64::MAX)), "Unknown total parsing failed");
+    assert_eq!(
+        parsed2,
+        Some((500, 999, u64::MAX)),
+        "Unknown total parsing failed"
+    );
     println!("Content-Range parsed (unknown total): {:?}", parsed2);
 
     // Test 6: Invalid format
@@ -238,9 +252,9 @@ fn test_range_request_build() {
 async fn test_timeout_on_slow_server() {
     let config = HttpConfig {
         max_connections: 2,
-        connect_timeout: Duration::from_millis(100),   // Short connect timeout
-        read_timeout: Duration::from_millis(200),      // Short read timeout
-        write_timeout: Duration::from_millis(200),     // Short write timeout
+        connect_timeout: Duration::from_millis(100), // Short connect timeout
+        read_timeout: Duration::from_millis(200),    // Short read timeout
+        write_timeout: Duration::from_millis(200),   // Short write timeout
         idle_timeout: Duration::from_secs(60),
         max_idle_per_host: 2,
     };
@@ -263,18 +277,27 @@ async fn test_timeout_on_slow_server() {
     // Note: Since this is a localhost connection, TCP connection may be established quickly
     // Timeout mainly applies to subsequent I/O operations
     let start = Instant::now();
-    let result = timeout(config.connect_timeout + Duration::from_millis(50), manager.acquire(&url, None)).await;
+    let result = timeout(
+        config.connect_timeout + Duration::from_millis(50),
+        manager.acquire(&url, None),
+    )
+    .await;
 
     match result {
         Ok(conn_result) => {
             // If connection succeeds (localhost may connect quickly), verify config is correct
             if let Ok(conn) = conn_result {
-                println!("Local connection succeeded (expected behavior), verifying timeout config...");
+                println!(
+                    "Local connection succeeded (expected behavior), verifying timeout config..."
+                );
                 assert_eq!(manager.max_connections(), 2);
                 manager.release(conn).await;
             } else {
                 // If failed, verify it is a timeout error
-                println!("Connection failed (possibly timeout): {:?}", conn_result.err());
+                println!(
+                    "Connection failed (possibly timeout): {:?}",
+                    conn_result.err()
+                );
             }
         }
         Err(_) => {
@@ -303,7 +326,7 @@ async fn test_timeout_on_slow_server() {
 #[tokio::test]
 async fn test_max_connections_limit() {
     let config = HttpConfig {
-        max_connections: 2,  // Limit to 2 connections
+        max_connections: 2, // Limit to 2 connections
         connect_timeout: Duration::from_millis(500),
         read_timeout: Duration::from_millis(1000),
         write_timeout: Duration::from_millis(1000),
@@ -327,18 +350,37 @@ async fn test_max_connections_limit() {
     let url = url::Url::parse(&format!("http://{}", addr)).unwrap();
 
     // Acquire first connection
-    let conn1 = manager.acquire(&url, None).await.expect("First connection should succeed");
-    println!("Connection 1: id={}, active={}/{}", conn1.id, manager.active_count(), manager.max_connections());
+    let conn1 = manager
+        .acquire(&url, None)
+        .await
+        .expect("First connection should succeed");
+    println!(
+        "Connection 1: id={}, active={}/{}",
+        conn1.id,
+        manager.active_count(),
+        manager.max_connections()
+    );
     assert!(manager.active_count() >= 1);
 
     // Acquire second connection
-    let conn2 = manager.acquire(&url, None).await.expect("Second connection should succeed");
-    println!("Connection 2: id={}, active={}/{}", conn2.id, manager.active_count(), manager.max_connections());
+    let conn2 = manager
+        .acquire(&url, None)
+        .await
+        .expect("Second connection should succeed");
+    println!(
+        "Connection 2: id={}, active={}/{}",
+        conn2.id,
+        manager.active_count(),
+        manager.max_connections()
+    );
     assert!(manager.active_count() >= 2);
 
     // Try to acquire third connection (should fail due to max limit)
     let result = manager.acquire(&url, None).await;
-    assert!(result.is_err(), "Should return error when max connection limit is exceeded");
+    assert!(
+        result.is_err(),
+        "Should return error when max connection limit is exceeded"
+    );
 
     match result.unwrap_err() {
         Aria2Error::Recoverable(err) => {
@@ -385,7 +427,7 @@ async fn test_lru_eviction_strategy() {
         connect_timeout: Duration::from_millis(500),
         read_timeout: Duration::from_millis(1000),
         write_timeout: Duration::from_millis(1000),
-        idle_timeout: Duration::from_millis(100),  // Very short idle timeout
+        idle_timeout: Duration::from_millis(100), // Very short idle timeout
         max_idle_per_host: 5,
     };
     let mut manager = HttpConnectionManager::new(&config);
@@ -423,7 +465,10 @@ async fn test_lru_eviction_strategy() {
 
     // Try to acquire new connection (should succeed, possibly creating a new one)
     let new_conn = manager.acquire(&url, None).await.unwrap();
-    println!("New connection created (may have triggered LRU eviction): id={}", new_conn.id);
+    println!(
+        "New connection created (may have triggered LRU eviction): id={}",
+        new_conn.id
+    );
 
     // Verify the manager is still in a healthy state
     assert!(manager.active_count() >= 1);
@@ -489,7 +534,11 @@ async fn test_concurrent_connection_access() {
     }
 
     let mut m = manager.lock().await;
-    println!("Final state: active={}, pool_size={}", m.active_count(), m.pool_size());
+    println!(
+        "Final state: active={}, pool_size={}",
+        m.active_count(),
+        m.pool_size()
+    );
 
     m.cleanup().await;
 

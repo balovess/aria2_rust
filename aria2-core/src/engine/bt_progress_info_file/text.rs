@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use crate::error::{Aria2Error, Result};
 
-use super::types::{hex_to_info_hash, BtProgress, PeerAddr};
+use super::types::{BtProgress, PeerAddr, hex_to_info_hash};
 
 /// Deserialize progress from legacy INI text format.
 ///
@@ -149,8 +149,8 @@ mod tests {
             hex_hash
         );
 
-        let progress = deserialize_text(text_content.as_bytes(), &info_hash)
-            .expect("deserialize failed");
+        let progress =
+            deserialize_text(text_content.as_bytes(), &info_hash).expect("deserialize failed");
 
         assert_eq!(progress.piece_length, 262144);
         assert_eq!(progress.total_size, 1048576);
@@ -179,8 +179,8 @@ mod tests {
             hex_hash
         );
 
-        let progress = deserialize_text(text_content.as_bytes(), &info_hash)
-            .expect("deserialize failed");
+        let progress =
+            deserialize_text(text_content.as_bytes(), &info_hash).expect("deserialize failed");
 
         assert_eq!(progress.peers.len(), 2);
         assert_eq!(progress.peers[0].ip, "192.168.1.1");

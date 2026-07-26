@@ -100,7 +100,10 @@ impl PeerConnection {
             return Err("info_hash mismatch".to_string());
         }
 
-        info!("Peer handshake successful: peer_id={}", remote_hs.peer_id_str());
+        info!(
+            "Peer handshake successful: peer_id={}",
+            remote_hs.peer_id_str()
+        );
 
         Ok(Self {
             stream,

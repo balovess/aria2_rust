@@ -17,8 +17,8 @@ mod tests;
 // Re-export ALL public items so that external code using
 // `crate::http::skip_response::X` continues to work unchanged.
 
-pub use handler::HttpSkipResponseHandler;
 pub use handler::HttpResponse;
+pub use handler::HttpSkipResponseHandler;
 
 pub use types::AuthScheme;
 pub use types::HttpAuthChallenge;

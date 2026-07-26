@@ -34,7 +34,9 @@ pub mod text;
 pub mod types;
 
 // Re-export public types for convenience
-pub use types::{hex_to_info_hash, info_hash_to_hex, BtProgress, DownloadStats, InFlightPiece, PeerAddr};
+pub use types::{
+    BtProgress, DownloadStats, InFlightPiece, PeerAddr, hex_to_info_hash, info_hash_to_hex,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -90,12 +92,10 @@ impl BtProgressManager {
 
         // Atomic write: write to temp file, then rename
         let temp_path = path.with_extension("aria2.tmp");
-        std::fs::write(&temp_path, &data).map_err(|e| {
-            Aria2Error::Io(format!("Failed to write temp progress file: {}", e))
-        })?;
-        std::fs::rename(&temp_path, &path).map_err(|e| {
-            Aria2Error::Io(format!("Failed to rename temp progress file: {}", e))
-        })?;
+        std::fs::write(&temp_path, &data)
+            .map_err(|e| Aria2Error::Io(format!("Failed to write temp progress file: {}", e)))?;
+        std::fs::rename(&temp_path, &path)
+            .map_err(|e| Aria2Error::Io(format!("Failed to rename temp progress file: {}", e)))?;
 
         debug!(
             path = ?path,
@@ -144,9 +144,8 @@ impl BtProgressManager {
             )));
         }
 
-        let data = std::fs::read(&path).map_err(|e| {
-            Aria2Error::Io(format!("Failed to read progress file: {}", e))
-        })?;
+        let data = std::fs::read(&path)
+            .map_err(|e| Aria2Error::Io(format!("Failed to read progress file: {}", e)))?;
 
         if data.is_empty() {
             return Err(Aria2Error::InvalidArgument(
@@ -172,9 +171,8 @@ impl BtProgressManager {
     pub fn remove_progress(&self, info_hash: &[u8; 20]) -> Result<()> {
         let path = self.get_progress_file_path(info_hash);
         if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| {
-                Aria2Error::Io(format!("Failed to remove progress file: {}", e))
-            })?;
+            std::fs::remove_file(&path)
+                .map_err(|e| Aria2Error::Io(format!("Failed to remove progress file: {}", e)))?;
         }
         Ok(())
     }

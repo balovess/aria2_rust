@@ -141,10 +141,7 @@ impl FtpProxyTunnel {
                 // Tunnel established successfully
                 info!(
                     "FTP proxy tunnel established: {}:{} -> {}:{}",
-                    config.proxy_host,
-                    config.proxy_port,
-                    config.target_host,
-                    config.target_port
+                    config.proxy_host, config.proxy_port, config.target_host, config.target_port
                 );
                 Ok(stream)
             }
@@ -154,17 +151,19 @@ impl FtpProxyTunnel {
             }
             status => {
                 // Proxy rejected the CONNECT request
-                Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!(
-                        "Proxy {}:{} rejected CONNECT to {}:{}: {} {}",
-                        config.proxy_host,
-                        config.proxy_port,
-                        config.target_host,
-                        config.target_port,
-                        status,
-                        response.reason_phrase
-                    ),
-                }))
+                Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: format!(
+                            "Proxy {}:{} rejected CONNECT to {}:{}: {} {}",
+                            config.proxy_host,
+                            config.proxy_port,
+                            config.target_host,
+                            config.target_port,
+                            status,
+                            response.reason_phrase
+                        ),
+                    },
+                ))
             }
         }
     }
@@ -179,12 +178,14 @@ impl FtpProxyTunnel {
         response: &ProxyResponse,
     ) -> Result<TcpStream> {
         if config.proxy_username.is_empty() {
-            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Proxy {}:{} requires authentication but no credentials provided",
-                    config.proxy_host, config.proxy_port
-                ),
-            }));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "Proxy {}:{} requires authentication but no credentials provided",
+                        config.proxy_host, config.proxy_port
+                    ),
+                },
+            ));
         }
 
         // Consume any remaining response body
@@ -213,14 +214,19 @@ impl FtpProxyTunnel {
             // Unknown or unsupported auth scheme
             warn!(
                 "Unsupported proxy auth scheme: {}",
-                proxy_authenticate.split_whitespace().next().unwrap_or("unknown")
+                proxy_authenticate
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("unknown")
             );
-            return Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Proxy requires unsupported authentication scheme: {}",
-                    proxy_authenticate
-                ),
-            }));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "Proxy requires unsupported authentication scheme: {}",
+                        proxy_authenticate
+                    ),
+                },
+            ));
         };
 
         // Retry CONNECT with auth
@@ -233,29 +239,26 @@ impl FtpProxyTunnel {
             200 => {
                 info!(
                     "FTP proxy tunnel established with authentication: {}:{} -> {}:{}",
-                    config.proxy_host,
-                    config.proxy_port,
-                    config.target_host,
-                    config.target_port
+                    config.proxy_host, config.proxy_port, config.target_host, config.target_port
                 );
                 Ok(stream)
             }
-            407 => {
-                Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            407 => Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
                     message: format!(
                         "Proxy authentication failed for {}:{}",
                         config.proxy_host, config.proxy_port
                     ),
-                }))
-            }
-            status => {
-                Err(Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                },
+            )),
+            status => Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
                     message: format!(
                         "Proxy rejected CONNECT after auth: {} {}",
                         status, retry_response.reason_phrase
                     ),
-                }))
-            }
+                },
+            )),
         }
     }
 
@@ -319,9 +322,7 @@ impl FtpProxyTunnel {
     }
 
     /// Parse an HTTP response from the proxy.
-    async fn parse_response<R: AsyncBufReadExt + Unpin>(
-        reader: &mut R,
-    ) -> Result<ProxyResponse> {
+    async fn parse_response<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<ProxyResponse> {
         // Parse status line
         let mut status_line = String::new();
         reader.read_line(&mut status_line).await.map_err(|e| {
@@ -342,9 +343,9 @@ impl FtpProxyTunnel {
             )));
         }
 
-        let status_code: u16 = parts[1].parse().map_err(|_| {
-            Aria2Error::Parse(format!("Invalid proxy status code: {}", parts[1]))
-        })?;
+        let status_code: u16 = parts[1]
+            .parse()
+            .map_err(|_| Aria2Error::Parse(format!("Invalid proxy status code: {}", parts[1])))?;
 
         let reason_phrase = parts.get(2).unwrap_or(&"").to_string();
 
@@ -378,10 +379,7 @@ impl FtpProxyTunnel {
     }
 
     /// Consume any response body data (for 407 responses).
-    async fn consume_response_body(
-        stream: &mut TcpStream,
-        _read_timeout: Duration,
-    ) -> Result<()> {
+    async fn consume_response_body(stream: &mut TcpStream, _read_timeout: Duration) -> Result<()> {
         // Read any remaining data with a short timeout
         let mut buf = [0u8; 4096];
         match timeout(Duration::from_secs(2), stream.read(&mut buf)).await {
@@ -439,13 +437,14 @@ impl FtpProxyTunnel {
             md5_hex(&format!("{}:{}:{}", username, realm, password))
         };
 
-        let (ha2, qop_value) = if qop.as_deref() == Some("auth") || qop.as_deref() == Some("auth-int") {
-            let ha2 = md5_hex(&format!("CONNECT:{}", uri));
-            (ha2, "auth")
-        } else {
-            let ha2 = md5_hex(&format!("CONNECT:{}", uri));
-            (ha2, "")
-        };
+        let (ha2, qop_value) =
+            if qop.as_deref() == Some("auth") || qop.as_deref() == Some("auth-int") {
+                let ha2 = md5_hex(&format!("CONNECT:{}", uri));
+                (ha2, "auth")
+            } else {
+                let ha2 = md5_hex(&format!("CONNECT:{}", uri));
+                (ha2, "")
+            };
 
         let response = if qop_value.is_empty() {
             md5_hex(&format!("{}:{}:{}", ha1, nonce, ha2))
@@ -568,8 +567,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request =
-            FtpProxyTunnel::build_connect_request(&config, Some("Basic dXNlcjpwYXNz"));
+        let request = FtpProxyTunnel::build_connect_request(&config, Some("Basic dXNlcjpwYXNz"));
         assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
     }
 
@@ -601,10 +599,7 @@ mod tests {
     fn test_md5_hex() {
         // Known MD5 value
         assert_eq!(md5_hex(""), "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(
-            md5_hex("hello"),
-            "5d41402abc4b2a76b9719d911017c592"
-        );
+        assert_eq!(md5_hex("hello"), "5d41402abc4b2a76b9719d911017c592");
     }
 
     #[test]
@@ -618,7 +613,8 @@ mod tests {
 
     #[test]
     fn test_build_digest_auth_header() {
-        let challenge = r#"Digest realm="test@example.com", nonce="abc123", qop="auth", algorithm=MD5"#;
+        let challenge =
+            r#"Digest realm="test@example.com", nonce="abc123", qop="auth", algorithm=MD5"#;
         let header = FtpProxyTunnel::build_digest_auth_header(
             "user",
             "pass",

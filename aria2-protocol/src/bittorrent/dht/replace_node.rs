@@ -140,7 +140,10 @@ mod tests {
     #[test]
     fn test_replace_node_result_variants() {
         assert_eq!(ReplaceNodeResult::NodeAlive, ReplaceNodeResult::NodeAlive);
-        assert_eq!(ReplaceNodeResult::NodeReplaced, ReplaceNodeResult::NodeReplaced);
+        assert_eq!(
+            ReplaceNodeResult::NodeReplaced,
+            ReplaceNodeResult::NodeReplaced
+        );
         assert_eq!(
             ReplaceNodeResult::NoQuestionableNode,
             ReplaceNodeResult::NoQuestionableNode

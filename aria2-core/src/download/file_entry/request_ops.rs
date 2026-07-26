@@ -94,10 +94,7 @@ impl FileEntry {
                 Some(r) => {
                     // If the URI-selected request uses the same URI as the
                     // first pooled request, fall back to the pooled one.
-                    let first_pool_uri = self
-                        .request_pool
-                        .first()
-                        .map(|r| r.uri().to_owned());
+                    let first_pool_uri = self.request_pool.first().map(|r| r.uri().to_owned());
                     if first_pool_uri.as_deref() == Some(r.uri()) {
                         req = Some(self.request_pool.remove(0));
                     } else {
@@ -424,10 +421,7 @@ impl FileEntry {
 
                 // Check if host is at max connection limit.
                 let host = new_req.host().to_owned();
-                let host_count = in_flight_hosts
-                    .iter()
-                    .filter(|h| *h == &host)
-                    .count();
+                let host_count = in_flight_hosts.iter().filter(|h| *h == &host).count();
                 if host_count >= self.max_connection_per_server {
                     pending.push(uri);
                     ignore_host.push(host);

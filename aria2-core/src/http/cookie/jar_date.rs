@@ -126,11 +126,7 @@ pub(super) fn parse_http_date(s: &str) -> Result<SystemTime> {
         let year: i32 = year_str.parse().unwrap_or({
             // Handle 2-digit years (RFC 850)
             let y: u32 = year_str.parse().unwrap_or(70);
-            if y < 100 {
-                (1900 + y) as i32
-            } else {
-                y as i32
-            }
+            if y < 100 { (1900 + y) as i32 } else { y as i32 }
         });
 
         let time_parts: Vec<u32> = time_str.split(':').filter_map(|x| x.parse().ok()).collect();

@@ -136,10 +136,7 @@ pub fn parse(result: &mut UriStruct, uri: &str) -> bool {
     // Username / password — percent-decode to match C++ util::percentDecode.
     result.username = percent_decode(parsed.username());
     result.has_password = parsed.password().is_some();
-    result.password = parsed
-        .password()
-        .map(percent_decode)
-        .unwrap_or_default();
+    result.password = parsed.password().map(percent_decode).unwrap_or_default();
 
     true
 }
@@ -449,11 +446,9 @@ pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(
-                &String::from_utf8_lossy(&bytes[i + 1..i + 3]),
-                16,
-            )
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&String::from_utf8_lossy(&bytes[i + 1..i + 3]), 16)
         {
             out.push(byte);
             i += 3;
@@ -590,10 +585,7 @@ mod tests {
             has_password: true,
             ipv6_literal_address: false,
         };
-        assert_eq!(
-            construct(&us),
-            "http://user:p%40ss@example.com/file.txt"
-        );
+        assert_eq!(construct(&us), "http://user:p%40ss@example.com/file.txt");
     }
 
     #[test]

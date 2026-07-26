@@ -193,9 +193,8 @@ async fn async_zero_fill<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result
 fn try_enable_volume_privilege() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Security::{
-        AdjustTokenPrivileges, LookupPrivilegeValueW,
-        SE_MANAGE_VOLUME_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
-        TOKEN_QUERY,
+        AdjustTokenPrivileges, LookupPrivilegeValueW, SE_MANAGE_VOLUME_NAME,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -519,9 +518,7 @@ pub async fn get_available_space(path: &Path) -> Result<u64> {
         // Get absolute path for GetDiskFreeSpaceEx
         let abs_path = match std::fs::canonicalize(parent) {
             Ok(p) => p,
-            Err(_) => {
-                std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-            }
+            Err(_) => std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
         };
 
         // Convert path to wide string with null terminator

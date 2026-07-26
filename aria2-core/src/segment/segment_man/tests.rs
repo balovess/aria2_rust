@@ -377,7 +377,11 @@ fn test_complete_segment_advertises_piece() {
 
     // Verify advertisement via PieceStorage delegation
     // get_advertised_piece_indexes should return the completed piece
-    let (indexes, _) = man.piece_storage.as_ref().unwrap().get_advertised_piece_indexes(999, 0);
+    let (indexes, _) = man
+        .piece_storage
+        .as_ref()
+        .unwrap()
+        .get_advertised_piece_indexes(999, 0);
     assert!(indexes.contains(&piece_index));
 }
 
@@ -395,7 +399,11 @@ fn test_complete_segment_advertises_multiple_pieces() {
     }
 
     // All 4 pieces should be advertised
-    let (indexes, _) = man.piece_storage.as_ref().unwrap().get_advertised_piece_indexes(999, 0);
+    let (indexes, _) = man
+        .piece_storage
+        .as_ref()
+        .unwrap()
+        .get_advertised_piece_indexes(999, 0);
     assert_eq!(indexes.len(), 4);
     for idx in &completed {
         assert!(indexes.contains(idx));

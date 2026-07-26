@@ -4,11 +4,11 @@
 
 use tracing::{debug, trace};
 
-use crate::segment::piece_storage::PieceStorage;
 use super::segment_kind::SegmentKind;
+use crate::segment::piece_storage::PieceStorage;
 
-use super::peer_stat::{PeerStat, PeerStatus};
 use super::SegmentMan;
+use super::peer_stat::{PeerStat, PeerStatus};
 
 impl SegmentMan {
     // ── Have advertisement (BT piece propagation) ─────────────────────
@@ -33,11 +33,7 @@ impl SegmentMan {
     pub fn advertise_piece(&mut self, cuid: u64, index: usize) {
         if let Some(ref mut ps) = self.piece_storage {
             ps.advertise_piece(cuid, index);
-            trace!(
-                cuid,
-                index,
-                "SegmentMan: advertised piece completion"
-            );
+            trace!(cuid, index, "SegmentMan: advertised piece completion");
         }
     }
 
@@ -78,10 +74,7 @@ impl SegmentMan {
     pub fn remove_advertised_piece(&mut self, expiry_ms: u64) {
         if let Some(ref mut ps) = self.piece_storage {
             ps.remove_advertised_piece(expiry_ms);
-            trace!(
-                expiry_ms,
-                "SegmentMan: removed expired have entries"
-            );
+            trace!(expiry_ms, "SegmentMan: removed expired have entries");
         }
     }
 
@@ -259,19 +252,13 @@ impl SegmentMan {
 
     /// Excludes segments covering the given byte range from selection.
     pub fn ignore_segment_for(&mut self, offset: u64, length: u64) {
-        debug!(
-            offset,
-            length, "SegmentMan: ignoring segment range"
-        );
+        debug!(offset, length, "SegmentMan: ignoring segment range");
         self.ignore_bitfield.add_filter(offset, length);
     }
 
     /// Includes segments covering the given byte range in selection.
     pub fn recognize_segment_for(&mut self, offset: u64, length: u64) {
-        debug!(
-            offset,
-            length, "SegmentMan: recognizing segment range"
-        );
+        debug!(offset, length, "SegmentMan: recognizing segment range");
         self.ignore_bitfield.remove_filter(offset, length);
     }
 
