@@ -365,4 +365,32 @@ impl AnnounceList {
     pub fn get_tracker_url(&self, tier_idx: usize, entry_idx: usize) -> Option<&String> {
         self.tiers.get(tier_idx).and_then(|t| t.urls.get(entry_idx))
     }
+
+    /// Reconfigure the announce list from a new multi-tier list.
+    ///
+    /// C++: `AnnounceList::reconfigure(const vector<vector<string>>& announceList)`
+    /// Replaces all tiers with the new list and resets the iterator.
+    /// Used when processing tracker responses that update the announce list
+    /// (e.g., from BEP 12 or BEP 15).
+    pub fn reconfigure(&mut self, announce_list: &[Vec<String>]) {
+        self.tiers.clear();
+        for tier_urls in announce_list {
+            if tier_urls.is_empty() {
+                continue;
+            }
+            self.tiers.push(AnnounceTier::from_urls(tier_urls.clone()));
+        }
+        self.reset_iterator();
+    }
+
+    /// Reconfigure the announce list from a single URL.
+    ///
+    /// C++: `AnnounceList::reconfigure(const string& url)`
+    /// Adds the URL as a new tier and resets the iterator.
+    pub fn reconfigure_from_url(&mut self, url: &str) {
+        let mut urls = VecDeque::new();
+        urls.push_back(url.to_string());
+        self.tiers.push(AnnounceTier::new(urls));
+        self.reset_iterator();
+    }
 }

@@ -8,6 +8,7 @@ use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use aria2_protocol::bittorrent::extension::ut_metadata::{
     ExtensionHandshake, MetadataCollector, UtMetadataMsg,
 };
+use aria2_protocol::bittorrent::extension::ut_metadata_tracker::UTMetadataRequestTracker;
 use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
 
 const METADATA_MAX_SIZE: u64 = 100 * 1024 * 1024;
@@ -286,21 +287,64 @@ impl MetadataExchangeSession {
         let num_pieces = metadata_size.div_ceil(self.config.piece_size as u64) as u32;
         let mut collector = MetadataCollector::new(metadata_size, self.config.piece_size);
 
-        for piece_idx in 0..num_pieces {
-            if collector.is_complete() {
-                break;
+        // Track in-flight metadata requests with timeout (C++ UTMetadataRequestTracker)
+        let mut tracker = UTMetadataRequestTracker::new();
+
+        // Collect pieces, retrying timed-out pieces up to max_attempts times
+        let mut retry_counts: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
+        let mut pending_pieces: Vec<u32> = (0..num_pieces).collect();
+
+        while !pending_pieces.is_empty() && !collector.is_complete() {
+            // Check for timed-out requests and requeue them
+            let timed_out = tracker.remove_timeout_entries();
+            for idx in timed_out {
+                let retries = retry_counts.entry(idx).or_insert(0);
+                if *retries < self.config.max_attempts {
+                    *retries += 1;
+                    debug!(
+                        piece = idx,
+                        retry = *retries,
+                        max = self.config.max_attempts,
+                        "Retrying timed-out ut_metadata piece"
+                    );
+                    pending_pieces.push(idx);
+                } else {
+                    warn!(
+                        piece = idx,
+                        retries = *retries,
+                        "ut_metadata piece exceeded max retries, giving up"
+                    );
+                    return Err(MetadataExchangeError::PieceTimeout { piece: idx });
+                }
             }
 
-            let req_msg = UtMetadataMsg::Request(piece_idx);
-            let encoded = req_msg.encode(20);
+            // Request next pending piece if tracker has capacity
+            if tracker.avail() > 0 {
+                let piece_idx = match pending_pieces.pop() {
+                    Some(idx) => idx,
+                    None => break,
+                };
 
-            conn.stream_write(&encoded).await.map_err(|e| {
-                MetadataExchangeError::IoError(format!("stream_write failed: {}", e))
-            })?;
-            conn.stream_flush().await.map_err(|e| {
-                MetadataExchangeError::IoError(format!("stream_flush failed: {}", e))
-            })?;
+                // Skip already-collected pieces (could be from retries)
+                if collector.is_complete() {
+                    break;
+                }
 
+                let req_msg = UtMetadataMsg::Request(piece_idx);
+                let encoded = req_msg.encode(20);
+
+                conn.stream_write(&encoded).await.map_err(|e| {
+                    MetadataExchangeError::IoError(format!("stream_write failed: {}", e))
+                })?;
+                conn.stream_flush().await.map_err(|e| {
+                    MetadataExchangeError::IoError(format!("stream_flush failed: {}", e))
+                })?;
+
+                tracker.add(piece_idx);
+            }
+
+            // Wait for a response (with timeout)
             match timeout(
                 self.config.request_timeout,
                 self.read_ut_metadata_response(&mut conn),
@@ -308,6 +352,7 @@ impl MetadataExchangeSession {
             .await
             {
                 Ok(Ok(UtMetadataMsg::Data(recv_piece, data))) => {
+                    tracker.remove(recv_piece);
                     collector.add_piece(recv_piece, &data);
                     debug!(
                         "Received piece {}/{} ({} bytes)",
@@ -316,22 +361,32 @@ impl MetadataExchangeSession {
                         data.len()
                     );
                 }
-                Ok(Ok(UtMetadataMsg::Reject(_))) => {
-                    debug!("Piece {} rejected by {}", piece_idx, peer_addr);
-                    return Err(MetadataExchangeError::PieceRejected { piece: piece_idx });
+                Ok(Ok(UtMetadataMsg::Reject(piece))) => {
+                    tracker.remove(piece);
+                    debug!("Piece {} rejected by {}", piece, peer_addr);
+                    // Requeue for retry
+                    let retries = retry_counts.entry(piece).or_insert(0);
+                    if *retries < self.config.max_attempts {
+                        *retries += 1;
+                        pending_pieces.push(piece);
+                    } else {
+                        return Err(MetadataExchangeError::PieceRejected { piece });
+                    }
                 }
                 Ok(Ok(UtMetadataMsg::Request(_))) => {
-                    return Err(MetadataExchangeError::BencodeDecodeFailed {
-                        detail: "Unexpected Request message type from peer".to_string(),
-                    });
+                    // Peer is requesting metadata from us; ignore for now
+                    // (we're in metadata fetch mode, not serving mode)
+                    debug!("Ignoring unexpected ut_metadata Request from peer");
                 }
                 Ok(Err(inner_err)) => {
                     return Err(MetadataExchangeError::BencodeDecodeFailed {
-                        detail: format!("ut_metadata error for piece {}: {}", piece_idx, inner_err),
+                        detail: format!("ut_metadata decode error: {}", inner_err),
                     });
                 }
                 Err(_) => {
-                    return Err(MetadataExchangeError::PieceTimeout { piece: piece_idx });
+                    // The tracker will handle timeout detection on the next
+                    // iteration via remove_timeout_entries()
+                    debug!("Read timeout waiting for ut_metadata response");
                 }
             }
         }

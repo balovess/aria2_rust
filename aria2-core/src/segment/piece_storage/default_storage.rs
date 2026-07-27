@@ -283,13 +283,18 @@ impl PieceStorage for DefaultPieceStorage {
         if let Some(piece) = self.used_pieces.get(&index) {
             return Some(piece.clone());
         }
-        // Return a new Piece without marking it as used
+        // Return a new Piece without marking it as used.
+        // C++: if(hasPiece(index)) piece->setAllBlock();
         let piece_start = index as u64 * self.piece_length;
         let piece_len = std::cmp::min(
             self.piece_length,
             self.total_length.saturating_sub(piece_start),
         );
-        Some(Piece::new(index, piece_len))
+        let mut piece = Piece::new(index, piece_len);
+        if self.bfman.has_piece(index) {
+            piece.set_all_blocks();
+        }
+        Some(piece)
     }
 
     fn complete_piece(&mut self, piece: &Piece) -> bool {
@@ -639,9 +644,12 @@ impl PieceStorage for DefaultPieceStorage {
     // ── Lifecycle ────────────────────────────────────────────────────────
 
     fn on_download_incomplete(&mut self) {
-        // C++ sets all used pieces' completed length to 0 and re-checks
-        // the bitfield consistency. For now we just log the event.
-        trace!("on_download_incomplete: download detected as incomplete");
+        // C++ calls `streamPieceSelector_->onBitfieldInit()` which resets
+        // the Geom selector's offset to the first missing piece.
+        // This is important for resumed downloads where the first missing
+        // piece may not be at the beginning.
+        self.on_bitfield_init();
+        trace!("on_download_incomplete: download detected as incomplete, reset piece selector offset");
     }
 
     // ── Selective downloading ────────────────────────────────────────────
@@ -650,6 +658,21 @@ impl PieceStorage for DefaultPieceStorage {
         // C++: `bitfieldMan_->isFilterEnabled()` — returns true when
         // selective downloading (file filtering) is active.
         self.bfman.is_filter_enabled()
+    }
+
+    fn setup_file_filter(&mut self) {
+        // C++: iterates file entries and calls addFilter() for each
+        // requested file's byte range, then enables the filter.
+        // In Rust, this is a placeholder — the actual file entry iteration
+        // is handled by the download engine which calls bfman methods directly.
+        // The filter bits should already be configured before calling this.
+        self.bfman.enable_filter();
+    }
+
+    fn clear_file_filter(&mut self) {
+        // C++: bitfieldMan_->clearFilter() — clears filter bitfield,
+        // disables filter.
+        self.bfman.clear_filter();
     }
 }
 

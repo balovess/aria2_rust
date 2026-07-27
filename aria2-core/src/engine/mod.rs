@@ -51,7 +51,11 @@ pub mod bt_message_handler;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_message_handler_tests;
 #[cfg(feature = "bittorrent")]
+pub mod bt_handshake_validation;
+#[cfg(feature = "bittorrent")]
 pub mod bt_message_receiver;
+#[cfg(all(test, feature = "bittorrent"))]
+pub mod bt_message_receiver_tests;
 #[cfg(feature = "bittorrent")]
 pub mod bt_mse_handshake;
 #[cfg(all(test, feature = "bittorrent"))]

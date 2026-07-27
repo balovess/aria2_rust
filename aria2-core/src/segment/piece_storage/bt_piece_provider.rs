@@ -8,6 +8,8 @@
 use super::default_storage::DefaultPieceStorage;
 
 #[cfg(feature = "bittorrent")]
+use std::collections::HashSet;
+#[cfg(feature = "bittorrent")]
 use super::super::piece::Piece;
 #[cfg(feature = "bittorrent")]
 use super::trait_def::PieceStorage;
@@ -56,7 +58,7 @@ impl PieceProvider for DefaultPieceStorage {
             None => return Vec::new(),
         };
 
-        self.get_missing_pieces_inner(count, peer_bitfield, target_piece_indexes, cuid, false)
+        self.get_missing_pieces_inner(count, peer_bitfield, target_piece_indexes, cuid, false, None)
     }
 
     fn get_missing_fast_pieces(
@@ -66,14 +68,29 @@ impl PieceProvider for DefaultPieceStorage {
         target_piece_indexes: &[u32],
         cuid: u64,
     ) -> Vec<Piece> {
-        // Fast pieces: only pieces in the peer's allowed-fast set.
-        // C++: createFastIndexBitfield() then select from that.
+        // C++ `getMissingFastPiece()` guards:
+        //   if(peer->isFastExtensionEnabled() && peer->countPeerAllowedIndexSet() > 0)
+        // If fast extension is off or the peer has no allowed-fast pieces, return empty.
+        if !peer.is_fast_extension_enabled() || peer.allowed_fast_set().is_empty() {
+            return Vec::new();
+        }
+
         let peer_bitfield = match peer.session_resource.as_ref() {
             Some(res) => res.bitfield(),
             None => return Vec::new(),
         };
 
-        self.get_missing_pieces_inner(count, peer_bitfield, target_piece_indexes, cuid, true)
+        // Pass the peer's allowed-fast set so the inner method can intersect.
+        // C++: createFastIndexBitfield() creates a temp bitfield with only
+        // allowed-fast indexes that are missing locally and the peer has.
+        self.get_missing_pieces_inner(
+            count,
+            peer_bitfield,
+            target_piece_indexes,
+            cuid,
+            true,
+            Some(peer.allowed_fast_set()),
+        )
     }
 
     fn is_end_game(&self) -> bool {
@@ -137,8 +154,8 @@ impl DefaultPieceStorage {
     /// - In endgame: get all missing pieces (even in-use), shuffle, pick
     /// - Normal: get missing unused pieces, select via piece selector
     ///
-    /// When `fast_only` is true, restrict to pieces in the peer's
-    /// allowed-fast set (C++ `createFastIndexBitfield()`).
+    /// When `fast_only` is true and `allowed_fast_set` is `Some`, restrict to
+    /// pieces in the peer's allowed-fast set (C++ `createFastIndexBitfield()`).
     pub(crate) fn get_missing_pieces_inner(
         &mut self,
         min_missing_blocks: usize,
@@ -146,6 +163,7 @@ impl DefaultPieceStorage {
         target_piece_indexes: &[u32],
         cuid: u64,
         fast_only: bool,
+        allowed_fast_set: Option<&HashSet<u32>>,
     ) -> Vec<Piece> {
         let num_pieces = self.bfman.num_pieces();
 
@@ -173,15 +191,23 @@ impl DefaultPieceStorage {
             }
         }
 
-        // If fast_only, restrict to allowed-fast pieces
-        // C++: createFastIndexBitfield() intersects with peer's allowed set
-        // For now, we just use the same bitfield since fast piece filtering
-        // would need the peer's allowed-fast index set from BtPeerConn
+        // If fast_only, restrict to allowed-fast pieces.
+        // C++: createFastIndexBitfield() — creates a temp bitfield with only
+        // pieces that are: (1) in peer's allowed-fast set, (2) missing locally,
+        // and (3) the peer has. Since mis_bitfield already encodes (2) and (3),
+        // we just need to clear any index NOT in the allowed-fast set.
         if fast_only {
-            // TODO: Once we expose the peer's allowed-fast index set from
-            // BtPeerConn, intersect mis_bitfield with it here.
-            // For now, we use the same bitfield (fast pieces are a subset
-            // of available pieces, filtered by the peer's allowed-fast set).
+            if let Some(allowed) = allowed_fast_set {
+                for i in 0..num_pieces {
+                    if !allowed.contains(&(i as u32)) {
+                        super::super::bitfield_util::clear_bit(
+                            &mut mis_bitfield,
+                            num_pieces,
+                            i,
+                        );
+                    }
+                }
+            }
         }
 
         let mut pieces = Vec::new();

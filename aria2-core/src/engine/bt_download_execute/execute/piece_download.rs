@@ -192,6 +192,42 @@ impl BtDownloadCommand {
                 }
             }
 
+            // Periodic tracker re-announce for peer discovery.
+            // C++ aria2 uses TrackerWatcherCommand which checks
+            // BtAnnounce::isAnnounceReady() on each iteration.
+            // If we have too few active connections, try to discover more peers.
+            if active_connections.len() < 5 {
+                let new_peers = self
+                    .periodic_tracker_announce(
+                        &meta.info_hash.bytes,
+                        self.completed_bytes,
+                        total_size.saturating_sub(self.completed_bytes),
+                        self.total_uploaded,
+                    )
+                    .await;
+                if !new_peers.is_empty() {
+                    info!(
+                        "[BT] Periodic tracker announce found {} new peers",
+                        new_peers.len()
+                    );
+                    // Connect to newly discovered peers
+                    let connected = self
+                        .connect_to_pex_discovered_peers(
+                            &new_peers,
+                            &meta.info_hash.bytes,
+                            num_pieces,
+                            active_connections,
+                        )
+                        .await;
+                    if connected > 0 {
+                        info!(
+                            "[BT] Connected to {} tracker-discovered peers",
+                            connected
+                        );
+                    }
+                }
+            }
+
             let remaining = piece_picker.remaining_count();
             let selection = piece_selector.select_next_piece(&mut piece_picker, remaining);
 

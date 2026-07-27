@@ -38,6 +38,21 @@ impl BtDownloadCommand {
             self.completed_bytes, self.total_uploaded
         );
 
+        // Send "completed" event to trackers via TrackerAnnouncer.
+        // C++ aria2 sends this in `DefaultBtAnnounce::announce()` when the
+        // download completes, which transitions the event to COMPLETED.
+        if let Some(ref mut announcer) = self.tracker_announcer {
+            let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+            announcer
+                .announce_completed(
+                    &meta.info_hash.bytes,
+                    &my_peer_id,
+                    self.completed_bytes,
+                    self.total_uploaded,
+                )
+                .await;
+        }
+
         // Unregister from BtRegistry. In C++ aria2, this is done when
         // DownloadEngine removes the RequestGroup. Here we do it explicitly
         // on download completion/finalization so the registry stays clean.
@@ -47,6 +62,21 @@ impl BtDownloadCommand {
                 && reg.remove(gid) {
                     info!(gid, "Removed BT download from BtRegistry on finalization");
                 }
+        }
+
+        // Send "stopped" event to trackers before shutdown.
+        // C++ aria2 sends stopped events in `DownloadEngine::setHaltRequested()`.
+        if let Some(ref mut announcer) = self.tracker_announcer {
+            let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+            announcer
+                .announce_stopped(
+                    &meta.info_hash.bytes,
+                    &my_peer_id,
+                    self.completed_bytes,
+                    0, // left = 0 after completion
+                    self.total_uploaded,
+                )
+                .await;
         }
 
         if let Some(ref engine) = self.dht_engine {

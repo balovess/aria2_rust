@@ -201,6 +201,9 @@ impl TrackerClient {
             seeders: udp_resp.seeders,
             leechers: udp_resp.leechers,
             peers,
+            // UDP tracker protocol (BEP 15) does not support peers6;
+            // IPv6 peers are returned via HTTP tracker only.
+            peers6: vec![],
             tracker_id: None,
             warning_message: None,
             failure_reason: None,

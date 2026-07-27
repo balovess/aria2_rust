@@ -79,6 +79,9 @@ pub enum RecoverableError {
 
     #[error("HTTP protocol error: {message}")]
     HttpProtocolError { message: String },
+
+    #[error("Handshake rejected: {reason}")]
+    HandshakeRejection { reason: String },
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]

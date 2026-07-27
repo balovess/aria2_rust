@@ -1,15 +1,17 @@
 //! Message dispatch, receive, flooding detection, and outstanding-request
-//! scaling for `BtPeerInteractive`.
+//! scaling for `BtPeerInteractive`. Also includes handshake reception and
+//! same-peer-ID duplicate detection integration.
 
 use std::time::{Duration, Instant};
 
+use aria2_protocol::bittorrent::message::handshake::Handshake;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::extension_registry;
 use crate::engine::extension_registry::ExtensionUpdate;
-use crate::error::Result;
-use tracing::{debug, trace, warn};
+use crate::error::{Aria2Error, RecoverableError, Result};
+use tracing::{debug, info, trace, warn};
 
 use super::super::piece_provider::PieceProvider;
 use super::super::types::*;
@@ -614,5 +616,78 @@ impl BtPeerInteractive {
         }
 
         Ok((count, last_pex_update))
+    }
+
+    // ── Handshake reception ────────────────────────────────────────────
+
+    /// Validate a received handshake message by checking the remote peer ID
+    /// against our own static peer ID and against all currently connected
+    /// peer IDs.
+    ///
+    /// Mirrors C++ `DefaultBtInteractive::receiveHandshake()`:
+    /// ```cpp
+    /// if (memcmp(message->getPeerId(), bittorrent::getStaticPeerId(),
+    ///            PEER_ID_LENGTH) == 0) {
+    ///   throw DL_ABORT_EX("Drop connection from the same Peer ID");
+    /// }
+    /// for (auto& peer : peerStorage_->getUsedPeers()) {
+    ///   if (peer->isActive() &&
+    ///       memcmp(peer->getPeerId(), message->getPeerId(), PEER_ID_LENGTH) == 0) {
+    ///     throw DL_ABORT_EX("Same Peer ID has been already seen.");
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `handshake` — The received handshake message containing the remote
+    ///   peer's 20-byte peer ID.
+    /// * `our_peer_id` — Our own static peer ID, generated once at startup
+    ///   (equivalent to C++ `bittorrent::getStaticPeerId()`).
+    /// * `connected_peer_ids` — Iterator yielding the 20-byte peer IDs of
+    ///   all currently active peer connections (equivalent to C++
+    ///   `peerStorage_->getUsedPeers()` filtered by `isActive()`).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` — Peer ID passed both checks; proceed with the handshake.
+    /// * `Err(Aria2Error::Recoverable(HandshakeRejection))` — Self-connection
+    ///   or duplicate detected; abort this connection.
+    pub fn validate_handshake_peer_id<'a>(
+        handshake: &Handshake,
+        our_peer_id: &[u8; 20],
+        connected_peer_ids: impl IntoIterator<Item = &'a [u8; 20]>,
+    ) -> Result<()> {
+        let result = Self::check_duplicate_peer_id(
+            &handshake.peer_id,
+            our_peer_id,
+            connected_peer_ids,
+        );
+
+        match result {
+            PeerIdCheckResult::SelfConnection => {
+                warn!(
+                    "Drop connection from the same Peer ID: {}",
+                    handshake.peer_id_str()
+                );
+                Err(Aria2Error::Recoverable(
+                    RecoverableError::HandshakeRejection {
+                        reason: "Self-connection: remote peer ID matches our own".into(),
+                    },
+                ))
+            }
+            PeerIdCheckResult::DuplicatePeer => {
+                info!(
+                    "Same Peer ID has been already seen: {}",
+                    handshake.peer_id_str()
+                );
+                Err(Aria2Error::Recoverable(
+                    RecoverableError::HandshakeRejection {
+                        reason: "Duplicate: peer ID already connected on another peer".into(),
+                    },
+                ))
+            }
+            PeerIdCheckResult::Ok => Ok(()),
+        }
     }
 }

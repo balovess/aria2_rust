@@ -21,13 +21,32 @@ impl PeerAddr {
         }
     }
 
+    /// Compact peer format sizes for IPv4 and IPv6.
+    pub const COMPACT_SIZE_V4: usize = 6;
+    pub const COMPACT_SIZE_V6: usize = 18;
+
+    /// Decode from IPv4 compact format (4-byte IP + 2-byte port = 6 bytes).
     pub fn from_compact(data: &[u8]) -> Option<Self> {
-        if data.len() < 6 {
+        if data.len() < Self::COMPACT_SIZE_V4 {
             return None;
         }
         let ip = format!("{}.{}.{}.{}", data[0], data[1], data[2], data[3]);
         let port = u16::from_be_bytes([data[4], data[5]]);
         Some(Self { ip, port })
+    }
+
+    /// Decode from IPv6 compact format (16-byte IP + 2-byte port = 18 bytes).
+    pub fn from_compact_v6(data: &[u8]) -> Option<Self> {
+        if data.len() < Self::COMPACT_SIZE_V6 {
+            return None;
+        }
+        let ip_bytes: [u8; 16] = data[..16].try_into().ok()?;
+        let ipv6 = std::net::Ipv6Addr::from(ip_bytes);
+        let port = u16::from_be_bytes([data[16], data[17]]);
+        Some(Self {
+            ip: ipv6.to_string(),
+            port,
+        })
     }
 
     pub fn to_socket_addr(&self) -> std::net::SocketAddr {
@@ -36,6 +55,7 @@ impl PeerAddr {
             .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap())
     }
 
+    /// Encode to IPv4 compact format (4-byte IP + 2-byte port = 6 bytes).
     pub fn to_compact(&self) -> [u8; 6] {
         let mut buf = [0u8; 6];
         if let Ok(addr) = self.ip.parse::<std::net::Ipv4Addr>() {
@@ -43,6 +63,15 @@ impl PeerAddr {
             buf[4..6].copy_from_slice(&self.port.to_be_bytes());
         }
         buf
+    }
+
+    /// Encode to IPv6 compact format (16-byte IP + 2-byte port = 18 bytes).
+    pub fn to_compact_v6(&self) -> Option<[u8; 18]> {
+        let addr = self.ip.parse::<std::net::Ipv6Addr>().ok()?;
+        let mut buf = [0u8; 18];
+        buf[..16].copy_from_slice(&addr.octets());
+        buf[16..18].copy_from_slice(&self.port.to_be_bytes());
+        Some(buf)
     }
 }
 
@@ -262,5 +291,55 @@ mod tests {
     #[test]
     fn test_peer_addr_too_short() {
         assert!(PeerAddr::from_compact(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn test_peer_addr_from_compact_v6() {
+        // ::1 (loopback) + port 6881
+        let mut data = [0u8; 18];
+        data[15] = 1; // ::1 in 16 bytes
+        data[16..18].copy_from_slice(&6881u16.to_be_bytes());
+        let addr = PeerAddr::from_compact_v6(&data).unwrap();
+        assert_eq!(addr.ip, "::1");
+        assert_eq!(addr.port, 6881);
+    }
+
+    #[test]
+    fn test_peer_addr_compact_v6_roundtrip() {
+        let addr = PeerAddr::new("2001:db8::1", 6881);
+        let compact = addr.to_compact_v6().unwrap();
+        let parsed = PeerAddr::from_compact_v6(&compact).unwrap();
+        assert_eq!(parsed.ip, addr.ip);
+        assert_eq!(parsed.port, addr.port);
+    }
+
+    #[test]
+    fn test_peer_addr_compact_v6_too_short() {
+        assert!(PeerAddr::from_compact_v6(&[0u8; 17]).is_none());
+    }
+
+    #[test]
+    fn test_peer_addr_to_compact_v6_non_ipv6() {
+        let addr = PeerAddr::new("192.168.1.1", 6881);
+        assert!(addr.to_compact_v6().is_none());
+    }
+
+    #[test]
+    fn test_peer_addr_from_compact_v6_full_addr() {
+        // 2001:0db8:85a3:0000:0000:8a2e:0370:7334 + port 1234
+        let mut data = [0u8; 18];
+        data[0..2].copy_from_slice(&[0x20, 0x01]);
+        data[2..4].copy_from_slice(&[0x0d, 0xb8]);
+        data[4..6].copy_from_slice(&[0x85, 0xa3]);
+        data[6..8].copy_from_slice(&[0x00, 0x00]);
+        data[8..10].copy_from_slice(&[0x00, 0x00]);
+        data[10..12].copy_from_slice(&[0x8a, 0x2e]);
+        data[12..14].copy_from_slice(&[0x03, 0x70]);
+        data[14..16].copy_from_slice(&[0x73, 0x34]);
+        data[16..18].copy_from_slice(&1234u16.to_be_bytes());
+
+        let addr = PeerAddr::from_compact_v6(&data).unwrap();
+        assert_eq!(addr.ip, "2001:db8:85a3::8a2e:370:7334");
+        assert_eq!(addr.port, 1234);
     }
 }

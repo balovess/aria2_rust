@@ -90,7 +90,7 @@ pub use constants::{
     TOKEN_UPDATE_INTERVAL_SECS, TRANSACTION_ID_LENGTH,
 };
 pub use dispatcher::DhtDispatcher;
-pub use engine::{DhtEngine, DhtEngineConfig, DhtEntryPoint};
+pub use engine::{ActiveLookup, DhtEngine, DhtEngineConfig, DhtEntryPoint};
 pub use message::{CompactNodeInfo, CompactPeerInfo, DhtMessage, MessageTypeKind};
 pub use message_codec::{MessageCodecError, encode};
 pub use message_decode::{decode, decode_response_with_method};
@@ -105,7 +105,7 @@ pub use routing_table_ser::{
 };
 pub use task::{
     DhtBucketRefreshTask, DhtLookupTask, DhtPingTask, DhtReplaceNodeTask, DhtTask, DhtTaskQueue,
-    LookupKind, LookupResult, LookupState, TaskExecutor,
+    LookupEntry, LookupKind, LookupResult, LookupState, TaskExecutor,
 };
 pub use token_tracker::TokenTracker;
 pub use tracker::{DhtMessageTracker, MatchResult, TimeoutEntry, TrackerEntry};

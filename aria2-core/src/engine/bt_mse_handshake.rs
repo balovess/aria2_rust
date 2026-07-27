@@ -2,6 +2,24 @@
 //!
 //! Implements BitTorrent BEP 10 encryption layer protocol, overlaying optional encrypted handshake on BT protocol handshake.
 //! Contains three-phase handshake: Method Selection, PAD/DH key exchange, SKEY/SVC verification.
+//!
+//! # ⚠️ DEPRECATED — Use `aria2_protocol::bittorrent::extension::mse_handshake` instead
+//!
+//! This module uses **X25519** (via the `ring` crate) for the DH key exchange,
+//! which is **NOT compliant** with the MSE specification. The MSE spec requires
+//! 1024-bit DH with the RFC 3526 prime (the same parameters used in C++ aria2).
+//!
+//! The correct implementation lives in the `aria2-protocol` crate:
+//! - `aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake` —
+//!   correct 3-step handshake using 1024-bit DH via `num-bigint-dig`
+//! - `aria2_protocol::bittorrent::extension::mse_crypto::MseCryptoState` —
+//!   correct RC4 stream cipher with 1024-byte keystream discard
+//! - `aria2_protocol::bittorrent::extension::mse_dh::DhKeyPair` —
+//!   correct 1024-bit DH key exchange matching C++ `InternalDHKeyExchange`
+//!
+//! This module is retained temporarily for reference but should NOT be used
+//! in new code. It will be removed once all call sites are migrated to the
+//! protocol-level MSE implementation.
 
 use rc4::{KeyInit, Rc4 as Rc4Cipher, StreamCipher};
 use ring::agreement::{self, EphemeralPrivateKey, UnparsedPublicKey};

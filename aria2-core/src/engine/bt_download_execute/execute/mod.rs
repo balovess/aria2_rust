@@ -1,9 +1,12 @@
 mod bep6;
+mod dht_periodic_lookup;
 mod finalization;
 mod peer_management;
 mod pex;
 mod piece_download;
 mod web_seed;
+
+pub use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
 
 use async_trait::async_trait;
 use std::collections::HashSet;

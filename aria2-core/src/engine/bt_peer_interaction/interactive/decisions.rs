@@ -1,5 +1,6 @@
 //! Choking/interest decisions, check-have, keep-alive, flooding detection,
-//! peer exchange, and request generation for `BtPeerInteractive`.
+//! peer exchange, request generation, and same-peer-ID duplicate detection
+//! for `BtPeerInteractive`.
 
 use std::time::Duration;
 
@@ -502,5 +503,63 @@ impl BtPeerInteractive {
                 self.max_outstanding_request
             );
         }
+    }
+
+    // ── Handshake duplicate detection ────────────────────────────────────
+
+    /// Check whether a received peer ID indicates a self-connection or a
+    /// duplicate peer, matching C++ `DefaultBtInteractive::receiveHandshake()`.
+    ///
+    /// # C++ reference
+    ///
+    /// ```cpp
+    /// if (memcmp(message->getPeerId(), bittorrent::getStaticPeerId(),
+    ///            PEER_ID_LENGTH) == 0) {
+    ///   throw DL_ABORT_EX("Drop connection from the same Peer ID");
+    /// }
+    /// for (auto& peer : peerStorage_->getUsedPeers()) {
+    ///   if (peer->isActive() &&
+    ///       memcmp(peer->getPeerId(), message->getPeerId(), PEER_ID_LENGTH) == 0) {
+    ///     throw DL_ABORT_EX("Same Peer ID has been already seen.");
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `received_peer_id` — The 20-byte peer ID from the handshake message.
+    /// * `our_peer_id` — Our own static peer ID (generated once at startup,
+    ///   equivalent to C++ `bittorrent::getStaticPeerId()`).
+    /// * `connected_peer_ids` — Iterator of peer IDs from currently active
+    ///   connections (equivalent to C++ `peerStorage_->getUsedPeers()`
+    ///   filtered by `isActive()`).
+    ///
+    /// # Returns
+    ///
+    /// * [`PeerIdCheckResult::SelfConnection`] — Remote peer ID matches our
+    ///   own; drop the connection.
+    /// * [`PeerIdCheckResult::DuplicatePeer`] — Remote peer ID matches
+    ///   another active peer; drop the connection.
+    /// * [`PeerIdCheckResult::Ok`] — Peer ID is unique; proceed normally.
+    pub fn check_duplicate_peer_id<'a>(
+        received_peer_id: &[u8; 20],
+        our_peer_id: &[u8; 20],
+        connected_peer_ids: impl IntoIterator<Item = &'a [u8; 20]>,
+    ) -> PeerIdCheckResult {
+        // Self-connection check: does the remote peer ID match our own?
+        // C++: memcmp(message->getPeerId(), bittorrent::getStaticPeerId(), PEER_ID_LENGTH) == 0
+        if received_peer_id == our_peer_id {
+            return PeerIdCheckResult::SelfConnection;
+        }
+
+        // Duplicate check: is this peer ID already present in an active connection?
+        // C++: iterating peerStorage_->getUsedPeers() for matching peer_id
+        for id in connected_peer_ids {
+            if received_peer_id == id {
+                return PeerIdCheckResult::DuplicatePeer;
+            }
+        }
+
+        PeerIdCheckResult::Ok
     }
 }

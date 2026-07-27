@@ -5,17 +5,21 @@ use tracing::{debug, info, warn};
 use crate::engine::bt_download_command::{
     BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY, PUBLIC_TRACKER_PEER_THRESHOLD,
 };
+use crate::engine::bt_handshake_validation::filter_duplicate_peer_connections;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::peer_stats::PeerStats;
 use crate::engine::udp_tracker_client::UdpTrackerClient;
-use crate::engine::udp_tracker_manager::UdpTrackerManager;
+use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
-    /// Discover peers via HTTP tracker, UDP tracker, DHT, public trackers, and LPD.
+    /// Discover peers via tracker announce (HTTP/UDP), DHT, public trackers, and LPD.
+    ///
+    /// Uses the `TrackerAnnouncer` state machine for proper HTTP/UDP dispatch,
+    /// tier rotation, and event management (Started → Downloading → Completed/Stopped).
     pub(super) async fn discover_peers(
         &mut self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
@@ -23,42 +27,81 @@ impl BtDownloadCommand {
         info_hash_raw: &[u8; 20],
     ) -> Result<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>> {
         let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        let mut peer_addrs = crate::engine::bt_tracker_comm::perform_http_tracker_announce(
-            &meta.announce,
-            info_hash_raw,
-            &my_peer_id,
-            total_size,
-        )
-        .await?;
 
+        // Initialize the unified TrackerAnnouncer from the torrent's announce list.
+        // This replaces the separate HTTP-only + ad-hoc UDP approach with a single
+        // state machine that properly routes HTTP vs UDP based on URL scheme.
+        let mut announcer = TrackerAnnouncer::new(&meta.announce_list, &Some(meta.announce.clone()));
+
+        // Set up UDP client for UDP tracker support
         if let Ok(udp) = UdpTrackerClient::new(0).await {
-            self.udp_client = Some(std::sync::Arc::new(tokio::sync::Mutex::new(udp)));
-            if let Some(ref shared_client) = self.udp_client {
-                let mut mgr = UdpTrackerManager::new(std::sync::Arc::clone(shared_client)).await;
-                let urls: Vec<String> = meta.announce_list.iter().flatten().cloned().collect();
-                mgr.parse_tracker_urls(&urls);
+            let shared = std::sync::Arc::new(tokio::sync::Mutex::new(udp));
+            self.udp_client = Some(std::sync::Arc::clone(&shared));
+            announcer.set_udp_client(shared);
+        }
 
-                if mgr.endpoint_count() > 0 {
-                    debug!("Trying {} UDP tracker endpoints", mgr.endpoint_count());
+        let mut peer_addrs: Vec<(String, u16)> = Vec::new();
 
-                    match mgr.announce(
-                        info_hash_raw, &my_peer_id,
-                        0, total_size as i64, 0,
-                        aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent::Started,
-                        50,
-                    ).await {
-                        udp_responses if !udp_responses.is_empty() => {
-                            let udp_peers = UdpTrackerManager::collect_all_peers(&udp_responses);
-                            debug!("UDP trackers returned {} additional peers", udp_peers.len());
-                            for (ip, port) in udp_peers {
-                                peer_addrs.push(aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port));
-                            }
-                        }
-                        _ => { debug!("No response from UDP trackers"); }
+        // Try tracker announces through the state machine (handles both HTTP and UDP)
+        let mut announce_attempts = 0;
+        const MAX_ANNOUNCE_ATTEMPTS: usize = 5;
+
+        while announcer.is_announce_ready() && announce_attempts < MAX_ANNOUNCE_ATTEMPTS {
+            if let Some(result) = announcer
+                .announce(info_hash_raw, &my_peer_id, 0, total_size, 0)
+                .await
+            {
+                debug!(
+                    "[BT] Tracker announce result: {} peers from {} (event={:?}, interval={}s, seeders={}, leechers={})",
+                    result.peers.len(),
+                    result.tracker_url,
+                    result.event,
+                    result.interval.as_secs(),
+                    result.seeders,
+                    result.leechers
+                );
+                peer_addrs.extend(result.peers);
+
+                // If we got peers, no need to try more trackers immediately
+                if !peer_addrs.is_empty() {
+                    break;
+                }
+            }
+            announce_attempts += 1;
+        }
+
+        // Fall back to simple HTTP announce if the state machine didn't produce peers
+        if peer_addrs.is_empty() {
+            debug!("[BT] State-machine announce produced no peers, trying simple HTTP announce");
+            match crate::engine::bt_tracker_comm::perform_http_tracker_announce(
+                &meta.announce,
+                info_hash_raw,
+                &my_peer_id,
+                total_size,
+            )
+            .await
+            {
+                Ok(peers) => {
+                    // perform_http_tracker_announce returns Vec<PeerAddr>
+                    for p in peers {
+                        peer_addrs.push((p.ip.clone(), p.port));
                     }
+                }
+                Err(e) => {
+                    debug!("[BT] Simple HTTP announce also failed: {}", e);
                 }
             }
         }
+
+        // Store the announcer for periodic re-announce during download
+        self.tracker_announcer = Some(announcer);
+
+        let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = peer_addrs
+            .into_iter()
+            .map(|(ip, port)| {
+                aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
+            })
+            .collect();
 
         if peer_addrs.is_empty() {
             tracing::error!("[BT] ERROR: No peers from tracker");
@@ -262,6 +305,16 @@ impl BtDownloadCommand {
     }
 
     /// Establish connections to discovered peers and initialize the choking algorithm.
+    ///
+    /// After establishing connections, this method filters out:
+    /// - Self-connections (peer ID matching our own local peer ID)
+    /// - Duplicate connections (two connections sharing the same remote peer ID)
+    ///
+    /// Mirrors C++ `DefaultBtInteractive::receiveHandshake()` which checks:
+    /// 1. `memcmp(message->getPeerId(), bittorrent::getStaticPeerId(), 20) == 0`
+    ///    → disconnect self-connection
+    /// 2. `for(auto& peer : peerStorage_->getUsedPeers()) { memcmp(...) }`
+    ///    → disconnect duplicate peer
     pub(super) async fn connect_to_peers(
         &mut self,
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
@@ -270,6 +323,13 @@ impl BtDownloadCommand {
     ) -> Result<Vec<BtPeerConn>> {
         let require_crypto = { self.group.recover().options().bt_require_crypto };
         let force_encrypt = { self.group.recover().options().bt_force_encrypt };
+
+        // Generate our local peer ID for this session. This is used for
+        // self-connection detection (C++ bittorrent::getStaticPeerId()).
+        // Note: C++ generates the static peer ID once per session; here we
+        // generate it at connection time. For future sessions, this should
+        // be a per-session singleton.
+        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
 
         let conn_result = BtPeerInteraction::connect_to_peers(
             peer_addrs,
@@ -280,13 +340,25 @@ impl BtDownloadCommand {
         )
         .await?;
 
-        let active_connections = conn_result.connections;
+        let mut active_connections = conn_result.connections;
 
         tracing::info!("[BT] Active connections: {}", active_connections.len());
+
+        // Filter out self-connections and duplicate peer IDs.
+        // Mirrors C++ DefaultBtInteractive::receiveHandshake() checks.
+        let removed = filter_duplicate_peer_connections(&mut active_connections, &local_peer_id);
+        if removed > 0 {
+            tracing::info!(
+                "[BT] Filtered {} invalid connections (self/duplicate), {} remaining",
+                removed,
+                active_connections.len()
+            );
+        }
+
         if active_connections.is_empty() {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {
-                    message: "All peer connections failed".into(),
+                    message: "All peer connections failed or were filtered".into(),
                 },
             ));
         }
@@ -366,6 +438,59 @@ impl BtDownloadCommand {
                 "[BT] PeerStats snub check: {} peers timed out",
                 stats_snubbed.len()
             );
+        }
+    }
+
+    /// Periodic tracker re-announce for peer discovery during download.
+    ///
+    /// C++ aria2 uses `TrackerWatcherCommand` which checks `BtAnnounce::isAnnounceReady()`
+    /// on each iteration and dispatches a new announce when the interval has elapsed.
+    /// This method replicates that behavior by checking the `TrackerAnnouncer` state
+    /// machine and dispatching an announce if ready.
+    ///
+    /// Returns any newly discovered peers (may be empty if announce not ready yet).
+    pub(super) async fn periodic_tracker_announce(
+        &mut self,
+        info_hash: &[u8; 20],
+        downloaded: u64,
+        left: u64,
+        uploaded: u64,
+    ) -> Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> {
+        let Some(ref mut announcer) = self.tracker_announcer else {
+            return Vec::new();
+        };
+
+        if !announcer.is_announce_ready() {
+            return Vec::new();
+        }
+
+        let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+
+        match announcer.announce(info_hash, &my_peer_id, downloaded, left, uploaded).await {
+            Some(result) => {
+                if result.peers.is_empty() {
+                    debug!(
+                        "[BT] Periodic tracker announce to {} returned no new peers",
+                        result.tracker_url
+                    );
+                    Vec::new()
+                } else {
+                    info!(
+                        "[BT] Periodic tracker announce discovered {} peers from {} (event={:?})",
+                        result.peers.len(),
+                        result.tracker_url,
+                        result.event
+                    );
+                    result
+                        .peers
+                        .into_iter()
+                        .map(|(ip, port)| {
+                            aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
+                        })
+                        .collect()
+                }
+            }
+            None => Vec::new(),
         }
     }
 }

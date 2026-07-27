@@ -31,8 +31,6 @@ pub struct PexHandler;
 impl PexHandler {
     pub const EXTENSION_NAME: &'static str = "ut_pex";
     pub const EXTENSION_ID: u8 = 1;
-    const COMPACT_PEER_SIZE_V4: usize = 6;
-    const COMPACT_PEER_SIZE_V6: usize = 18;
     pub const DEFAULT_MAX_PEERS: usize = 50; // Used as default for build_pex_added() max_peers param
 
     pub fn parse_pex_data(data: &[u8]) -> Result<PexMessage, String> {
@@ -254,7 +252,7 @@ fn partition_peers_by_ip(peers: &[PeerAddr]) -> (Vec<PeerAddr>, Vec<PeerAddr>) {
 
 /// Encode IPv4 peers into compact format (4-byte IP + 2-byte port per peer).
 fn encode_compact_peers_v4(peers: &[PeerAddr]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(peers.len() * PexHandler::COMPACT_PEER_SIZE_V4);
+    let mut result = Vec::with_capacity(peers.len() * PeerAddr::COMPACT_SIZE_V4);
     for peer in peers {
         if let Ok(ipv4) = peer.ip.parse::<std::net::Ipv4Addr>() {
             let mut buf = [0u8; 6];
@@ -268,12 +266,9 @@ fn encode_compact_peers_v4(peers: &[PeerAddr]) -> Vec<u8> {
 
 /// Encode IPv6 peers into compact format (16-byte IP + 2-byte port per peer).
 fn encode_compact_peers_v6(peers: &[PeerAddr]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(peers.len() * PexHandler::COMPACT_PEER_SIZE_V6);
+    let mut result = Vec::with_capacity(peers.len() * PeerAddr::COMPACT_SIZE_V6);
     for peer in peers {
-        if let Ok(ipv6) = peer.ip.parse::<std::net::Ipv6Addr>() {
-            let mut buf = [0u8; 18];
-            buf[..16].copy_from_slice(&ipv6.octets());
-            buf[16..18].copy_from_slice(&peer.port.to_be_bytes());
+        if let Some(buf) = peer.to_compact_v6() {
             result.extend_from_slice(&buf);
         }
     }
@@ -285,18 +280,18 @@ fn decode_compact_peers_v4(data: &[u8]) -> Result<Vec<PeerAddr>, String> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    if !data.len().is_multiple_of(PexHandler::COMPACT_PEER_SIZE_V4) {
+    if !data.len().is_multiple_of(PeerAddr::COMPACT_SIZE_V4) {
         return Err(format!(
             "Invalid compact IPv4 peer data length: {} (must be multiple of {})",
             data.len(),
-            PexHandler::COMPACT_PEER_SIZE_V4
+            PeerAddr::COMPACT_SIZE_V4
         ));
     }
-    let count = data.len() / PexHandler::COMPACT_PEER_SIZE_V4;
+    let count = data.len() / PeerAddr::COMPACT_SIZE_V4;
     let mut peers = Vec::with_capacity(count);
     for i in 0..count {
-        let start = i * PexHandler::COMPACT_PEER_SIZE_V4;
-        let end = start + PexHandler::COMPACT_PEER_SIZE_V4;
+        let start = i * PeerAddr::COMPACT_SIZE_V4;
+        let end = start + PeerAddr::COMPACT_SIZE_V4;
         let peer = PeerAddr::from_compact(&data[start..end])
             .ok_or_else(|| format!("Failed to parse IPv4 peer at index {}", i))?;
         peers.push(peer);
@@ -309,38 +304,23 @@ fn decode_compact_peers_v6(data: &[u8]) -> Result<Vec<PeerAddr>, String> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    if !data.len().is_multiple_of(PexHandler::COMPACT_PEER_SIZE_V6) {
+    if !data.len().is_multiple_of(PeerAddr::COMPACT_SIZE_V6) {
         return Err(format!(
             "Invalid compact IPv6 peer data length: {} (must be multiple of {})",
             data.len(),
-            PexHandler::COMPACT_PEER_SIZE_V6
+            PeerAddr::COMPACT_SIZE_V6
         ));
     }
-    let count = data.len() / PexHandler::COMPACT_PEER_SIZE_V6;
+    let count = data.len() / PeerAddr::COMPACT_SIZE_V6;
     let mut peers = Vec::with_capacity(count);
     for i in 0..count {
-        let start = i * PexHandler::COMPACT_PEER_SIZE_V6;
-        let end = start + PexHandler::COMPACT_PEER_SIZE_V6;
-        let peer = decode_ipv6_peer(&data[start..end])
+        let start = i * PeerAddr::COMPACT_SIZE_V6;
+        let end = start + PeerAddr::COMPACT_SIZE_V6;
+        let peer = PeerAddr::from_compact_v6(&data[start..end])
             .ok_or_else(|| format!("Failed to parse IPv6 peer at index {}", i))?;
         peers.push(peer);
     }
     Ok(peers)
-}
-
-fn decode_ipv6_peer(data: &[u8]) -> Option<PeerAddr> {
-    if data.len() < 18 {
-        return None;
-    }
-
-    let ip_bytes: [u8; 16] = data[..16].try_into().ok()?;
-    let ipv6 = std::net::Ipv6Addr::from(ip_bytes);
-    let port = u16::from_be_bytes([data[16], data[17]]);
-
-    Some(PeerAddr {
-        ip: ipv6.to_string(),
-        port,
-    })
 }
 
 fn deduplicate_peers(peers: &[PeerAddr]) -> Vec<PeerAddr> {

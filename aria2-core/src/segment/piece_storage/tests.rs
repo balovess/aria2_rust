@@ -304,8 +304,10 @@ fn test_get_next_used_index() {
 #[test]
 fn test_filtered_lengths_default() {
     let storage = DefaultPieceStorage::new(1024, 4096);
-    // No filter active — filtered == unfiltered
-    assert_eq!(storage.get_filtered_total_length(), 4096);
+    // No filter active — C++ returns 0 for filtered total when filter
+    // is disabled (filterBitfield_ is null). Filtered completed falls
+    // back to unfiltered completed length.
+    assert_eq!(storage.get_filtered_total_length(), 0);
     assert_eq!(storage.get_filtered_completed_length(), 0);
 }
 
@@ -457,8 +459,8 @@ fn test_bitfield_man_get_max_index() {
 #[test]
 fn test_bitfield_man_filtered_total_length() {
     let mut bfman = BitfieldMan::new(1024, 4096);
-    // No filter: returns total
-    assert_eq!(bfman.get_filtered_total_length(), 4096);
+    // No filter: C++ returns 0 (filterBitfield_ is null)
+    assert_eq!(bfman.get_filtered_total_length(), 0);
     // Enable filter with pieces 0,1 selected
     bfman.add_filter(0, 2048);
     bfman.enable_filter();
@@ -765,8 +767,8 @@ fn test_bit_range_set() {
 #[test]
 fn test_bit_set_offset_range() {
     let mut bf = BitfieldMan::new(1024, 4096);
-    // Empty range should return true
-    assert!(bf.is_bit_set_offset_range(0, 0));
+    // C++ returns false for zero length (no range to check)
+    assert!(!bf.is_bit_set_offset_range(0, 0));
 
     // Set pieces 0,1 -> byte range [0, 2048) should be true
     bf.set_piece(0);

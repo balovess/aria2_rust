@@ -1,8 +1,15 @@
-//! Main tracker announce client and HTTP tracker communication functions.
+//! Main tracker announce client and HTTP/UDP tracker communication functions.
 //!
 //! Contains [`BtAnnounce`] (the core announce orchestrator), the public
 //! helper [`urlencode_infohash`], and free functions for HTTP/HTTPS tracker
 //! announce requests.
+//!
+//! # UDP Tracker Integration
+//!
+//! The [`BtAnnounce`] state machine supports both HTTP and UDP tracker URLs.
+//! When a `udp://` URL is encountered, the announce should be routed through
+//! [`crate::engine::udp_tracker_manager::UdpTrackerManager`] instead of the
+//! HTTP path. The helper [`is_udp_tracker`] can be used to detect UDP URLs.
 
 #![allow(clippy::empty_line_after_doc_comments)]
 
@@ -21,6 +28,24 @@ const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 120;
 
 /// Default number of peers to request from tracker
 const DEFAULT_NUMWANT: u32 = 50;
+
+// ======================================================================
+// URL Detection Helpers
+// ======================================================================
+
+/// Returns `true` if the URL uses the UDP tracker protocol (`udp://`).
+///
+/// This is used by the BtAnnounce integration to route UDP tracker URLs
+/// to the `UdpTrackerManager` instead of the HTTP announce path.
+///
+/// # C++ Reference
+///
+/// C++ aria2 routes UDP tracker announces through `DHTSetup` which creates
+/// `UdpTrackerRequest` objects for `udp://` URLs, while HTTP trackers
+/// use `HttpRequestCommand` → `HttpResponseCommand`.
+pub fn is_udp_tracker(url: &str) -> bool {
+    url.to_lowercase().starts_with("udp://")
+}
 
 // ======================================================================
 // URL Encoding Helpers
@@ -77,6 +102,13 @@ pub struct BtAnnounce {
     less_than_min_peers: bool,
     /// TCP port for announce
     tcp_port: u16,
+    /// Whether to require encryption (PREF_BT_FORCE_ENCRYPTION or PREF_BT_REQUIRE_CRYPTO).
+    /// When true, appends `&requirecrypto=1` to announce URL.
+    /// When false, appends `&supportcrypto=1` (we support but don't require).
+    force_encryption: bool,
+    /// External IP address to report in announce URL (PREF_BT_EXTERNAL_IP).
+    /// When set, appends `&ip=<addr>` to the announce URL.
+    external_ip: Option<String>,
 }
 
 impl BtAnnounce {
@@ -96,6 +128,8 @@ impl BtAnnounce {
             runtime_halted: false,
             less_than_min_peers: true,
             tcp_port: 0,
+            force_encryption: false,
+            external_ip: None,
         }
     }
 
@@ -256,8 +290,19 @@ impl BtAnnounce {
             url.push_str(&urlencode_bytes(self.tracker_id.as_bytes()));
         }
 
-        // TODO: Add supportcrypto=1 / requirecrypto=1 based on config
-        url.push_str("&supportcrypto=1");
+        // C++: if(PREF_BT_FORCE_ENCRYPTION || PREF_BT_REQUIRE_CRYPTO)
+        //   append "&requirecrypto=1", else append "&supportcrypto=1"
+        if self.force_encryption {
+            url.push_str("&requirecrypto=1");
+        } else {
+            url.push_str("&supportcrypto=1");
+        }
+
+        // C++: if(PREF_BT_EXTERNAL_IP is set) append "&ip=<addr>"
+        if let Some(ref ip) = self.external_ip {
+            url.push_str("&ip=");
+            url.push_str(ip);
+        }
 
         Some(url)
     }
@@ -354,12 +399,22 @@ impl BtAnnounce {
             self.complete, self.incomplete
         );
 
-        // Extract peer addresses
-        let peers = response
+        // Extract peer addresses (both IPv4 and IPv6).
+        // Matches C++ DefaultBtAnnounce::processAnnounceResponse which processes
+        // BtAnnounce::PEERS (AF_INET) and BtAnnounce::PEERS6 (AF_INET6) separately
+        // but adds both to peer storage.
+        let mut peers: Vec<(String, u16)> = response
             .peers
             .iter()
             .map(|p| (p.ip.clone(), p.port))
             .collect();
+
+        peers.extend(
+            response
+                .peers6
+                .iter()
+                .map(|p| (p.ip.clone(), p.port)),
+        );
 
         Ok(peers)
     }
@@ -409,6 +464,97 @@ impl BtAnnounce {
     /// Duration::ZERO means use tracker's interval.
     pub fn set_user_defined_interval(&mut self, interval: Duration) {
         self.user_defined_interval = interval;
+    }
+
+    /// Set whether to require encryption for peer connections.
+    ///
+    /// Maps to C++ `PREF_BT_FORCE_ENCRYPTION` and `PREF_BT_REQUIRE_CRYPTO`.
+    /// When true, `&requirecrypto=1` is appended to announce URLs instead
+    /// of `&supportcrypto=1`.
+    pub fn set_force_encryption(&mut self, force: bool) {
+        self.force_encryption = force;
+    }
+
+    /// Set the external IP address to report in announce URLs.
+    ///
+    /// Maps to C++ `PREF_BT_EXTERNAL_IP`. When set, `&ip=<addr>` is
+    /// appended to announce URLs so the tracker can report our
+    /// external address to other peers.
+    pub fn set_external_ip(&mut self, ip: Option<String>) {
+        self.external_ip = ip;
+    }
+
+    // ==================================================================
+    // UDP Tracker Integration
+    // ==================================================================
+
+    /// Returns `true` if the current tracker URL is a UDP tracker.
+    ///
+    /// Call this after `adjust_announce_list()` to determine whether
+    /// to route the announce through `UdpTrackerManager` or the HTTP path.
+    ///
+    /// # C++ Reference
+    ///
+    /// C++ aria2 dispatches to `UdpTrackerRequest` based on the URL scheme
+    /// during `BtAnnounce::announce()`.
+    pub fn is_current_tracker_udp(&self) -> bool {
+        self.announce_list
+            .get_announce()
+            .map(|url| is_udp_tracker(&url))
+            .unwrap_or(false)
+    }
+
+    /// Convert the current announce event to a UDP tracker event.
+    ///
+    /// Maps the tracker state machine event to the appropriate UDP protocol
+    /// event for use with `UdpTrackerManager::announce()`.
+    ///
+    /// # C++ Reference
+    ///
+    /// C++ `UdpTrackerRequest` uses the same event values:
+    /// - 0 = none, 1 = completed, 2 = started, 3 = stopped
+    pub fn current_udp_event(&self) -> aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent {
+        use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
+        match self.announce_list.get_event() {
+            AnnounceEvent::Started | AnnounceEvent::StartedAfterCompletion => UdpEvent::Started,
+            AnnounceEvent::Completed => UdpEvent::Completed,
+            AnnounceEvent::Stopped => UdpEvent::Stopped,
+            // Downloading, Seeding, Halted are periodic announces with no event
+            AnnounceEvent::Downloading | AnnounceEvent::Seeding | AnnounceEvent::Halted => UdpEvent::None,
+        }
+    }
+
+    /// Process a UDP tracker announce response and update internal state.
+    ///
+    /// This is the UDP equivalent of `process_announce_response()`. It
+    /// updates the interval, seeder/leecher counts, and announces success.
+    ///
+    /// Returns peer addresses on success.
+    pub fn process_udp_announce_response(
+        &mut self,
+        response: &aria2_protocol::bittorrent::tracker::udp_tracker_protocol::AnnounceResponse,
+    ) -> Vec<(String, u16)> {
+        // Update interval from response
+        // C++ sets both minInterval_ and interval_ to the reply interval directly
+        if response.interval > 0 {
+            let new_interval = Duration::from_secs(response.interval as u64);
+            self.interval = new_interval;
+            self.min_interval = new_interval;
+            debug!("[BT] UDP tracker interval: {}s", response.interval);
+        }
+
+        // Update complete/incomplete counts
+        self.complete = response.seeders as i64;
+        self.incomplete = response.leechers as i64;
+        debug!(
+            "[BT] UDP tracker stats: seeders={}, leechers={}",
+            response.seeders, response.leechers
+        );
+
+        // Mark announce success (resets in-flight counter, updates timing)
+        self.announce_success();
+
+        response.peers.clone()
     }
 
     /// Get the current announce interval.
@@ -630,9 +776,12 @@ pub async fn perform_http_tracker_announce(
             })
         })?;
 
-    info!("[BT] Tracker response: {} peers", tracker_resp.peer_count());
+    info!("[BT] Tracker response: {} peers ({} v4 + {} v6)", tracker_resp.peer_count(), tracker_resp.peers.len(), tracker_resp.peers6.len());
     for peer in &tracker_resp.peers {
-        debug!("[BT]   Peer: {}:{}", peer.ip, peer.port);
+        debug!("[BT]   Peer (v4): {}:{}", peer.ip, peer.port);
+    }
+    for peer in &tracker_resp.peers6 {
+        debug!("[BT]   Peer (v6): [{}]:{}", peer.ip, peer.port);
     }
 
     if tracker_resp.is_failure() {
@@ -643,11 +792,20 @@ pub async fn perform_http_tracker_announce(
         ));
     }
 
-    Ok(tracker_resp
+    let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = tracker_resp
         .peers
         .iter()
         .map(|p| aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&p.ip, p.port))
-        .collect())
+        .collect();
+
+    peer_addrs.extend(
+        tracker_resp
+            .peers6
+            .iter()
+            .map(|p| aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&p.ip, p.port)),
+    );
+
+    Ok(peer_addrs)
 }
 
 /// Perform an announce with a specific tracker event (for state machine integration).

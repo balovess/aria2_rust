@@ -264,8 +264,9 @@ impl PieceStorage for UnknownLengthPieceStorage {
     }
 
     fn get_filtered_total_length(&self) -> u64 {
-        // No filtering support for unknown-length downloads
-        self.total_length
+        // No filtering support for unknown-length downloads.
+        // C++ returns 0 when filter is not enabled.
+        0
     }
 
     fn get_filtered_completed_length(&self) -> u64 {
@@ -413,6 +414,14 @@ impl PieceStorage for UnknownLengthPieceStorage {
 
     fn is_selective_downloading_mode(&self) -> bool {
         false
+    }
+
+    fn setup_file_filter(&mut self) {
+        // No filtering for unknown-length downloads
+    }
+
+    fn clear_file_filter(&mut self) {
+        // No filtering for unknown-length downloads
     }
 }
 

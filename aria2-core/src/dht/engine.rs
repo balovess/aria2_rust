@@ -21,18 +21,21 @@ use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, info, trace, warn};
 
 use super::constants::{
-    BUCKET_REFRESH_CHECK_INTERVAL_SECS, DHT_MAX_MESSAGE_SIZE, PEER_ANNOUNCE_CHECK_INTERVAL_SECS,
-    TOKEN_UPDATE_INTERVAL_SECS,
+    BUCKET_REFRESH_CHECK_INTERVAL_SECS, DHT_MAX_MESSAGE_SIZE, K,
+    PEER_ANNOUNCE_CHECK_INTERVAL_SECS, TOKEN_UPDATE_INTERVAL_SECS,
 };
 use super::dispatcher::DhtDispatcher;
+use super::message::{AnnouncePeerQueryPayload, DhtMessage};
 use super::node::DhtNode;
 use super::node_id::NodeId;
 use super::peer_announce::DhtPeerAnnounceStorage;
 use super::receiver::{DhtReceiver, ReceiveAction};
 use super::routing_table::RoutingTable;
 use super::routing_table_ser;
+use super::message_decode;
 use super::task::{
-    DhtBucketRefreshTask, DhtLookupTask, DhtTask, DhtTaskQueue, LookupKind, TaskExecutor,
+    self, DhtBucketRefreshTask, DhtTaskQueue, LookupKind,
+    LookupResult, LookupState, TaskExecutor,
 };
 use super::token_tracker::TokenTracker;
 use super::transport::{AddressFamily, DhtTransport};
@@ -78,6 +81,49 @@ impl Default for DhtEngineConfig {
     }
 }
 
+// ── ActiveLookup ────────────────────────────────────────────────────────
+
+/// An active Kademlia lookup being driven by the DHT engine.
+///
+/// Unlike the C++ version where `DHTAbstractNodeLookupTask` sends queries
+/// directly via `DHTMessageDispatcher`, this Rust version separates the
+/// lookup state machine from the message dispatching. The engine polls
+/// each active lookup for the next batch of query targets, constructs
+/// the appropriate DHT messages, and queues them via the dispatcher.
+///
+/// C++: `DHTAbstractNodeLookupTask<Resp>` + `DHTNodeLookupTask` / `DHTPeerLookupTask`
+pub struct ActiveLookup {
+    /// The lookup state machine.
+    state: LookupState,
+}
+
+impl ActiveLookup {
+    /// Create a new active lookup from an initial state.
+    pub fn new(state: LookupState) -> Self {
+        Self { state }
+    }
+
+    /// Get a reference to the lookup state.
+    pub fn state(&self) -> &LookupState {
+        &self.state
+    }
+
+    /// Get a mutable reference to the lookup state.
+    pub fn state_mut(&mut self) -> &mut LookupState {
+        &mut self.state
+    }
+
+    /// Whether this lookup has finished.
+    pub fn is_done(&self) -> bool {
+        self.state.is_done()
+    }
+
+    /// Consume the state and produce a result.
+    pub fn into_result(self) -> LookupResult {
+        self.state.into_result()
+    }
+}
+
 // ── DhtEngine ─────────────────────────────────────────────────────────────
 
 /// The DHT engine: owns all DHT components and runs the main event loop.
@@ -105,10 +151,22 @@ pub struct DhtEngine {
     peer_announce_storage: DhtPeerAnnounceStorage,
     /// The token tracker.
     token_tracker: TokenTracker,
-    /// The task queue.
+    /// The task queue (for non-lookup tasks: ping, replace node, bucket refresh).
     task_queue: DhtTaskQueue,
-    /// The task executor.
+    /// The task executor (for non-lookup tasks).
     task_executor: TaskExecutor,
+    /// Active lookups being driven by the engine.
+    /// Unlike the C++ version where lookups are opaque tasks, here the engine
+    /// directly manages the lookup state machine to dispatch queries.
+    active_lookups: Vec<ActiveLookup>,
+    /// Channel for completed lookup results from non-engine-driven sources.
+    lookup_result_rx: task::LookupResultReceiver,
+    /// Channel sender for lookup results (cloned for external consumers).
+    /// TODO: Wire into BT engine for announce_peer dispatch after peer lookup.
+    #[allow(dead_code)]
+    lookup_result_tx: task::LookupResultSender,
+    /// TCP port for announce_peer (0 = use default).
+    tcp_port: u16,
     /// Engine configuration.
     config: DhtEngineConfig,
     /// Whether the engine has been bootstrapped.
@@ -145,6 +203,7 @@ impl DhtEngine {
         let token_tracker = TokenTracker::new();
         let task_queue = DhtTaskQueue::new();
         let task_executor = TaskExecutor::new(8); // max concurrent tasks
+        let (lookup_result_tx, lookup_result_rx) = task::lookup_result_channel();
 
         let bootstrapped = false;
 
@@ -158,6 +217,10 @@ impl DhtEngine {
             token_tracker,
             task_queue,
             task_executor,
+            active_lookups: Vec::new(),
+            lookup_result_rx,
+            lookup_result_tx,
+            tcp_port: bound_addr.port(),
             config,
             bootstrapped,
         })
@@ -214,6 +277,18 @@ impl DhtEngine {
                         }
                         Err(e) => {
                             warn!(error = %e, "Error receiving DHT message");
+                        }
+                    }
+                }
+
+                // Receive completed lookup results from task system
+                result = self.lookup_result_rx.recv() => {
+                    match result {
+                        Some(lookup_result) => {
+                            self.handle_lookup_result(lookup_result).await;
+                        }
+                        None => {
+                            warn!("Lookup result channel closed unexpectedly");
                         }
                     }
                 }
@@ -277,15 +352,117 @@ impl DhtEngine {
     }
 
     /// Initiate a peer lookup for the given info hash.
+    ///
+    /// After the lookup completes, the engine will:
+    /// 1. Feed discovered peers to the peer announce storage
+    /// 2. Send `announce_peer` messages to K closest nodes that provided tokens
+    ///
+    /// C++: `DHTGetPeersCommand::execute()` → `taskFactory->createPeerLookupTask()`
     pub fn lookup_peers(&mut self, info_hash: NodeId) {
-        let mut task = DhtLookupTask::new(info_hash, LookupKind::Peer);
-        task.state_mut()
-            .startup(&self.routing_table, &self.local_id);
-        task.startup();
-        self.task_queue.add_immediate(Box::new(task));
+        let mut state = LookupState::new(info_hash, LookupKind::Peer);
+        state.startup(&self.routing_table, &self.local_id);
+        let lookup = ActiveLookup::new(state);
+        self.active_lookups.push(lookup);
+    }
+
+    /// Initiate a node lookup for the given target ID.
+    ///
+    /// C++: `DHTBucketRefreshTask` → `taskFactory->createNodeLookupTask()`
+    pub fn lookup_nodes(&mut self, target: NodeId) {
+        let mut state = LookupState::new(target, LookupKind::Node);
+        state.startup(&self.routing_table, &self.local_id);
+        let lookup = ActiveLookup::new(state);
+        self.active_lookups.push(lookup);
     }
 
     // ── Private methods ────────────────────────────────────────────────────
+
+    /// Generate a random transaction ID for DHT messages.
+    ///
+    /// C++: `DHTMessageFactoryImpl::generateTransactionId()` uses random bytes.
+    fn generate_transaction_id() -> Vec<u8> {
+        use super::constants::TRANSACTION_ID_LENGTH;
+        let mut tid = vec![0u8; TRANSACTION_ID_LENGTH];
+        // Use a simple counter + random prefix for uniqueness
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let counter: u32 = (now.as_nanos() as u32) ^ (now.as_secs() as u32);
+        tid[..4].copy_from_slice(&counter.to_ne_bytes());
+        for b in tid.iter_mut().skip(4) {
+            *b = rand::random::<u8>();
+        }
+        tid
+    }
+
+    /// Handle a completed lookup result.
+    ///
+    /// C++: `DHTPeerLookupTask::onFinish()` + `DHTPeerLookupTask::onReceivedInternal()`
+    ///
+    /// When a peer lookup finishes:
+    /// 1. Add discovered peers to the peer announce storage
+    /// 2. Send `announce_peer` messages to the K closest nodes that returned tokens
+    ///
+    /// When a node lookup finishes:
+    /// 1. Add discovered nodes to the routing table
+    async fn handle_lookup_result(&mut self, result: LookupResult) {
+        match result.kind {
+            LookupKind::Peer => {
+                debug!(
+                    info_hash = %result.target,
+                    peers = result.peers.len(),
+                    tokens = result.tokens.len(),
+                    "Peer lookup completed"
+                );
+
+                // Feed discovered peers to the peer announce storage
+                for peer_addr in &result.peers {
+                    self.peer_announce_storage.add_peer_announce(&result.target, *peer_addr);
+                }
+
+                // Send announce_peer messages to K closest nodes that provided tokens.
+                // C++: DHTPeerLookupTask::onFinish() iterates entries and calls
+                // createAnnouncePeerMessage() for each node with a stored token.
+                let mut token_count = 0;
+                for (node_addr, token) in result.tokens.iter().take(K) {
+                    let announce_msg = DhtMessage::AnnouncePeerQuery {
+                        transaction_id: Self::generate_transaction_id(),
+                        sender_id: self.local_id,
+                        sender_addr: *node_addr,
+                        payload: AnnouncePeerQueryPayload {
+                            info_hash: result.target,
+                            port: self.tcp_port,
+                            token: token.clone(),
+                        },
+                    };
+                    self.dispatcher.add_message(announce_msg);
+                    token_count += 1;
+                }
+                debug!(
+                    info_hash = %result.target,
+                    announce_count = token_count,
+                    "Queued announce_peer messages"
+                );
+
+                // Send the queued messages
+                if self.dispatcher.queue_length() > 0 {
+                    self.dispatcher.send_messages(&self.transport).await;
+                }
+            }
+            LookupKind::Node => {
+                debug!(
+                    target = %result.target,
+                    nodes = result.nodes.len(),
+                    "Node lookup completed"
+                );
+
+                // Add discovered nodes to the routing table
+                for node in &result.nodes {
+                    self.routing_table.add_node(node.clone());
+                }
+            }
+        }
+    }
 
     /// Handle an inbound UDP message.
     async fn handle_inbound_message(&mut self, data: &[u8], sender: SocketAddr) {
@@ -314,6 +491,11 @@ impl DhtEngine {
                         addr = %sender_addr,
                         "DHT response processed"
                     );
+
+                    // Feed the response to active lookups.
+                    // C++: DHTPeerLookupTask::onReceivedInternal() and
+                    // DHTNodeLookupTask handle responses via callbacks.
+                    self.feed_response_to_lookups(method, sender_addr, data);
                 }
                 ReceiveAction::NoAction => {}
             }
@@ -326,13 +508,99 @@ impl DhtEngine {
         self.execute_tasks().await;
     }
 
+    /// Feed an inbound DHT response to active lookups that are waiting for it.
+    ///
+    /// When a response arrives from a node that an active lookup queried,
+    /// the lookup state is updated with the response data (nodes, peers, tokens).
+    ///
+    /// C++: `DHTAbstractNodeLookupTask` uses a callback mechanism where each
+    /// response triggers `onReceived()` → `onReceivedInternal()`. In Rust,
+    /// we match the response to the lookup by the sender address and method.
+    fn feed_response_to_lookups(&mut self, method: String, sender_addr: SocketAddr, data: &[u8]) {
+        // Decode the response to extract nodes, peers, and tokens
+        let (nodes, peers, token) = match method.as_str() {
+            "find_node" => {
+                match message_decode::decode_response_with_method(data, sender_addr, "find_node") {
+                    Ok(DhtMessage::FindNodeResponse { payload, .. }) => {
+                        let nodes: Vec<DhtNode> = payload
+                            .nodes
+                            .iter()
+                            .map(|cni| DhtNode::new(cni.node_id, cni.addr))
+                            .collect();
+                        (nodes, Vec::new(), None)
+                    }
+                    _ => (Vec::new(), Vec::new(), None),
+                }
+            }
+            "get_peers" => {
+                match message_decode::decode_response_with_method(data, sender_addr, "get_peers") {
+                    Ok(DhtMessage::GetPeersResponse { payload, .. }) => {
+                        let nodes: Vec<DhtNode> = payload
+                            .nodes
+                            .iter()
+                            .map(|cni| DhtNode::new(cni.node_id, cni.addr))
+                            .collect();
+                        let peers: Vec<SocketAddr> =
+                            payload.values.iter().map(|pi| pi.addr).collect();
+                        (nodes, peers, Some(payload.token))
+                    }
+                    _ => (Vec::new(), Vec::new(), None),
+                }
+            }
+            _ => return,
+        };
+
+        // Update the matching active lookup(s)
+        for lookup in &mut self.active_lookups {
+            let matches_method = match lookup.state().kind() {
+                LookupKind::Node => method == "find_node",
+                LookupKind::Peer => method == "get_peers",
+            };
+
+            if !matches_method {
+                continue;
+            }
+
+            // Check if the sender is one of the nodes we queried
+            let is_queried = lookup
+                .state()
+                .entries()
+                .iter()
+                .any(|e| e.node.addr() == sender_addr && e.used);
+
+            if is_queried {
+                lookup.state_mut().on_response(
+                    sender_addr,
+                    nodes.clone(),
+                    peers.clone(),
+                    token.clone(),
+                    &self.local_id,
+                );
+                trace!(
+                    method = %method,
+                    addr = %sender_addr,
+                    nodes = nodes.len(),
+                    peers = peers.len(),
+                    "Fed response to active lookup"
+                );
+            }
+        }
+    }
+
     /// Execute pending tasks from the task queue.
+    ///
+    /// After executing, checks for finished lookup tasks and sends their
+    /// results through the lookup result channel. Also drives active
+    /// lookup tasks by sending the next batch of queries.
     async fn execute_tasks(&mut self) {
         // Execute tasks from the task queue
         self.task_queue.execute();
 
         // Execute tasks through the task executor
         self.task_executor.update();
+
+        // Drive active lookup tasks: send the next batch of queries
+        self.drive_active_lookups().await;
 
         // Send any messages queued by tasks
         if self.dispatcher.queue_length() > 0 {
@@ -348,11 +616,104 @@ impl DhtEngine {
         }
     }
 
+    /// Drive active lookup tasks by sending the next batch of queries.
+    ///
+    /// For each active lookup, this method:
+    /// 1. Gets the next batch of nodes to query from `LookupState::next_query_batch()`
+    /// 2. Constructs the appropriate DHT query message (find_node or get_peers)
+    /// 3. Queues the message via the dispatcher
+    /// 4. Marks the queried entries as "used" in the lookup state
+    ///
+    /// C++: `DHTAbstractNodeLookupTask::sendMessage()` dispatches queries
+    /// via `DHTMessageDispatcher::addMessageToQueue()`.
+    async fn drive_active_lookups(&mut self) {
+        // Collect completed lookups by removing them from active_lookups.
+        // We cannot use drain_filter directly, so we swap the vec and filter.
+        let mut remaining = Vec::new();
+        let mut completed_results = Vec::new();
+
+        for lookup in std::mem::take(&mut self.active_lookups) {
+            if lookup.is_done() {
+                completed_results.push(lookup.into_result());
+            } else {
+                remaining.push(lookup);
+            }
+        }
+        self.active_lookups = remaining;
+
+        // Handle completed lookup results
+        for result in completed_results {
+            self.handle_lookup_result(result).await;
+        }
+
+        // Drive remaining active lookups: send the next batch of queries
+        for lookup in &mut self.active_lookups {
+            let batch = lookup.state().next_query_batch();
+            if batch.is_empty() {
+                continue;
+            }
+
+            let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
+            let method = match lookup.state().kind() {
+                LookupKind::Node => "find_node",
+                LookupKind::Peer => "get_peers",
+            };
+
+            for (_, node) in &batch {
+                let transaction_id = Self::generate_transaction_id();
+                let target_addr = node.addr();
+
+                let msg = match lookup.state().kind() {
+                    LookupKind::Node => {
+                        let target = *lookup.state().target();
+                        DhtMessage::FindNodeQuery {
+                            transaction_id,
+                            sender_id: self.local_id,
+                            sender_addr: target_addr,
+                            payload: super::message::FindNodeQueryPayload { target },
+                        }
+                    }
+                    LookupKind::Peer => {
+                        let info_hash = *lookup.state().target();
+                        DhtMessage::GetPeersQuery {
+                            transaction_id,
+                            sender_id: self.local_id,
+                            sender_addr: target_addr,
+                            payload: super::message::GetPeersQueryPayload { info_hash },
+                        }
+                    }
+                };
+
+                trace!(
+                    method = method,
+                    addr = %target_addr,
+                    tid = ?msg.transaction_id(),
+                    "Dispatching lookup query"
+                );
+
+                self.dispatcher.add_message(msg);
+            }
+
+            // Mark the queried entries as "used" in the lookup state
+            lookup.state_mut().mark_sent(&indices);
+        }
+
+        // Send any queued messages
+        if self.dispatcher.queue_length() > 0 {
+            self.dispatcher.send_messages(&self.transport).await;
+        }
+    }
+
     /// Bootstrap from configured entry points.
     async fn bootstrap(&mut self) {
         info!("Bootstrapping DHT from entry points");
 
-        for entry in &self.config.entry_points {
+        // Collect entry points first to avoid immutable borrow conflict
+        // when calling self.lookup_nodes() (mutable) inside the loop.
+        let entry_points = self.config.entry_points.clone();
+        let local_id = self.local_id;
+
+        for entry in &entry_points {
             // Resolve the entry point hostname
             match tokio::net::lookup_host(format!("{}:{}", entry.host, entry.port)).await {
                 Ok(addrs) => {
@@ -363,12 +724,7 @@ impl DhtEngine {
                         self.routing_table.add_node(node);
 
                         // Start a find_node lookup to discover more nodes
-                        let target = self.local_id;
-                        let mut task = DhtLookupTask::new(target, LookupKind::Node);
-                        task.state_mut()
-                            .startup(&self.routing_table, &self.local_id);
-                        task.startup();
-                        self.task_queue.add_immediate(Box::new(task));
+                        self.lookup_nodes(local_id);
                     }
                 }
                 Err(e) => {
@@ -405,15 +761,12 @@ impl DhtEngine {
         // Purge stale peer entries
         self.peer_announce_storage.handle_timeout();
 
-        // Get info hashes needing re-announcement
-        let info_hashes = self.peer_announce_storage.local_info_hashes();
+        // Collect info hashes first to avoid immutable borrow conflict
+        // when calling self.lookup_peers() (mutable) inside the loop.
+        let info_hashes: Vec<NodeId> = self.peer_announce_storage.local_info_hashes().iter().copied().collect();
         for info_hash in info_hashes {
             debug!(info_hash = %info_hash, "Re-announcing local info hash via DHT");
-            let mut task = DhtLookupTask::new(*info_hash, LookupKind::Peer);
-            task.state_mut()
-                .startup(&self.routing_table, &self.local_id);
-            task.startup();
-            self.task_queue.add_immediate(Box::new(task));
+            self.lookup_peers(info_hash);
         }
     }
 

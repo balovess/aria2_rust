@@ -230,6 +230,29 @@ pub struct DispatchUpdate {
 
 
 // ======================================================================
+// PeerIdCheckResult — same-peer-ID duplicate detection
+// ======================================================================
+
+/// Result of checking a received peer ID for self-connection or duplicates.
+///
+/// Mirrors the two checks in C++ `DefaultBtInteractive::receiveHandshake()`:
+/// 1. `memcmp(message->getPeerId(), bittorrent::getStaticPeerId(), PEER_ID_LENGTH) == 0`
+///    — remote peer ID matches our own (self-connection).
+/// 2. Iterating `peerStorage_->getUsedPeers()` for an active peer with the
+///    same ID — duplicate connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerIdCheckResult {
+    /// The remote peer ID matches our own static peer ID (self-connection).
+    /// C++ throws: "Drop connection from the same Peer ID"
+    SelfConnection,
+    /// The remote peer ID is already connected on another active peer.
+    /// C++ throws: "Same Peer ID has been already seen."
+    DuplicatePeer,
+    /// The peer ID is unique — proceed with the handshake.
+    Ok,
+}
+
+// ======================================================================
 // PostHandshakeActions — messages to send after handshake
 // ======================================================================
 

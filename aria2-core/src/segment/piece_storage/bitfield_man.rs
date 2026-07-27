@@ -250,15 +250,61 @@ impl BitfieldMan {
     }
 
     /// Sets the completion bitfield from external data.
+    ///
+    /// C++ also clears the use bitfield when setting the completion bitfield.
+    /// This ensures stale use bits from a previous session don't persist.
     pub fn set_bitfield(&mut self, bitfield: &[u8]) {
         let copy_len = std::cmp::min(bitfield.len(), self.bitfield.len());
         self.bitfield[..copy_len].copy_from_slice(&bitfield[..copy_len]);
+        // C++ clears useBitfield_ on setBitfield()
+        for b in self.use_bitfield.iter_mut() {
+            *b = 0;
+        }
         self.cached_num_piece = bf_count_set(&self.bitfield, self.num_pieces);
     }
 
     /// Returns the number of remaining (not completed) pieces.
     pub fn count_missing_pieces(&self) -> usize {
         self.num_pieces.saturating_sub(self.cached_num_piece)
+    }
+
+    /// Returns the number of filtered pieces that are completed.
+    ///
+    /// C++: `countFilteredBlock()` — returns `cachedNumFilteredBlock_`.
+    /// In Rust, we compute this live since we don't cache it.
+    /// When filter is disabled, returns 0 (matching C++).
+    pub fn count_filtered_block(&self) -> usize {
+        if !self.filter_enabled {
+            return 0;
+        }
+        let mut count = 0usize;
+        for i in 0..self.num_pieces {
+            if test_bit(&self.bitfield, self.num_pieces, i)
+                && test_bit(&self.filter_bitfield, self.num_pieces, i)
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Returns the number of missing filtered pieces.
+    ///
+    /// C++: `countMissingBlock()` for the filtered case.
+    /// When filter is disabled, returns `count_missing_pieces()`.
+    pub fn count_missing_filtered_block(&self) -> usize {
+        if !self.filter_enabled {
+            return self.count_missing_pieces();
+        }
+        let mut count = 0usize;
+        for i in 0..self.num_pieces {
+            if !test_bit(&self.bitfield, self.num_pieces, i)
+                && test_bit(&self.filter_bitfield, self.num_pieces, i)
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     // ── Filter methods (used by SegmentMan) ─────────────────────────────
@@ -441,6 +487,26 @@ impl BitfieldMan {
         result
     }
 
+    /// Get a bitfield of all missing pieces (no peer constraint).
+    ///
+    /// C++ overload: `getAllMissingIndexes(misbitfield, mislen)` without
+    /// a peer bitfield — returns all pieces we still need.
+    /// When filter is enabled, only pieces with filter bit set are considered.
+    pub fn all_missing_indexes_no_peer(&self) -> Vec<u8> {
+        let num_bytes = self.num_pieces.div_ceil(8);
+        let mut result = vec![0u8; num_bytes];
+
+        for i in 0..self.num_pieces {
+            if !test_bit(&self.bitfield, self.num_pieces, i)
+                && (!self.filter_enabled || test_bit(&self.filter_bitfield, self.num_pieces, i))
+            {
+                super::super::bitfield_util::set_bit(&mut result, self.num_pieces, i);
+            }
+        }
+
+        result
+    }
+
     /// Get a bitfield of all pieces that are missing, unused, and the peer has.
     ///
     /// Mirrors C++ `BitfieldMan::getAllMissingUnusedIndexes()`.
@@ -605,9 +671,14 @@ impl BitfieldMan {
     ///
     /// C++: `getFilteredTotalLengthNow()` — computes the total length of
     /// all pieces that have their filter bit set.
+    ///
+    /// When filter is not enabled, C++ returns 0 (filterBitfield_ is null).
+    /// This differs from `getFilteredCompletedLength()` which falls back to
+    /// the unfiltered completed length when filter is disabled.
     pub fn get_filtered_total_length(&self) -> u64 {
         if !self.filter_enabled {
-            return self.total_length;
+            // C++: if(!filterBitfield_) return 0;
+            return 0;
         }
         let filtered_count = bf_count_set(&self.filter_bitfield, self.num_pieces);
         if filtered_count == 0 {
@@ -673,12 +744,23 @@ impl BitfieldMan {
     ///
     /// C++: `BitfieldMan::isBitSetOffsetRange(int64_t offset, int64_t length)`.
     /// Used to verify that a byte range is fully available before reading.
+    ///
+    /// C++ returns false for zero/negative length or offset beyond total length.
+    /// It also clamps `offset + length` to `totalLength`.
     pub fn is_bit_set_offset_range(&self, offset: u64, length: u64) -> bool {
-        if length == 0 {
-            return true;
+        // C++: if(length <= 0 || totalLength_ <= offset) return false;
+        if length == 0 || offset >= self.total_length {
+            return false;
         }
+        // C++: if(totalLength_ < offset + length) length = totalLength_ - offset;
+        let effective_length = if offset + length > self.total_length {
+            self.total_length - offset
+        } else {
+            length
+        };
         let start_index = (offset / self.piece_length) as usize;
-        let end_index = ((offset + length - 1) / self.piece_length) as usize;
+        let end_index = ((offset + effective_length - 1) / self.piece_length) as usize;
+        // C++ is inclusive-inclusive; Rust is_bit_range_set is inclusive-exclusive
         self.is_bit_range_set(start_index, end_index + 1)
     }
 
@@ -687,12 +769,23 @@ impl BitfieldMan {
     ///
     /// C++: `BitfieldMan::getOffsetCompletedLength(int64_t offset, int64_t length)`.
     /// Used for partial progress reporting.
+    ///
+    /// C++ clamps `offset + length` to `totalLength` before computing indices.
     pub fn get_offset_completed_length(&self, offset: u64, length: u64) -> u64 {
         if length == 0 || self.num_pieces == 0 {
             return 0;
         }
+        // C++: if(totalLength_ < offset + length) length = totalLength_ - offset;
+        let effective_length = if offset + length > self.total_length {
+            self.total_length.saturating_sub(offset)
+        } else {
+            length
+        };
+        if effective_length == 0 {
+            return 0;
+        }
         let start_index = (offset / self.piece_length) as usize;
-        let end_index = ((offset + length - 1) / self.piece_length) as usize;
+        let end_index = ((offset + effective_length - 1) / self.piece_length) as usize;
         let mut completed: u64 = 0;
         for i in start_index..=end_index {
             if i >= self.num_pieces {
@@ -703,7 +796,7 @@ impl BitfieldMan {
                 let piece_start = i as u64 * self.piece_length;
                 let piece_end = piece_start + self.get_block_length(i);
                 let range_start = offset;
-                let range_end = offset + length;
+                let range_end = offset + effective_length;
                 let overlap_start = piece_start.max(range_start);
                 let overlap_end = piece_end.min(range_end);
                 if overlap_end > overlap_start {
@@ -720,14 +813,23 @@ impl BitfieldMan {
     /// C++: `BitfieldMan::getMissingUnusedLength(size_t startingIndex)`.
     /// Used to calculate how much data is available for download from
     /// a particular position.
+    ///
+    /// C++ stops at the first completed or in-use piece (returns contiguous
+    /// missing+unused run only). Rust previously continued past gaps, which
+    /// was incorrect.
     pub fn get_missing_unused_length(&self, starting_index: usize) -> u64 {
+        if starting_index >= self.num_pieces {
+            return 0;
+        }
         let mut length: u64 = 0;
         for i in starting_index..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i)
-                && !test_bit(&self.use_bitfield, self.num_pieces, i)
+            // C++: if(isBitSet(i) || isUseBitSet(i)) break;
+            if test_bit(&self.bitfield, self.num_pieces, i)
+                || test_bit(&self.use_bitfield, self.num_pieces, i)
             {
-                length += self.get_block_length(i);
+                break;
             }
+            length += self.get_block_length(i);
         }
         length
     }
@@ -893,16 +995,18 @@ impl BitfieldMan {
             let max_size = max_range_end.saturating_sub(max_range_start);
 
             // Prefer larger ranges. For equal-sized ranges, prefer the one
-            // whose start-1 piece is completed and not in-use (adjacent to
-            // completed data, so sequential download benefits).
+            // whose start-1 piece is "unavailable" in the combined bitfield
+            // (completed, ignored, or filter-excluded) and not in-use.
+            // C++ checks `bitfield::test(bitfield, blocks, maxRange.startIndex-1)`
+            // where `bitfield` is the COMBINED unavailable bitfield.
             let is_better = current_size > max_size
                 || (current_size == max_size
                     && adjusted_start > 0
                     && max_range_start > 0
-                    && (!test_bit(&self.bitfield, self.num_pieces, max_range_start - 1)
-                        || test_bit(&self.use_bitfield, self.num_pieces, max_range_start - 1))
-                    && test_bit(&self.bitfield, self.num_pieces, adjusted_start - 1)
-                    && !test_bit(&self.use_bitfield, self.num_pieces, adjusted_start - 1));
+                    // max_range_start-1 NOT completed/filtered/ignored → bad
+                    && !test_bit(&combined, self.num_pieces, max_range_start - 1)
+                    // adjusted_start-1 IS completed/filtered/ignored → good
+                    && test_bit(&combined, self.num_pieces, adjusted_start - 1));
 
             if is_better {
                 max_range_start = adjusted_start;

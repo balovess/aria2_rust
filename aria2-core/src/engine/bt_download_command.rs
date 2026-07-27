@@ -45,6 +45,9 @@ pub struct BtDownloadCommand {
     pub(crate) seed_ratio: Option<f64>,
     pub(crate) total_uploaded: u64,
     pub(crate) udp_client: Option<crate::engine::udp_tracker_client::SharedUdpClient>,
+    /// Unified tracker announcer (HTTP + UDP) using BtAnnounce state machine.
+    /// Created during execute() from the torrent's announce list.
+    pub(crate) tracker_announcer: Option<crate::engine::bt_tracker_comm::TrackerAnnouncer>,
     pub(crate) dht_engine:
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
@@ -93,6 +96,15 @@ pub struct BtDownloadCommand {
     pub(crate) web_seed_urls: Vec<String>,
     /// Web seed manager for HTTP piece downloads (initialized on first use)
     pub(crate) web_seed_manager: Option<crate::engine::bt_web_seed::WebSeedManager>,
+
+    // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
+    /// Tracks timing and retry state for periodic DHT get_peers lookups.
+    /// C++: `DHTGetPeersCommand` runs as a per-torrent command that
+    /// triggers DHT lookups at adaptive intervals (15min normal,
+    /// 5min low peers, 1min zero peers, 5s retry).
+    /// TODO: Wire into BT download loop for periodic DHT peer discovery.
+    #[allow(dead_code)]
+    pub(crate) dht_periodic_lookup: super::bt_download_execute::execute::DhtPeriodicLookup,
 
     // File lock (J6): prevents concurrent aria2 instances from writing to same output dir
     /// Download path lock held for the lifetime of this command.
@@ -316,6 +328,7 @@ impl BtDownloadCommand {
             seed_ratio,
             total_uploaded: 0,
             udp_client: None,
+            tracker_announcer: None,
             dht_engine: None,
             public_trackers: None,
             choking_algo,
@@ -346,6 +359,9 @@ impl BtDownloadCommand {
             web_seed_urls: meta.web_seeds.clone(),
             // Web seed manager (initialized lazily when needed)
             web_seed_manager: None,
+
+            // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
+            dht_periodic_lookup: super::bt_download_execute::execute::DhtPeriodicLookup::new(),
 
             // Download path lock (J6)
             download_path_lock,
