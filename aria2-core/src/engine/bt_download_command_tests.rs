@@ -1270,12 +1270,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_private_torrent_maybe_send_pex_returns_none() {
+    fn test_private_torrent_build_pex_extended_message_returns_none() {
         use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
         let mut cmd = create_private_test_command();
 
-        // Even if peers were somehow added, maybe_send_pex must refuse to
+        // Even if peers were somehow added, build_pex_extended_message must refuse to
         // build a PEX message for private torrents.
         cmd.set_pex_known_peers(vec![
             PeerAddr::new("10.0.0.1", 6881),
@@ -1283,10 +1283,10 @@ pub(crate) mod tests {
         ]);
 
         let remote = PeerAddr::new("10.0.0.99", 6881);
-        let result = cmd.maybe_send_pex(&remote);
+        let result = cmd.build_pex_extended_message(&remote, 2);
         assert!(
             result.is_none(),
-            "maybe_send_pex must return None for private torrents (BEP 0027) \
+            "build_pex_extended_message must return None for private torrents (BEP 0027) \
              even when pex_known_peers is populated"
         );
     }
@@ -1316,21 +1316,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_non_private_torrent_maybe_send_pex_can_proceed() {
+    fn test_non_private_torrent_build_pex_extended_message_can_proceed() {
         use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
         let mut cmd = create_test_command();
         assert!(!cmd.is_private);
 
-        // For a non-private torrent with peers populated, maybe_send_pex should
+        // For a non-private torrent with peers populated, build_pex_extended_message should
         // be allowed to build a PEX message (it returns Some when ready).
         cmd.set_pex_known_peers(vec![PeerAddr::new("10.0.0.1", 6881)]);
 
         let remote = PeerAddr::new("10.0.0.99", 6881);
-        let result = cmd.maybe_send_pex(&remote);
+        let result = cmd.build_pex_extended_message(&remote, 2);
         assert!(
             result.is_some(),
-            "maybe_send_pex should return Some for non-private torrents with known peers"
+            "build_pex_extended_message should return Some for non-private torrents with known peers"
         );
     }
 }

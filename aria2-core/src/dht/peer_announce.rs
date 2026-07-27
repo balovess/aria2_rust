@@ -58,7 +58,7 @@ impl AnnouncedPeer {
 
     /// Check if this peer entry has expired.
     pub fn is_expired(&self, timeout_secs: u64) -> bool {
-        self.last_seen.elapsed().as_secs() > timeout_secs
+        self.last_seen.elapsed() > std::time::Duration::from_secs(timeout_secs)
     }
 }
 
@@ -144,7 +144,7 @@ impl PeerAnnounceEntry {
 
     /// Check if the entry itself is stale (no updates for `timeout_secs`).
     pub fn is_stale(&self, timeout_secs: u64) -> bool {
-        self.last_updated.elapsed().as_secs() > timeout_secs
+        self.last_updated.elapsed() > std::time::Duration::from_secs(timeout_secs)
     }
 
     /// Get the info hash.

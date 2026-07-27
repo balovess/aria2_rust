@@ -1235,8 +1235,12 @@ mod tests {
         use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = DhtEngineConfig {
+            port: 0, // OS-assigned ephemeral port to avoid conflicts
+            ..Default::default()
+        };
         let engine =
-            rt.block_on(async { DhtEngine::start(DhtEngineConfig::default()).await.unwrap() });
+            rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
         let mut registry = BtRegistry::new();
         registry.set_dht_engine(engine);
@@ -1249,8 +1253,12 @@ mod tests {
         use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = DhtEngineConfig {
+            port: 0, // OS-assigned ephemeral port to avoid conflicts
+            ..Default::default()
+        };
         let engine =
-            rt.block_on(async { DhtEngine::start(DhtEngineConfig::default()).await.unwrap() });
+            rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
         let mut registry = BtRegistry::new();
         registry.set_dht_engine(engine);

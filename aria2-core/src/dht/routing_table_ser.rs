@@ -453,7 +453,7 @@ mod tests {
 
         // Verify node IDs match
         for node in &result.nodes {
-            assert_eq!(node.id().as_bytes()[0], node.addr().port() as u8 - 6881);
+            assert_eq!(node.id().as_bytes()[0], ((node.addr().port() as u16 - 6881u16) & 0xFF) as u8);
         }
     }
 

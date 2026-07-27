@@ -412,10 +412,12 @@ mod tests {
         NodeId([0xAA; ID_LENGTH])
     }
 
+    #[allow(dead_code)]
     fn test_addr() -> SocketAddr {
         "192.168.0.1:6881".parse().unwrap()
     }
 
+    #[allow(dead_code)]
     fn test_sender_id() -> NodeId {
         NodeId([0xBB; ID_LENGTH])
     }

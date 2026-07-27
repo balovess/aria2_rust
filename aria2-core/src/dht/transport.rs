@@ -160,7 +160,10 @@ mod tests {
         let (n, from) = receiver.recv_message(&mut buf).await.unwrap();
         assert_eq!(n, payload.len());
         assert_eq!(&buf[..n], payload);
-        assert_eq!(from, sender.local_addr().unwrap());
+        // When the sender binds to a wildcard address (0.0.0.0), the OS reports
+        // the source as 127.0.0.1 when sending to localhost, while local_addr()
+        // returns 0.0.0.0. Compare ports only to avoid this discrepancy.
+        assert_eq!(from.port(), sender.local_addr().unwrap().port());
     }
 
     #[tokio::test]

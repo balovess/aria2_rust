@@ -883,6 +883,10 @@ mod tests {
         }));
 
         assert_eq!(executor.queue_size(), 2);
+        // First tick: starts tasks from queue. ImmediateTask sets done=true in
+        // startup(), but finished tasks are only removed at the *beginning* of
+        // the next tick, so we need a second call to clear them.
+        executor.update();
         executor.update();
         // Both should have started and finished immediately
         assert_eq!(executor.running_count(), 0);

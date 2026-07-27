@@ -299,7 +299,10 @@ mod tests {
     async fn start_test_dht_engine()
     -> std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine> {
         aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
-            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::default(),
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+                port: 0, // OS-assigned ephemeral port to avoid conflicts
+                ..Default::default()
+            },
         )
         .await
         .expect("Failed to start DhtEngine for test")

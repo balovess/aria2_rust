@@ -346,7 +346,7 @@ impl Default for DhtMessageTracker {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, SocketAddrV4};
 
     use super::*;
 
@@ -470,7 +470,7 @@ mod tests {
         assert!(tracker
             .match_response(&[9, 9], &make_addr(5000))
             .is_none());
-        let empty_tracker = DhtMessageTracker::new();
+        let mut empty_tracker = DhtMessageTracker::new();
         assert!(empty_tracker
             .match_response(&[1, 2], &make_addr(5000))
             .is_none());

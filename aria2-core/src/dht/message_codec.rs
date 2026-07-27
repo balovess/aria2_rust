@@ -263,7 +263,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use super::super::constants::ID_LENGTH;
-    use super::super::message::{PingQueryPayload, method};
+    use super::super::message::PingQueryPayload;
     use super::super::node_id::NodeId;
 
     fn test_addr() -> SocketAddr {

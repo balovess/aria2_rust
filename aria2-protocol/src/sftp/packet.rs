@@ -928,10 +928,6 @@ impl SftpPacket {
 // Wire Helper Functions
 // =============================================================================
 
-fn write_u8(w: &mut impl Write, v: u8) -> io::Result<()> {
-    w.write_all(&[v])
-}
-
 fn write_u32(w: &mut impl Write, v: u32) -> io::Result<()> {
     w.write_all(&v.to_be_bytes())
 }
@@ -1102,4 +1098,97 @@ mod tests {
 
     #[test]
     fn test_decode_incomplete_returns_error() {
-        let
+        let buf = [0u8; 3]; // Too short for length prefix
+        let result = SftpPacket::decode(&buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_partial_payload_returns_error() {
+        let pkt = SftpPacket::Init { version: 3 };
+        let encoded = pkt.encode().unwrap();
+        let result = SftpPacket::decode(&encoded[..5]); // Only length + 1 byte
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_packet_type_codes() {
+        assert_eq!(SftpPacket::Init { version: 3 }.packet_type(), SSH_FXP_INIT);
+        assert_eq!(
+            SftpPacket::Version { version: 3, extensions: vec![] }.packet_type(),
+            SSH_FXP_VERSION
+        );
+        assert_eq!(
+            SftpPacket::Open {
+                request_id: 0,
+                filename: String::new(),
+                flags: 0,
+                attrs: SftpFileAttrs::default(),
+            }
+            .packet_type(),
+            SSH_FXP_OPEN
+        );
+    }
+
+    #[test]
+    fn test_request_id_extraction() {
+        assert!(SftpPacket::Init { version: 3 }.request_id().is_none());
+        assert!(SftpPacket::Version { version: 3, extensions: vec![] }.request_id().is_none());
+        assert_eq!(
+            SftpPacket::Open {
+                request_id: 42,
+                filename: String::new(),
+                flags: 0,
+                attrs: SftpFileAttrs::default(),
+            }
+            .request_id(),
+            Some(42)
+        );
+        assert_eq!(
+            SftpPacket::Status {
+                request_id: 99,
+                code: SSH_FX_OK,
+                message: String::new(),
+                language: String::new(),
+            }
+            .request_id(),
+            Some(99)
+        );
+    }
+
+    #[test]
+    fn test_file_attrs_directory_check() {
+        let dir_attrs = SftpFileAttrs::full(4096, 0, 0, 0o040755, 0, 0);
+        assert!(dir_attrs.is_directory());
+        assert!(!dir_attrs.is_regular_file());
+
+        let file_attrs = SftpFileAttrs::full(100, 0, 0, 0o100644, 0, 0);
+        assert!(file_attrs.is_regular_file());
+        assert!(!file_attrs.is_directory());
+
+        let link_attrs = SftpFileAttrs::full(10, 0, 0, 0o120777, 0, 0);
+        assert!(link_attrs.is_symlink());
+    }
+
+    #[test]
+    fn test_status_code_descriptions() {
+        assert_eq!(status_code_description(SSH_FX_OK), "Operation succeeded");
+        assert_eq!(status_code_description(SSH_FX_EOF), "End of file");
+        assert_eq!(status_code_description(999), "Unknown status code");
+    }
+
+    #[test]
+    fn test_write_and_read_roundtrip() {
+        let mut buf = Vec::new();
+        write_u32(&mut buf, 0xDEADBEEF).unwrap();
+        write_u64(&mut buf, 0xCAFEBABE_CAFEBABE).unwrap();
+        write_string(&mut buf, "hello").unwrap();
+        write_string_raw(&mut buf, &[0x01, 0x02]).unwrap();
+
+        let mut cursor = io::Cursor::new(&buf);
+        assert_eq!(read_u32(&mut cursor).unwrap(), 0xDEADBEEF);
+        assert_eq!(read_u64(&mut cursor).unwrap(), 0xCAFEBABE_CAFEBABE);
+        assert_eq!(read_string(&mut cursor).unwrap(), "hello");
+        assert_eq!(read_raw(&mut cursor).unwrap(), vec![0x01, 0x02]);
+    }
+}

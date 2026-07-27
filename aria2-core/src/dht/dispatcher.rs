@@ -186,7 +186,7 @@ impl Default for DhtDispatcher {
 mod tests {
     use super::*;
     use super::super::node_id::NodeId;
-    use super::super::message::{PingQueryPayload, FindNodeQueryPayload};
+    use super::super::message::PingQueryPayload;
 
     fn test_addr() -> SocketAddr {
         "192.168.0.1:6881".parse().unwrap()

@@ -490,7 +490,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
-    use std::time::Instant;
 
     /// Test concurrent add_group operations
     #[test]
@@ -524,7 +523,7 @@ mod tests {
     #[test]
     fn test_add_group_goes_to_reserved() {
         let man = RequestGroupMan::new();
-        let gid = man
+        let _gid = man
             .add_group(
                 vec!["http://example.com/file.bin".to_string()],
                 DownloadOptions::default(),

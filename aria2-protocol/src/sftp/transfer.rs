@@ -303,7 +303,7 @@ impl<'a> SftpTransfer<'a> {
         );
 
         // Step 3: Open remote file for reading
-        let remote_file = match self.ops.open(remote_path, OpenFlags::readonly(), 0).await {
+        let mut remote_file = match self.ops.open(remote_path, OpenFlags::readonly(), 0).await {
             Ok(f) => f,
             Err(e) => {
                 return Err(format!(
@@ -493,7 +493,7 @@ impl<'a> SftpTransfer<'a> {
         let total_size = metadata.len();
 
         // Open remote file for writing
-        let remote_file = match self
+        let mut remote_file = match self
             .ops
             .open(remote_path, OpenFlags::write_create(), 0o644)
             .await
