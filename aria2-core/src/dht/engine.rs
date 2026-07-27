@@ -34,8 +34,8 @@ use super::routing_table::RoutingTable;
 use super::routing_table_ser;
 use super::message_decode;
 use super::task::{
-    self, DhtBucketRefreshTask, DhtTaskQueue, LookupKind,
-    LookupResult, LookupState, TaskExecutor,
+    self, DhtBucketRefreshTask, DhtPingTask, DhtReplaceNodeTask, DhtTask, DhtTaskQueue,
+    LookupKind, LookupResult, LookupState, TaskExecutor,
 };
 use super::token_tracker::TokenTracker;
 use super::transport::{AddressFamily, DhtTransport};
@@ -159,6 +159,19 @@ pub struct DhtEngine {
     /// Unlike the C++ version where lookups are opaque tasks, here the engine
     /// directly manages the lookup state machine to dispatch queries.
     active_lookups: Vec<ActiveLookup>,
+    /// Active ping tasks for bootstrap entry points and replace-node probes.
+    ///
+    /// C++: `DHTEntryPointNameResolveCommand::addPingTask()` creates a
+    /// `DHTPingTask` with 10 retries. When the ping succeeds, the response
+    /// handler adds the node to the routing table. When it fails after all
+    /// retries, the node is discarded.
+    active_pings: Vec<DhtPingTask>,
+    /// Active replace-node tasks.
+    ///
+    /// C++: `DHTReplaceNodeTask` is created when a good node is cached in a
+    /// full bucket. It pings the LRU questionable node; if it doesn't respond,
+    /// it's replaced with the cached candidate.
+    active_replace_tasks: Vec<DhtReplaceNodeTask>,
     /// Channel for completed lookup results from non-engine-driven sources.
     lookup_result_rx: task::LookupResultReceiver,
     /// Channel sender for lookup results (cloned for external consumers).
@@ -218,6 +231,8 @@ impl DhtEngine {
             task_queue,
             task_executor,
             active_lookups: Vec::new(),
+            active_pings: Vec::new(),
+            active_replace_tasks: Vec::new(),
             lookup_result_rx,
             lookup_result_tx,
             tcp_port: bound_addr.port(),
@@ -485,17 +500,31 @@ impl DhtEngine {
                 ReceiveAction::ResponseReceived {
                     method,
                     sender_addr,
+                    target_node_id: _,
+                    elapsed,
                 } => {
                     trace!(
                         method = %method,
                         addr = %sender_addr,
+                        elapsed_ms = elapsed.as_millis(),
                         "DHT response processed"
                     );
 
                     // Feed the response to active lookups.
                     // C++: DHTPeerLookupTask::onReceivedInternal() and
                     // DHTNodeLookupTask handle responses via callbacks.
-                    self.feed_response_to_lookups(method, sender_addr, data);
+                    self.feed_response_to_lookups(method.clone(), sender_addr, data);
+
+                    // Feed the response to active ping tasks.
+                    // C++: DHTPingTask::onReceived() marks the node as
+                    // successfully pinged. For bootstrap pings, this is when
+                    // the real node ID becomes known (via the response).
+                    self.handle_ping_response(sender_addr, elapsed);
+
+                    // Feed the response to active replace-node tasks.
+                    // C++: DHTReplaceNodeTask::onReceived() marks the
+                    // questionable node as alive (no replacement needed).
+                    self.handle_replace_node_response(sender_addr);
                 }
                 ReceiveAction::NoAction => {}
             }
@@ -607,12 +636,144 @@ impl DhtEngine {
             self.dispatcher.send_messages(&self.transport).await;
         }
 
-        // Handle timeouts
+        // Handle timeouts — updates node state (RTT, condition counter)
         let timed_out = self
             .receiver
             .handle_timeouts(&mut self.dispatcher, &mut self.routing_table);
         if !timed_out.is_empty() {
+            // Process timeout entries for active ping and replace-node tasks
+            for entry in &timed_out {
+                self.handle_ping_timeout(entry.target_addr);
+                self.handle_replace_node_timeout(entry.target_addr);
+            }
             trace!(count = timed_out.len(), "DHT queries timed out");
+        }
+
+        // Clean up completed ping tasks
+        let bootstrap_done = self
+            .active_pings
+            .iter()
+            .all(|p| p.finished())
+            && !self.active_pings.is_empty();
+        if bootstrap_done {
+            // All bootstrap pings completed (success or failure).
+            // C++: After all entry point pings succeed, the bootstrap
+            // triggers createNodeLookupTask(localNode_->getID()).
+            let all_success = self.active_pings.iter().all(|p| p.is_success());
+            if all_success {
+                info!("All bootstrap entry point pings succeeded, starting initial node lookup");
+                self.lookup_nodes(self.local_id);
+            } else {
+                debug!("Some bootstrap entry point pings failed, proceeding with partial routing table");
+                // Still try a node lookup even if some pings failed
+                self.lookup_nodes(self.local_id);
+            }
+            self.active_pings.clear();
+        }
+
+        // Clean up completed replace-node tasks
+        let mut replacements_to_apply = Vec::new();
+        self.active_replace_tasks.retain(|task| {
+            if task.finished() && !task.is_target_alive() {
+                // Target node is unresponsive — replace it with the candidate
+                replacements_to_apply.push((
+                    task.bucket_prefix_len(),
+                    task.target_node().id().clone(),
+                    task.replacement_node().clone(),
+                ));
+                false // remove from active list
+            } else {
+                !task.finished() // keep if not finished
+            }
+        });
+
+        // Apply replacements: drop the bad node, add the replacement
+        for (_prefix_len, target_id, replacement) in replacements_to_apply {
+            debug!(
+                target_id = %target_id,
+                replacement_id = %replacement.id(),
+                "Replacing unresponsive DHT node with cached candidate"
+            );
+            self.routing_table.drop_node(&target_id);
+            self.routing_table.add_good_node(replacement);
+        }
+    }
+
+    /// Handle a successful ping response from a node.
+    ///
+    /// C++: `DHTPingReplyMessage::receivedAction()` calls
+    /// `node->markGood()` and `node->updateLastContact()`. For bootstrap
+    /// pings, this is where the real node ID (from the response) replaces
+    /// the random placeholder ID.
+    fn handle_ping_response(&mut self, sender_addr: SocketAddr, elapsed: std::time::Duration) {
+        for ping in &mut self.active_pings {
+            if ping.remote_node().addr() == sender_addr && !ping.finished() {
+                ping.on_response();
+                debug!(
+                    addr = %sender_addr,
+                    elapsed_ms = elapsed.as_millis(),
+                    "Bootstrap ping succeeded"
+                );
+            }
+        }
+    }
+
+    /// Handle a ping timeout for active ping tasks.
+    ///
+    /// C++: `DHTPingTask::onTimeout()` retries up to max_retry times.
+    fn handle_ping_timeout(&mut self, timed_out_addr: SocketAddr) {
+        // First pass: update ping task state and collect retry addresses
+        let mut retry_addrs = Vec::new();
+        for ping in &mut self.active_pings {
+            if ping.remote_node().addr() == timed_out_addr && !ping.finished() {
+                let should_retry = ping.on_timeout();
+                if should_retry {
+                    retry_addrs.push(timed_out_addr);
+                }
+            }
+        }
+        // Second pass: send retries (avoids borrow conflict)
+        for addr in retry_addrs {
+            self.send_ping(addr);
+            trace!(addr = %addr, "Retrying bootstrap ping");
+        }
+    }
+
+    /// Handle a successful response for an active replace-node task.
+    ///
+    /// C++: `DHTReplaceNodeTask::onReceived()` marks the target as alive
+    /// and finishes the task without replacing.
+    fn handle_replace_node_response(&mut self, sender_addr: SocketAddr) {
+        for task in &mut self.active_replace_tasks {
+            if task.target_node().addr() == sender_addr && !task.finished() {
+                task.on_response();
+                debug!(
+                    addr = %sender_addr,
+                    "Replace-node task: questionable node is alive, keeping it"
+                );
+            }
+        }
+    }
+
+    /// Handle a timeout for an active replace-node task.
+    ///
+    /// C++: `DHTReplaceNodeTask::onTimeout()` increments retry count.
+    /// After MAX_RETRY timeouts, the target is replaced with the candidate.
+    fn handle_replace_node_timeout(&mut self, timed_out_addr: SocketAddr) {
+        // First pass: update task state and collect retry addresses
+        let mut retry_addrs = Vec::new();
+        for task in &mut self.active_replace_tasks {
+            if task.target_node().addr() == timed_out_addr && !task.finished() {
+                task.on_timeout();
+                if !task.finished() {
+                    retry_addrs.push(timed_out_addr);
+                }
+            }
+        }
+        // Second pass: send retries (avoids borrow conflict)
+        for addr in retry_addrs {
+            self.send_ping(addr);
+            trace!(addr = %addr, "Retrying replace-node ping");
         }
     }
 
@@ -705,26 +866,40 @@ impl DhtEngine {
     }
 
     /// Bootstrap from configured entry points.
+    ///
+    /// C++: `DHTEntryPointNameResolveCommand::execute()` resolves the entry
+    /// point hostnames, then calls `addPingTask()` for each resolved address.
+    /// The ping task verifies the node is alive and updates its real node ID
+    /// from the ping response. Only after successful pings does the bootstrap
+    /// proceed to `createNodeLookupTask(localNode_->getID())` and
+    /// `createBucketRefreshTask()`.
+    ///
+    /// In the Rust implementation, we create `DhtPingTask` entries with high
+    /// retry counts (matching C++'s 10 retries) and send actual ping messages
+    /// via the dispatcher. When the response arrives, `handle_inbound_message()`
+    /// will update the node in the routing table with the real ID and RTT.
     async fn bootstrap(&mut self) {
         info!("Bootstrapping DHT from entry points");
 
-        // Collect entry points first to avoid immutable borrow conflict
-        // when calling self.lookup_nodes() (mutable) inside the loop.
         let entry_points = self.config.entry_points.clone();
-        let local_id = self.local_id;
 
         for entry in &entry_points {
             // Resolve the entry point hostname
             match tokio::net::lookup_host(format!("{}:{}", entry.host, entry.port)).await {
                 Ok(addrs) => {
                     for addr in addrs {
-                        info!(addr = %addr, "Adding DHT entry point node");
-                        // Create a node from the entry point and add it
-                        let node = DhtNode::new(NodeId::random(), addr);
-                        self.routing_table.add_node(node);
+                        info!(addr = %addr, "Pinging DHT entry point before adding");
 
-                        // Start a find_node lookup to discover more nodes
-                        self.lookup_nodes(local_id);
+                        // C++: DHTEntryPointNameResolveCommand::addPingTask()
+                        // creates a DHTPingTask with 10 retries. The entry node
+                        // starts with a random ID; the real ID comes from the
+                        // ping response.
+                        let node = DhtNode::with_random_id(addr);
+                        let ping_task = DhtPingTask::new(node, 10);
+                        self.active_pings.push(ping_task);
+
+                        // Send the ping message immediately
+                        self.send_ping(addr);
                     }
                 }
                 Err(e) => {
@@ -738,21 +913,113 @@ impl DhtEngine {
             }
         }
 
-        // Also trigger a bucket refresh to populate the routing table
-        let bucket_refresh = DhtBucketRefreshTask::new(true);
-        self.task_queue.add_periodic1(Box::new(bucket_refresh));
+        // Also trigger a bucket refresh to populate the routing table.
+        // C++: DHTBucketRefreshCommand creates bucket refresh tasks which
+        // schedule node lookups for stale buckets.
+        let mut bucket_refresh = DhtBucketRefreshTask::new(true);
+        bucket_refresh.compute_targets(&self.routing_table);
+        let targets = bucket_refresh.take_targets();
+        for target in targets {
+            self.lookup_nodes(target);
+        }
 
         self.bootstrapped = true;
     }
 
-    /// Check if any buckets need refreshing and start refresh tasks.
-    fn bucket_refresh_check(&self) {
+    /// Send a DHT ping message to the given address.
+    ///
+    /// C++: `DHTPingTask::sendMessage()` dispatches a ping via
+    /// `DHTMessageDispatcher::addMessageToQueue()`.
+    fn send_ping(&mut self, target_addr: SocketAddr) {
+        let transaction_id = Self::generate_transaction_id();
+        let msg = DhtMessage::PingQuery {
+            transaction_id,
+            sender_id: self.local_id,
+            sender_addr: target_addr,
+            payload: super::message::PingQueryPayload,
+        };
+        self.dispatcher.add_message(msg);
+    }
+
+    /// Check if any buckets need refreshing and start node lookups for them.
+    ///
+    /// C++: `DHTBucketRefreshCommand::execute()` calls
+    /// `taskFactory_->createBucketRefreshTask()` which creates a
+    /// `DHTBucketRefreshTask`. That task's `startup()` iterates all buckets,
+    /// checks `b->needsRefresh()`, calls `b->notifyUpdate()` to reset the
+    /// bucket's timer, generates a random target ID within the bucket's range
+    /// via `b->getRandomNodeID(targetID)`, then creates a `DHTNodeLookupTask`
+    /// for each stale bucket.
+    ///
+    /// In Rust, we directly create node lookups for stale buckets.
+    fn bucket_refresh_check(&mut self) {
+        // Collect refresh targets from stale buckets
+        let mut targets = Vec::new();
         for bucket in self.routing_table.get_buckets() {
             if bucket.needs_refresh() {
-                let prefix_len = bucket.prefix_length();
-                trace!(prefix_len, "Bucket needs refresh");
-                // A bucket refresh task would be created here via the task factory
+                let target = bucket.random_id_in_range();
+                debug!(
+                    prefix_len = bucket.common_prefix_len(),
+                    nodes = bucket.count(),
+                    "Bucket needs refresh, scheduling node lookup"
+                );
+                targets.push(target);
             }
+        }
+
+        // Create node lookups for each stale bucket
+        for target in targets {
+            self.lookup_nodes(target);
+        }
+
+        // Check for buckets with questionable nodes and cached replacements.
+        // C++: DHTReplaceNodeTask is triggered when a good node is cached in
+        // a full bucket. We also proactively check on bucket refresh.
+        self.schedule_replace_node_tasks();
+    }
+
+    /// Schedule replace-node tasks for buckets with questionable nodes
+    /// and cached replacement candidates.
+    ///
+    /// C++: When `DHTBucket::cacheNode()` is called, the replace-node task
+    /// is created to ping the LRU questionable node. If it doesn't respond,
+    /// it's replaced with the cached candidate.
+    fn schedule_replace_node_tasks(&mut self) {
+        let buckets = self.routing_table.get_buckets();
+        let mut tasks_to_create = Vec::new();
+
+        for bucket in &buckets {
+            // Only consider buckets with cached candidates
+            if bucket.cached_nodes().is_empty() {
+                continue;
+            }
+
+            // Find the LRU questionable node
+            if let Some(target_node) = bucket.lru_questionable_node() {
+                // Get the first cached replacement candidate
+                if let Some(replacement) = bucket.cached_nodes().front() {
+                    tasks_to_create.push((
+                        bucket.common_prefix_len(),
+                        target_node.clone(),
+                        replacement.as_ref().clone(),
+                    ));
+                }
+            }
+        }
+
+        // Create replace-node tasks
+        for (prefix_len, target, replacement) in tasks_to_create {
+            debug!(
+                prefix_len = prefix_len,
+                target = %target.addr(),
+                replacement = %replacement.addr(),
+                "Scheduling replace-node task for questionable node"
+            );
+            let task = DhtReplaceNodeTask::new(prefix_len, target.clone(), replacement);
+            self.active_replace_tasks.push(task);
+
+            // Send a ping to the questionable node
+            self.send_ping(target.addr());
         }
     }
 

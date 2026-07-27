@@ -95,13 +95,34 @@ impl super::RequestGroupMan {
     /// the list of demoted GIDs for event notification.
     ///
     /// This is the main entry point the engine should call each tick.
+    /// After demoting each group, if the group completed successfully,
+    /// resolves any `CompletionDependency` waiting on that GID so that
+    /// dependent reserved groups (e.g. Metalink→torrent, magnet→torrent)
+    /// can be promoted on the next tick.
+    ///
+    /// Mirrors C++ `ProcessStoppedRequestGroup` which calls
+    /// `postDownloadProcessing()` on completed groups, enabling
+    /// their dependent children to be promoted by
+    /// `fillRequestGroupFromReserver()`.
     pub fn remove_stopped_groups(&self) -> Vec<crate::request::request_group::GroupId> {
         let demoted = self.find_stopped_groups();
         let mut gids = Vec::with_capacity(demoted.len());
 
         for dg in demoted {
             let gid = dg.group.recover().gid();
+            let status = dg.group.recover().status();
             self.demote_group(gid, dg.result);
+
+            // When a download completes successfully, resolve any
+            // CompletionDependency waiting on this GID. This allows
+            // dependent reserved groups (e.g. Metalink->torrent,
+            // magnet->torrent) to be promoted on the next tick.
+            // Mirrors C++ postDownloadProcessing() which creates and
+            // enables child groups when the parent finishes.
+            if matches!(status, DownloadStatus::Complete) {
+                self.resolve_dependencies_for(gid);
+            }
+
             gids.push(gid);
         }
 

@@ -188,6 +188,16 @@ impl RoutingTable {
         bucket.get_node(node_id, addr_check)
     }
 
+    /// Find a node by ID with mutable access.
+    ///
+    /// Used for updating node state (RTT, timeout counter) in place,
+    /// matching C++ `DHTMessageTracker::messageArrived()` which calls
+    /// `node->updateRTT()` and `node->timeout()` on the tracked node.
+    pub fn get_node_mut(&mut self, node_id: &NodeId) -> Option<&mut DhtNode> {
+        let bucket = find_bucket_for_mut(&mut self.root, node_id);
+        bucket.get_node_mut(node_id)
+    }
+
     /// Get all buckets in the routing table.
     ///
     /// C++: `DHTRoutingTable::getBuckets()`

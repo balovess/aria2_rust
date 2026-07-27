@@ -142,6 +142,11 @@ pub struct MatchResult {
     pub target_node_id: NodeId,
     /// The target address from the tracked query.
     pub target_addr: SocketAddr,
+    /// Elapsed time since the query was dispatched (for RTT update).
+    ///
+    /// C++: `DHTMessageTracker::messageArrived()` computes
+    /// `entry->getElapsed()` and calls `node->updateRTT(rtt)`.
+    pub elapsed: Duration,
 }
 
 // ---------------------------------------------------------------------------
@@ -260,11 +265,13 @@ impl DhtMessageTracker {
             .iter()
             .position(|e| e.matches(transaction_id, sender_addr))?;
         let entry = self.entries.remove(pos)?;
+        let elapsed = entry.elapsed();
 
         debug!(
             tid = ?transaction_id,
             method = %entry.method,
             addr = %sender_addr,
+            elapsed_ms = elapsed.as_millis(),
             "DHT response matched to query"
         );
 
@@ -272,6 +279,7 @@ impl DhtMessageTracker {
             method: entry.method,
             target_node_id: entry.target_node_id,
             target_addr: entry.target_addr,
+            elapsed,
         })
     }
 
@@ -455,6 +463,8 @@ mod tests {
         assert_eq!(result.method, "ping");
         assert_eq!(result.target_node_id, make_node_id(1));
         assert_eq!(result.target_addr, addr);
+        // Elapsed should be very small for an immediately-matched entry
+        assert!(result.elapsed < Duration::from_secs(1));
         assert_eq!(tracker.count(), 0);
     }
 

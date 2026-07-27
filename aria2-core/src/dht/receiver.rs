@@ -7,6 +7,7 @@
 //! C++ reference: `DHTMessageReceiver.h/cc`
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use tracing::{debug, trace, warn};
 
@@ -30,6 +31,13 @@ pub enum ReceiveAction {
     ResponseReceived {
         method: String,
         sender_addr: SocketAddr,
+        /// The target node ID from the tracked query (used for node ID change detection).
+        /// C++: `DHTMessageTracker::messageArrived()` compares `targetNode`
+        /// against `message->getRemoteNode()` and drops stale entries.
+        target_node_id: NodeId,
+        /// Elapsed time since the query was dispatched (for RTT update).
+        /// C++: `node->updateRTT(rtt)` in `DHTMessageTracker::messageArrived()`.
+        elapsed: Duration,
     },
     /// The message was an error or unknown; no action needed.
     NoAction,
@@ -81,6 +89,8 @@ impl DhtReceiver {
             && let Some(tracked) = dispatcher.take_tracked(&tid, remote_addr) {
                 // This is a response to one of our queries
                 let method = tracked.method.clone();
+                let target_node_id = tracked.target_node_id;
+                let elapsed = tracked.elapsed;
                 trace!(
                     tid = ?tid,
                     addr = %remote_addr,
@@ -94,6 +104,8 @@ impl DhtReceiver {
                         self.handle_response(
                             &msg,
                             remote_addr,
+                            target_node_id,
+                            elapsed,
                             routing_table,
                             peer_announce_storage,
                             &mut actions,
@@ -138,18 +150,37 @@ impl DhtReceiver {
     }
 
     /// Handle a decoded response message.
+    ///
+    /// Performs node ID change detection (C++ `DHTMessageTracker::messageArrived()`)
+    /// and RTT update (C++ `node->updateRTT()`).
     fn handle_response(
         &self,
         msg: &DhtMessage,
         _remote_addr: SocketAddr,
+        target_node_id: NodeId,
+        elapsed: Duration,
         routing_table: &mut RoutingTable,
         peer_announce_storage: &mut DhtPeerAnnounceStorage,
         actions: &mut Vec<ReceiveAction>,
     ) {
-        // Add the responding node to the routing table
+        // C++: DHTMessageTracker::messageArrived() compares targetNode's ID
+        // with the response's sender ID. If they differ, the old node is
+        // dropped from the routing table because its identity has changed.
         if let Some(sender_id) = msg.sender_id() {
-            let node = DhtNode::new(*sender_id, *msg.sender_addr());
-            routing_table.add_node(node);
+            if *sender_id != target_node_id && target_node_id != NodeId::ZERO {
+                debug!(
+                    old_id = %target_node_id,
+                    new_id = %sender_id,
+                    "Node ID has changed, dropping stale entry from routing table"
+                );
+                routing_table.drop_node(&target_node_id);
+            }
+
+            // Add the responding node to the routing table as a "good" node
+            // since it just responded successfully.
+            let mut node = DhtNode::new(*sender_id, *msg.sender_addr());
+            node.update_rtt(elapsed.as_millis() as u64);
+            routing_table.add_good_node(node);
         }
 
         // Handle get_peers responses: store discovered peers
@@ -168,6 +199,8 @@ impl DhtReceiver {
         actions.push(ReceiveAction::ResponseReceived {
             method: msg.method_name().unwrap_or("unknown").to_owned(),
             sender_addr: *msg.sender_addr(),
+            target_node_id,
+            elapsed,
         });
     }
 
@@ -377,13 +410,13 @@ impl DhtReceiver {
 
     /// Handle message tracker timeouts.
     ///
-    /// Called periodically to clean up unanswered queries. Returns the
-    /// list of timed-out entries for the caller to handle (e.g., marking
-    /// nodes as bad in the routing table).
+    /// Called periodically to clean up unanswered queries. Updates node
+    /// state in the routing table (RTT, timeout counter, bad node eviction),
+    /// matching C++ `DHTMessageTracker::handleTimeoutEntry()` behavior.
     pub fn handle_timeouts(
         &self,
         dispatcher: &mut DhtDispatcher,
-        _routing_table: &mut RoutingTable,
+        routing_table: &mut RoutingTable,
     ) -> Vec<super::tracker::TimeoutEntry> {
         let timed_out = dispatcher.handle_timeouts();
 
@@ -391,14 +424,42 @@ impl DhtReceiver {
             debug!(
                 addr = %entry.target_addr,
                 method = %entry.method,
+                elapsed_ms = entry.elapsed.as_millis(),
                 "DHT query timed out"
             );
 
-            // Move the timed-out node to the tail of its bucket (soft penalty).
-            // If it fails too many times, it will be evicted in favor of
-            // replacement candidates.
-            // We don't have the node_id here, so we rely on the routing
-            // table's own health tracking during bucket refreshes.
+            // C++: DHTMessageTracker::handleTimeoutEntry() calls
+            // node->updateRTT(elapsed) and node->timeout().
+            // If the node becomes bad, it will be evicted during bucket
+            // refresh or when a replacement candidate is available.
+            if entry.target_node_id != NodeId::ZERO {
+                let node_id = entry.target_node_id;
+                let rtt_ms = entry.elapsed.as_millis() as u64;
+
+                // Update the node's RTT and increment timeout counter.
+                // C++: DHTMessageTracker::handleTimeoutEntry():
+                //   node->updateRTT(entry->getElapsed());
+                //   node->timeout()  (increments condition counter)
+                if let Some(node) = routing_table.get_node_mut(&node_id) {
+                    node.update_rtt(rtt_ms);
+                    node.timeout();
+                    trace!(
+                        node_id = %node_id,
+                        rtt_ms = rtt_ms,
+                        condition = node.condition(),
+                        "Applied timeout penalty to DHT node"
+                    );
+
+                    // C++ does not immediately drop bad nodes on timeout.
+                    // Instead, DHTReplaceNodeTask pings the LRU questionable
+                    // node and replaces it if it doesn't respond. Bad nodes
+                    // are also evicted when a new node is added to a full bucket.
+                } else {
+                    // Node may have already been dropped; just move to tail
+                    // for any remaining reference.
+                    routing_table.move_bucket_tail(&node_id);
+                }
+            }
         }
 
         timed_out

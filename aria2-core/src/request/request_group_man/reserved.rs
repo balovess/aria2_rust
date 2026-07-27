@@ -39,6 +39,21 @@ impl ReservedQueue {
         self.groups.recover_mut().push_front(group);
     }
 
+    /// Insert a batch of groups at the front of the reserved queue.
+    ///
+    /// Mirrors C++ `RequestGroupMan::insertReservedGroup(0, nextGroups)`:
+    /// child groups from `postDownloadProcessing()` are inserted at position 0
+    /// so they are promoted before other waiting downloads.
+    ///
+    /// Groups are inserted in order: the first element of `groups` will be
+    /// at the front of the queue (promoted first).
+    pub fn insert_front_batch(&self, groups: Vec<Arc<std::sync::RwLock<RequestGroup>>>) {
+        let mut queue = self.groups.recover_mut();
+        for group in groups.into_iter().rev() {
+            queue.push_front(group);
+        }
+    }
+
     /// Pop the front group from the reserved queue.
     /// Returns `None` if the queue is empty.
     pub fn pop_front(&self) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {

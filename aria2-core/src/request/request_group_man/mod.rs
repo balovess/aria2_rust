@@ -104,6 +104,23 @@ impl RequestGroupMan {
         );
     }
 
+    /// Insert a batch of groups at the front of the reserved queue.
+    ///
+    /// Mirrors C++ `RequestGroupMan::insertReservedGroup(0, nextGroups)`:
+    /// child groups from `postDownloadProcessing()` are inserted at
+    /// position 0 so they are promoted before other waiting downloads.
+    pub fn insert_reserved_at_front(
+        &self,
+        groups: Vec<Arc<std::sync::RwLock<RequestGroup>>>,
+    ) {
+        let count = groups.len();
+        self.reserved.insert_front_batch(groups);
+        debug!(
+            "Inserted {} groups at front of reserved queue",
+            count
+        );
+    }
+
     /// Insert a download group under a caller-chosen GID (used by RPC).
     /// Returns `Err` if the GID already exists.
     pub fn add_group_with_gid(
