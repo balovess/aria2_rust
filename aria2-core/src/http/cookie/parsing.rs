@@ -6,12 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// A string domain-matches a given domain string if at least one of the
 /// following conditions holds:
+///
 /// 1. The host string and the domain string are identical.
 /// 2. All of the following conditions hold:
-///    a. The host string is a host name (not an IP)
-///    b. The domain string is a suffix of the host string
-///    c. The last character of the host that is not included in the domain
-///       string is a `.` character.
+///    - The host string is a host name (not an IP)
+///    - The domain string is a suffix of the host string
+///    - The last character of the host that is not included in the domain string is a `.` character.
 pub(crate) fn domain_matches(host: &str, domain: &str) -> bool {
     let h = host.to_lowercase();
     let d = domain.to_lowercase();
@@ -190,26 +190,24 @@ pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
 
     for token in &tokens {
         // Try to parse as time (HH:MM:SS)
-        if !found_time {
-            if let Some((h, m, s)) = parse_time_token(token) {
+        if !found_time
+            && let Some((h, m, s)) = parse_time_token(token) {
                 hour = h;
                 minute = m;
                 second = s;
                 found_time = true;
                 continue;
             }
-        }
 
         // Try to parse as day-of-month (1-2 digit number)
         if !found_day {
             let digits = leading_digits(token);
-            if (1..=2).contains(&digits) && digits == token.len() {
-                if let Ok(d) = token.parse::<u32>() {
+            if (1..=2).contains(&digits) && digits == token.len()
+                && let Ok(d) = token.parse::<u32>() {
                     day_of_month = d;
                     found_day = true;
                     continue;
                 }
-            }
         }
 
         // Try to parse as month name (case-insensitive, at least 3 chars)
@@ -230,13 +228,12 @@ pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
         // Try to parse as year (1-4 digit number)
         if !found_year {
             let digits = leading_digits(token);
-            if (1..=4).contains(&digits) && digits == token.len() {
-                if let Ok(y) = token.parse::<u32>() {
+            if (1..=4).contains(&digits) && digits == token.len()
+                && let Ok(y) = token.parse::<u32>() {
                     year = y;
                     found_year = true;
                     continue;
                 }
-            }
         }
     }
 
@@ -258,7 +255,7 @@ pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
     let max_day = match month {
         4 | 6 | 9 | 11 => 30,
         2 => {
-            let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            let is_leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
             if is_leap { 29 } else { 28 }
         }
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -310,7 +307,7 @@ fn days_since_epoch(year: u32, month: u32, day: u32) -> u32 {
         };
     }
     let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let is_leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     for m in 1..month {
         days += if m == 2 && is_leap {
             29

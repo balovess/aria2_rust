@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 /// calculator); the counters are incremented via [`DownloadContext::update_download`]
 /// and [`DownloadContext::update_upload_length`].
 #[derive(Debug)]
+#[derive(Default)]
 pub struct NetStat {
     /// Cumulative bytes downloaded in the current session.
     session_download_length: u64,
@@ -24,18 +25,6 @@ pub struct NetStat {
     download_stop_time: Option<Instant>,
 }
 
-impl Default for NetStat {
-    fn default() -> Self {
-        Self {
-            session_download_length: 0,
-            session_upload_length: 0,
-            download_speed: 0,
-            upload_speed: 0,
-            download_start_time: None,
-            download_stop_time: None,
-        }
-    }
-}
 
 impl NetStat {
     /// Mark the download as started — records the current time.

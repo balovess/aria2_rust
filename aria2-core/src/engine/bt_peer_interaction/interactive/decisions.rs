@@ -34,7 +34,7 @@ impl BtPeerInteractive {
         let we_are_seeder = conn
             .session_resource
             .as_ref()
-            .map_or(false, |res| res.is_seeder());
+            .is_some_and(|res| res.is_seeder());
         let peer_is_seeder = conn.seeder;
 
         self.active_interaction_checker.check(
@@ -302,7 +302,7 @@ impl BtPeerInteractive {
             let fast_ext = conn
                 .session_resource
                 .as_ref()
-                .map_or(false, |r| r.is_fast_extension_enabled());
+                .is_some_and(|r| r.is_fast_extension_enabled());
             if fast_ext {
                 piece_storage.get_missing_fast_pieces(
                     diff_missing_block,
@@ -368,11 +368,7 @@ impl BtPeerInteractive {
         // Calculate how many new requests to create
         // C++: reqNumToCreate = max(maxOutstandingRequest - countOutstandingRequest, 0)
         let outstanding = self.handler.count_outstanding_requests();
-        let req_num_to_create = if self.max_outstanding_request > outstanding {
-            self.max_outstanding_request - outstanding
-        } else {
-            0
-        };
+        let req_num_to_create = self.max_outstanding_request.saturating_sub(outstanding);
 
         let mut all_requests = Vec::new();
 

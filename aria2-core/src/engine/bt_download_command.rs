@@ -179,7 +179,7 @@ impl BtDownloadCommand {
                 .info
                 .pieces
                 .iter()
-                .map(|hash_bytes| hex::encode(hash_bytes))
+                .map(hex::encode)
                 .collect();
             ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
 

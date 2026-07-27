@@ -55,6 +55,7 @@ impl BtPeerInteractive {
     /// - `InteractionResult::Disconnect(reason)` — peer should be dropped
     /// - `InteractionResult::FloodingDetected` — flooding detected
     /// - `InteractionResult::WaitingForHandshake` — not yet wired
+    #[allow(clippy::too_many_arguments)]
     pub async fn do_interaction_processing(
         &mut self,
         conn: &mut BtPeerConn,
@@ -72,11 +73,10 @@ impl BtPeerInteractive {
 
         if self.metadata_get_mode {
             // Simplified metadata-get mode: just keep-alive + receive
-            if self.should_send_keepalive() {
-                if let Err(e) = conn.send_keepalive().await {
+            if self.should_send_keepalive()
+                && let Err(e) = conn.send_keepalive().await {
                     warn!("Failed to send keepalive in metadata-get mode: {}", e);
                 }
-            }
             let (count, pex_update) = self
                 .receive_messages(conn, is_in_allowed_fast.clone())
                 .await?;
@@ -367,11 +367,10 @@ impl BtPeerInteractive {
                 }
                 // If the peer was a seeder before and now has even more,
                 // or if the peer now has all pieces, mark as seeder
-                if let Some(ref res) = conn.session_resource {
-                    if res.is_seeder() {
+                if let Some(ref res) = conn.session_resource
+                    && res.is_seeder() {
                         conn.seeder = true;
                     }
-                }
                 update.have_index = Some(piece_index);
                 trace!("Dispatched Have({}) message", piece_index);
             }
@@ -595,11 +594,10 @@ impl BtPeerInteractive {
                     }
 
                     // Collect inbound PEX updates for the caller.
-                    if let Some(ext) = &update.extension_update {
-                        if matches!(ext, ExtensionUpdate::PeerExchange { .. }) {
+                    if let Some(ext) = &update.extension_update
+                        && matches!(ext, ExtensionUpdate::PeerExchange { .. }) {
                             last_pex_update = Some(ext.clone());
                         }
-                    }
 
                     // Reset inactive timer on any received message
                     self.inactive_timer = Instant::now();

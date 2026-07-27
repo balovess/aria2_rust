@@ -142,8 +142,8 @@ impl PiecePicker {
     /// Update per-piece frequency data from a peer frequency slice.
     pub fn set_frequencies_from_peers(&mut self, freqs: &[usize]) {
         let len = freqs.len().min(self.frequencies.len());
-        for i in 0..len {
-            self.frequencies[i] = freqs[i] as u32;
+        for (dst, src) in self.frequencies.iter_mut().zip(freqs.iter()).take(len) {
+            *dst = *src as u32;
         }
     }
 

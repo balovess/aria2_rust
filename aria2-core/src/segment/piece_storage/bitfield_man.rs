@@ -88,9 +88,9 @@ impl BitfieldMan {
         let num_pieces = if piece_length == 0 || total_length == 0 {
             0
         } else {
-            ((total_length + piece_length - 1) / piece_length) as usize
+            total_length.div_ceil(piece_length) as usize
         };
-        let num_bytes = (num_pieces + 7) / 8;
+        let num_bytes = num_pieces.div_ceil(8);
 
         BitfieldMan {
             bitfield: vec![0u8; num_bytes],
@@ -173,14 +173,10 @@ impl BitfieldMan {
 
     /// Returns the index of the first missing unused piece.
     pub fn get_missing_piece_index(&self) -> Option<usize> {
-        for i in 0..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i)
+        (0..self.num_pieces).find(|&i| {
+            !test_bit(&self.bitfield, self.num_pieces, i)
                 && !test_bit(&self.use_bitfield, self.num_pieces, i)
-            {
-                return Some(i);
-            }
-        }
-        None
+        })
     }
 
     /// Returns the index of the first missing unused piece that is not
@@ -189,15 +185,11 @@ impl BitfieldMan {
     /// A piece is "ignored" if the corresponding bit is SET in `ignore_bitfield`.
     /// Pieces whose bit is set in the ignore bitfield are skipped.
     pub fn get_missing_piece_index_with_ignore(&self, ignore_bitfield: &[u8]) -> Option<usize> {
-        for i in 0..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i)
+        (0..self.num_pieces).find(|&i| {
+            !test_bit(&self.bitfield, self.num_pieces, i)
                 && !test_bit(&self.use_bitfield, self.num_pieces, i)
                 && !test_bit(ignore_bitfield, self.num_pieces, i)
-            {
-                return Some(i);
-            }
-        }
-        None
+        })
     }
 
     /// Returns the completed length in bytes.
@@ -388,7 +380,7 @@ impl BitfieldMan {
     /// Clears trailing bits beyond num_pieces in the filter bitfield.
     /// Public so that SegmentMan can use it after manually modifying filter bits.
     pub fn clear_trailing_filter_bits(&mut self) {
-        if self.num_pieces % 8 != 0 {
+        if !self.num_pieces.is_multiple_of(8) {
             let extra = 8 - (self.num_pieces % 8);
             if let Some(last) = self.filter_bitfield.last_mut() {
                 *last &= !((1u8 << extra) - 1);
@@ -430,11 +422,11 @@ impl BitfieldMan {
     /// Returns a bitfield where set bits represent pieces that:
     /// - Are NOT in our completed bitfield (we need them)
     /// - ARE in the peer's bitfield (peer has them)
-    /// This includes in-use pieces (for endgame mode).
+    ///   This includes in-use pieces (for endgame mode).
     ///
     /// When filter is enabled, only pieces with filter bit set are considered.
     pub fn all_missing_indexes(&self, peer_bitfield: &[u8]) -> Vec<u8> {
-        let num_bytes = (self.num_pieces + 7) / 8;
+        let num_bytes = self.num_pieces.div_ceil(8);
         let mut result = vec![0u8; num_bytes];
 
         for i in 0..self.num_pieces {
@@ -459,7 +451,7 @@ impl BitfieldMan {
     ///
     /// When filter is enabled, only pieces with filter bit set are considered.
     pub fn all_missing_unused_indexes(&self, peer_bitfield: &[u8]) -> Vec<u8> {
-        let num_bytes = (self.num_pieces + 7) / 8;
+        let num_bytes = self.num_pieces.div_ceil(8);
         let mut result = vec![0u8; num_bytes];
 
         for i in 0..self.num_pieces {
@@ -784,14 +776,10 @@ impl BitfieldMan {
     /// not completed. When filter is enabled, only considers pieces with
     /// their filter bit set.
     pub fn get_first_missing_index(&self) -> Option<usize> {
-        for i in 0..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i) {
-                if !self.filter_enabled || test_bit(&self.filter_bitfield, self.num_pieces, i) {
-                    return Some(i);
-                }
-            }
-        }
-        None
+        (0..self.num_pieces).find(|&i| {
+            !test_bit(&self.bitfield, self.num_pieces, i)
+                && (!self.filter_enabled || test_bit(&self.filter_bitfield, self.num_pieces, i))
+        })
     }
 
     /// Finds the first missing unused piece index starting from `start_index`,
@@ -802,11 +790,8 @@ impl BitfieldMan {
     /// The algorithm:
     /// 1. Always return `startIndex` if it is available (not in combined, not in use)
     /// 2. For subsequent indices, only return a piece if:
-    ///    a. The previous piece is not in-use and is "unavailable" in combined
-    ///       (meaning completed/filtered/ignored — adjacent to data we won't
-    ///       conflict with), OR
-    ///    b. There are enough consecutive available pieces to satisfy
-    ///       `min_split_size`
+    ///    - The previous piece is not in-use and is "unavailable" in combined (completed/filtered/ignored — adjacent to data we won't conflict with), OR
+    ///    - There are enough consecutive available pieces to satisfy `min_split_size`
     pub fn get_inorder_missing_unused_index(
         &self,
         start_index: usize,
@@ -1009,7 +994,7 @@ impl BitfieldMan {
     /// C++ computes: `ignore | ~filter | completion | use` (when filter enabled)
     /// or `ignore | completion | use` (when filter disabled).
     fn build_combined_unavailable(&self, ignore_bitfield: &[u8]) -> Vec<u8> {
-        let num_bytes = (self.num_pieces + 7) / 8;
+        let num_bytes = self.num_pieces.div_ceil(8);
         let mut combined = vec![0u8; num_bytes];
 
         for i in 0..self.num_pieces {
@@ -1049,7 +1034,7 @@ impl BitfieldMan {
 
     /// Clears trailing bits beyond num_pieces in the completion bitfield.
     fn clear_trailing_bits(&mut self) {
-        if self.num_pieces % 8 != 0 {
+        if !self.num_pieces.is_multiple_of(8) {
             let extra = 8 - (self.num_pieces % 8);
             if let Some(last) = self.bitfield.last_mut() {
                 *last &= !((1u8 << extra) - 1);
@@ -1059,7 +1044,7 @@ impl BitfieldMan {
 
     /// Clears trailing bits beyond num_pieces in the use bitfield.
     fn clear_trailing_use_bits(&mut self) {
-        if self.num_pieces % 8 != 0 {
+        if !self.num_pieces.is_multiple_of(8) {
             let extra = 8 - (self.num_pieces % 8);
             if let Some(last) = self.use_bitfield.last_mut() {
                 *last &= !((1u8 << extra) - 1);

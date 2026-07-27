@@ -103,7 +103,7 @@ pub enum FtpControlStream {
     /// Unencrypted TCP connection (plain FTP)
     Plain(TcpStream),
     /// TLS-encrypted connection (FTPS, RFC 4217)
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl FtpControlStream {

@@ -491,7 +491,7 @@ impl DhtBucketRefreshTask {
         let buckets = routing_table.get_buckets();
         for bucket in &buckets {
             if self.force_refresh
-                || bucket.time_since_last_update().as_secs() > BUCKET_REFRESH_INTERVAL_SECS as u64
+                || bucket.time_since_last_update().as_secs() > BUCKET_REFRESH_INTERVAL_SECS
             {
                 // Generate a random ID within this bucket's range
                 let target = bucket.random_id_in_range();

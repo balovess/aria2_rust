@@ -19,7 +19,7 @@
 //!   Rust passes a closure `is_in_allowed_fast(index) -> bool`.
 //! - C++ `createRequestMessagesOnEndGame()` uses `Piece::getAllMissingBlockIndexes()`
 //!   + `BtMessageDispatcher::isOutstandingRequest()`. Rust uses
-//!   `Piece::missing_block_bitfield_bytes()` + a closure for outstanding checks.
+//!     `Piece::missing_block_bitfield_bytes()` + a closure for outstanding checks.
 //! - C++ relies on `BtMessageDispatcher::doAbortOutstandingRequestAction()`.
 //!   Rust returns piece indices so the caller can perform the abort.
 

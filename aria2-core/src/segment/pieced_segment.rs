@@ -121,9 +121,9 @@ impl PiecedSegment {
 
         // Mark blocks as completed on the piece
         let block_length = self.piece.block_length() as u64;
-        if block_length > 0 {
-            let start_block = (old_pos / block_length) as usize;
-            let end_block = ((new_pos + block_length - 1) / block_length) as usize;
+        if let Some(start_block) = old_pos.checked_div(block_length) {
+            let start_block = start_block as usize;
+            let end_block = new_pos.div_ceil(block_length) as usize;
             let num_blocks = self.piece.count_blocks();
 
             for block_idx in start_block..std::cmp::min(end_block, num_blocks) {

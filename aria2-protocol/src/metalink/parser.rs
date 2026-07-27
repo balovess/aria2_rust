@@ -337,11 +337,10 @@ impl MetalinkFile {
     /// ```
     pub fn set_location_priority(&mut self, locations: &[&str], priority_to_add: i32) {
         for url in &mut self.urls {
-            if let Some(ref loc) = url.location {
-                if locations.iter().any(|l| l.eq_ignore_ascii_case(loc)) {
+            if let Some(ref loc) = url.location
+                && locations.iter().any(|l| l.eq_ignore_ascii_case(loc)) {
                     url.priority += priority_to_add;
                 }
-            }
         }
     }
 
@@ -410,11 +409,10 @@ pub fn resolve_url(base_uri: Option<&str>, url: &str) -> String {
     };
 
     // Try to resolve relative URL against base
-    if let Ok(base_url) = url::Url::parse(base) {
-        if let Ok(resolved) = base_url.join(url) {
+    if let Ok(base_url) = url::Url::parse(base)
+        && let Ok(resolved) = base_url.join(url) {
             return resolved.to_string();
         }
-    }
 
     // Fallback: return original URL
     url.to_string()
@@ -445,7 +443,7 @@ pub fn group_entry_by_metaurl_name(files: &[MetalinkFile]) -> Vec<(String, Vec<u
             let meta_url = &file.meta_urls[0];
             // C++ condition: if name is empty or size is unknown, skip merge search
             let can_merge =
-                meta_url.name.as_ref().map_or(false, |n| !n.is_empty()) && file.size_known;
+                meta_url.name.as_ref().is_some_and(|n| !n.is_empty()) && file.size_known;
 
             let mut found = false;
             if can_merge {
@@ -454,7 +452,7 @@ pub fn group_entry_by_metaurl_name(files: &[MetalinkFile]) -> Vec<(String, Vec<u
                         .meta_urls
                         .first()
                         .and_then(|m| m.name.as_deref())
-                        .map_or(false, |n| !n.is_empty());
+                        .is_some_and(|n| !n.is_empty());
                     if group.0 == meta_url.url && group_first_has_name {
                         group.1.push(idx);
                         found = true;
@@ -630,12 +628,11 @@ impl MetalinkDocument {
                             }
                         }
                         "size" => {
-                            if let Some(ref mut f) = current_file {
-                                if let Ok(size) = text_buf.trim().parse::<u64>() {
+                            if let Some(ref mut f) = current_file
+                                && let Ok(size) = text_buf.trim().parse::<u64>() {
                                     f.size = Some(size);
                                     f.size_known = true;
                                 }
-                            }
                         }
                         "identity" => {
                             if let Some(ref mut f) = current_file {
@@ -669,11 +666,10 @@ impl MetalinkDocument {
                             // V3 <resources maxconnections="N"> wrapper
                             if let Some(ref mut f) = current_file {
                                 let mc = find_attr(&pending_attrs, "maxconnections");
-                                if let Ok(n) = mc.parse::<i32>() {
-                                    if n > 0 {
+                                if let Ok(n) = mc.parse::<i32>()
+                                    && n > 0 {
                                         f.max_connections = Some(n);
                                     }
-                                }
                             }
                         }
                         "url" => {
@@ -701,7 +697,7 @@ impl MetalinkDocument {
                                                 // V4 priority: lowest value (1) = best.
                                                 // Conversion: priority = 101 - preference
                                                 // This mirrors C++ MetalinkParserStateV3Impl.cc:355.
-                                                if p >= 0 && p <= 100 {
+                                                if (0..=100).contains(&p) {
                                                     entry.preference = Some(p);
                                                     entry.priority = 101 - p;
                                                 } else {
@@ -734,13 +730,12 @@ impl MetalinkDocument {
                                                 entry.priority = p;
                                             }
                                         }
-                                        "name" => {
+                                        "name"
                                             // Reject directory traversal in metaurl@name
                                             // (mirrors C++ MetalinkParserStateV4Impl.cc:108)
-                                            if !detect_dir_traversal(val) {
+                                            if !detect_dir_traversal(val) => {
                                                 entry.name = Some(val.clone());
                                             }
-                                        }
                                         _ => {}
                                     }
                                 }

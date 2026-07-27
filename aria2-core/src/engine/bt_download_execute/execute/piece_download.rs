@@ -193,7 +193,7 @@ impl BtDownloadCommand {
             }
 
             let remaining = piece_picker.remaining_count();
-            let selection = piece_selector.select_next_piece(&mut piece_picker, remaining as usize);
+            let selection = piece_selector.select_next_piece(&mut piece_picker, remaining);
 
             let next_piece_idx = match selection.piece_index {
                 Some(idx) => idx,

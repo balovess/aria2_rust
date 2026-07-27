@@ -75,6 +75,7 @@ impl HttpResponseProcessor {
     /// # Returns
     ///
     /// A `ResponseProcessResult` indicating the next action for the download engine.
+    #[allow(clippy::too_many_arguments)]
     pub fn process(
         &self,
         response_head: &HttpResponseHead,
@@ -109,8 +110,8 @@ impl HttpResponseProcessor {
 
         if !piece_storage_initialized {
             // Metalink/HTTP Link headers
-            if accept_metalink {
-                if response_head.header("link").is_some() {
+            if accept_metalink
+                && response_head.header("link").is_some() {
                     let metalink_result = MetalinkHttpParser::parse_response(response_head);
                     for link in &metalink_result.links {
                         metalink_uris.push(link.uri.clone());
@@ -118,14 +119,12 @@ impl HttpResponseProcessor {
                     }
                     digests = metalink_result.digests;
                 }
-            }
 
             // Digest header (standalone, not from Link)
-            if response_head.header("digest").is_some() && digests.is_empty() {
-                if let Some(digest_value) = response_head.header("digest") {
+            if response_head.header("digest").is_some() && digests.is_empty()
+                && let Some(digest_value) = response_head.header("digest") {
                     digests = MetalinkHttpParser::parse_digest_header(digest_value);
                 }
-            }
         }
 
         // --- Non-2xx status codes (3xx/4xx/5xx) ---
@@ -159,14 +158,12 @@ impl HttpResponseProcessor {
             should_inflate_content_encoding(response_head, self.config.accept_gzip);
 
         // --- Range validation ---
-        if let Some((req_start, req_end)) = requested_range {
-            if let Some((resp_start, resp_end, _resp_total)) = content_range {
-                if let Err(e) = validate_response_range(req_start, req_end, resp_start, resp_end) {
+        if let Some((req_start, req_end)) = requested_range
+            && let Some((resp_start, resp_end, _resp_total)) = content_range
+                && let Err(e) = validate_response_range(req_start, req_end, resp_start, resp_end) {
                     warn!("Range validation failed: {}", e);
                     return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
                 }
-            }
-        }
 
         // --- HEAD -> GET switch detection ---
         let switch_head_to_get = request_method == HttpMethod::Head;

@@ -182,9 +182,7 @@ impl HttpProxyForward {
             req.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
         }
 
-        req.push_str(&format!(
-            "User-Agent: aria2-rust/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-        ));
+        req.push_str("User-Agent: aria2-rust/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n");
 
         let _ = path; // Path is used by the caller for Digest auth URI computation
         req

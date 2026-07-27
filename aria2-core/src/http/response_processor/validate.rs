@@ -93,13 +93,11 @@ fn validate_200_206(
 
     if !has_transfer_encoding {
         // No Transfer-Encoding: validate Content-Range against requested range.
-        if let Some((req_start, req_end)) = ctx.requested_range {
-            if let Some((resp_start, resp_end, _resp_total)) = parse_content_range(response_head) {
-                if let Err(_e) = validate_response_range(req_start, req_end, resp_start, resp_end) {
+        if let Some((req_start, req_end)) = ctx.requested_range
+            && let Some((resp_start, resp_end, _resp_total)) = parse_content_range(response_head)
+                && let Err(_e) = validate_response_range(req_start, req_end, resp_start, resp_end) {
                     return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
                 }
-            }
-        }
     }
     // When Transfer-Encoding is present, Content-Range is stripped by the
     // header processor per RFC 7230 §3.3.2 (Transfer-Encoding takes precedence

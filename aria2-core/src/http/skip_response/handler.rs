@@ -409,10 +409,10 @@ impl HttpSkipResponseHandler {
         if let Some(idx) = lower.find("realm=") {
             let rest = &header_value[idx + 6..];
             let rest = rest.trim();
-            if rest.starts_with('"') {
+            if let Some(stripped) = rest.strip_prefix('"') {
                 // Quoted value: find closing quote
-                if let Some(end) = rest[1..].find('"') {
-                    return rest[1..end + 1].to_string();
+                if let Some(end) = stripped.find('"') {
+                    return stripped[..end].to_string();
                 }
             } else {
                 // Unquoted value — ends at whitespace or comma

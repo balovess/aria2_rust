@@ -147,7 +147,7 @@ impl DhtBucket {
         }
 
         // Bucket full: evict bad node at front (LRU) if possible
-        if self.nodes.front().map_or(false, |n| n.is_bad()) {
+        if self.nodes.front().is_some_and(|n| n.is_bad()) {
             self.nodes.pop_front();
             self.nodes.push_back(Box::new(node));
             return true;
@@ -378,11 +378,11 @@ impl DhtBucket {
     pub fn random_id_in_range(&self) -> NodeId {
         let mut id = *self.min_id.as_bytes();
         // The first prefix_length bits are fixed; randomize the rest
-        for i in self.prefix_length / 8..ID_LENGTH {
-            id[i] = rand::random::<u8>();
+        for byte in &mut id[self.prefix_length / 8..ID_LENGTH] {
+            *byte = rand::random::<u8>();
         }
         // Randomize the remaining bits in the boundary byte
-        if self.prefix_length % 8 != 0 {
+        if !self.prefix_length.is_multiple_of(8) {
             let byte_idx = self.prefix_length / 8;
             let mask = 0xFFu8 >> (self.prefix_length % 8);
             id[byte_idx] = (id[byte_idx] & !mask) | (rand::random::<u8>() & mask);

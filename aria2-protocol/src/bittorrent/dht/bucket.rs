@@ -201,13 +201,12 @@ impl Bucket {
         }
 
         // Bucket is full. Try to replace a bad node (LRU = front).
-        if let Some(front) = self.nodes.first() {
-            if front.is_bad() {
+        if let Some(front) = self.nodes.first()
+            && front.is_bad() {
                 self.nodes.remove(0);
                 self.nodes.push(node);
                 return true;
             }
-        }
 
         false
     }

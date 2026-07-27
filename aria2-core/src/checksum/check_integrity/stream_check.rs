@@ -171,7 +171,6 @@ impl StreamCheckIntegrity {
 
         if self.hash_check_only {
             tracing::trace!("hash_check_only is set — skipping file allocation");
-            return;
         }
 
         // C++: proceedFileAllocation(commands, StreamFileAllocationEntry, e)

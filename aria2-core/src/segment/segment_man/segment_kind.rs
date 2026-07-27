@@ -17,7 +17,7 @@ use crate::segment::pieced_segment::PiecedSegment;
 #[derive(Debug)]
 pub enum SegmentKind {
     /// Fixed-length piece segment (total length known)
-    Pieced(PiecedSegment),
+    Pieced(Box<PiecedSegment>),
     /// Growing segment (total length unknown, e.g. chunked transfer)
     Grow(GrowSegment),
 }

@@ -183,13 +183,12 @@ impl AdaptiveUriSelector {
 
         // At least MIN_TESTED_SERVERS (3) mirrors must be tested
         let nb_tested = self.get_nb_tested_servers(&hosts);
-        if nb_tested < MIN_TESTED_SERVERS {
-            if let Some(idx) = self.get_first_not_tested(&hosts) {
+        if nb_tested < MIN_TESTED_SERVERS
+            && let Some(idx) = self.get_first_not_tested(&hosts) {
                 trace!(idx, "AdaptiveURISelector: choosing first non-tested mirror");
                 self.nb_server_to_evaluate.fetch_sub(1, Ordering::Relaxed);
                 return Some(idx);
             }
-        }
 
         // Check if we should evaluate servers or select best
         let nb_eval = self.nb_server_to_evaluate.load(Ordering::Relaxed);
@@ -300,7 +299,7 @@ impl AdaptiveUriSelector {
         bests.retain(|idx| {
             hosts
                 .get(*idx)
-                .map_or(false, |(_, h, _)| !used_set.contains(h.as_str()))
+                .is_some_and(|(_, h, _)| !used_set.contains(h.as_str()))
         });
 
         if bests.is_empty() {

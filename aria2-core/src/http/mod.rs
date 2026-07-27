@@ -62,6 +62,9 @@ pub use auth::{
     erase_confidential_info,
 };
 
+// Re-export netrc parser types for direct access
+pub use auth::netrc::{NetrcEntry as NetrcParserEntry, NetrcError, NetrcParser, find_netrc_file};
+
 // Re-export response processor types for convenient access
 pub use response_processor::{
     HttpResponseProcessor, ResponseProcessResult, ResponseProcessorConfig, ValidateRequestContext,

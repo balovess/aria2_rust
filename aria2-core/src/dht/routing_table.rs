@@ -97,7 +97,7 @@ impl RoutingTable {
                 let bucket = tree_node.bucket().expect("leaf must have bucket");
                 let already_exists = bucket.nodes().iter().any(|n| n.id() == &node_id);
                 let has_room = bucket.count() < K;
-                let has_bad_front = bucket.nodes().front().map_or(false, |n| n.is_bad());
+                let has_bad_front = bucket.nodes().front().is_some_and(|n| n.is_bad());
                 let can = already_exists || has_room || has_bad_front;
                 let should = !can && bucket.split_allowed();
                 (can, should)
@@ -142,7 +142,7 @@ impl RoutingTable {
                 bucket.cache_node(node);
                 trace!(node_id = %node_id, "Cached node in full bucket");
             }
-            return false;
+            false
         }
     }
 

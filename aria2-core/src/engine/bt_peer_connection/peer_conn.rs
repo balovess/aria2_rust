@@ -380,7 +380,7 @@ impl BtPeerConn {
     pub fn is_fast_extension_enabled(&self) -> bool {
         self.session_resource
             .as_ref()
-            .map_or(false, |sr| sr.is_fast_extension_enabled())
+            .is_some_and(|sr| sr.is_fast_extension_enabled())
     }
 
     /// Enable or disable fast extension for this connection.
@@ -437,7 +437,7 @@ impl BtPeerConn {
     pub fn has_piece(&self, index: usize) -> bool {
         self.session_resource
             .as_ref()
-            .map_or(false, |r| r.has_piece(index))
+            .is_some_and(|r| r.has_piece(index))
     }
 
     /// Set the peer bitfield from raw bytes.

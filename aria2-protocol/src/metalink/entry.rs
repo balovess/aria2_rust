@@ -97,11 +97,10 @@ impl MetalinkEntry {
     /// Empty filter strings match everything, matching C++ query logic
     /// in `Metalinker::queryEntry()`.
     pub fn matches_query(&self, version: &str, language: &str, os: &str) -> bool {
-        if !version.is_empty() {
-            if self.file.version.as_deref() != Some(version) {
+        if !version.is_empty()
+            && self.file.version.as_deref() != Some(version) {
                 return false;
             }
-        }
         if !language.is_empty() && !self.file.contains_language(language) {
             return false;
         }

@@ -44,11 +44,13 @@ use crate::error::Result;
 /// Mirrors C++ `AbstractCommand::resolveProxyMethod()` which returns
 /// either `V_GET` or `V_TUNNEL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ProxyMethod {
     /// Send FTP URL as HTTP GET through proxy (default for FTP).
     ///
     /// The proxy translates `ftp://` to FTP and returns data over HTTP.
     /// Equivalent to C++ `V_GET`.
+    #[default]
     Get,
     /// Establish CONNECT tunnel, then speak FTP directly.
     /// Already implemented in `proxy_tunnel.rs`.
@@ -65,11 +67,6 @@ impl fmt::Display for ProxyMethod {
     }
 }
 
-impl Default for ProxyMethod {
-    fn default() -> Self {
-        ProxyMethod::Get
-    }
-}
 
 // ---------------------------------------------------------------------------
 // FtpProxyConfig — shared proxy configuration
@@ -302,7 +299,7 @@ impl FtpProxyGetRequestBuilder {
     /// - Otherwise, use the URL as-is.
     fn build_request_url(&self) -> String {
         // Check if the FTP URL already has a username embedded
-        let has_embedded_username = self.ftp_url.username().is_empty() == false;
+        let has_embedded_username = !self.ftp_url.username().is_empty();
 
         if !has_embedded_username && !self.proxy_config.ftp_username.is_empty() {
             // C++: Insert user into URI, like ftp://USER@host/

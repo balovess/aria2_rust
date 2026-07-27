@@ -198,14 +198,35 @@ impl BtProgress {
 // Helper functions
 // ===========================================================================
 
+/// Error type for [`hex_to_info_hash`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HexInfoHashError {
+    /// The input string is not exactly 40 characters.
+    InvalidLength,
+    /// A hex digit could not be parsed.
+    InvalidHex,
+}
+
+impl std::fmt::Display for HexInfoHashError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HexInfoHashError::InvalidLength => write!(f, "info hash must be 40 hex characters"),
+            HexInfoHashError::InvalidHex => write!(f, "invalid hex digit in info hash"),
+        }
+    }
+}
+
+impl std::error::Error for HexInfoHashError {}
+
 /// Parse a 40-character hex string into a 20-byte info hash.
-pub fn hex_to_info_hash(hex: &str) -> std::result::Result<[u8; 20], ()> {
+pub fn hex_to_info_hash(hex: &str) -> std::result::Result<[u8; 20], HexInfoHashError> {
     if hex.len() != 40 {
-        return Err(());
+        return Err(HexInfoHashError::InvalidLength);
     }
     let mut hash = [0u8; 20];
     for i in 0..20 {
-        hash[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
+        hash[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| HexInfoHashError::InvalidHex)?;
     }
     Ok(hash)
 }

@@ -71,7 +71,7 @@ impl fmt::Display for BtMessageValidationError {
                 bitfield_len,
                 expected_pieces,
             } => {
-                let expected_bytes = ((*expected_pieces as usize) + 7) / 8;
+                let expected_bytes = (*expected_pieces as usize).div_ceil(8);
                 write!(
                     f,
                     "bitfield length {} does not match expected {} bytes ({} pieces)",
@@ -319,7 +319,7 @@ impl BtMessageValidator {
         if self.metadata_get_mode {
             return Ok(());
         }
-        let expected_bytes = ((self.num_pieces as usize) + 7) / 8;
+        let expected_bytes = (self.num_pieces as usize).div_ceil(8);
         if data.len() != expected_bytes {
             return Err(BtMessageValidationError::BitfieldLengthMismatch {
                 bitfield_len: data.len(),
@@ -330,8 +330,8 @@ impl BtMessageValidator {
         // If num_pieces is not a multiple of 8, the last byte has some
         // unused high bits that must be zero.
         let remainder = (self.num_pieces as usize) % 8;
-        if remainder != 0 {
-            if let Some(&last_byte) = data.last() {
+        if remainder != 0
+            && let Some(&last_byte) = data.last() {
                 // The valid bits in the last byte are the low `remainder` bits.
                 // All higher bits must be zero.
                 let mask: u8 = !((1 << remainder) - 1);
@@ -342,7 +342,6 @@ impl BtMessageValidator {
                     });
                 }
             }
-        }
         Ok(())
     }
 
@@ -353,11 +352,10 @@ impl BtMessageValidator {
         &self,
         received_hash: &[u8; 20],
     ) -> Result<(), BtMessageValidationError> {
-        if let Some(expected) = self.expected_info_hash {
-            if received_hash != &expected {
+        if let Some(expected) = self.expected_info_hash
+            && received_hash != &expected {
                 return Err(BtMessageValidationError::InfoHashMismatch);
             }
-        }
         Ok(())
     }
 }

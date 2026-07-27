@@ -96,7 +96,7 @@ impl DhtQueryHandler {
         trace!(
             method = %method,
             from = %from,
-            sender_id = sender_id.map(|id| hex::encode(id)).as_deref().unwrap_or("?"),
+            sender_id = sender_id.map(hex::encode).as_deref().unwrap_or("?"),
             "Processing inbound DHT query"
         );
 

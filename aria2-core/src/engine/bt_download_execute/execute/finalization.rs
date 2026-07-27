@@ -43,11 +43,10 @@ impl BtDownloadCommand {
         // on download completion/finalization so the registry stays clean.
         if let Some(ref registry) = self.bt_registry {
             let gid = self.group.recover().gid().value();
-            if let Ok(mut reg) = registry.write() {
-                if reg.remove(gid) {
+            if let Ok(mut reg) = registry.write()
+                && reg.remove(gid) {
                     info!(gid, "Removed BT download from BtRegistry on finalization");
                 }
-            }
         }
 
         if let Some(ref engine) = self.dht_engine {

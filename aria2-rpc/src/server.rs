@@ -833,15 +833,14 @@ async fn handle_ws_socket(
             result = rx.recv() => {
                 match result {
                     Ok((_event_type, event)) => {
-                        if let Ok(json_str) = event.to_json() {
-                            if socket
-                                .send(axum::extract::ws::Message::Text(json_str.into()))
+                        if let Ok(json_str) = event.to_json()
+                            && socket
+                                .send(axum::extract::ws::Message::Text(json_str))
                                 .await
                                 .is_err()
                             {
                                 break; // Client disconnected
                             }
-                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("WebSocket client lagged by {} events", n);
@@ -931,7 +930,7 @@ async fn process_ws_jsonrpc(
         match batch.to_string() {
             Ok(json_str) => {
                 if socket
-                    .send(axum::extract::ws::Message::Text(json_str.into()))
+                    .send(axum::extract::ws::Message::Text(json_str))
                     .await
                     .is_err()
                 {
@@ -953,7 +952,7 @@ async fn send_ws_response(
     match resp.to_string() {
         Ok(json_str) => {
             if socket
-                .send(axum::extract::ws::Message::Text(json_str.into()))
+                .send(axum::extract::ws::Message::Text(json_str))
                 .await
                 .is_err()
             {

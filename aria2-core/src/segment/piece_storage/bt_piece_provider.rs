@@ -282,12 +282,11 @@ impl DefaultPieceStorage {
 
         // In endgame, the piece might already be in used_pieces
         // C++ handles this by adding another user to the existing piece
-        if self.end_game {
-            if let Some(existing) = self.used_pieces.get_mut(&index) {
+        if self.end_game
+            && let Some(existing) = self.used_pieces.get_mut(&index) {
                 existing.add_user(cuid);
                 return Some(existing.clone());
             }
-        }
 
         self.used_pieces.insert(index, piece.clone());
         Some(piece)

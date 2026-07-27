@@ -44,8 +44,8 @@ pub(crate) fn build_proxy_auth_header(
 ) -> Option<String> {
     // Check for Digest first (more secure), then Basic
     for (_, value) in head.iter_headers() {
-        if value.starts_with("Digest ") || value.starts_with("digest ") {
-            if let Ok(challenge) = DigestAuthChallenge::parse(value) {
+        if (value.starts_with("Digest ") || value.starts_with("digest "))
+            && let Ok(challenge) = DigestAuthChallenge::parse(value) {
                 let auth = proxy_digest_auth(username, password, method, uri, &challenge, nc);
                 debug!(
                     "Using Digest proxy authentication for realm='{}'",
@@ -53,7 +53,6 @@ pub(crate) fn build_proxy_auth_header(
                 );
                 return Some(auth);
             }
-        }
     }
 
     // Fall back to Basic

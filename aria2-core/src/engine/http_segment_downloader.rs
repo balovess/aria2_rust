@@ -315,8 +315,8 @@ impl HttpSegmentDownloader {
                     data.extend_from_slice(&bytes);
                     // Report per-chunk progress if a progress channel is provided
                     let downloaded = data.len() as u64;
-                    if let Some(ref tx) = progress_tx {
-                        if downloaded - last_reported_progress
+                    if let Some(tx) = progress_tx
+                        && downloaded - last_reported_progress
                             >= constants::PROGRESS_UPDATE_BYTES as u64
                         {
                             let update = ProgressUpdate {
@@ -327,7 +327,6 @@ impl HttpSegmentDownloader {
                             let _ = tx.send(update);
                             last_reported_progress = downloaded;
                         }
-                    }
                 }
                 Err(e) => {
                     return Err(Aria2Error::Recoverable(
@@ -363,6 +362,7 @@ impl HttpSegmentDownloader {
     /// enabling immediate disk writes without the 16 MB per-segment memory overhead.
     ///
     /// Returns the total number of bytes downloaded on success.
+    #[allow(clippy::too_many_arguments)]
     pub async fn download_range_streaming(
         &self,
         url: &str,
@@ -451,8 +451,8 @@ impl HttpSegmentDownloader {
             total_written += chunk_len;
 
             // Report per-chunk progress if a progress channel is provided
-            if let Some(ref tx) = progress_tx {
-                if total_written - last_reported_progress >= constants::PROGRESS_UPDATE_BYTES as u64
+            if let Some(tx) = progress_tx
+                && total_written - last_reported_progress >= constants::PROGRESS_UPDATE_BYTES as u64
                 {
                     let update = ProgressUpdate {
                         completed_bytes: offset + total_written,
@@ -462,7 +462,6 @@ impl HttpSegmentDownloader {
                     let _ = tx.send(update);
                     last_reported_progress = total_written;
                 }
-            }
         }
 
         if total_written == 0 && length > 0 {

@@ -150,7 +150,7 @@ impl BtDownloadCommand {
 
         // Convert compact IPv4 peers → PeerAddr
         for compact in added_v4 {
-            let ip = std::net::Ipv4Addr::from(compact.ip().clone());
+            let ip = std::net::Ipv4Addr::from(*compact.ip());
             let addr = PeerAddr::new(&ip.to_string(), compact.port());
             if !self.pex_known_peers.contains(&addr) {
                 self.add_pex_peer(addr.clone());
@@ -160,7 +160,7 @@ impl BtDownloadCommand {
 
         // Convert compact IPv6 peers → PeerAddr
         for compact in added_v6 {
-            let ip = std::net::Ipv6Addr::from(compact.ip().clone());
+            let ip = std::net::Ipv6Addr::from(*compact.ip());
             let addr = PeerAddr::new(&ip.to_string(), compact.port());
             if !self.pex_known_peers.contains(&addr) {
                 self.add_pex_peer(addr.clone());
@@ -171,12 +171,12 @@ impl BtDownloadCommand {
         // Remove dropped peers from the known-peers list
         let mut dropped_addrs = Vec::new();
         for compact in dropped_v4 {
-            let ip = std::net::Ipv4Addr::from(compact.ip().clone());
+            let ip = std::net::Ipv4Addr::from(*compact.ip());
             let addr = PeerAddr::new(&ip.to_string(), compact.port());
             dropped_addrs.push(addr);
         }
         for compact in dropped_v6 {
-            let ip = std::net::Ipv6Addr::from(compact.ip().clone());
+            let ip = std::net::Ipv6Addr::from(*compact.ip());
             let addr = PeerAddr::new(&ip.to_string(), compact.port());
             dropped_addrs.push(addr);
         }

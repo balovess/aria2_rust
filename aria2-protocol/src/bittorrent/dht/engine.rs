@@ -190,8 +190,8 @@ impl DhtEngine {
 
         // Load routing table from disk or start empty
         let mut routing_table = RoutingTable::new(self_id);
-        if let Some(ref path) = config.dht_file_path {
-            if path.exists() {
+        if let Some(ref path) = config.dht_file_path
+            && path.exists() {
                 match super::persistence::DhtPersistence::load_from_file_sync(path) {
                     Ok(data) => {
                         info!(
@@ -208,7 +208,6 @@ impl DhtEngine {
                     }
                 }
             }
-        }
 
         let inner = Arc::new(RwLock::new(DhtEngineInner {
             state: DhtEngineState::Bootstrapping,
@@ -362,14 +361,13 @@ impl DhtEngine {
             .socket
             .recv_with_timeout(&mut buf, self.config.query_timeout)
             .await
-        {
-            if len > 0 {
-                if let Ok(response) = DhtMessage::decode(&buf[..len]) {
-                    if response.is_response() {
+            && len > 0
+                && let Ok(response) = DhtMessage::decode(&buf[..len])
+                    && response.is_response() {
                         // Extract node ID from response
-                        if let Some(r) = &response.r {
-                            if let Some(id_bytes) = r.dict_get(b"id").and_then(|v| v.as_bytes()) {
-                                if id_bytes.len() == 20 {
+                        if let Some(r) = &response.r
+                            && let Some(id_bytes) = r.dict_get(b"id").and_then(|v| v.as_bytes())
+                                && id_bytes.len() == 20 {
                                     let mut node_id = [0u8; 20];
                                     node_id.copy_from_slice(id_bytes);
                                     let node = DhtNode::new(node_id, addr);
@@ -377,12 +375,7 @@ impl DhtEngine {
                                     inner.routing_table.insert(node);
                                     debug!(addr = %addr, id = %hex::encode(node_id), "Added DHT node via add_node");
                                 }
-                            }
-                        }
                     }
-                }
-            }
-        }
     }
 
     /// Start the periodic bucket-refresh maintenance loop.

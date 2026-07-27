@@ -710,18 +710,17 @@ impl VersionInfo {
     /// protocol support available in the current build. The list reflects
     /// which protocols and capabilities aria2-core is compiled with.
     pub fn from_env() -> Self {
-        let mut features: Vec<&str> = Vec::new();
-
         // Always-on protocol support via reqwest + aria2-protocol
-        features.push("http");
-        features.push("https");
-        features.push("ftp");
-        features.push("bittorrent");
-        features.push("metalink");
-        features.push("sftp");
-
-        // Async DNS: available when the tokio-based resolver is compiled in
-        features.push("Async DNS");
+        let features: Vec<&str> = vec![
+            "http",
+            "https",
+            "ftp",
+            "bittorrent",
+            "metalink",
+            "sftp",
+            // Async DNS: available when the tokio-based resolver is compiled in
+            "Async DNS",
+        ];
 
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),

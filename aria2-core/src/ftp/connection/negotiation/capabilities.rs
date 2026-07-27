@@ -199,8 +199,8 @@ pub async fn query_syst(ctrl: &mut FreshControl) -> Result<Option<String>> {
 
     // Parse system type from "215 SystemType" response
     let msg = resp.1.trim();
-    let systype = if msg.starts_with("215") {
-        msg[3..].trim().to_string()
+    let systype = if let Some(stripped) = msg.strip_prefix("215") {
+        stripped.trim().to_string()
     } else {
         msg.to_string()
     };

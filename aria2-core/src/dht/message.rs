@@ -100,9 +100,9 @@ impl CompactNodeInfo {
         let v4_unit = ID_LENGTH + 4 + 2; // 26
         let v6_unit = ID_LENGTH + 16 + 2; // 38
 
-        let (unit, is_v6) = if data.len() % v4_unit == 0 && !data.is_empty() {
+        let (unit, is_v6) = if data.len().is_multiple_of(v4_unit) && !data.is_empty() {
             (v4_unit, false)
-        } else if data.len() % v6_unit == 0 && !data.is_empty() {
+        } else if data.len().is_multiple_of(v6_unit) && !data.is_empty() {
             (v6_unit, true)
         } else {
             return nodes;

@@ -563,11 +563,10 @@ impl ConcurrentDownloader {
         // ADR-0001: Delete control file on successful completion.
         // The download is done; the .aria2 file is no longer needed.
         drop(ctrl_file);
-        if ctrl_path.exists() {
-            if let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
+        if ctrl_path.exists()
+            && let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
                 tracing::debug!("Failed to delete control file on completion: {}", e);
             }
-        }
         self.cookie_helper.save_cookies_if_configured();
         Ok(ConcurrentDownloadResult::Complete)
     }

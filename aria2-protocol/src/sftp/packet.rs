@@ -195,19 +195,19 @@ impl SftpFileAttrs {
     /// Check if the permissions indicate a directory (S_ISDIR).
     pub fn is_directory(&self) -> bool {
         self.permissions
-            .map_or(false, |p| (p & 0o170000) == 0o040000)
+            .is_some_and(|p| (p & 0o170000) == 0o040000)
     }
 
     /// Check if the permissions indicate a regular file (S_ISREG).
     pub fn is_regular_file(&self) -> bool {
         self.permissions
-            .map_or(false, |p| (p & 0o170000) == 0o100000)
+            .is_some_and(|p| (p & 0o170000) == 0o100000)
     }
 
     /// Check if the permissions indicate a symlink (S_ISLNK).
     pub fn is_symlink(&self) -> bool {
         self.permissions
-            .map_or(false, |p| (p & 0o170000) == 0o120000)
+            .is_some_and(|p| (p & 0o170000) == 0o120000)
     }
 
     /// Encode this attribute block into the writer (SFTP wire format).

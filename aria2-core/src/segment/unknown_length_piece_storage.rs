@@ -401,7 +401,7 @@ impl PieceStorage for UnknownLengthPieceStorage {
     fn get_next_used_index(&self, index: usize) -> usize {
         // Single piece model: if index < 0 and piece is in use, return 0; else num_pieces
         if self.piece.is_some() || self.download_finished {
-            0.max(index + 1).min(1)
+            index + 1
         } else {
             1
         }

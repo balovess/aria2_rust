@@ -56,11 +56,7 @@ impl RequestSlot {
     ///
     /// `block_size` is used to compute `block_index = begin / block_size`.
     pub fn new(index: u32, begin: u32, length: u32, block_size: u32) -> Self {
-        let block_index = if block_size > 0 {
-            begin / block_size
-        } else {
-            0
-        };
+        let block_index = begin.checked_div(block_size).unwrap_or(0);
         Self {
             index,
             begin,
@@ -305,6 +301,7 @@ impl Default for ActiveInteractionChecker {
 ///
 /// Returned by `BtMessageDispatcher::check_request_slots()`.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct SlotCheckResult {
     /// Whether any request slot timed out (peer may be snubbing)
     pub timed_out: bool,
@@ -313,14 +310,6 @@ pub struct SlotCheckResult {
     pub cancelled_blocks: Vec<(u32, u32, u32)>,
 }
 
-impl Default for SlotCheckResult {
-    fn default() -> Self {
-        Self {
-            timed_out: false,
-            cancelled_blocks: Vec::new(),
-        }
-    }
-}
 
 // ===========================================================================
 // PendingMessage — tagged outgoing message
@@ -609,7 +598,7 @@ impl BtMessageDispatcher {
         // Re-insert deferred upload messages (preserving order, matching C++
         // which inserts tempQueue at the front of messageQueue_).
         if !deferred.is_empty() {
-            deferred.extend(self.message_queue.drain(..));
+            deferred.append(&mut self.message_queue);
             self.message_queue = deferred;
         }
 

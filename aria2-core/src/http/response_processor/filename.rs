@@ -35,14 +35,13 @@ pub fn determine_filename(
     content_disposition_default_utf8: bool,
 ) -> String {
     // Try Content-Disposition header first
-    if let Some(cd) = response_head.header("content-disposition") {
-        if let Some(filename) =
+    if let Some(cd) = response_head.header("content-disposition")
+        && let Some(filename) =
             parse_content_disposition_filename(cd, content_disposition_default_utf8)
         {
             debug!(filename = %filename, source = "Content-Disposition", "Filename determined");
             return create_safe_path(&filename);
         }
-    }
 
     // Fall back to URL path
     let url_filename = extract_filename_from_url(request_url);

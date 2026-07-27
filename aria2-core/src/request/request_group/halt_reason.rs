@@ -16,8 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///
 /// Mirrors C++ `RequestGroup::HaltReason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum HaltReason {
     /// No halt has been requested.
+    #[default]
     None,
     /// The program is shutting down (SIGTERM / Ctrl+C).
     ShutdownSignal,
@@ -25,11 +27,6 @@ pub enum HaltReason {
     UserRequest,
 }
 
-impl Default for HaltReason {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 /// Atomic control flags for download lifecycle transitions.
 ///

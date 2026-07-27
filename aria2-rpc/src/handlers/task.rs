@@ -384,8 +384,8 @@ impl RpcEngine {
                 // changes to Active but no download task runs.
                 if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
                     let man = group_man.read().await;
-                    if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-                        if let Some(group) = man.group_by_id(gid_parsed) {
+                    if let Some(gid_parsed) = GroupId::from_hex_string(&gid)
+                        && let Some(group) = man.group_by_id(gid_parsed) {
                             let group_guard = group.recover();
                             let options = group_guard.options_arc();
                             let uris = group_guard.uris().to_vec();
@@ -411,7 +411,6 @@ impl RpcEngine {
                                 }
                             }
                         }
-                    }
                 }
 
                 // C++ aria2 fires onDownloadStart (not a separate onDownloadResume)
@@ -844,7 +843,7 @@ impl RpcEngine {
                 .with_index(1),
         ];
 
-        let connections = g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT) as u16;
+        let connections = g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT);
 
         // BT-specific fields: bitfield, piece length, num pieces, info hash
         let bt_info_hash = g.get_bt_info_hash_hex();
@@ -904,7 +903,7 @@ impl RpcEngine {
         if info.num_pieces.is_none() && total > 0 {
             let pl = info.piece_length.unwrap_or(ARIA2_DEFAULT_PIECE_LENGTH);
             if pl > 0 {
-                info = info.with_num_pieces(((total + pl - 1) / pl) as u32);
+                info = info.with_num_pieces(total.div_ceil(pl) as u32);
             }
         }
 

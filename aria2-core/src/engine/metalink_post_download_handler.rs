@@ -74,7 +74,7 @@ impl MetalinkPostDownloadHandler {
             let ct_lower = ct.to_lowercase();
             // Strip parameters (e.g. "application/metalink4+xml; charset=utf-8")
             let ct_base = ct_lower.split(';').next().unwrap_or("").trim();
-            if METALINK_CONTENT_TYPES.iter().any(|&t| ct_base == t) {
+            if METALINK_CONTENT_TYPES.contains(&ct_base) {
                 return true;
             }
         }
@@ -126,7 +126,7 @@ impl MetalinkPostDownloadHandler {
             ));
         }
 
-        let doc = MetalinkDocument::parse(metalink_data, None).map_err(|e| Aria2Error::Parse(e))?;
+        let doc = MetalinkDocument::parse(metalink_data, None).map_err(Aria2Error::Parse)?;
 
         if doc.files.is_empty() {
             tracing::info!("Metalink document contains no downloadable files");

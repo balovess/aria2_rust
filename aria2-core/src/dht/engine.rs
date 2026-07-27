@@ -14,7 +14,7 @@
 //! C++ reference: `DHTSetup.cc` + `DHTInteractionCommand.cc` + `DHTRegistry.h`
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::time::{self, MissedTickBehavior};
@@ -431,7 +431,7 @@ impl DhtEngine {
     }
 
     /// Load or create a local node ID.
-    fn load_or_create_local_id(dht_file: &PathBuf) -> NodeId {
+    fn load_or_create_local_id(dht_file: &Path) -> NodeId {
         // Try to load from the routing table file
         match routing_table_ser::deserialize_from_file(dht_file) {
             Ok(result) => {
@@ -449,7 +449,7 @@ impl DhtEngine {
 
     /// Load the routing table from disk.
     fn load_routing_table(
-        dht_file: &PathBuf,
+        dht_file: &Path,
         routing_table: &mut RoutingTable,
         _family: AddressFamily,
     ) {

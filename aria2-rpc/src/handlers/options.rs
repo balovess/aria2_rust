@@ -275,8 +275,8 @@ impl RpcEngine {
         }
 
         // Apply immediate options to the running RequestGroup.
-        if !immediate.is_empty() {
-            if let Some(ref group_man) = self.group_man {
+        if !immediate.is_empty()
+            && let Some(ref group_man) = self.group_man {
                 let gm = group_man.read().await;
                 if let Err(e) = gm.update_group_options(&gid, immediate.clone()) {
                     if !e.contains("not found") {
@@ -288,7 +288,6 @@ impl RpcEngine {
                     );
                 }
             }
-        }
 
         // Store pending options (to be applied on next pause/restart).
         // In C++ aria2, these trigger a pause + restart cycle.

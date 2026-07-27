@@ -30,7 +30,7 @@ struct BlockBitfield {
 
 impl BlockBitfield {
     fn new(num_bits: usize) -> Self {
-        let num_bytes = (num_bits + 7) / 8;
+        let num_bytes = num_bits.div_ceil(8);
         BlockBitfield {
             data: vec![0u8; num_bytes],
             num_bits,
@@ -73,7 +73,7 @@ impl BlockBitfield {
             .iter()
             .map(|b| b.count_ones() as usize)
             .sum::<usize>()
-            - if self.num_bits % 8 != 0 {
+            - if !self.num_bits.is_multiple_of(8) {
                 // Count extra bits in the last byte that are beyond num_bits
                 let extra = 8 - (self.num_bits % 8);
                 let last = *self.data.last().unwrap_or(&0);
@@ -94,7 +94,7 @@ impl BlockBitfield {
             *byte = 0xFF;
         }
         // Clear trailing bits beyond num_bits
-        if self.num_bits % 8 != 0 {
+        if !self.num_bits.is_multiple_of(8) {
             let extra = 8 - (self.num_bits % 8);
             if let Some(last) = self.data.last_mut() {
                 *last &= !((1u8 << extra) - 1);
@@ -109,17 +109,12 @@ impl BlockBitfield {
 
     /// Find the first clear (unset) bit, returns None if all are set
     fn find_first_clear(&self) -> Option<usize> {
-        for i in 0..self.num_bits {
-            if !self.test(i) {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.num_bits).find(|&i| !self.test(i))
     }
 
     /// Create from existing byte data
     fn from_bytes(data: &[u8], num_bits: usize) -> Self {
-        let num_bytes = (num_bits + 7) / 8;
+        let num_bytes = num_bits.div_ceil(8);
         let mut bf = BlockBitfield {
             data: vec![0u8; num_bytes],
             num_bits,
@@ -319,7 +314,7 @@ impl Piece {
         if length == 0 || block_length == 0 {
             0
         } else {
-            ((length as u64 + block_length as u64 - 1) / block_length as u64) as usize
+            length.div_ceil(block_length as u64) as usize
         }
     }
 
@@ -616,7 +611,7 @@ impl Piece {
 
     /// Returns true if the given CUID is among this piece's users.
     pub fn used_by(&self, cuid: u64) -> bool {
-        self.users.iter().any(|&c| c == cuid)
+        self.users.contains(&cuid)
     }
 
     /// Returns true if this piece has any users.
@@ -747,7 +742,7 @@ impl Eq for Piece {}
 
 impl PartialOrd for Piece {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.index.cmp(&other.index))
+        Some(self.cmp(other))
     }
 }
 

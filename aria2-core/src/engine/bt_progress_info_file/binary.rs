@@ -211,7 +211,7 @@ pub fn deserialize_binary(data: &[u8], expected_info_hash: &[u8; 20]) -> Result<
     pos += bf_len;
 
     // Compute num_pieces from bitfield
-    let num_pieces = (total_size + piece_length as u64 - 1) / piece_length as u64;
+    let num_pieces = total_size.div_ceil(piece_length as u64);
 
     // numInFlightPiece: 4 bytes BE
     let num_in_flight = read_u32_be(data, &mut pos)?;

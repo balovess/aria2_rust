@@ -225,7 +225,7 @@ impl FeedbackUriSelector {
         } else {
             trace!("Selected from fastCands");
             // Sort by speed descending (matching C++ ServerStatFaster comparator)
-            fast_cands.sort_by(|a, b| b.0.cmp(&a.0));
+            fast_cands.sort_by_key(|b| std::cmp::Reverse(b.0));
             Some(fast_cands[0].1)
         }
     }
@@ -255,12 +255,11 @@ impl FeedbackUriSelector {
             };
 
             // Check server stat — skip if ERROR
-            if let Some(stat) = self.stat_man.find_stat_by_protocol(&host, &protocol) {
-                if !stat.is_ok() {
+            if let Some(stat) = self.stat_man.find_stat_by_protocol(&host, &protocol)
+                && !stat.is_ok() {
                     trace!(uri = %uri, "Error not considered (rarer)");
                     continue;
                 }
-            }
 
             cands.push((host, idx));
         }
@@ -276,7 +275,7 @@ impl FeedbackUriSelector {
 
         // No match with usedHosts → return first candidate
         // Matching C++: `assert(!uris.empty()); return uris.front();`
-        cands.first().map(|(_, idx)| *idx).or_else(|| {
+        cands.first().map(|(_, idx)| *idx).or({
             // If no valid candidates but URIs exist, return first
             if !uris.is_empty() { Some(0) } else { None }
         })

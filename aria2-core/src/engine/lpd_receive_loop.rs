@@ -421,11 +421,10 @@ async fn update_peer_registry(
 
         // Limit total peers per hash (same as LpdManager::MAX_PEERS_PER_HASH).
         // If at capacity, remove the oldest peer to make room.
-        if entry.len() >= crate::engine::lpd_manager::MAX_PEERS_PER_HASH {
-            if let Some(oldest) = entry.iter().max_by_key(|p| p.last_seen.elapsed()).cloned() {
+        if entry.len() >= crate::engine::lpd_manager::MAX_PEERS_PER_HASH
+            && let Some(oldest) = entry.iter().max_by_key(|p| p.last_seen.elapsed()).cloned() {
                 entry.remove(&oldest);
             }
-        }
 
         if entry.insert(peer.clone()) {
             debug!(

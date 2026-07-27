@@ -23,18 +23,15 @@ pub enum ContextAttributeType {
 ///
 /// Mirrors C++ `BtFileMode` enum. Used in `TorrentAttribute::mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BtFileMode {
     /// Single-file torrent (one file in the info dict).
+    #[default]
     Single,
     /// Multi-file torrent (directory with multiple files in the info dict).
     Multi,
 }
 
-impl Default for BtFileMode {
-    fn default() -> Self {
-        BtFileMode::Single
-    }
-}
 
 /// BitTorrent-specific attributes stored on `DownloadContext`.
 ///

@@ -280,12 +280,10 @@ impl DefaultPeerStorage {
                 .iter()
                 .position(|p| p.ip == peer.ip && p.port == peer.port);
 
-            if let Some(idx) = pos {
+            {
+                let idx = pos?;
                 // Remove from unused list; we'll push to front below.
                 self.unused_peers.remove(idx);
-            } else {
-                // Peer is in used_peers — cannot checkout.
-                return None;
             }
         } else {
             // New peer — register in uniq set.

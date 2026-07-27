@@ -508,8 +508,8 @@ impl CookieStorage {
         // Check if this is a delete cookie with no existing match
         if cookie.is_delete_cookie() {
             let mut domains = self.domains.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(bucket) = domains.get_mut(&cookie.domain) {
-                if let Some(pos) = bucket.cookies.iter().position(|c| c == &cookie) {
+            if let Some(bucket) = domains.get_mut(&cookie.domain)
+                && let Some(pos) = bucket.cookies.iter().position(|c| c == &cookie) {
                     bucket.cookies.remove(pos);
                     if bucket.cookies.is_empty() {
                         let domain = cookie.domain.clone();
@@ -522,7 +522,6 @@ impl CookieStorage {
                     }
                     return false; // C++ returns false for expired cookies
                 }
-            }
             return false;
         }
         self.add(cookie);

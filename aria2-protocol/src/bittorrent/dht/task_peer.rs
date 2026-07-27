@@ -222,8 +222,8 @@ impl DhtTask for ReplaceNodeTask {
                 .await
             {
                 Ok((len, _from)) if len > 0 => {
-                    if let Ok(response) = super::message::DhtMessage::decode(&buf[..len]) {
-                        if response.is_response() {
+                    if let Ok(response) = super::message::DhtMessage::decode(&buf[..len])
+                        && response.is_response() {
                             info!(
                                 "ReplaceNodeTask: ping reply received from {} — node is alive",
                                 hex::encode(q_id)
@@ -232,7 +232,6 @@ impl DhtTask for ReplaceNodeTask {
                             rt.mark_good(&q_id);
                             return;
                         }
-                    }
                 }
                 _ => {
                     if attempt < 1 {

@@ -165,11 +165,10 @@ impl AnnounceList {
 
     /// Set the event on the current tier.
     pub fn set_event(&mut self, event: AnnounceEvent) {
-        if self.current_tracker_initialized {
-            if let Some(tier) = self.tiers.get_mut(self.current_tier) {
+        if self.current_tracker_initialized
+            && let Some(tier) = self.tiers.get_mut(self.current_tier) {
                 tier.event = event;
             }
-        }
     }
 
     /// Returns the event string for the tracker URL parameter.

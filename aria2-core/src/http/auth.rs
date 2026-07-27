@@ -5,7 +5,10 @@
 //! for a request using URL-embedded creds, BasicCred cache, Netrc, and
 //! defaults — matching the C++ `AuthConfig` + `AuthConfigFactory` design).
 
+pub mod netrc;
+
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use tracing::{debug, info, warn};
 use url::Url;
@@ -179,11 +182,15 @@ pub struct AuthConfigFactory {
 }
 
 /// Simplified Netrc store — maps hostname to (login, password).
-/// The full Netrc parser lives elsewhere; this is the minimal interface
-/// needed by `AuthConfigFactory`.
+///
+/// Built from the full [`netrc::NetrcParser`] via conversion. Machine entries
+/// are stored in `entries`; the `default` entry (which matches any host) is
+/// stored separately so that [`find_with_fallback`] can first try an exact
+/// match then fall back to the default, matching C++ `findAuthenticator()`.
 #[derive(Debug, Clone)]
 pub struct NetrcStore {
     entries: Vec<NetrcEntry>,
+    default_entry: Option<NetrcEntry>,
 }
 
 /// A single .netrc entry.
@@ -202,22 +209,46 @@ impl NetrcStore {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            default_entry: None,
         }
     }
 
-    /// Create a Netrc store from a list of entries.
+    /// Create a Netrc store from a list of entries and an optional default.
     pub fn from_entries(entries: Vec<NetrcEntry>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            default_entry: None,
+        }
     }
 
-    /// Look up credentials for a hostname.
+    /// Create a Netrc store with machine entries and a default entry.
+    pub fn with_default(entries: Vec<NetrcEntry>, default: Option<NetrcEntry>) -> Self {
+        Self {
+            entries,
+            default_entry: default,
+        }
+    }
+
+    /// Look up credentials for a hostname (exact match only, no default fallback).
     pub fn find(&self, host: &str) -> Option<&NetrcEntry> {
         self.entries.iter().find(|e| e.host == host)
     }
 
+    /// Look up credentials for a hostname, falling back to the default entry.
+    ///
+    /// This mirrors the C++ `Netrc::findAuthenticator()` logic.
+    pub fn find_with_fallback(&self, host: &str) -> Option<&NetrcEntry> {
+        self.find(host).or(self.default_entry.as_ref())
+    }
+
+    /// The default entry, if any.
+    pub fn default_entry(&self) -> Option<&NetrcEntry> {
+        self.default_entry.as_ref()
+    }
+
     /// Check whether any entries exist.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.default_entry.is_none()
     }
 }
 
@@ -227,11 +258,50 @@ impl Default for NetrcStore {
     }
 }
 
+/// Build a `NetrcStore` from a parsed [`netrc::NetrcParser`].
+///
+/// This replaces the old `From<NetrcParser>` conversion (which could not
+/// populate `default_entry`) with a proper builder that separates machine
+/// entries from the default entry.
+impl From<netrc::NetrcParser> for NetrcStore {
+    fn from(parser: netrc::NetrcParser) -> Self {
+        let mut entries = Vec::with_capacity(parser.entries().len());
+
+        for entry in parser.entries() {
+            if let (Some(login), Some(password)) = (&entry.login, &entry.password) {
+                entries.push(NetrcEntry {
+                    host: entry.machine.clone(),
+                    login: login.clone(),
+                    password: password.clone(),
+                });
+            }
+        }
+
+        let default_entry = parser.default_entry().and_then(|d| {
+            if let (Some(login), Some(password)) = (&d.login, &d.password) {
+                Some(NetrcEntry {
+                    host: String::new(),
+                    login: login.clone(),
+                    password: password.clone(),
+                })
+            } else {
+                None
+            }
+        });
+
+        NetrcStore {
+            entries,
+            default_entry,
+        }
+    }
+}
+
 /// Options that influence auth resolution, passed per-request.
 ///
 /// These correspond to C++ `Option` prefs like `PREF_HTTP_USER`,
 /// `PREF_HTTP_PASSWD`, `PREF_NO_NETRC`, and `PREF_HTTP_AUTH_CHALLENGE`.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct AuthResolveOptions {
     /// Whether HTTP auth-challenge mode is enabled (C++ `PREF_HTTP_AUTH_CHALLENGE`).
     /// When true, 401 responses trigger BasicCred activation.
@@ -251,18 +321,6 @@ pub struct AuthResolveOptions {
     pub ftp_passwd: Option<String>,
 }
 
-impl Default for AuthResolveOptions {
-    fn default() -> Self {
-        Self {
-            http_auth_challenge: false,
-            no_netrc: false,
-            http_user: None,
-            http_passwd: None,
-            ftp_user: None,
-            ftp_passwd: None,
-        }
-    }
-}
 
 impl AuthConfigFactory {
     /// Create a new factory with no cached credentials or Netrc.
@@ -276,6 +334,26 @@ impl AuthConfigFactory {
     /// Set the Netrc store.
     pub fn set_netrc(&mut self, netrc: NetrcStore) {
         self.netrc = Some(netrc);
+    }
+
+    /// Load netrc credentials from a file path.
+    ///
+    /// Parses the file using [`netrc::NetrcParser`] and converts it into
+    /// a [`NetrcStore`] for use by the auth resolution chain.
+    pub fn load_netrc_file(&mut self, path: &Path) -> Result<(), netrc::NetrcError> {
+        let parser = netrc::NetrcParser::parse_file(path)?;
+        self.netrc = Some(NetrcStore::from(parser));
+        Ok(())
+    }
+
+    /// Load netrc credentials from a string.
+    ///
+    /// Useful for testing or when the netrc content comes from a source
+    /// other than a file.
+    pub fn load_netrc_str(&mut self, content: &str) -> Result<(), netrc::NetrcError> {
+        let parser = netrc::NetrcParser::parse(content)?;
+        self.netrc = Some(NetrcStore::from(parser));
+        Ok(())
     }
 
     /// Resolve the [`AuthConfig`] for the given request URL.
@@ -341,25 +419,22 @@ impl AuthConfigFactory {
 
     /// Resolve HTTP auth via Netrc / CLI-option chain (non-challenge mode).
     fn resolve_http_via_chain(&self, host: &str, opts: &AuthResolveOptions) -> Option<AuthConfig> {
-        // Netrc lookup (unless disabled)
-        if !opts.no_netrc {
-            if let Some(ref netrc) = self.netrc {
-                if let Some(entry) = netrc.find(host) {
+        // Netrc lookup with default fallback (unless disabled)
+        if !opts.no_netrc
+            && let Some(ref netrc) = self.netrc
+                && let Some(entry) = netrc.find_with_fallback(host) {
                     debug!(
                         "Resolved HTTP auth for {} from Netrc (user={})",
                         host, entry.login
                     );
                     return AuthConfig::new(entry.login.clone(), entry.password.clone());
                 }
-            }
-        }
         // CLI fallback
-        if let Some(ref user) = opts.http_user {
-            if !user.is_empty() {
+        if let Some(ref user) = opts.http_user
+            && !user.is_empty() {
                 debug!("Resolved HTTP auth for {} from CLI options", host);
                 return AuthConfig::new(user.clone(), opts.http_passwd.clone().unwrap_or_default());
             }
-        }
         None
     }
 
@@ -380,15 +455,12 @@ impl AuthConfigFactory {
                 return AuthConfig::new(username.to_string(), password.to_string());
             }
             // URL has username but no password — try Netrc first
-            if !opts.no_netrc {
-                if let Some(ref netrc) = self.netrc {
-                    if let Some(entry) = netrc.find(host) {
-                        if entry.login == username {
+            if !opts.no_netrc
+                && let Some(ref netrc) = self.netrc
+                    && let Some(entry) = netrc.find(host)
+                        && entry.login == username {
                             return AuthConfig::new(entry.login.clone(), entry.password.clone());
                         }
-                    }
-                }
-            }
             // Fall back to CLI FTP password
             let ftp_passwd = opts.ftp_passwd.clone().unwrap_or_default();
             return AuthConfig::new(username.to_string(), ftp_passwd);
@@ -400,25 +472,22 @@ impl AuthConfigFactory {
 
     /// Resolve FTP auth via Netrc / CLI-option / anonymous-default chain.
     fn resolve_ftp_via_chain(&self, host: &str, opts: &AuthResolveOptions) -> Option<AuthConfig> {
-        // Netrc lookup
-        if !opts.no_netrc {
-            if let Some(ref netrc) = self.netrc {
-                if let Some(entry) = netrc.find(host) {
+        // Netrc lookup with default fallback
+        if !opts.no_netrc
+            && let Some(ref netrc) = self.netrc
+                && let Some(entry) = netrc.find_with_fallback(host) {
                     debug!(
                         "Resolved FTP auth for {} from Netrc (user={})",
                         host, entry.login
                     );
                     return AuthConfig::new(entry.login.clone(), entry.password.clone());
                 }
-            }
-        }
         // CLI fallback
-        if let Some(ref user) = opts.ftp_user {
-            if !user.is_empty() {
+        if let Some(ref user) = opts.ftp_user
+            && !user.is_empty() {
                 let passwd = opts.ftp_passwd.clone().unwrap_or_default();
                 return AuthConfig::new(user.clone(), passwd);
             }
-        }
         // FTP anonymous default
         debug!("Resolved FTP auth for {} as anonymous (default)", host);
         AuthConfig::new(FTP_DEFAULT_USER.to_string(), FTP_DEFAULT_PASSWD.to_string())

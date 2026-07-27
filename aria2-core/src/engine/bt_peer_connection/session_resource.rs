@@ -59,9 +59,9 @@ impl PeerSessionResource {
         let num_pieces = if piece_length == 0 || total_length == 0 {
             0
         } else {
-            ((total_length + piece_length as u64 - 1) / piece_length as u64) as u32
+            total_length.div_ceil(piece_length as u64) as u32
         };
-        let bitfield_length = ((num_pieces as usize) + 7) / 8;
+        let bitfield_length = (num_pieces as usize).div_ceil(8);
 
         Self {
             bitfield: vec![0u8; bitfield_length],
@@ -187,9 +187,9 @@ impl PeerSessionResource {
         let num_pieces = if piece_length == 0 || total_length == 0 {
             0
         } else {
-            ((total_length + piece_length as u64 - 1) / piece_length as u64) as u32
+            total_length.div_ceil(piece_length as u64) as u32
         };
-        let bitfield_length = ((num_pieces as usize) + 7) / 8;
+        let bitfield_length = (num_pieces as usize).div_ceil(8);
 
         self.bitfield.resize(bitfield_length, 0);
         self.bitfield_length = bitfield_length;

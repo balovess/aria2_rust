@@ -73,7 +73,7 @@ impl BtPeerInteractive {
 
     /// Set the maximum outstanding request count.
     pub fn set_max_outstanding_request(&mut self, max: usize) {
-        self.max_outstanding_request = max.max(1).min(UB_MAX_OUTSTANDING_REQUEST);
+        self.max_outstanding_request = max.clamp(1, UB_MAX_OUTSTANDING_REQUEST);
     }
 
     /// Set the allowed-fast set size.

@@ -165,7 +165,7 @@ pub(super) fn parse_mdtm_timestamp(s: &str) -> Option<SystemTime> {
 
     let days_since_epoch = days_from_civil(year, month, day)?;
     let secs =
-        days_since_epoch as u64 * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
+        days_since_epoch * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
     Some(UNIX_EPOCH + Duration::from_secs(secs))
 }
 
@@ -378,8 +378,8 @@ pub(super) async fn query_mdtm(
     }
 
     let msg = resp.1.trim();
-    let timestamp_str = if msg.starts_with("213") {
-        msg[3..].trim()
+    let timestamp_str = if let Some(stripped) = msg.strip_prefix("213") {
+        stripped.trim()
     } else {
         msg
     };
@@ -411,8 +411,8 @@ pub(super) async fn query_size(ctrl: &mut FreshControl, file_path: &str) -> Resu
 
     if resp.0 == 213 {
         let msg = resp.1.trim();
-        let size_str = if msg.starts_with("213") {
-            msg[3..].trim()
+        let size_str = if let Some(stripped) = msg.strip_prefix("213") {
+            stripped.trim()
         } else {
             msg
         };
@@ -559,8 +559,8 @@ pub(super) async fn query_mdtm_pooled(
     }
 
     let msg = resp.1.trim();
-    let timestamp_str = if msg.starts_with("213") {
-        msg[3..].trim()
+    let timestamp_str = if let Some(stripped) = msg.strip_prefix("213") {
+        stripped.trim()
     } else {
         msg
     };
@@ -585,8 +585,8 @@ pub(super) async fn query_size_pooled(
 
     if resp.0 == 213 {
         let msg = resp.1.trim();
-        let size_str = if msg.starts_with("213") {
-            msg[3..].trim()
+        let size_str = if let Some(stripped) = msg.strip_prefix("213") {
+            stripped.trim()
         } else {
             msg
         };

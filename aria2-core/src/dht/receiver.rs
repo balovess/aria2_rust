@@ -77,8 +77,8 @@ impl DhtReceiver {
 
         // Step 1: Is this a response to a tracked query?
         // Peek at the transaction ID first without decoding the full message.
-        if let Some(tid) = Self::extract_transaction_id(data) {
-            if let Some(tracked) = dispatcher.take_tracked(&tid, remote_addr) {
+        if let Some(tid) = Self::extract_transaction_id(data)
+            && let Some(tracked) = dispatcher.take_tracked(&tid, remote_addr) {
                 // This is a response to one of our queries
                 let method = tracked.method.clone();
                 trace!(
@@ -110,7 +110,6 @@ impl DhtReceiver {
                 }
                 return actions;
             }
-        }
 
         // Step 2: Try to decode as a new query or error
         match message_decode::decode(data, remote_addr) {
@@ -192,7 +191,6 @@ impl DhtReceiver {
         match msg {
             DhtMessage::PingQuery {
                 transaction_id,
-                sender_id: _,
                 ..
             } => {
                 debug!(tid = ?transaction_id, addr = %remote_addr, "Received DHT ping query");

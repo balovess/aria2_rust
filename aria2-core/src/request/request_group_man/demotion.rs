@@ -127,8 +127,7 @@ impl super::RequestGroupMan {
                 if let Some(completion_dep) =
                     dep.as_any()
                         .downcast_ref::<crate::request::request_group::CompletionDependency>()
-                {
-                    if completion_dep.depends_on_gid == completed_gid {
+                    && completion_dep.depends_on_gid == completed_gid {
                         completion_dep.mark_resolved();
                         debug!(
                             gid = g.gid().value(),
@@ -136,7 +135,6 @@ impl super::RequestGroupMan {
                             "Resolved completion dependency"
                         );
                     }
-                }
             }
         }
     }

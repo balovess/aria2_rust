@@ -213,7 +213,7 @@ pub fn find_tree_node_for_mut<'a>(
         return root;
     }
     // Determine which child to descend into before borrowing mutably
-    let go_left = root.left().map_or(false, |l| l.is_in_range(key));
+    let go_left = root.left().is_some_and(|l| l.is_in_range(key));
     if go_left {
         find_tree_node_for_mut(root.left_mut().unwrap(), key)
     } else {

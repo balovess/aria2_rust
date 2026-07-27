@@ -263,7 +263,7 @@ impl ConfigParser {
         ];
         for (env_name, opt_name) in proxy_vars {
             let value = std::env::var(env_name)
-                .or_else(|_| std::env::var(&env_name.to_uppercase()))
+                .or_else(|_| std::env::var(env_name.to_uppercase()))
                 .unwrap_or_default();
             if !value.is_empty() {
                 self.set_raw(*opt_name, &value);

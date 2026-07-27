@@ -349,7 +349,7 @@ impl RpcEngine {
             if arr
                 .first()
                 .and_then(|v| v.as_str())
-                .map_or(false, |s| s.starts_with("token:"))
+                .is_some_and(|s| s.starts_with("token:"))
             {
                 let mut new_params = arr.clone();
                 new_params.remove(0);

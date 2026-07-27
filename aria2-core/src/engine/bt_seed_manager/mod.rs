@@ -490,22 +490,20 @@ impl BtSeedManager {
     /// Returns `true` if seeding should stop.
     pub fn should_stop_seeding(&self) -> bool {
         // Check seed ratio
-        if let Some(ratio) = self.exit_condition.seed_ratio {
-            if SeedExitCondition::check_seed_condition(
+        if let Some(ratio) = self.exit_condition.seed_ratio
+            && SeedExitCondition::check_seed_condition(
                 self.total_uploaded,
                 self.total_downloaded,
                 ratio,
             ) {
                 return true;
             }
-        }
 
         // Check seed time
-        if let Some(time) = self.exit_condition.seed_time {
-            if SeedExitCondition::check_seed_time(self.seeding_start_time, time.as_secs(), true) {
+        if let Some(time) = self.exit_condition.seed_time
+            && SeedExitCondition::check_seed_time(self.seeding_start_time, time.as_secs(), true) {
                 return true;
             }
-        }
 
         false
     }
@@ -528,11 +526,7 @@ impl BtSeedManager {
     /// Return upload statistics: (total_uploaded, upload_speed).
     pub fn get_upload_stats(&self) -> (u64, u64) {
         let elapsed_secs = self.seeding_start_time.elapsed().as_secs();
-        let upload_speed = if elapsed_secs > 0 {
-            self.total_uploaded / elapsed_secs
-        } else {
-            0
-        };
+        let upload_speed = self.total_uploaded.checked_div(elapsed_secs).unwrap_or(0);
         (self.total_uploaded, upload_speed)
     }
 

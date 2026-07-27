@@ -321,12 +321,11 @@ impl BtAnnounce {
 
         // Store tracker_id from response for subsequent announces
         // (matching C++ BtAnnounce::processAnnounceResponse)
-        if let Some(ref tid) = response.tracker_id {
-            if !tid.is_empty() {
+        if let Some(ref tid) = response.tracker_id
+            && !tid.is_empty() {
                 debug!("[BT] Tracker ID: {}", tid);
                 self.tracker_id = tid.clone();
             }
-        }
 
         // Update interval
         let interval_secs = response.interval;

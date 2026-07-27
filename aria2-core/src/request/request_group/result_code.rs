@@ -14,10 +14,12 @@ use std::fmt;
 /// The numeric values match the C++ wire format for RPC compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
+#[derive(Default)]
 pub enum DownloadResultCode {
     /// Download completed successfully.
     Finished = 0,
     /// Unknown error occurred.
+    #[default]
     UnknownError = 1,
     /// Connection / read timed out.
     TimeOut = 2,
@@ -115,11 +117,6 @@ impl fmt::Display for DownloadResultCode {
     }
 }
 
-impl Default for DownloadResultCode {
-    fn default() -> Self {
-        Self::UnknownError
-    }
-}
 
 #[cfg(test)]
 mod tests {

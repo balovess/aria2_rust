@@ -14,6 +14,12 @@ pub struct AtomicProgress {
     upload_speed: AtomicU64,
 }
 
+impl Default for AtomicProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AtomicProgress {
     pub fn new() -> Self {
         Self {

@@ -209,8 +209,8 @@ pub async fn iterative_get_peers(
                 }
 
                 // Extract token from response (for subsequent announce)
-                if let Some(r) = &response.r {
-                    if let Some(token_val) = r.dict_get(b"token").and_then(|v| v.as_bytes()) {
+                if let Some(r) = &response.r
+                    && let Some(token_val) = r.dict_get(b"token").and_then(|v| v.as_bytes()) {
                         // Find the node ID for this address
                         let node_id = entries
                             .iter()
@@ -219,7 +219,6 @@ pub async fn iterative_get_peers(
                             .unwrap_or([0u8; 20]);
                         token_nodes.push((from, node_id, token_val.to_vec()));
                     }
-                }
 
                 // Extract nodes from response
                 let new_nodes = extract_compact_nodes_from_response(&response);

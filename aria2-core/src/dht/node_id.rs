@@ -57,10 +57,7 @@ impl NodeId {
     /// In Kademlia, distance = A XOR B. This is the fundamental metric
     /// for routing table placement and lookup operations.
     pub fn distance_to(&self, other: &NodeId) -> NodeId {
-        let mut result = [0u8; ID_LENGTH];
-        for i in 0..ID_LENGTH {
-            result[i] = self.0[i] ^ other.0[i];
-        }
+        let result: [u8; ID_LENGTH] = std::array::from_fn(|i| self.0[i] ^ other.0[i]);
         NodeId(result)
     }
 

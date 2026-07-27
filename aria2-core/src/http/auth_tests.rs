@@ -1,4 +1,5 @@
 use super::auth::*;
+use super::auth::netrc::NetrcError;
 use url::Url;
 
 #[test]
@@ -169,4 +170,117 @@ fn test_erase_confidential_proxy_auth() {
     let safe = erase_confidential_info(raw);
     assert!(safe.contains("Proxy-Authorization: <snip>"));
     assert!(safe.contains("Set-Cookie: <snip>"));
+}
+
+// ---------------------------------------------------------------------------
+// Netrc integration tests (parser -> NetrcStore -> AuthConfigFactory)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_netrc_to_auth_factory_http() {
+    let mut factory = AuthConfigFactory::new();
+    factory.load_netrc_str(
+        "machine http.example.com\nlogin netrcuser\npassword netrcpass\n"
+    ).unwrap();
+
+    let url = Url::parse("http://http.example.com/file").unwrap();
+    let opts = AuthResolveOptions::default();
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+    assert_eq!(ac.user(), "netrcuser");
+    assert_eq!(ac.password(), "netrcpass");
+}
+
+#[test]
+fn test_netrc_to_auth_factory_ftp() {
+    let mut factory = AuthConfigFactory::new();
+    factory.load_netrc_str(
+        "machine ftp.example.com\nlogin ftpuser\npassword ftppass\n"
+    ).unwrap();
+
+    let url = Url::parse("ftp://ftp.example.com/file").unwrap();
+    let opts = AuthResolveOptions::default();
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+    assert_eq!(ac.user(), "ftpuser");
+    assert_eq!(ac.password(), "ftppass");
+}
+
+#[test]
+fn test_netrc_default_fallback_for_http() {
+    let mut factory = AuthConfigFactory::new();
+    factory.load_netrc_str(
+        "machine known.example.com\nlogin knownuser\npassword knownpass\n\
+         default\nlogin defaultuser\npassword defaultpass\n"
+    ).unwrap();
+
+    // Known host gets its specific entry
+    let url = Url::parse("http://known.example.com/file").unwrap();
+    let opts = AuthResolveOptions::default();
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+    assert_eq!(ac.user(), "knownuser");
+
+    // Unknown host falls back to default
+    let url2 = Url::parse("http://unknown.example.com/file").unwrap();
+    let ac2 = factory.resolve(&url2, false, &opts).unwrap();
+    assert_eq!(ac2.user(), "defaultuser");
+    assert_eq!(ac2.password(), "defaultpass");
+}
+
+#[test]
+fn test_netrc_default_fallback_for_ftp() {
+    let mut factory = AuthConfigFactory::new();
+    factory.load_netrc_str(
+        "default\nlogin anonftp\npassword anonftp@\n"
+    ).unwrap();
+
+    let url = Url::parse("ftp://any.host.com/file").unwrap();
+    let opts = AuthResolveOptions::default();
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+    assert_eq!(ac.user(), "anonftp");
+}
+
+#[test]
+fn test_netrc_no_netrc_flag_skips_lookup() {
+    let mut factory = AuthConfigFactory::new();
+    factory.load_netrc_str(
+        "machine example.com\nlogin netrcuser\npassword netrcpass\n"
+    ).unwrap();
+
+    let url = Url::parse("http://example.com/file").unwrap();
+    let opts = AuthResolveOptions {
+        no_netrc: true,
+        http_user: Some("cliuser".into()),
+        http_passwd: Some("clipass".into()),
+        ..Default::default()
+    };
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+    // Should use CLI creds, not netrc
+    assert_eq!(ac.user(), "cliuser");
+}
+
+#[test]
+fn test_netrc_url_creds_take_priority() {
+    let mut factory = AuthConfigFactory::new();
+    factory.load_netrc_str(
+        "machine example.com\nlogin netrcuser\npassword netrcpass\n"
+    ).unwrap();
+
+    let url = Url::parse("http://urluser:urlpass@example.com/file").unwrap();
+    let opts = AuthResolveOptions::default();
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+    // URL creds take priority over netrc
+    assert_eq!(ac.user(), "urluser");
+    assert_eq!(ac.password(), "urlpass");
+}
+
+#[test]
+fn test_netrc_parse_error_propagates() {
+    let mut factory = AuthConfigFactory::new();
+    let result = factory.load_netrc_str("login user\n");
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        NetrcError::ParseError(msg) => {
+            assert!(msg.contains("machine") || msg.contains("default"));
+        }
+        other => panic!("expected ParseError, got {:?}", other),
+    }
 }

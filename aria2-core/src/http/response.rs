@@ -207,7 +207,8 @@ impl HttpResponse {
             }
             // 307 Temporary Redirect / 308 Permanent Redirect:
             // preserve the original method per RFC 7538 and RFC 7231 §6.4.7
-            307 | 308 | _ => original_method.clone(),
+            307 | 308 => original_method.clone(),
+            _ => original_method.clone(),
         }
     }
 
@@ -231,7 +232,8 @@ impl HttpResponse {
             // 301/302 from POST switches to GET → drops body
             301 | 302 => *original_method != HttpMethod::Post,
             // 307/308 preserve method → preserve body
-            307 | 308 | _ => true,
+            307 | 308 => true,
+            _ => true,
         }
     }
 

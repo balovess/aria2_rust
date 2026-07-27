@@ -319,7 +319,7 @@ impl DownloadContext {
             return 0;
         }
         let last_offset = self.file_entries.last().unwrap().last_offset();
-        ((last_offset + self.piece_length as u64 - 1) / self.piece_length as u64) as usize
+        last_offset.div_ceil(self.piece_length as u64) as usize
     }
 
     // -----------------------------------------------------------------------

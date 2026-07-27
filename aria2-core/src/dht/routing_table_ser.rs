@@ -201,7 +201,7 @@ pub fn deserialize_from_reader(mut reader: impl Read) -> io::Result<DeserializeR
 
     // Extract version
     let version = u16::from_be_bytes([header[6], header[7]]);
-    if version < MIN_VERSION || version > VERSION {
+    if !(MIN_VERSION..=VERSION).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("DHT routing table: unsupported version {}", version),

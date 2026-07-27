@@ -303,11 +303,10 @@ impl SequentialDownloader {
         );
         // ADR-0001: Delete control file on successful completion.
         drop(ctrl_file);
-        if ctrl_path.exists() {
-            if let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
+        if ctrl_path.exists()
+            && let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
                 tracing::debug!("Failed to delete control file on completion: {}", e);
             }
-        }
         self.cookie_helper.save_cookies_if_configured();
         Ok(())
     }

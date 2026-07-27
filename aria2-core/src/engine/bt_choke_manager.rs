@@ -523,7 +523,7 @@ impl BtSeederStateChoke {
     /// Unchoke the top-ranked peers and optionally perform optimistic unchoke.
     ///
     /// Mirrors C++ `BtSeederStateChoke::unchoke()`.
-    fn unchoke_peers(&mut self, entries: &mut Vec<SeederPeerEntry>, peers: &mut [&mut PeerStats]) {
+    fn unchoke_peers(&mut self, entries: &mut [SeederPeerEntry], peers: &mut [&mut PeerStats]) {
         // Round 2 gets one more regular slot (C++: count = (round==2) ? 4 : 3)
         let regular_slots = if self.round == 2 {
             self.base_unchoke_slots
@@ -538,8 +538,7 @@ impl BtSeederStateChoke {
         // Regular unchoke: top-N peers (use index-based iteration to avoid
         // long-lived mutable borrows from split_at_mut conflicting with
         // the optimistic-unchoke phase below).
-        for i in 0..split_point {
-            let entry = &entries[i];
+        for entry in entries.iter().take(split_point) {
             let peer = &mut peers[entry.index];
             peer.am_choking = false;
             peer.record_unchoke();

@@ -277,11 +277,10 @@ fn parse_link_param(param: &str, link: &mut MetalinkHttpLink) {
             link.rel = value.split_whitespace().map(|s| s.to_string()).collect();
         }
         "pri" => {
-            if let Ok(p) = value.parse::<u64>() {
-                if p >= 1 && p <= MAX_PRI {
+            if let Ok(p) = value.parse::<u64>()
+                && (1..=MAX_PRI).contains(&p) {
                     link.pri = Some(p);
                 }
-            }
         }
         "pref" => {
             link.pref = true;

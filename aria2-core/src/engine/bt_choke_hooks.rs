@@ -86,11 +86,10 @@ pub fn on_data_received_from_peer(
 /// Sets `peer_choking = true` on the peer stats, mirroring C++
 /// `BtChokeMessage::doReceivedAction()`.
 pub fn on_peer_choke(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize) {
-    if let Some(algo) = algo.as_mut() {
-        if let Some(peer) = algo.get_peer_mut(peer_idx) {
+    if let Some(algo) = algo.as_mut()
+        && let Some(peer) = algo.get_peer_mut(peer_idx) {
             peer.peer_choking = true;
         }
-    }
 }
 
 /// Handle an Unchoke message received from a peer.
@@ -98,22 +97,20 @@ pub fn on_peer_choke(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize) {
 /// Sets `peer_choking = false` on the peer stats, mirroring C++
 /// `BtUnchokeMessage::doReceivedAction()`.
 pub fn on_peer_unchoke(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize) {
-    if let Some(algo) = algo.as_mut() {
-        if let Some(peer) = algo.get_peer_mut(peer_idx) {
+    if let Some(algo) = algo.as_mut()
+        && let Some(peer) = algo.get_peer_mut(peer_idx) {
             peer.peer_choking = false;
         }
-    }
 }
 
 /// Record that a piece was received from a peer.
 ///
 /// Updates download speed tracking for choking decisions.
 pub fn on_piece_received(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize, bytes: u32) {
-    if let Some(algo) = algo.as_mut() {
-        if let Some(peer) = algo.get_peer_mut(peer_idx) {
+    if let Some(algo) = algo.as_mut()
+        && let Some(peer) = algo.get_peer_mut(peer_idx) {
             peer.on_data_received(bytes as u64);
         }
-    }
 }
 
 /// Select the best peer to request the next piece from.

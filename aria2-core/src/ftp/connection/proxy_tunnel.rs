@@ -438,7 +438,7 @@ impl FtpProxyTunnel {
         };
 
         let (ha2, qop_value) =
-            if qop.as_deref() == Some("auth") || qop.as_deref() == Some("auth-int") {
+            if qop == Some("auth") || qop == Some("auth-int") {
                 let ha2 = md5_hex(&format!("CONNECT:{}", uri));
                 (ha2, "auth")
             } else {
@@ -512,10 +512,10 @@ fn extract_digest_param<'a>(challenge: &'a str, param: &str) -> Option<&'a str> 
     for part in params_section.split(',') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&search) {
-            // Handle quoted values
-            if rest.starts_with('"') {
-                if let Some(end) = rest[1..].find('"') {
-                    return Some(&rest[1..end + 1]);
+                // Handle quoted values
+                if let Some(stripped) = rest.strip_prefix('"') {
+                    if let Some(end) = stripped.find('"') {
+                        return Some(&stripped[..end]);
                 }
             } else {
                 // Unquoted value - take until comma or end

@@ -117,8 +117,8 @@ impl BtDownloadCommand {
             }
         }
 
-        if let Some(ref engine) = self.dht_engine {
-            if let Ok(result) = engine.find_peers(info_hash_raw).await {
+        if let Some(ref engine) = self.dht_engine
+            && let Ok(result) = engine.find_peers(info_hash_raw).await {
                 if !result.peers.is_empty() {
                     let before = peer_addrs.len();
                     for addr in &result.peers {
@@ -144,7 +144,6 @@ impl BtDownloadCommand {
                     debug!("[BT] DHT find_peers returned no peers");
                 }
             }
-        }
 
         // BEP 0027 (Private Torrent): public tracker announcement is forbidden
         // for private torrents because it would leak the info_hash to trackers

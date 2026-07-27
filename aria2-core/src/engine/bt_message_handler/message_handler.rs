@@ -268,14 +268,14 @@ impl BtMessageHandler {
             Ok(pex_msg) => {
                 // Convert compact IPv4 peers to PeerAddr
                 for compact in &pex_msg.added {
-                    let ip = std::net::Ipv4Addr::from(compact.ip().clone());
+                    let ip = std::net::Ipv4Addr::from(*compact.ip());
                     let addr = PeerAddr::new(&ip.to_string(), compact.port());
                     conn.pending_pex_peers.push(addr);
                 }
 
                 // Convert compact IPv6 peers to PeerAddr
                 for compact in &pex_msg.added6 {
-                    let ip = std::net::Ipv6Addr::from(compact.ip().clone());
+                    let ip = std::net::Ipv6Addr::from(*compact.ip());
                     let addr = PeerAddr::new(&ip.to_string(), compact.port());
                     conn.pending_pex_peers.push(addr);
                 }

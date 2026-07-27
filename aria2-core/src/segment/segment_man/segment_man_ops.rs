@@ -85,7 +85,7 @@ impl SegmentMan {
                 // Check if the owner is idle
                 let owner_is_idle = self
                     .get_peer_stat(owner_cuid)
-                    .map_or(true, |ps| ps.status == PeerStatus::Idle);
+                    .is_none_or(|ps| ps.status == PeerStatus::Idle);
 
                 if owner_cuid == cuid {
                     // Same CUID already owns it
@@ -207,14 +207,13 @@ impl SegmentMan {
         let piece_index = segment.index();
 
         // Complete the piece in storage
-        if let Some(piece) = segment.piece() {
-            if let Some(ref mut ps) = self.piece_storage {
+        if let Some(piece) = segment.piece()
+            && let Some(ref mut ps) = self.piece_storage {
                 ps.complete_piece(piece);
                 // Advertise the completed piece so other commands send Have messages
                 // to their peers. C++: pieceStorage_->advertisePiece(cuid, index, wallclock)
                 ps.advertise_piece(cuid, piece_index);
             }
-        }
 
         // Remove the tracking entry
         let idx = self
@@ -257,7 +256,7 @@ impl SegmentMan {
         if self.piece_length == 0 || self.total_length == 0 {
             0
         } else {
-            ((self.total_length + self.piece_length - 1) / self.piece_length) as usize
+            self.total_length.div_ceil(self.piece_length) as usize
         }
     }
 
@@ -288,7 +287,7 @@ impl SegmentMan {
         let mut segment = if piece_len == 0 {
             SegmentKind::Grow(GrowSegment::new())
         } else {
-            SegmentKind::Pieced(PiecedSegment::new(self.piece_length, piece))
+            SegmentKind::Pieced(Box::new(PiecedSegment::new(self.piece_length, piece)))
         };
 
         trace!(
@@ -300,8 +299,8 @@ impl SegmentMan {
         );
 
         // Check written length memo for resume support (C++ behavior)
-        if segment.length() > 0 {
-            if let Some(&memo_written) = self.segment_written_length_memo.get(&segment.index()) {
+        if segment.length() > 0
+            && let Some(&memo_written) = self.segment_written_length_memo.get(&segment.index()) {
                 let current_written = segment.written_length();
                 trace!(
                     index = segment.index(),
@@ -317,7 +316,6 @@ impl SegmentMan {
                     }
                 }
             }
-        }
 
         // Record the tracking entry
         self.used_segment_entries.push(TrackingEntry {

@@ -50,9 +50,9 @@ pub fn decode(data: &[u8], sender_addr: SocketAddr) -> Result<DhtMessage> {
         .ok_or_else(|| MessageCodecError::MissingField(key::Y.into()))?;
 
     match y_str {
-        "q" => decode_query(dict, &transaction_id, sender_addr),
-        "r" => decode_response(dict, &transaction_id, sender_addr),
-        "e" => decode_error(dict, &transaction_id, sender_addr),
+        "q" => decode_query(dict, transaction_id, sender_addr),
+        "r" => decode_response(dict, transaction_id, sender_addr),
+        "e" => decode_error(dict, transaction_id, sender_addr),
         other => Err(MessageCodecError::InvalidMessageType(other.into())),
     }
 }
@@ -79,7 +79,7 @@ pub fn decode_response_with_method(
         })?;
 
     let transaction_id = extract_bytes(dict, key::T)?;
-    decode_response_inner(dict, &transaction_id, sender_addr, method_name)
+    decode_response_inner(dict, transaction_id, sender_addr, method_name)
 }
 
 // ── Query decoding ────────────────────────────────────────────────────────

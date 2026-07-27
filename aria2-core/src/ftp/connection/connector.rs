@@ -127,7 +127,7 @@ impl FtpClient {
             .map_err(|e| Aria2Error::Network(format!("FTPS upgrade failed: {}", e)))?;
 
         let client = Self {
-            control_stream: tokio::io::BufReader::new(FtpControlStream::Tls(tls_stream)),
+            control_stream: tokio::io::BufReader::new(FtpControlStream::Tls(Box::new(tls_stream))),
             mode,
             binary_mode: false,
             host: host.to_string(),
@@ -185,7 +185,7 @@ impl FtpClient {
             .map_err(|e| Aria2Error::Network(format!("FTPS implicit TLS failed: {}", e)))?;
 
         let mut client = Self {
-            control_stream: tokio::io::BufReader::new(FtpControlStream::Tls(tls_stream)),
+            control_stream: tokio::io::BufReader::new(FtpControlStream::Tls(Box::new(tls_stream))),
             mode,
             binary_mode: false,
             host: host.to_string(),

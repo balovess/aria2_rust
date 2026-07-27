@@ -39,14 +39,12 @@ pub fn deserialize_text(data: &[u8], info_hash: &[u8; 20]) -> Result<BtProgress>
         if let Some(rest) = line.strip_prefix("info_hash=") {
             info_hash_found = true;
             // Parse hex info hash — must be exactly 40 hex chars
-            if rest.len() == 40 {
-                if let Ok(hash) = hex_to_info_hash(rest) {
-                    if &hash == info_hash {
+            if rest.len() == 40
+                && let Ok(hash) = hex_to_info_hash(rest)
+                    && &hash == info_hash {
                         info_hash_valid = true;
                         progress.info_hash = hash;
                     }
-                }
-            }
         } else if let Some(rest) = line.strip_prefix("version=") {
             if let Ok(v) = rest.parse::<u32>() {
                 progress.version = v;

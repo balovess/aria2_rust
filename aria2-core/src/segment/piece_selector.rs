@@ -91,8 +91,7 @@ impl RarestPieceSelector {
         let mut min_count = u32::MAX;
         let mut best_idx = nbits; // sentinel: not found
 
-        for i in 0..nbits {
-            let idx = order[i];
+        for &idx in order.iter().take(nbits) {
             if test_bit(bitfield, nbits, idx) && counts[idx] < min_count {
                 min_count = counts[idx];
                 best_idx = idx;

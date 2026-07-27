@@ -212,6 +212,7 @@ pub enum CheckHaveResult {
 /// side-effects (e.g., cancelling outstanding requests after choke)
 /// after the batch is processed.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct DispatchUpdate {
     /// Request slots removed by a Choke message (caller should send Cancel).
     pub cancelled_slots: Vec<RequestSlot>,
@@ -227,18 +228,6 @@ pub struct DispatchUpdate {
     pub extension_update: Option<ExtensionUpdate>,
 }
 
-impl Default for DispatchUpdate {
-    fn default() -> Self {
-        Self {
-            cancelled_slots: Vec::new(),
-            have_index: None,
-            bitfield_data: None,
-            peer_choking_changed: false,
-            peer_choking: false,
-            extension_update: None,
-        }
-    }
-}
 
 // ======================================================================
 // PostHandshakeActions — messages to send after handshake

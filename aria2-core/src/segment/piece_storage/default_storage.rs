@@ -75,7 +75,7 @@ impl DefaultPieceStorage {
         let num_pieces = if piece_length == 0 || total_length == 0 {
             0
         } else {
-            ((total_length + piece_length - 1) / piece_length) as usize
+            total_length.div_ceil(piece_length) as usize
         };
 
         // C++ initializes PieceStatMan with random shuffle for tie-breaking
