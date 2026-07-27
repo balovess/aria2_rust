@@ -91,7 +91,7 @@ impl RoutingTable {
         // Try to add to the current bucket. If the bucket is full, we may
         // need to split. Since add_node() takes ownership, we use a
         // two-phase approach: check if we can add, then add.
-        loop {
+        {
             // Phase 1: Check the bucket's state
             let (can_add, should_split) = {
                 let bucket = tree_node.bucket().expect("leaf must have bucket");

@@ -23,9 +23,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::DigitallySignedStruct;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -46,8 +46,8 @@ use super::types::{FtpsConfig, TlsVersion};
 /// If `config.check_certificate` is `false`, all certificate verification
 /// is disabled (dangerous: susceptible to MITM attacks).
 pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConnector, String> {
-    use rustls::crypto::ring::default_provider;
     use rustls::ClientConfig;
+    use rustls::crypto::ring::default_provider;
 
     // Install the ring crypto provider (idempotent if already installed)
     let _ = default_provider().install_default();
@@ -78,7 +78,10 @@ pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConne
             if root_store.is_empty() {
                 return Err("No bundled root certificates available".to_string());
             }
-            debug!("Using {} bundled Mozilla root certificates", root_store.len());
+            debug!(
+                "Using {} bundled Mozilla root certificates",
+                root_store.len()
+            );
         }
     } else {
         // Dangerous: accept any certificate.
@@ -90,13 +93,11 @@ pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConne
         TlsVersion::Tls12 => ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth(),
-        TlsVersion::Tls13 => {
-            ClientConfig::builder_with_provider(Arc::new(default_provider()))
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .map_err(|e| format!("Failed to set TLS 1.3 only: {}", e))?
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        }
+        TlsVersion::Tls13 => ClientConfig::builder_with_provider(Arc::new(default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| format!("Failed to set TLS 1.3 only: {}", e))?
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
     };
 
     // If certificate verification is disabled, install a dangerous verifier
@@ -110,9 +111,7 @@ pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConne
 }
 
 /// Load PEM-encoded certificates from a file path.
-fn load_pem_certs(
-    path: &Path,
-) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+fn load_pem_certs(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
     use std::io::BufReader as SyncBufReader;
 
     let file = std::fs::File::open(path).map_err(|e| {
@@ -124,22 +123,18 @@ fn load_pem_certs(
     })?;
 
     let mut reader = SyncBufReader::new(file);
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut reader)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                format!(
-                    "Failed to parse CA certificates from {}: {}",
-                    path.display(),
-                    e
-                )
-            })?;
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            format!(
+                "Failed to parse CA certificates from {}: {}",
+                path.display(),
+                e
+            )
+        })?;
 
     if certs.is_empty() {
-        return Err(format!(
-            "No PEM certificates found in {}",
-            path.display()
-        ));
+        return Err(format!("No PEM certificates found in {}", path.display()));
     }
 
     Ok(certs)

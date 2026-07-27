@@ -381,7 +381,7 @@ impl UtpConnection {
 
     /// Check if connection has timed out
     pub fn check_timeout(&mut self, idle_timeout: Duration) -> bool {
-        if self.last_activity.elapsed() > idle_timeout {
+        if self.last_activity.elapsed() >= idle_timeout {
             self.state = ConnectionState::Closed;
             return true;
         }

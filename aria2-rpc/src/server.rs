@@ -633,8 +633,7 @@ impl RpcServer {
             // HTTPS mode — accept TCP connections, perform TLS handshake,
             // then hand the encrypted stream to hyper/axum.
             tracing::info!("TLS enabled, serving HTTPS");
-            self.serve_tls(listener, tls_acceptor.clone(), app)
-                .await?;
+            self.serve_tls(listener, tls_acceptor.clone(), app).await?;
         } else {
             // HTTP mode
             axum::serve(
@@ -671,16 +670,14 @@ impl RpcServer {
 
             // Convert the Router into a MakeService that provides
             // ConnectInfo<SocketAddr> to handlers.
-            let mut make_service =
-                app.clone().into_make_service_with_connect_info::<SocketAddr>();
+            let mut make_service = app
+                .clone()
+                .into_make_service_with_connect_info::<SocketAddr>();
 
             tokio::spawn(async move {
                 // Perform TLS handshake
                 let Ok(tls_stream) = tls_acceptor.accept(cnx).await else {
-                    tracing::error!(
-                        "TLS handshake failed for connection from {}",
-                        remote_addr
-                    );
+                    tracing::error!("TLS handshake failed for connection from {}", remote_addr);
                     return;
                 };
 

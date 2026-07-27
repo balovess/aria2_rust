@@ -398,37 +398,99 @@ impl fmt::Display for DhtMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let txn_hex = hex::encode(self.transaction_id());
         match self {
-            DhtMessage::PingQuery { sender_id, sender_addr, .. } => write!(
-                f, "DHT ping query txn={} from {} ({})", txn_hex, sender_id, sender_addr
+            DhtMessage::PingQuery {
+                sender_id,
+                sender_addr,
+                ..
+            } => write!(
+                f,
+                "DHT ping query txn={} from {} ({})",
+                txn_hex, sender_id, sender_addr
             ),
-            DhtMessage::FindNodeQuery { sender_id, sender_addr, payload, .. } => write!(
-                f, "DHT find_node query txn={} from {} ({}) target={}",
+            DhtMessage::FindNodeQuery {
+                sender_id,
+                sender_addr,
+                payload,
+                ..
+            } => write!(
+                f,
+                "DHT find_node query txn={} from {} ({}) target={}",
                 txn_hex, sender_id, sender_addr, payload.target
             ),
-            DhtMessage::GetPeersQuery { sender_id, sender_addr, payload, .. } => write!(
-                f, "DHT get_peers query txn={} from {} ({}) info_hash={}",
+            DhtMessage::GetPeersQuery {
+                sender_id,
+                sender_addr,
+                payload,
+                ..
+            } => write!(
+                f,
+                "DHT get_peers query txn={} from {} ({}) info_hash={}",
                 txn_hex, sender_id, sender_addr, payload.info_hash
             ),
-            DhtMessage::AnnouncePeerQuery { sender_id, sender_addr, payload, .. } => write!(
-                f, "DHT announce_peer query txn={} from {} ({}) info_hash={} port={}",
+            DhtMessage::AnnouncePeerQuery {
+                sender_id,
+                sender_addr,
+                payload,
+                ..
+            } => write!(
+                f,
+                "DHT announce_peer query txn={} from {} ({}) info_hash={} port={}",
                 txn_hex, sender_id, sender_addr, payload.info_hash, payload.port
             ),
-            DhtMessage::PingResponse { sender_id, sender_addr, .. } => write!(
-                f, "DHT ping response txn={} from {} ({})", txn_hex, sender_id, sender_addr
+            DhtMessage::PingResponse {
+                sender_id,
+                sender_addr,
+                ..
+            } => write!(
+                f,
+                "DHT ping response txn={} from {} ({})",
+                txn_hex, sender_id, sender_addr
             ),
-            DhtMessage::FindNodeResponse { sender_id, sender_addr, payload, .. } => write!(
-                f, "DHT find_node response txn={} from {} ({}) nodes={}",
-                txn_hex, sender_id, sender_addr, payload.nodes.len()
+            DhtMessage::FindNodeResponse {
+                sender_id,
+                sender_addr,
+                payload,
+                ..
+            } => write!(
+                f,
+                "DHT find_node response txn={} from {} ({}) nodes={}",
+                txn_hex,
+                sender_id,
+                sender_addr,
+                payload.nodes.len()
             ),
-            DhtMessage::GetPeersResponse { sender_id, sender_addr, payload, .. } => write!(
-                f, "DHT get_peers response txn={} from {} ({}) nodes={} values={}",
-                txn_hex, sender_id, sender_addr, payload.nodes.len(), payload.values.len()
+            DhtMessage::GetPeersResponse {
+                sender_id,
+                sender_addr,
+                payload,
+                ..
+            } => write!(
+                f,
+                "DHT get_peers response txn={} from {} ({}) nodes={} values={}",
+                txn_hex,
+                sender_id,
+                sender_addr,
+                payload.nodes.len(),
+                payload.values.len()
             ),
-            DhtMessage::AnnouncePeerResponse { sender_id, sender_addr, .. } => write!(
-                f, "DHT announce_peer response txn={} from {} ({})", txn_hex, sender_id, sender_addr
+            DhtMessage::AnnouncePeerResponse {
+                sender_id,
+                sender_addr,
+                ..
+            } => write!(
+                f,
+                "DHT announce_peer response txn={} from {} ({})",
+                txn_hex, sender_id, sender_addr
             ),
-            DhtMessage::Error { sender_addr, code, message, .. } => write!(
-                f, "DHT error txn={} from {} code={} msg={}", txn_hex, sender_addr, code, message
+            DhtMessage::Error {
+                sender_addr,
+                code,
+                message,
+                ..
+            } => write!(
+                f,
+                "DHT error txn={} from {} code={} msg={}",
+                txn_hex, sender_addr, code, message
             ),
         }
     }
@@ -463,7 +525,10 @@ mod tests {
 
     #[test]
     fn compact_node_info_roundtrip_ipv4() {
-        let info = CompactNodeInfo { node_id: NodeId::from_slice(&[0xAB; ID_LENGTH]), addr: addr_v4() };
+        let info = CompactNodeInfo {
+            node_id: NodeId::from_slice(&[0xAB; ID_LENGTH]),
+            addr: addr_v4(),
+        };
         let packed = info.pack().unwrap();
         assert_eq!(packed.len(), 26);
         let unpacked = CompactNodeInfo::unpack_all(&packed);
@@ -473,7 +538,10 @@ mod tests {
 
     #[test]
     fn compact_node_info_roundtrip_ipv6() {
-        let info = CompactNodeInfo { node_id: NodeId::from_slice(&[0xCD; ID_LENGTH]), addr: addr_v6() };
+        let info = CompactNodeInfo {
+            node_id: NodeId::from_slice(&[0xCD; ID_LENGTH]),
+            addr: addr_v6(),
+        };
         let packed = info.pack().unwrap();
         assert_eq!(packed.len(), 38);
         let unpacked = CompactNodeInfo::unpack_all(&packed);
@@ -515,7 +583,10 @@ mod tests {
     #[test]
     fn message_kind_error() {
         let msg = DhtMessage::Error {
-            transaction_id: vec![0x01], sender_addr: addr_v4(), code: 201, message: "err".into(),
+            transaction_id: vec![0x01],
+            sender_addr: addr_v4(),
+            code: 201,
+            message: "err".into(),
         };
         assert!(msg.is_error());
         assert!(msg.sender_id().is_none());
@@ -529,8 +600,12 @@ mod tests {
     #[test]
     fn display_format() {
         let msg = DhtMessage::FindNodeQuery {
-            transaction_id: vec![0xAA], sender_id: NodeId::ZERO, sender_addr: addr_v4(),
-            payload: FindNodeQueryPayload { target: NodeId::MAX },
+            transaction_id: vec![0xAA],
+            sender_id: NodeId::ZERO,
+            sender_addr: addr_v4(),
+            payload: FindNodeQueryPayload {
+                target: NodeId::MAX,
+            },
         };
         let s = format!("{}", msg);
         assert!(s.contains("find_node query") && s.contains("target="));
@@ -544,7 +619,10 @@ mod tests {
                 id[0] = i;
                 CompactNodeInfo {
                     node_id: NodeId(id),
-                    addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, i + 1)), 6881 + i as u16),
+                    addr: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, i + 1)),
+                        6881 + i as u16,
+                    ),
                 }
             })
             .collect();

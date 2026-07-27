@@ -184,9 +184,9 @@ impl Default for DhtDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::node_id::NodeId;
     use super::super::message::PingQueryPayload;
+    use super::super::node_id::NodeId;
+    use super::*;
 
     fn test_addr() -> SocketAddr {
         "192.168.0.1:6881".parse().unwrap()
@@ -234,7 +234,8 @@ mod tests {
         let addr = test_addr();
 
         // Manually track a message (simulating what send_messages would do)
-        d.tracker.add_query(NodeId::ZERO, addr, tid.clone(), "ping".to_owned());
+        d.tracker
+            .add_query(NodeId::ZERO, addr, tid.clone(), "ping".to_owned());
         assert_eq!(d.tracked_count(), 1);
 
         // Match it
@@ -249,10 +250,17 @@ mod tests {
         let mut d = DhtDispatcher::new();
         let short = Duration::from_millis(1);
         d.tracker.add_query_with_timeout(
-            NodeId::ZERO, test_addr(), vec![0x01], "ping".to_owned(), short,
+            NodeId::ZERO,
+            test_addr(),
+            vec![0x01],
+            "ping".to_owned(),
+            short,
         );
         d.tracker.add_query_with_timeout(
-            NodeId::ZERO, test_addr(), vec![0x02], "ping".to_owned(),
+            NodeId::ZERO,
+            test_addr(),
+            vec![0x02],
+            "ping".to_owned(),
             Duration::from_secs(300),
         );
 

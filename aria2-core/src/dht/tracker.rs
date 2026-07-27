@@ -236,8 +236,7 @@ impl DhtMessageTracker {
             addr = %target_addr,
             "Tracking DHT query"
         );
-        let entry =
-            TrackerEntry::new(target_node_id, target_addr, transaction_id, method, timeout);
+        let entry = TrackerEntry::new(target_node_id, target_addr, transaction_id, method, timeout);
         self.entries.push_back(entry);
     }
 
@@ -464,16 +463,14 @@ mod tests {
         let mut tracker = DhtMessageTracker::new();
         tracker.add_query(make_node_id(1), make_addr(5000), vec![1, 2], "ping".into());
 
-        assert!(tracker
-            .match_response(&[1, 2], &make_addr(9999))
-            .is_none());
-        assert!(tracker
-            .match_response(&[9, 9], &make_addr(5000))
-            .is_none());
+        assert!(tracker.match_response(&[1, 2], &make_addr(9999)).is_none());
+        assert!(tracker.match_response(&[9, 9], &make_addr(5000)).is_none());
         let mut empty_tracker = DhtMessageTracker::new();
-        assert!(empty_tracker
-            .match_response(&[1, 2], &make_addr(5000))
-            .is_none());
+        assert!(
+            empty_tracker
+                .match_response(&[1, 2], &make_addr(5000))
+                .is_none()
+        );
     }
 
     #[test]
@@ -505,7 +502,12 @@ mod tests {
     fn tracker_timeout_removes_expired() {
         let mut tracker = DhtMessageTracker::with_timeout(Duration::from_millis(30));
         tracker.add_query(make_node_id(1), make_addr(5000), vec![1], "ping".into());
-        tracker.add_query(make_node_id(2), make_addr(5001), vec![2], "find_node".into());
+        tracker.add_query(
+            make_node_id(2),
+            make_addr(5001),
+            vec![2],
+            "find_node".into(),
+        );
 
         assert_eq!(tracker.count(), 2);
 
@@ -563,7 +565,12 @@ mod tests {
     fn tracker_get_entry_by_tid() {
         let mut tracker = DhtMessageTracker::new();
         tracker.add_query(make_node_id(1), make_addr(5000), vec![0xAA], "ping".into());
-        tracker.add_query(make_node_id(2), make_addr(5001), vec![0xBB], "find_node".into());
+        tracker.add_query(
+            make_node_id(2),
+            make_addr(5001),
+            vec![0xBB],
+            "find_node".into(),
+        );
 
         let entry = tracker.get_entry(&[0xBB]).unwrap();
         assert_eq!(entry.method(), "find_node");

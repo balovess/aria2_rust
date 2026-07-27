@@ -1239,8 +1239,7 @@ mod tests {
             port: 0, // OS-assigned ephemeral port to avoid conflicts
             ..Default::default()
         };
-        let engine =
-            rt.block_on(async { DhtEngine::start(config).await.unwrap() });
+        let engine = rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
         let mut registry = BtRegistry::new();
         registry.set_dht_engine(engine);
@@ -1257,8 +1256,7 @@ mod tests {
             port: 0, // OS-assigned ephemeral port to avoid conflicts
             ..Default::default()
         };
-        let engine =
-            rt.block_on(async { DhtEngine::start(config).await.unwrap() });
+        let engine = rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
         let mut registry = BtRegistry::new();
         registry.set_dht_engine(engine);

@@ -19,7 +19,10 @@ mod types;
 mod tests;
 
 // Re-export all public types to preserve the original API
-pub use types::{FtpClient, FtpControlStream, FtpFeatures, FtpFileInfo, FtpMode, FtpResponse, FtpTlsMode, FtpsConfig, TlsVersion};
+pub use types::{
+    FtpClient, FtpControlStream, FtpFeatures, FtpFileInfo, FtpMode, FtpResponse, FtpTlsMode,
+    FtpsConfig, TlsVersion,
+};
 
 // Re-export FTPS TLS functions
 pub use tls::{build_tls_connector, upgrade_control_stream, upgrade_data_stream};

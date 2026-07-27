@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 
 use tokio::net::TcpStream;
-use tokio_rustls::client::TlsStream;
 use tokio::time::Duration;
+use tokio_rustls::client::TlsStream;
 
 /// FTP data connection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

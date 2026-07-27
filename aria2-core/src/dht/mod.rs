@@ -89,16 +89,19 @@ pub use constants::{
     PEER_ANNOUNCE_PURGE_INTERVAL_SECS, TOKEN_SECRET_COUNT, TOKEN_SECRET_SIZE,
     TOKEN_UPDATE_INTERVAL_SECS, TRANSACTION_ID_LENGTH,
 };
+pub use dispatcher::DhtDispatcher;
+pub use engine::{DhtEngine, DhtEngineConfig, DhtEntryPoint};
 pub use message::{CompactNodeInfo, CompactPeerInfo, DhtMessage, MessageTypeKind};
-pub use message_codec::{encode, MessageCodecError};
+pub use message_codec::{MessageCodecError, encode};
 pub use message_decode::{decode, decode_response_with_method};
 pub use node::DhtNode;
 pub use node_id::NodeId;
 pub use peer_announce::{AnnouncedPeer, DhtPeerAnnounceStorage, PeerAnnounceEntry};
+pub use receiver::{DhtReceiver, ReceiveAction};
 pub use routing_table::RoutingTable;
 pub use routing_table_ser::{
-    deserialize_from_file, deserialize_from_reader, serialize_to_file, serialize_to_writer,
-    DeserializeResult,
+    DeserializeResult, deserialize_from_file, deserialize_from_reader, serialize_to_file,
+    serialize_to_writer,
 };
 pub use task::{
     DhtBucketRefreshTask, DhtLookupTask, DhtPingTask, DhtReplaceNodeTask, DhtTask, DhtTaskQueue,
@@ -107,6 +110,3 @@ pub use task::{
 pub use token_tracker::TokenTracker;
 pub use tracker::{DhtMessageTracker, MatchResult, TimeoutEntry, TrackerEntry};
 pub use transport::{AddressFamily, DhtTransport};
-pub use dispatcher::DhtDispatcher;
-pub use receiver::{DhtReceiver, ReceiveAction};
-pub use engine::{DhtEngine, DhtEngineConfig, DhtEntryPoint};

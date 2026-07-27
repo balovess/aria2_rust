@@ -251,7 +251,8 @@ impl DhtReceiver {
                 // Generate a token for this IP and port
                 let ip_str = remote_addr.ip().to_string();
                 let port = remote_addr.port();
-                let token = token_tracker.generate_token(payload.info_hash.as_bytes(), &ip_str, port);
+                let token =
+                    token_tracker.generate_token(payload.info_hash.as_bytes(), &ip_str, port);
 
                 // Check if we have peers for this info hash
                 let peers = peer_announce_storage.get_peers(&payload.info_hash);
@@ -300,7 +301,12 @@ impl DhtReceiver {
                 // Validate the token
                 let ip_str = remote_addr.ip().to_string();
                 let port = remote_addr.port();
-                if token_tracker.validate_token(&payload.token, payload.info_hash.as_bytes(), &ip_str, port) {
+                if token_tracker.validate_token(
+                    &payload.token,
+                    payload.info_hash.as_bytes(),
+                    &ip_str,
+                    port,
+                ) {
                     // Store the announced peer
                     let announce_addr = if payload.port > 0 {
                         SocketAddr::new(remote_addr.ip(), payload.port)
@@ -405,8 +411,8 @@ impl DhtReceiver {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::constants::ID_LENGTH;
+    use super::*;
 
     fn test_local_id() -> NodeId {
         NodeId([0xAA; ID_LENGTH])

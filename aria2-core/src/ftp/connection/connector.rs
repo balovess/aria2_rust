@@ -409,7 +409,9 @@ impl FtpClient {
             .control_stream
             .get_ref()
             .get_ref()
-            .ok_or_else(|| Aria2Error::Network("Cannot get local address from TLS stream".to_string()))?
+            .ok_or_else(|| {
+                Aria2Error::Network("Cannot get local address from TLS stream".to_string())
+            })?
             .local_addr()
             .map_err(|e| Aria2Error::Network(format!("Failed to get local address: {}", e)))?;
 

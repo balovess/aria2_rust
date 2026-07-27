@@ -172,14 +172,7 @@ pub struct SftpFileAttrs {
 
 impl SftpFileAttrs {
     /// Create an `SftpFileAttrs` with all standard fields populated.
-    pub fn full(
-        size: u64,
-        uid: u32,
-        gid: u32,
-        permissions: u32,
-        atime: u32,
-        mtime: u32,
-    ) -> Self {
+    pub fn full(size: u64, uid: u32, gid: u32, permissions: u32, atime: u32, mtime: u32) -> Self {
         Self {
             flags: SSH_FILEXFER_ATTR_SIZE
                 | SSH_FILEXFER_ATTR_UIDGID
@@ -201,17 +194,20 @@ impl SftpFileAttrs {
 
     /// Check if the permissions indicate a directory (S_ISDIR).
     pub fn is_directory(&self) -> bool {
-        self.permissions.map_or(false, |p| (p & 0o170000) == 0o040000)
+        self.permissions
+            .map_or(false, |p| (p & 0o170000) == 0o040000)
     }
 
     /// Check if the permissions indicate a regular file (S_ISREG).
     pub fn is_regular_file(&self) -> bool {
-        self.permissions.map_or(false, |p| (p & 0o170000) == 0o100000)
+        self.permissions
+            .map_or(false, |p| (p & 0o170000) == 0o100000)
     }
 
     /// Check if the permissions indicate a symlink (S_ISLNK).
     pub fn is_symlink(&self) -> bool {
-        self.permissions.map_or(false, |p| (p & 0o170000) == 0o120000)
+        self.permissions
+            .map_or(false, |p| (p & 0o170000) == 0o120000)
     }
 
     /// Encode this attribute block into the writer (SFTP wire format).
@@ -281,9 +277,7 @@ impl SftpFileAttrs {
 pub enum SftpPacket {
     // -- Control packets (no request_id) --
     /// SSH_FXP_INIT: client initiates session with desired version
-    Init {
-        version: u32,
-    },
+    Init { version: u32 },
     /// SSH_FXP_VERSION: server responds with supported version + extensions
     Version {
         version: u32,
@@ -299,10 +293,7 @@ pub enum SftpPacket {
         attrs: SftpFileAttrs,
     },
     /// SSH_FXP_CLOSE: close an open file/directory handle
-    Close {
-        request_id: u32,
-        handle: Vec<u8>,
-    },
+    Close { request_id: u32, handle: Vec<u8> },
     /// SSH_FXP_READ: read data from an open file handle
     Read {
         request_id: u32,
@@ -318,15 +309,9 @@ pub enum SftpPacket {
         data: Vec<u8>,
     },
     /// SSH_FXP_LSTAT: stat a path without following symlinks
-    Lstat {
-        request_id: u32,
-        path: String,
-    },
+    Lstat { request_id: u32, path: String },
     /// SSH_FXP_FSTAT: stat an open file handle
-    Fstat {
-        request_id: u32,
-        handle: Vec<u8>,
-    },
+    Fstat { request_id: u32, handle: Vec<u8> },
     /// SSH_FXP_SETSTAT: set file attributes by path
     Setstat {
         request_id: u32,
@@ -340,20 +325,11 @@ pub enum SftpPacket {
         attrs: SftpFileAttrs,
     },
     /// SSH_FXP_OPENDIR: open a directory for listing
-    Opendir {
-        request_id: u32,
-        path: String,
-    },
+    Opendir { request_id: u32, path: String },
     /// SSH_FXP_READDIR: read directory entries from a handle
-    Readdir {
-        request_id: u32,
-        handle: Vec<u8>,
-    },
+    Readdir { request_id: u32, handle: Vec<u8> },
     /// SSH_FXP_REMOVE: delete a file
-    Remove {
-        request_id: u32,
-        filename: String,
-    },
+    Remove { request_id: u32, filename: String },
     /// SSH_FXP_MKDIR: create a directory
     Mkdir {
         request_id: u32,
@@ -361,20 +337,11 @@ pub enum SftpPacket {
         attrs: SftpFileAttrs,
     },
     /// SSH_FXP_RMDIR: remove a directory
-    Rmdir {
-        request_id: u32,
-        path: String,
-    },
+    Rmdir { request_id: u32, path: String },
     /// SSH_FXP_REALPATH: canonicalize a path
-    Realpath {
-        request_id: u32,
-        path: String,
-    },
+    Realpath { request_id: u32, path: String },
     /// SSH_FXP_STAT: stat a path, following symlinks
-    Stat {
-        request_id: u32,
-        path: String,
-    },
+    Stat { request_id: u32, path: String },
     /// SSH_FXP_RENAME: rename a file or directory
     Rename {
         request_id: u32,
@@ -382,10 +349,7 @@ pub enum SftpPacket {
         new_path: String,
     },
     /// SSH_FXP_READLINK: read the target of a symbolic link
-    Readlink {
-        request_id: u32,
-        path: String,
-    },
+    Readlink { request_id: u32, path: String },
     /// SSH_FXP_SYMLINK: create a symbolic link
     Symlink {
         request_id: u32,
@@ -402,15 +366,9 @@ pub enum SftpPacket {
         language: String,
     },
     /// SSH_FXP_HANDLE: file/directory handle response
-    Handle {
-        request_id: u32,
-        handle: Vec<u8>,
-    },
+    Handle { request_id: u32, handle: Vec<u8> },
     /// SSH_FXP_DATA: file data response
-    Data {
-        request_id: u32,
-        data: Vec<u8>,
-    },
+    Data { request_id: u32, data: Vec<u8> },
     /// SSH_FXP_NAME: directory listing response
     Name {
         request_id: u32,
@@ -650,17 +608,11 @@ impl SftpPacket {
                 write_string(&mut payload, message)?;
                 write_string(&mut payload, language)?;
             }
-            Self::Handle {
-                request_id,
-                handle,
-            } => {
+            Self::Handle { request_id, handle } => {
                 write_u32(&mut payload, *request_id)?;
                 write_string_raw(&mut payload, handle)?;
             }
-            Self::Data {
-                request_id,
-                data,
-            } => {
+            Self::Data { request_id, data } => {
                 write_u32(&mut payload, *request_id)?;
                 write_string_raw(&mut payload, data)?;
             }
@@ -676,10 +628,7 @@ impl SftpPacket {
                     entry.attrs.encode_to(&mut payload)?;
                 }
             }
-            Self::Attrs {
-                request_id,
-                attrs,
-            } => {
+            Self::Attrs { request_id, attrs } => {
                 write_u32(&mut payload, *request_id)?;
                 attrs.encode_to(&mut payload)?;
             }
@@ -699,11 +648,17 @@ impl SftpPacket {
     /// `Err(io::ErrorKind::UnexpectedEof)`.
     pub fn decode(buf: &[u8]) -> io::Result<(Self, usize)> {
         if buf.len() < 4 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "need length prefix"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "need length prefix",
+            ));
         }
         let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
         if buf.len() < 4 + len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete packet"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete packet",
+            ));
         }
         let payload = &buf[4..4 + len];
         let mut cursor = io::Cursor::new(payload);
@@ -1070,13 +1025,11 @@ mod tests {
     fn test_name_roundtrip() {
         let pkt = SftpPacket::Name {
             request_id: 20,
-            entries: vec![
-                SftpNameEntry {
-                    filename: "file1.txt".to_string(),
-                    longname: "-rw-r--r-- 1 user group 1234 Jan 1 00:00 file1.txt".to_string(),
-                    attrs: SftpFileAttrs::full(1234, 1000, 1000, 0o100644, 1700000000, 1700000100),
-                },
-            ],
+            entries: vec![SftpNameEntry {
+                filename: "file1.txt".to_string(),
+                longname: "-rw-r--r-- 1 user group 1234 Jan 1 00:00 file1.txt".to_string(),
+                attrs: SftpFileAttrs::full(1234, 1000, 1000, 0o100644, 1700000000, 1700000100),
+            }],
         };
         let encoded = pkt.encode().unwrap();
         let (decoded, consumed) = SftpPacket::decode(&encoded).unwrap();
@@ -1115,7 +1068,11 @@ mod tests {
     fn test_packet_type_codes() {
         assert_eq!(SftpPacket::Init { version: 3 }.packet_type(), SSH_FXP_INIT);
         assert_eq!(
-            SftpPacket::Version { version: 3, extensions: vec![] }.packet_type(),
+            SftpPacket::Version {
+                version: 3,
+                extensions: vec![]
+            }
+            .packet_type(),
             SSH_FXP_VERSION
         );
         assert_eq!(
@@ -1133,7 +1090,14 @@ mod tests {
     #[test]
     fn test_request_id_extraction() {
         assert!(SftpPacket::Init { version: 3 }.request_id().is_none());
-        assert!(SftpPacket::Version { version: 3, extensions: vec![] }.request_id().is_none());
+        assert!(
+            SftpPacket::Version {
+                version: 3,
+                extensions: vec![]
+            }
+            .request_id()
+            .is_none()
+        );
         assert_eq!(
             SftpPacket::Open {
                 request_id: 42,

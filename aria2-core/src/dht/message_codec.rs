@@ -12,9 +12,7 @@ use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use thiserror::Error;
 
 use super::constants::K;
-use super::message::{
-    CompactNodeInfo, DhtMessage, MessageTypeKind, key,
-};
+use super::message::{CompactNodeInfo, DhtMessage, MessageTypeKind, key};
 
 // ── Error type ────────────────────────────────────────────────────────────
 
@@ -31,10 +29,7 @@ pub enum MessageCodecError {
 
     /// Invalid field value (wrong type, wrong length, etc.).
     #[error("invalid field \"{field}\": {reason}")]
-    InvalidField {
-        field: String,
-        reason: String,
-    },
+    InvalidField { field: String, reason: String },
 
     /// Unknown or unsupported DHT method name.
     #[error("unsupported method: {0}")]
@@ -63,7 +58,10 @@ pub fn encode(msg: &DhtMessage) -> Vec<u8> {
 
     match msg.kind() {
         MessageTypeKind::Query => {
-            dict.insert(key::Y.as_bytes().to_vec(), BencodeValue::Bytes(b"q".to_vec()));
+            dict.insert(
+                key::Y.as_bytes().to_vec(),
+                BencodeValue::Bytes(b"q".to_vec()),
+            );
             dict.insert(
                 key::Q.as_bytes().to_vec(),
                 BencodeValue::Bytes(msg.method_name().unwrap().as_bytes().to_vec()),
@@ -71,11 +69,17 @@ pub fn encode(msg: &DhtMessage) -> Vec<u8> {
             dict.insert(key::A.as_bytes().to_vec(), encode_query_args(msg));
         }
         MessageTypeKind::Response => {
-            dict.insert(key::Y.as_bytes().to_vec(), BencodeValue::Bytes(b"r".to_vec()));
+            dict.insert(
+                key::Y.as_bytes().to_vec(),
+                BencodeValue::Bytes(b"r".to_vec()),
+            );
             dict.insert(key::R.as_bytes().to_vec(), encode_response_values(msg));
         }
         MessageTypeKind::Error => {
-            dict.insert(key::Y.as_bytes().to_vec(), BencodeValue::Bytes(b"e".to_vec()));
+            dict.insert(
+                key::Y.as_bytes().to_vec(),
+                BencodeValue::Bytes(b"e".to_vec()),
+            );
             if let DhtMessage::Error { code, message, .. } = msg {
                 dict.insert(
                     key::E.as_bytes().to_vec(),
@@ -127,7 +131,10 @@ fn encode_query_args(msg: &DhtMessage) -> BencodeValue {
                 key::INFO_HASH.as_bytes().to_vec(),
                 BencodeValue::Bytes(payload.info_hash.as_bytes().to_vec()),
             );
-            args.insert(key::PORT.as_bytes().to_vec(), BencodeValue::Int(payload.port as i64));
+            args.insert(
+                key::PORT.as_bytes().to_vec(),
+                BencodeValue::Int(payload.port as i64),
+            );
             args.insert(
                 key::TOKEN.as_bytes().to_vec(),
                 BencodeValue::Bytes(payload.token.clone()),
@@ -164,8 +171,11 @@ fn encode_response_values(msg: &DhtMessage) -> BencodeValue {
             );
             encode_compact_nodes(&mut resp, &payload.nodes);
             if !payload.values.is_empty() {
-                let values: Vec<BencodeValue> =
-                    payload.values.iter().map(|p| BencodeValue::Bytes(p.pack())).collect();
+                let values: Vec<BencodeValue> = payload
+                    .values
+                    .iter()
+                    .map(|p| BencodeValue::Bytes(p.pack()))
+                    .collect();
                 resp.insert(key::VALUES.as_bytes().to_vec(), BencodeValue::List(values));
             }
         }
@@ -246,10 +256,7 @@ pub(crate) fn extract_bytes_from<'a>(
 }
 
 /// Extract an integer value from a nested dictionary.
-pub(crate) fn extract_int_from(
-    dict: &BTreeMap<Vec<u8>, BencodeValue>,
-    key: &str,
-) -> Result<i64> {
+pub(crate) fn extract_int_from(dict: &BTreeMap<Vec<u8>, BencodeValue>, key: &str) -> Result<i64> {
     dict.get(key.as_bytes())
         .and_then(|v| v.as_int())
         .ok_or_else(|| MessageCodecError::MissingField(key.into()))

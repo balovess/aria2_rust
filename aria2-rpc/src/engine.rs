@@ -48,7 +48,8 @@ pub struct RpcEngine {
     /// EngineCommand channel for structured download lifecycle commands.
     /// When set, RPC handlers send `EngineCommand` variants (AddDownload,
     /// RemoveDownload, Pause, etc.) to the v2 engine loop.
-    pub(crate) engine_cmd_tx: Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
+    pub(crate) engine_cmd_tx:
+        Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
     /// Cumulative count of stopped downloads since session start (atomic).
     pub(crate) num_stopped_total: AtomicUsize,
     /// Session information generated once at engine construction.

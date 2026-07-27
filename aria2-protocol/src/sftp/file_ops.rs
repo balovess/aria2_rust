@@ -23,8 +23,8 @@
 use tracing::{debug, warn};
 
 use super::packet::{
-    SftpFileAttrs, SftpPacket, SSH_FX_EOF, SSH_FX_OK, SSH_FXF_APPEND, SSH_FXF_CREAT,
-    SSH_FXF_EXCL, SSH_FXF_READ, SSH_FXF_TRUNC, SSH_FXF_WRITE,
+    SSH_FX_EOF, SSH_FX_OK, SSH_FXF_APPEND, SSH_FXF_CREAT, SSH_FXF_EXCL, SSH_FXF_READ,
+    SSH_FXF_TRUNC, SSH_FXF_WRITE, SftpFileAttrs, SftpPacket,
 };
 use super::session::SftpSession;
 
@@ -282,9 +282,7 @@ impl<'a> SftpRemoteFile<'a> {
 
         match resp {
             SftpPacket::Data { data, .. } => Ok(data),
-            SftpPacket::Status { code, .. } if code == SSH_FX_EOF => {
-                Ok(Vec::new())
-            }
+            SftpPacket::Status { code, .. } if code == SSH_FX_EOF => Ok(Vec::new()),
             SftpPacket::Status { code, message, .. } => {
                 Err(format!("Read failed (code={}): {}", code, message))
             }
@@ -818,7 +816,10 @@ mod tests {
     #[test]
     fn test_open_flags_display() {
         assert_eq!(OpenFlags::readonly().to_string(), "OPEN(READ)");
-        assert_eq!(OpenFlags::write_create().to_string(), "OPEN(WRITE|CREAT|TRUNC)");
+        assert_eq!(
+            OpenFlags::write_create().to_string(),
+            "OPEN(WRITE|CREAT|TRUNC)"
+        );
         assert_eq!(OpenFlags::from_bits(0).to_string(), "OPEN(0x00000000)");
     }
 

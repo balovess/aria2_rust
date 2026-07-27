@@ -302,8 +302,8 @@ impl Default for DhtPeerAnnounceStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::constants::ID_LENGTH;
+    use super::*;
 
     fn test_info_hash(byte: u8) -> NodeId {
         NodeId([byte; ID_LENGTH])

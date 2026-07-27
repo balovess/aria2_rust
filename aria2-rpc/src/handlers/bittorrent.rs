@@ -5,9 +5,7 @@
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use crate::types::{
-    DownloadStatus, FileInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo,
-};
+use crate::types::{DownloadStatus, FileInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 
 impl RpcEngine {

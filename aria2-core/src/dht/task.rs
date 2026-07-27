@@ -233,10 +233,7 @@ impl LookupState {
                 dist < e_dist
             });
 
-            let entry = LookupEntry {
-                node,
-                used: false,
-            };
+            let entry = LookupEntry { node, used: false };
 
             match pos {
                 Some(idx) => self.entries.insert(idx, entry),
@@ -251,7 +248,8 @@ impl LookupState {
 
         // Deduplicate entries by node ID
         let mut seen = std::collections::HashSet::new();
-        self.entries.retain(|e| seen.insert(*e.node.id().as_bytes()));
+        self.entries
+            .retain(|e| seen.insert(*e.node.id().as_bytes()));
 
         self.check_finished();
     }
@@ -492,7 +490,8 @@ impl DhtBucketRefreshTask {
 
         let buckets = routing_table.get_buckets();
         for bucket in &buckets {
-            if self.force_refresh || bucket.time_since_last_update().as_secs() > BUCKET_REFRESH_INTERVAL_SECS as u64
+            if self.force_refresh
+                || bucket.time_since_last_update().as_secs() > BUCKET_REFRESH_INTERVAL_SECS as u64
             {
                 // Generate a random ID within this bucket's range
                 let target = bucket.random_id_in_range();
@@ -561,11 +560,7 @@ pub struct DhtReplaceNodeTask {
 
 impl DhtReplaceNodeTask {
     /// Create a new replace node task.
-    pub fn new(
-        bucket_prefix_len: usize,
-        target_node: DhtNode,
-        replacement_node: DhtNode,
-    ) -> Self {
+    pub fn new(bucket_prefix_len: usize, target_node: DhtNode, replacement_node: DhtNode) -> Self {
         Self {
             bucket_prefix_len,
             target_node,

@@ -19,7 +19,9 @@ use super::message::{
     DhtMessage, FindNodeQueryPayload, FindNodeResponsePayload, GetPeersQueryPayload,
     GetPeersResponsePayload, PingQueryPayload, PingResponsePayload, key, method,
 };
-use super::message_codec::{MessageCodecError, Result, extract_bytes, extract_bytes_from, extract_int_from, extract_str};
+use super::message_codec::{
+    MessageCodecError, Result, extract_bytes, extract_bytes_from, extract_int_from, extract_str,
+};
 use super::node_id::NodeId;
 
 // ── Public decode API ─────────────────────────────────────────────────────
@@ -31,13 +33,14 @@ use super::node_id::NodeId;
 ///
 /// C++: `DHTMessageFactoryImpl::createQueryMessage/createResponseMessage`
 pub fn decode(data: &[u8], sender_addr: SocketAddr) -> Result<DhtMessage> {
-    let (value, _) = BencodeValue::decode(data)
-        .map_err(MessageCodecError::BencodeDecode)?;
+    let (value, _) = BencodeValue::decode(data).map_err(MessageCodecError::BencodeDecode)?;
 
-    let dict = value.as_dict().ok_or_else(|| MessageCodecError::InvalidField {
-        field: "root".into(),
-        reason: "expected bencoded dictionary".into(),
-    })?;
+    let dict = value
+        .as_dict()
+        .ok_or_else(|| MessageCodecError::InvalidField {
+            field: "root".into(),
+            reason: "expected bencoded dictionary".into(),
+        })?;
 
     let transaction_id = extract_bytes(dict, key::T)?;
 
@@ -66,13 +69,14 @@ pub fn decode_response_with_method(
     sender_addr: SocketAddr,
     method_name: &str,
 ) -> Result<DhtMessage> {
-    let (value, _) = BencodeValue::decode(data)
-        .map_err(MessageCodecError::BencodeDecode)?;
+    let (value, _) = BencodeValue::decode(data).map_err(MessageCodecError::BencodeDecode)?;
 
-    let dict = value.as_dict().ok_or_else(|| MessageCodecError::InvalidField {
-        field: "root".into(),
-        reason: "expected bencoded dictionary".into(),
-    })?;
+    let dict = value
+        .as_dict()
+        .ok_or_else(|| MessageCodecError::InvalidField {
+            field: "root".into(),
+            reason: "expected bencoded dictionary".into(),
+        })?;
 
     let transaction_id = extract_bytes(dict, key::T)?;
     decode_response_inner(dict, &transaction_id, sender_addr, method_name)
@@ -273,12 +277,17 @@ fn decode_error(
         });
     }
 
-    let code = e_list[0].as_int().ok_or_else(|| MessageCodecError::InvalidField {
-        field: "e[0]".into(),
-        reason: "error code must be integer".into(),
-    })?;
+    let code = e_list[0]
+        .as_int()
+        .ok_or_else(|| MessageCodecError::InvalidField {
+            field: "e[0]".into(),
+            reason: "error code must be integer".into(),
+        })?;
 
-    let message = e_list[1].as_str().unwrap_or("<non-utf8 error message>").to_string();
+    let message = e_list[1]
+        .as_str()
+        .unwrap_or("<non-utf8 error message>")
+        .to_string();
 
     Ok(DhtMessage::Error {
         transaction_id: transaction_id.to_vec(),
@@ -312,16 +321,15 @@ fn decode_compact_peers(resp: &BTreeMap<Vec<u8>, BencodeValue>) -> Vec<CompactPe
         Some(l) => l,
         None => return Vec::new(),
     };
-    list.iter().filter_map(|v| CompactPeerInfo::unpack(v.as_bytes()?)).collect()
+    list.iter()
+        .filter_map(|v| CompactPeerInfo::unpack(v.as_bytes()?))
+        .collect()
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────
 
 /// Extract a 20-byte node ID from a nested dictionary, with length validation.
-fn extract_node_id(
-    dict: &BTreeMap<Vec<u8>, BencodeValue>,
-    key: &str,
-) -> Result<NodeId> {
+fn extract_node_id(dict: &BTreeMap<Vec<u8>, BencodeValue>, key: &str) -> Result<NodeId> {
     let bytes = extract_bytes_from(dict, key)?;
     if bytes.len() != ID_LENGTH {
         return Err(MessageCodecError::InvalidField {
@@ -375,7 +383,9 @@ mod tests {
             transaction_id: vec![0x03, 0x04],
             sender_id: test_id(0xAB),
             sender_addr: test_addr(),
-            payload: FindNodeQueryPayload { target: test_id(0xCD) },
+            payload: FindNodeQueryPayload {
+                target: test_id(0xCD),
+            },
         };
         let encoded = encode(&msg);
         let decoded = decode(&encoded, test_addr()).unwrap();
@@ -393,7 +403,9 @@ mod tests {
             transaction_id: vec![0x05, 0x06],
             sender_id: test_id(0xAB),
             sender_addr: test_addr(),
-            payload: GetPeersQueryPayload { info_hash: test_id(0xEF) },
+            payload: GetPeersQueryPayload {
+                info_hash: test_id(0xEF),
+            },
         };
         let encoded = encode(&msg);
         let decoded = decode(&encoded, test_addr()).unwrap();
@@ -442,7 +454,10 @@ mod tests {
 
     #[test]
     fn roundtrip_find_node_response() {
-        let node = CompactNodeInfo { node_id: test_id(0xCD), addr: test_addr() };
+        let node = CompactNodeInfo {
+            node_id: test_id(0xCD),
+            addr: test_addr(),
+        };
         let msg = DhtMessage::FindNodeResponse {
             transaction_id: vec![0x01],
             sender_id: test_id(0xAB),
@@ -450,7 +465,8 @@ mod tests {
             payload: FindNodeResponsePayload { nodes: vec![node] },
         };
         let encoded = encode(&msg);
-        let decoded = decode_response_with_method(&encoded, test_addr(), method::FIND_NODE).unwrap();
+        let decoded =
+            decode_response_with_method(&encoded, test_addr(), method::FIND_NODE).unwrap();
         if let DhtMessage::FindNodeResponse { payload, .. } = decoded {
             assert_eq!(payload.nodes.len(), 1);
         } else {
@@ -460,7 +476,10 @@ mod tests {
 
     #[test]
     fn roundtrip_get_peers_response() {
-        let node = CompactNodeInfo { node_id: test_id(0xCD), addr: test_addr() };
+        let node = CompactNodeInfo {
+            node_id: test_id(0xCD),
+            addr: test_addr(),
+        };
         let peer = CompactPeerInfo { addr: test_addr() };
         let msg = DhtMessage::GetPeersResponse {
             transaction_id: vec![0x02],
@@ -473,7 +492,8 @@ mod tests {
             },
         };
         let encoded = encode(&msg);
-        let decoded = decode_response_with_method(&encoded, test_addr(), method::GET_PEERS).unwrap();
+        let decoded =
+            decode_response_with_method(&encoded, test_addr(), method::GET_PEERS).unwrap();
         if let DhtMessage::GetPeersResponse { payload, .. } = decoded {
             assert_eq!(payload.token, vec![0x42]);
             assert_eq!(payload.nodes.len(), 1);
@@ -492,7 +512,8 @@ mod tests {
             payload: AnnouncePeerResponsePayload,
         };
         let encoded = encode(&msg);
-        let decoded = decode_response_with_method(&encoded, test_addr(), method::ANNOUNCE_PEER).unwrap();
+        let decoded =
+            decode_response_with_method(&encoded, test_addr(), method::ANNOUNCE_PEER).unwrap();
         assert!(decoded.is_response());
     }
 
@@ -531,7 +552,10 @@ mod tests {
         let mut dict = BTreeMap::new();
         dict.insert(b"y".to_vec(), BencodeValue::Bytes(b"q".to_vec()));
         let encoded = BencodeValue::Dict(dict).encode();
-        assert!(matches!(decode(&encoded, test_addr()), Err(MessageCodecError::MissingField(_))));
+        assert!(matches!(
+            decode(&encoded, test_addr()),
+            Err(MessageCodecError::MissingField(_))
+        ));
     }
 
     #[test]
@@ -544,7 +568,10 @@ mod tests {
         dict.insert(b"q".to_vec(), BencodeValue::Bytes(b"ping".to_vec()));
         dict.insert(b"a".to_vec(), BencodeValue::Dict(args));
         let encoded = BencodeValue::Dict(dict).encode();
-        assert!(matches!(decode(&encoded, test_addr()), Err(MessageCodecError::InvalidField { .. })));
+        assert!(matches!(
+            decode(&encoded, test_addr()),
+            Err(MessageCodecError::InvalidField { .. })
+        ));
     }
 
     #[test]
@@ -557,7 +584,10 @@ mod tests {
         dict.insert(b"q".to_vec(), BencodeValue::Bytes(b"unknown".to_vec()));
         dict.insert(b"a".to_vec(), BencodeValue::Dict(args));
         let encoded = BencodeValue::Dict(dict).encode();
-        assert!(matches!(decode(&encoded, test_addr()), Err(MessageCodecError::UnsupportedMethod(_))));
+        assert!(matches!(
+            decode(&encoded, test_addr()),
+            Err(MessageCodecError::UnsupportedMethod(_))
+        ));
     }
 
     #[test]

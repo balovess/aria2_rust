@@ -310,9 +310,7 @@ impl App {
                 .map(|v| v != "false")
                 .unwrap_or(true),
             // FTP
-            timeout: options
-                .get("timeout")
-                .and_then(|v| v.parse::<u64>().ok()),
+            timeout: options.get("timeout").and_then(|v| v.parse::<u64>().ok()),
             connect_timeout: options
                 .get("connect-timeout")
                 .and_then(|v| v.parse::<u64>().ok()),

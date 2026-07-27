@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-core"
-version = "0.2.4"
+version = "0.2.8"
 dependencies = [
  "adler32",
  "anyhow",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-protocol"
-version = "0.2.4"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-rpc"
-version = "0.2.4"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "aria2-core",

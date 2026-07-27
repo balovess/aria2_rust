@@ -21,8 +21,8 @@ use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, info, trace, warn};
 
 use super::constants::{
-    BUCKET_REFRESH_CHECK_INTERVAL_SECS, DHT_MAX_MESSAGE_SIZE,
-    PEER_ANNOUNCE_CHECK_INTERVAL_SECS, TOKEN_UPDATE_INTERVAL_SECS,
+    BUCKET_REFRESH_CHECK_INTERVAL_SECS, DHT_MAX_MESSAGE_SIZE, PEER_ANNOUNCE_CHECK_INTERVAL_SECS,
+    TOKEN_UPDATE_INTERVAL_SECS,
 };
 use super::dispatcher::DhtDispatcher;
 use super::node::DhtNode;
@@ -32,8 +32,7 @@ use super::receiver::{DhtReceiver, ReceiveAction};
 use super::routing_table::RoutingTable;
 use super::routing_table_ser;
 use super::task::{
-    DhtBucketRefreshTask, DhtLookupTask, DhtTask, DhtTaskQueue,
-    LookupKind, TaskExecutor,
+    DhtBucketRefreshTask, DhtLookupTask, DhtTask, DhtTaskQueue, LookupKind, TaskExecutor,
 };
 use super::token_tracker::TokenTracker;
 use super::transport::{AddressFamily, DhtTransport};
@@ -179,13 +178,16 @@ impl DhtEngine {
         }
 
         // Periodic task intervals
-        let mut token_update_interval = time::interval(Duration::from_secs(TOKEN_UPDATE_INTERVAL_SECS));
+        let mut token_update_interval =
+            time::interval(Duration::from_secs(TOKEN_UPDATE_INTERVAL_SECS));
         token_update_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let mut bucket_refresh_interval = time::interval(Duration::from_secs(BUCKET_REFRESH_CHECK_INTERVAL_SECS));
+        let mut bucket_refresh_interval =
+            time::interval(Duration::from_secs(BUCKET_REFRESH_CHECK_INTERVAL_SECS));
         bucket_refresh_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let mut peer_announce_interval = time::interval(Duration::from_secs(PEER_ANNOUNCE_CHECK_INTERVAL_SECS));
+        let mut peer_announce_interval =
+            time::interval(Duration::from_secs(PEER_ANNOUNCE_CHECK_INTERVAL_SECS));
         peer_announce_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let mut auto_save_interval = time::interval(Duration::from_secs(30 * 60));
@@ -277,7 +279,8 @@ impl DhtEngine {
     /// Initiate a peer lookup for the given info hash.
     pub fn lookup_peers(&mut self, info_hash: NodeId) {
         let mut task = DhtLookupTask::new(info_hash, LookupKind::Peer);
-        task.state_mut().startup(&self.routing_table, &self.local_id);
+        task.state_mut()
+            .startup(&self.routing_table, &self.local_id);
         task.startup();
         self.task_queue.add_immediate(Box::new(task));
     }
@@ -302,7 +305,10 @@ impl DhtEngine {
                 ReceiveAction::Respond(reply) => {
                     self.dispatcher.add_message(reply);
                 }
-                ReceiveAction::ResponseReceived { method, sender_addr } => {
+                ReceiveAction::ResponseReceived {
+                    method,
+                    sender_addr,
+                } => {
                     trace!(
                         method = %method,
                         addr = %sender_addr,
@@ -334,10 +340,9 @@ impl DhtEngine {
         }
 
         // Handle timeouts
-        let timed_out = self.receiver.handle_timeouts(
-            &mut self.dispatcher,
-            &mut self.routing_table,
-        );
+        let timed_out = self
+            .receiver
+            .handle_timeouts(&mut self.dispatcher, &mut self.routing_table);
         if !timed_out.is_empty() {
             trace!(count = timed_out.len(), "DHT queries timed out");
         }
@@ -360,7 +365,8 @@ impl DhtEngine {
                         // Start a find_node lookup to discover more nodes
                         let target = self.local_id;
                         let mut task = DhtLookupTask::new(target, LookupKind::Node);
-                        task.state_mut().startup(&self.routing_table, &self.local_id);
+                        task.state_mut()
+                            .startup(&self.routing_table, &self.local_id);
                         task.startup();
                         self.task_queue.add_immediate(Box::new(task));
                     }
@@ -404,7 +410,8 @@ impl DhtEngine {
         for info_hash in info_hashes {
             debug!(info_hash = %info_hash, "Re-announcing local info hash via DHT");
             let mut task = DhtLookupTask::new(*info_hash, LookupKind::Peer);
-            task.state_mut().startup(&self.routing_table, &self.local_id);
+            task.state_mut()
+                .startup(&self.routing_table, &self.local_id);
             task.startup();
             self.task_queue.add_immediate(Box::new(task));
         }
@@ -451,9 +458,7 @@ impl DhtEngine {
                 for node in result.nodes {
                     routing_table.add_node(node);
                 }
-                debug!(
-                    "Loaded DHT nodes from routing table file"
-                );
+                debug!("Loaded DHT nodes from routing table file");
             }
             Err(e) => {
                 debug!(error = %e, "No DHT routing table file found, starting fresh");

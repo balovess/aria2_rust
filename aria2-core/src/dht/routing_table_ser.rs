@@ -108,7 +108,10 @@ pub fn serialize_to_writer(table: &RoutingTable, mut writer: impl Write) -> io::
 
     // ── Collect all nodes from routing table ─────────────────────────────
     let buckets = table.get_buckets();
-    let all_nodes: Vec<&DhtNode> = buckets.iter().flat_map(|b| b.nodes().iter().map(|n| n.as_ref())).collect();
+    let all_nodes: Vec<&DhtNode> = buckets
+        .iter()
+        .flat_map(|b| b.nodes().iter().map(|n| n.as_ref()))
+        .collect();
 
     // ── Node count (8 bytes) ────────────────────────────────────────────
     let num_nodes = all_nodes.len() as u32;
@@ -254,8 +257,7 @@ pub fn deserialize_from_reader(mut reader: impl Read) -> io::Result<DeserializeR
 
     debug!(
         nodes = nodes.len(),
-        saved_at,
-        "DHT routing table deserialized successfully"
+        saved_at, "DHT routing table deserialized successfully"
     );
 
     Ok(DeserializeResult {
@@ -416,7 +418,10 @@ mod tests {
     }
 
     fn test_addr_v6() -> SocketAddr {
-        SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 6881)
+        SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            6881,
+        )
     }
 
     fn make_node(id_byte: u8, addr: SocketAddr) -> DhtNode {
@@ -431,10 +436,10 @@ mod tests {
 
         // Add some nodes
         for i in 1u8..5 {
-            let mut node = make_node(i, SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)),
-                6881 + i as u16,
-            ));
+            let mut node = make_node(
+                i,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)), 6881 + i as u16),
+            );
             node.mark_good();
             node.update_last_contact();
             table.add_node(node);
@@ -453,7 +458,10 @@ mod tests {
 
         // Verify node IDs match
         for node in &result.nodes {
-            assert_eq!(node.id().as_bytes()[0], ((node.addr().port() as u16 - 6881u16) & 0xFF) as u8);
+            assert_eq!(
+                node.id().as_bytes()[0],
+                ((node.addr().port() as u16 - 6881u16) & 0xFF) as u8
+            );
         }
     }
 
