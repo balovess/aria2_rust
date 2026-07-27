@@ -64,15 +64,11 @@ impl FtpDownloadCommand {
     ) -> Result<Self> {
         let (uri, options) = {
             let g = group.recover();
-            let uri = g
-                .uris()
-                .first()
-                .cloned()
-                .ok_or_else(|| {
-                    Aria2Error::Fatal(FatalError::Config(
-                        "RequestGroup has no URIs for FTP download".into(),
-                    ))
-                })?;
+            let uri = g.uris().first().cloned().ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "RequestGroup has no URIs for FTP download".into(),
+                ))
+            })?;
             let opts = g.options_arc();
             (uri, opts)
         };

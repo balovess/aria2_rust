@@ -37,6 +37,11 @@ rand.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls = { workspace = true, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile.workspace = true
+# Low-level hyper server used to serve axum over TLS streams (axum::serve
+# only accepts plain TCP; wrapping with tokio-rustls requires hyper directly).
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower-service = "0.3"
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }

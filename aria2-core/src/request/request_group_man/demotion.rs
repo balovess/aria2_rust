@@ -41,9 +41,7 @@ impl super::RequestGroupMan {
             // C++ checks `numCommand_ == 0` in the AbstractCommand destructor path.
             let is_terminal = matches!(
                 status,
-                DownloadStatus::Complete
-                    | DownloadStatus::Error(_)
-                    | DownloadStatus::Removed
+                DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
             );
 
             if num_cmd == 0 && is_terminal {
@@ -85,7 +83,10 @@ impl super::RequestGroupMan {
             info!(gid = gid.value(), "Demoted group from active to stopped");
             true
         } else {
-            warn!(gid = gid.value(), "Tried to demote group not found in active");
+            warn!(
+                gid = gid.value(),
+                "Tried to demote group not found in active"
+            );
             false
         }
     }
@@ -123,9 +124,9 @@ impl super::RequestGroupMan {
             let dep_guard = g.dependency.recover();
             if let Some(ref dep) = *dep_guard {
                 // Check if this is a CompletionDependency waiting on our GID.
-                if let Some(completion_dep) = dep
-                    .as_any()
-                    .downcast_ref::<crate::request::request_group::CompletionDependency>()
+                if let Some(completion_dep) =
+                    dep.as_any()
+                        .downcast_ref::<crate::request::request_group::CompletionDependency>()
                 {
                     if completion_dep.depends_on_gid == completed_gid {
                         completion_dep.mark_resolved();

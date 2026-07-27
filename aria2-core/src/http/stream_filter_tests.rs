@@ -161,18 +161,18 @@ fn test_chunked_early_eof() {
 
 #[test]
 fn test_chunked_multiple_chunks() {
-    // Multiple chunks: 5\r\nhello\r\n6\r\n world\r\n7\r\n!!!\r\n0\r\n\r\n
-    let chunked_data = b"5\r\nhello\r\n6\r\n world\r\n7\r\n!!!\r\n0\r\n\r\n";
+    // Multiple chunks: 5\r\nhello\r\n6\r\n world\r\n3\r\n!!!\r\n0\r\n\r\n
+    let chunked_data = b"5\r\nhello\r\n6\r\n world\r\n3\r\n!!!\r\n0\r\n\r\n";
 
     let mut decoder = ChunkedDecoder::new();
     let result = decoder
         .filter(chunked_data)
         .expect("Multi-chunk decode failed");
 
-    // Verify output contains data from all chunks (leading part should match exactly)
-    assert!(
-        result.starts_with(b"hello world!!!"),
-        "Output should start with concatenated chunk data: got {:?}",
+    // Verify output contains data from all chunks
+    assert_eq!(
+        result, b"hello world!!!",
+        "Output should be concatenated chunk data: got {:?}",
         result
     );
 }
@@ -452,4 +452,51 @@ fn test_chunked_large_size() {
 
     assert_eq!(result.len(), 100, "Should decode all 100 bytes");
     assert!(result.iter().all(|&b| b == b'X'), "All bytes should be X");
+}
+
+#[test]
+fn test_chunked_strict_crlf_after_data() {
+    // Strict CRLF enforcement after chunk data — matches C++ ChunkedDecodeFilter.
+    // After chunk data, the decoder expects exactly \r\n.
+    // Bare \r\n is the valid sequence.
+    let chunked_data = b"4\r\ntest\r\n0\r\n\r\n";
+
+    let mut decoder = ChunkedDecoder::new();
+    let result = decoder
+        .filter(chunked_data)
+        .expect("Valid CRLF after data should succeed");
+
+    assert_eq!(result, b"test", "Should decode 'test' with strict CRLF");
+}
+
+#[test]
+fn test_chunked_bare_lf_after_data_tolerated() {
+    // Bare LF after chunk data is tolerated for robustness (some broken servers).
+    // C++ is strict and would reject this, but we tolerate it for real-world compat.
+    let chunked_data = b"4\r\ntest\n0\r\n\r\n";
+
+    let mut decoder = ChunkedDecoder::new();
+    let result = decoder
+        .filter(chunked_data)
+        .expect("Bare LF after data should be tolerated");
+
+    assert_eq!(
+        result, b"test",
+        "Should decode 'test' even with bare LF after data"
+    );
+}
+
+#[test]
+fn test_chunked_invalid_byte_after_data() {
+    // Non-CRLF byte after chunk data should be rejected.
+    // After reading chunk data, the decoder expects CRLF; a letter is invalid.
+    let chunked_data = b"4\r\ntestX0\r\n\r\n";
+
+    let mut decoder = ChunkedDecoder::new();
+    let result = decoder.filter(chunked_data);
+
+    assert!(
+        result.is_err(),
+        "Non-CRLF byte after chunk data should be rejected"
+    );
 }

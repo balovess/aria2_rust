@@ -11,7 +11,6 @@ pub mod download_engine;
 pub mod download_progress;
 pub mod engine_command;
 pub mod engine_loop;
-pub mod task_spawner;
 pub mod http_segment_downloader;
 pub mod http_tail_reclaim;
 pub mod http_tracker_client;
@@ -25,6 +24,7 @@ pub mod range_prober;
 pub mod resume_data;
 pub mod retry_policy;
 pub mod sequential_download;
+pub mod task_spawner;
 pub mod timer;
 
 // ── BitTorrent feature-gated modules ──────────────────────────────────

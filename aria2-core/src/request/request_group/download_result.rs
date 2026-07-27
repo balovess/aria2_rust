@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::GroupId;
-use super::status::DownloadStatus;
 use super::result_code::DownloadResultCode;
+use super::status::DownloadStatus;
 
 /// File entry within a download result.
 ///
@@ -106,11 +106,7 @@ pub struct DownloadResult {
 
 impl DownloadResult {
     /// Create a new download result with identity fields and defaults.
-    pub fn new(
-        gid: GroupId,
-        status: DownloadStatus,
-        code: DownloadResultCode,
-    ) -> Self {
+    pub fn new(gid: GroupId, status: DownloadStatus, code: DownloadResultCode) -> Self {
         let message = match code {
             DownloadResultCode::Finished => "OK".to_string(),
             DownloadResultCode::Removed => "Download removed by user".to_string(),

@@ -1345,12 +1345,10 @@ async fn test_get_session_info_returns_session_id() {
 }
 
 #[tokio::test]
-async fn test_get_session_info_unique_per_call() {
+async fn test_get_session_info_consistent_per_call() {
     let engine = RpcEngine::new();
     let req1 = JsonRpcRequest::new("aria2.getSessionInfo", serde_json::json!([])).with_id(1);
     let resp1 = engine.handle_request(&req1).await;
-
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     let req2 = JsonRpcRequest::new("aria2.getSessionInfo", serde_json::json!([])).with_id(2);
     let resp2 = engine.handle_request(&req2).await;
@@ -1375,6 +1373,12 @@ async fn test_get_session_info_unique_per_call() {
     assert!(
         !sid1.is_empty() && !sid2.is_empty(),
         "Both session IDs should be non-empty"
+    );
+    // C++ aria2 generates sessionId_ once at engine construction and returns
+    // the same value on every call. The Rust port must match this behavior.
+    assert_eq!(
+        sid1, sid2,
+        "Session ID must be consistent across calls (C++ generates once at construction)"
     );
 }
 

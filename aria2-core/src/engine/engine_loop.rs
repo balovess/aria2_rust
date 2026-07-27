@@ -86,8 +86,7 @@ pub async fn run_engine_loop(
     let mut force_halt_requested = false;
 
     // Completion channel: spawned tasks send (GID, TaskResult) here when done.
-    let (completion_tx, mut completion_rx) =
-        mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(GroupId, TaskResult)>();
 
     let mut ticker = tokio::time::interval(tick_interval);
 
@@ -132,10 +131,16 @@ pub async fn run_engine_loop(
                             timeout,
                         },
                     ));
-                    debug!(gid = gid.value(), "Spawned download task for promoted group");
+                    debug!(
+                        gid = gid.value(),
+                        "Spawned download task for promoted group"
+                    );
                 }
                 None => {
-                    warn!(gid = gid.value(), "Failed to spawn download task for promoted group");
+                    warn!(
+                        gid = gid.value(),
+                        "Failed to spawn download task for promoted group"
+                    );
                     // Decrement the num_commands that spawn_download_task
                     // already incremented (it increments before checking URIs).
                     // Actually, spawn_download_task decrements on failure too.
@@ -273,30 +278,18 @@ async fn process_engine_commands(
                 }
             }
 
-            EngineCommand::TaskCompleted { gid, result } => {
-                // Decrement num_commands on the group.
-                let man = ctx.group_man.read().await;
-                if let Some(group) = man.find_group(gid) {
-                    let prev = group.recover().dec_commands();
-                    debug!(
-                        gid = gid.value(),
-                        prev, "Task completed, decremented num_commands"
-                    );
-
-                    // Update group status based on result.
-                    match result {
-                        TaskResult::Success => {
-                            group.recover_mut().mark_complete();
-                        }
-                        TaskResult::Failed(e) => {
-                            group.recover_mut().mark_error(e.to_string());
-                        }
-                        TaskResult::Cancelled => {
-                            // Group may be paused or halted — don't change status
-                            // if it's already in a terminal state.
-                        }
-                    }
-                }
+            EngineCommand::TaskCompleted { gid, result: _ } => {
+                // NOTE: TaskCompleted via the engine command channel is NOT the
+                // primary completion path. Spawned tasks report completion via
+                // the `completion_tx` channel, which is handled by
+                // `process_task_completions`. This variant exists for external
+                // callers (e.g., RPC) that need to signal completion without
+                // going through the completion channel. To avoid a double
+                // decrement of `num_commands`, we do NOT decrement here.
+                debug!(
+                    gid = gid.value(),
+                    "Received TaskCompleted via engine command channel (external signal)"
+                );
             }
 
             EngineCommand::PauseAll => {
@@ -425,16 +418,9 @@ async fn run_housekeeping(
     // ── Prune excess stopped results ─────────────────────────────────────
     {
         let man = ctx.group_man.read().await;
-        let stopped_count = man.stopped_count();
-        if stopped_count > MAX_STOPPED_RESULTS {
-            // Prune oldest entries. In C++ this is handled by
-            // `purgeDownloadResult()` triggered by a timer.
-            let excess = stopped_count - MAX_STOPPED_RESULTS;
-            for _ in 0..excess {
-                // Remove the oldest (first) result.
-                // TODO: add a method to StoppedResults for removing by index.
-            }
-            debug!("Pruned {} excess stopped results", excess);
+        let pruned = man.prune_stopped_results(MAX_STOPPED_RESULTS);
+        if pruned > 0 {
+            debug!("Pruned {} excess stopped results", pruned);
         }
     }
 

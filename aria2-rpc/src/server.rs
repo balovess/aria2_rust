@@ -629,14 +629,12 @@ impl RpcServer {
         let listener = TcpListener::bind(addr).await?;
 
         // Serve with or without TLS
-        if let Some(ref _tls_acceptor) = self.tls_acceptor {
-            // HTTPS mode
+        if let Some(ref tls_acceptor) = self.tls_acceptor {
+            // HTTPS mode — accept TCP connections, perform TLS handshake,
+            // then hand the encrypted stream to hyper/axum.
             tracing::info!("TLS enabled, serving HTTPS");
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await?;
+            self.serve_tls(listener, tls_acceptor.clone(), app)
+                .await?;
         } else {
             // HTTP mode
             axum::serve(
@@ -647,6 +645,67 @@ impl RpcServer {
         }
 
         Ok(())
+    }
+
+    /// Serve HTTPS by accepting TCP connections, wrapping each with TLS,
+    /// then dispatching to the axum router via hyper's low-level connection API.
+    ///
+    /// This follows the official axum `low-level-rustls` example pattern:
+    /// each incoming TCP connection is TLS-accepted, then handed to
+    /// `hyper_util::server::conn::auto::Builder` which handles both
+    /// HTTP/1.1 and HTTP/2 (h2) over the encrypted stream.
+    async fn serve_tls(
+        &self,
+        listener: tokio::net::TcpListener,
+        tls_acceptor: tokio_rustls::TlsAcceptor,
+        app: axum::Router,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use axum::extract::Request;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use std::net::SocketAddr;
+        use tower_service::Service;
+
+        loop {
+            let (cnx, remote_addr) = listener.accept().await?;
+            let tls_acceptor = tls_acceptor.clone();
+
+            // Convert the Router into a MakeService that provides
+            // ConnectInfo<SocketAddr> to handlers.
+            let mut make_service =
+                app.clone().into_make_service_with_connect_info::<SocketAddr>();
+
+            tokio::spawn(async move {
+                // Perform TLS handshake
+                let Ok(tls_stream) = tls_acceptor.accept(cnx).await else {
+                    tracing::error!(
+                        "TLS handshake failed for connection from {}",
+                        remote_addr
+                    );
+                    return;
+                };
+
+                // Call the MakeService to obtain a per-connection Router.
+                // IntoMakeServiceWithConnectInfo never returns Err, so unwrap is safe.
+                let router = make_service.call(remote_addr).await.unwrap();
+
+                // Bridge tokio AsyncRead/AsyncWrite → hyper's IO traits
+                let io = TokioIo::new(tls_stream);
+
+                // Build a hyper Service that delegates to the Router
+                let hyper_service =
+                    hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+                        router.clone().call(request)
+                    });
+
+                let result = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection_with_upgrades(io, hyper_service)
+                    .await;
+
+                if let Err(err) = result {
+                    tracing::warn!("HTTPS connection error from {}: {}", remote_addr, err);
+                }
+            });
+        }
     }
 }
 

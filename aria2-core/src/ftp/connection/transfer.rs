@@ -114,7 +114,20 @@ impl FtpClient {
 
     /// Download a file
     ///
-    /// Supports resume transfer by specifying an offset via the REST command.
+    /// Establishes a data connection, optionally sets a resume offset, then
+    /// sends RETR to begin the file transfer. The caller reads file contents
+    /// from the returned `TcpStream`.
+    ///
+    /// # Command Order (matching C++ FtpNegotiationCommand)
+    ///
+    /// 1. PASV / PORT — establish data connection
+    /// 2. REST — set resume offset (if offset > 0)
+    /// 3. RETR — begin file transfer
+    ///
+    /// The C++ `FtpNegotiationCommand` follows the sequence:
+    /// `SEQ_PREPARE_PASV` → `SEQ_SEND_REST` → `SEQ_SEND_RETR`.
+    /// REST must come **after** the data connection method so that some
+    /// servers (which reset their data-port state on REST) remain consistent.
     ///
     /// # Arguments
     ///
@@ -123,7 +136,8 @@ impl FtpClient {
     ///
     /// # Returns
     ///
-    /// Returns the data connection TcpStream for reading file contents
+    /// Returns the data connection `TcpStream` for reading file contents.
+    /// The caller is responsible for reading data and closing the stream.
     ///
     /// # Errors
     ///
@@ -139,7 +153,21 @@ impl FtpClient {
             remote_path, offset
         );
 
-        // If there is an offset, send REST command first
+        // Step 1: Establish data connection (PASV/PORT)
+        // C++ FtpNegotiationCommand: SEQ_PREPARE_PASV / SEQ_PREPARE_PORT
+        let data_stream = match self.mode {
+            FtpMode::Passive => match self.passive_mode().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!("Passive mode failed, trying active mode: {}", e);
+                    self.active_mode().await?
+                }
+            },
+            FtpMode::Active => self.active_mode().await?,
+        };
+
+        // Step 2: Send REST if resuming (after data connection, before RETR)
+        // C++ FtpNegotiationCommand: SEQ_SEND_REST → SEQ_RECV_REST
         if let Some(off) = offset
             && off > 0
         {
@@ -155,19 +183,8 @@ impl FtpClient {
             }
         }
 
-        // Establish data connection
-        let _data_stream = match self.mode {
-            FtpMode::Passive => match self.passive_mode().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    warn!("Passive mode failed, trying active mode: {}", e);
-                    self.active_mode().await?
-                }
-            },
-            FtpMode::Active => self.active_mode().await?,
-        };
-
-        // Send RETR command
+        // Step 3: Send RETR command
+        // C++ FtpNegotiationCommand: SEQ_SEND_RETR → SEQ_RECV_RETR
         self.send_command(&format!("RETR {}", remote_path)).await?;
         let retr_resp = self.read_response().await?;
 
@@ -183,12 +200,7 @@ impl FtpClient {
             )));
         }
 
-        // Note: the actual data stream needs to be managed by the caller
-        // Here we return a placeholder; in a real scenario the data connection should be returned
-        // Due to Rust's ownership rules, we need to redesign this part
-        // For simplicity, create a new connection description here
-        Err(Aria2Error::DownloadFailed(
-            "download_file needs to return the stream after data connection is established, please use a higher-level API".to_string(),
-        ))
+        debug!("Data connection ready for file download: {}", remote_path);
+        Ok(data_stream)
     }
 }

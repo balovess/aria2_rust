@@ -81,9 +81,7 @@ impl ReservedQueue {
         gid: crate::request::request_group::GroupId,
     ) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
         let mut groups = self.groups.recover_mut();
-        let pos = groups
-            .iter()
-            .position(|g| g.recover().gid() == gid)?;
+        let pos = groups.iter().position(|g| g.recover().gid() == gid)?;
         groups.remove(pos)
     }
 
@@ -102,15 +100,11 @@ impl ReservedQueue {
         how: PositionMode,
     ) -> Option<usize> {
         let mut groups = self.groups.recover_mut();
-        let current = groups
-            .iter()
-            .position(|g| g.recover().gid() == gid)?;
+        let current = groups.iter().position(|g| g.recover().gid() == gid)?;
 
         let new_pos = match how {
             PositionMode::SetFromStart => pos as usize,
-            PositionMode::MoveFromStart => {
-                (current as i32 + pos).max(0) as usize
-            }
+            PositionMode::MoveFromStart => (current as i32 + pos).max(0) as usize,
             PositionMode::SetFromEnd => groups.len().saturating_sub(pos as usize + 1),
             PositionMode::MoveFromEnd => {
                 let from_end = groups.len() as i32 - current as i32 - 1;

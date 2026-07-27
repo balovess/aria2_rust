@@ -14,8 +14,8 @@ mod stopped;
 
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tracing::{debug, info};
 
 use reserved::ReservedQueue;
@@ -79,10 +79,15 @@ impl RequestGroupMan {
     pub fn add_group(&self, uris: Vec<String>, options: DownloadOptions) -> Result<GroupId> {
         let gid = self.generate_gid();
         let group = RequestGroup::new(gid, uris, options);
-        self.reserved.push_back(Arc::new(std::sync::RwLock::new(group)));
+        self.reserved
+            .push_back(Arc::new(std::sync::RwLock::new(group)));
 
         info!("Adding download task #{} (reserved)", gid.value());
-        debug!("Current reserved: {}, active: {}", self.reserved.len(), self.active.len());
+        debug!(
+            "Current reserved: {}, active: {}",
+            self.reserved.len(),
+            self.active.len()
+        );
 
         Ok(gid)
     }
@@ -93,7 +98,10 @@ impl RequestGroupMan {
     pub fn add_group_arc(&self, group: Arc<std::sync::RwLock<RequestGroup>>) {
         let gid = group.recover().gid();
         self.reserved.push_back(group);
-        info!("Adding download task #{} (reserved, pre-constructed)", gid.value());
+        info!(
+            "Adding download task #{} (reserved, pre-constructed)",
+            gid.value()
+        );
     }
 
     /// Insert a download group under a caller-chosen GID (used by RPC).
@@ -111,8 +119,12 @@ impl RequestGroupMan {
             )));
         }
         let group = RequestGroup::new(gid, uris, options);
-        self.reserved.push_back(Arc::new(std::sync::RwLock::new(group)));
-        info!("Adding download task (RPC) #{} (reserved)", gid.to_hex_string());
+        self.reserved
+            .push_back(Arc::new(std::sync::RwLock::new(group)));
+        info!(
+            "Adding download task (RPC) #{} (reserved)",
+            gid.to_hex_string()
+        );
         Ok(())
     }
 
@@ -154,7 +166,11 @@ impl RequestGroupMan {
             let mut group = group_lock.recover_mut();
             group.remove()?;
             info!("Removing download task #{}", gid.value());
-            debug!("Remaining: active={}, reserved={}", self.active.len(), self.reserved.len());
+            debug!(
+                "Remaining: active={}, reserved={}",
+                self.active.len(),
+                self.reserved.len()
+            );
         }
         Ok(())
     }
@@ -318,7 +334,10 @@ impl RequestGroupMan {
             .iter_snapshot()
             .into_iter()
             .filter(|g| {
-                matches!(g.recover().status(), DownloadStatus::Waiting | DownloadStatus::Paused)
+                matches!(
+                    g.recover().status(),
+                    DownloadStatus::Waiting | DownloadStatus::Paused
+                )
             })
             .collect()
     }
@@ -344,7 +363,14 @@ impl RequestGroupMan {
     /// 0 means unlimited.
     pub fn set_max_concurrent(&self, max: u32) {
         self.max_concurrent.store(max, Ordering::Relaxed);
-        info!("Max concurrent downloads set to {}", if max == 0 { "unlimited".to_string() } else { max.to_string() });
+        info!(
+            "Max concurrent downloads set to {}",
+            if max == 0 {
+                "unlimited".to_string()
+            } else {
+                max.to_string()
+            }
+        );
     }
 
     // ── Global Speed Limits ─────────────────────────────────────────────
@@ -426,6 +452,19 @@ impl RequestGroupMan {
         self.stopped.remove_by_hex(hex)
     }
 
+    /// Prune excess stopped results, keeping at most `max` entries.
+    /// Mirrors C++ `purgeDownloadResult()` triggered by a timer.
+    /// Returns the number of pruned results.
+    pub fn prune_stopped_results(&self, max: usize) -> usize {
+        let count = self.stopped.len();
+        if count > max {
+            let excess = count - max;
+            self.stopped.remove_oldest(excess)
+        } else {
+            0
+        }
+    }
+
     // ── Internal ────────────────────────────────────────────────────────
 
     fn generate_gid(&self) -> GroupId {
@@ -485,7 +524,12 @@ mod tests {
     #[test]
     fn test_add_group_goes_to_reserved() {
         let man = RequestGroupMan::new();
-        let gid = man.add_group(vec!["http://example.com/file.bin".to_string()], DownloadOptions::default()).unwrap();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
         assert_eq!(man.active.len(), 0, "No groups should be active yet");
         assert_eq!(man.reserved.len(), 1, "Group should be in reserved queue");
         assert_eq!(man.count(), 1);
@@ -506,7 +550,9 @@ mod tests {
     #[test]
     fn test_find_group_searches_both() {
         let man = RequestGroupMan::new();
-        let gid1 = man.add_group(vec!["http://a.com".to_string()], DownloadOptions::default()).unwrap();
+        let gid1 = man
+            .add_group(vec!["http://a.com".to_string()], DownloadOptions::default())
+            .unwrap();
 
         // Manually add a group to active (normally done by promotion).
         let gid2 = GroupId(999);
@@ -532,7 +578,11 @@ mod tests {
     fn test_download_finished() {
         let man = RequestGroupMan::new();
         assert!(man.download_finished());
-        man.add_group(vec!["http://example.com".to_string()], DownloadOptions::default()).unwrap();
+        man.add_group(
+            vec!["http://example.com".to_string()],
+            DownloadOptions::default(),
+        )
+        .unwrap();
         assert!(!man.download_finished());
     }
 }

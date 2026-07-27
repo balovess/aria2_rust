@@ -26,31 +26,20 @@ pub enum EngineCommand {
     },
 
     /// Remove a download group by GID (from either active or reserved).
-    RemoveDownload {
-        gid: GroupId,
-    },
+    RemoveDownload { gid: GroupId },
 
     /// Pause an active or reserved download.
-    Pause {
-        gid: GroupId,
-    },
+    Pause { gid: GroupId },
 
     /// Force-pause an active download (abort in-flight commands).
-    ForcePause {
-        gid: GroupId,
-    },
+    ForcePause { gid: GroupId },
 
     /// Unpause a paused download (moves it back to waiting for promotion).
-    Unpause {
-        gid: GroupId,
-    },
+    Unpause { gid: GroupId },
 
     /// A spawned download task completed (successfully or with error).
     /// The engine uses this to decrement `num_commands` and check for demotion.
-    TaskCompleted {
-        gid: GroupId,
-        result: TaskResult,
-    },
+    TaskCompleted { gid: GroupId, result: TaskResult },
 
     /// Pause all active and reserved downloads.
     PauseAll,
@@ -62,19 +51,13 @@ pub enum EngineCommand {
     UnpauseAll,
 
     /// Request graceful halt of all downloads (let in-flight chunks finish).
-    HaltAll {
-        reason: HaltReason,
-    },
+    HaltAll { reason: HaltReason },
 
     /// Request forced halt of all downloads (abort immediately).
-    ForceHaltAll {
-        reason: HaltReason,
-    },
+    ForceHaltAll { reason: HaltReason },
 
     /// Change the maximum concurrent download limit.
-    SetMaxConcurrent {
-        max: u32,
-    },
+    SetMaxConcurrent { max: u32 },
 }
 
 /// Result of a completed download task, sent back to the engine loop.

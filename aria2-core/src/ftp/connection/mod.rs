@@ -1,7 +1,7 @@
 //! FTP protocol client implementation
 //!
 //! Provides an async FTP client supporting passive/active mode, binary transfer,
-//! directory listing parsing, and more.
+//! directory listing parsing, FTPS (FTP over TLS per RFC 4217), and more.
 
 mod commands;
 mod connector;
@@ -11,6 +11,7 @@ mod negotiation;
 mod parser;
 mod proxy_get;
 mod proxy_tunnel;
+mod tls;
 mod transfer;
 mod types;
 
@@ -18,7 +19,10 @@ mod types;
 mod tests;
 
 // Re-export all public types to preserve the original API
-pub use types::{FtpClient, FtpFeatures, FtpFileInfo, FtpMode, FtpResponse};
+pub use types::{FtpClient, FtpControlStream, FtpFeatures, FtpFileInfo, FtpMode, FtpResponse, FtpTlsMode, FtpsConfig, TlsVersion};
+
+// Re-export FTPS TLS functions
+pub use tls::{build_tls_connector, upgrade_control_stream, upgrade_data_stream};
 
 // Re-export negotiation types
 pub use negotiation::{

@@ -81,7 +81,10 @@ impl BtPeerInteractive {
                 .receive_messages(conn, is_in_allowed_fast.clone())
                 .await?;
             self.num_received_message = count;
-            return Ok(InteractionResult::Continue { pex_pending: false, pex_update });
+            return Ok(InteractionResult::Continue {
+                pex_pending: false,
+                pex_update,
+            });
         }
 
         // ── Step 1: checkActiveInteraction ──────────────────────────────
@@ -287,7 +290,10 @@ impl BtPeerInteractive {
             warn!("Failed to flush send buffer: {}", e);
         }
 
-        Ok(InteractionResult::Continue { pex_pending, pex_update })
+        Ok(InteractionResult::Continue {
+            pex_pending,
+            pex_update,
+        })
     }
 
     // ── Message dispatch ────────────────────────────────────────────────

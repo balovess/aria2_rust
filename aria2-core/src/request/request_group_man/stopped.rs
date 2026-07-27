@@ -60,6 +60,16 @@ impl StoppedResults {
         count
     }
 
+    /// Remove the oldest (first) N results.
+    /// Mirrors C++ `RequestGroupMan::purgeDownloadResult()` with limit.
+    /// Used by housekeeping to enforce `MAX_DOWNLOAD_RESULT`.
+    pub fn remove_oldest(&self, count: usize) -> usize {
+        let mut results = self.results.recover_mut();
+        let to_remove = count.min(results.len());
+        results.drain(..to_remove);
+        to_remove
+    }
+
     /// Get results in the given range (offset, count).
     /// Returns a snapshot for RPC `tellStopped` pagination.
     /// Supports negative offset for reverse pagination (C++ `getPaginationRange`).
@@ -78,12 +88,7 @@ impl StoppedResults {
             return Vec::new();
         }
 
-        results
-            .iter()
-            .skip(start)
-            .take(count)
-            .cloned()
-            .collect()
+        results.iter().skip(start).take(count).cloned().collect()
     }
 
     /// Iterate over all results (read-only snapshot).

@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use super::rpc_helpers::to_aria2_wire_format;
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
-use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
+use super::types::{GlobalOptions, PeerInfo, SessionInfo, StatusInfo, TaskOptions};
 use super::websocket::EventPublisher;
 #[cfg(feature = "bittorrent")]
 use aria2_core::TorrentFileEntry;
@@ -51,6 +51,10 @@ pub struct RpcEngine {
     pub(crate) engine_cmd_tx: Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
     /// Cumulative count of stopped downloads since session start (atomic).
     pub(crate) num_stopped_total: AtomicUsize,
+    /// Session information generated once at engine construction.
+    /// C++ aria2 generates sessionId_ once and returns it consistently;
+    /// we match that by storing it here rather than creating a new one per request.
+    pub(crate) session_info: SessionInfo,
 }
 
 /// Internal state for an active download task.
@@ -180,6 +184,7 @@ impl RpcEngine {
             cmd_tx: None,
             engine_cmd_tx: None,
             num_stopped_total: AtomicUsize::new(0),
+            session_info: SessionInfo::new(),
         }
     }
 

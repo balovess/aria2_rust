@@ -306,26 +306,19 @@ impl DownloadEngine {
     /// Requires `request_group_man` to be set via `set_save_session()` or
     /// directly. If not set, falls back to the v1 loop.
     pub async fn run_v2(mut self) -> Result<()> {
-        let group_man = self
-            .request_group_man
-            .take()
-            .ok_or_else(|| Aria2Error::DownloadFailed(
-                "run_v2 requires request_group_man to be set".to_string()
-            ))?;
+        let group_man = self.request_group_man.take().ok_or_else(|| {
+            Aria2Error::DownloadFailed("run_v2 requires request_group_man to be set".to_string())
+        })?;
 
         let shutdown_rx = self
             .shutdown_rx
             .take()
-            .ok_or_else(|| Aria2Error::DownloadFailed(
-                "shutdown_rx already taken".to_string()
-            ))?;
+            .ok_or_else(|| Aria2Error::DownloadFailed("shutdown_rx already taken".to_string()))?;
 
         let engine_cmd_rx = self
             .engine_cmd_rx
             .take()
-            .ok_or_else(|| Aria2Error::DownloadFailed(
-                "engine_cmd_rx already taken".to_string()
-            ))?;
+            .ok_or_else(|| Aria2Error::DownloadFailed("engine_cmd_rx already taken".to_string()))?;
 
         let ctx = EngineLoopContext {
             group_man,
@@ -335,13 +328,8 @@ impl DownloadEngine {
             keep_alive: self.keep_alive,
         };
 
-        super::engine_loop::run_engine_loop(
-            ctx,
-            engine_cmd_rx,
-            shutdown_rx,
-            self.tick_interval,
-        )
-        .await;
+        super::engine_loop::run_engine_loop(ctx, engine_cmd_rx, shutdown_rx, self.tick_interval)
+            .await;
 
         Ok(())
     }

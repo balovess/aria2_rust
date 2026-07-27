@@ -175,7 +175,8 @@ impl DownloadControlFlags {
         self.restart_requested.store(false, Ordering::Release);
         self.close_file_requested.store(false, Ordering::Release);
         self.save_control_requested.store(false, Ordering::Release);
-        self.remove_control_requested.store(false, Ordering::Release);
+        self.remove_control_requested
+            .store(false, Ordering::Release);
     }
 
     /// Check whether any control flag is set (for quick early-exit checks).
@@ -227,7 +228,8 @@ impl DownloadControlFlags {
 
     /// Clear the remove control flag after processing.
     pub fn clear_remove_control(&self) {
-        self.remove_control_requested.store(false, Ordering::Release);
+        self.remove_control_requested
+            .store(false, Ordering::Release);
     }
 }
 
@@ -247,7 +249,10 @@ impl std::fmt::Debug for DownloadControlFlags {
             .field("restart_requested", &self.is_restart_requested())
             .field("close_file_requested", &self.is_close_file_requested())
             .field("save_control_requested", &self.is_save_control_requested())
-            .field("remove_control_requested", &self.is_remove_control_requested())
+            .field(
+                "remove_control_requested",
+                &self.is_remove_control_requested(),
+            )
             .finish()
     }
 }

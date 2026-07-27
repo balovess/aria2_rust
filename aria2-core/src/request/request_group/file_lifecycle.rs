@@ -34,8 +34,15 @@ impl super::RequestGroup {
     /// Returns `true` if a control file was saved, `false` if saving was
     /// disabled (e.g. during hash checking) or no progress file exists.
     pub fn save_control_file(&self) -> bool {
-        if !self.save_control_file_enabled.recover().load(Ordering::SeqCst) {
-            tracing::debug!(gid = self.gid.value(), "Control file saving disabled, skipping");
+        if !self
+            .save_control_file_enabled
+            .recover()
+            .load(Ordering::SeqCst)
+        {
+            tracing::debug!(
+                gid = self.gid.value(),
+                "Control file saving disabled, skipping"
+            );
             return false;
         }
 

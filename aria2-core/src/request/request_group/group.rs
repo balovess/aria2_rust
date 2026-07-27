@@ -149,7 +149,9 @@ impl RequestGroup {
             halt_reason: std::sync::RwLock::new(HaltReason::None),
             last_error_code: std::sync::RwLock::new(DownloadResultCode::UnknownError),
             last_error_message: std::sync::RwLock::new(String::new()),
-            save_control_file_enabled: std::sync::RwLock::new(std::sync::atomic::AtomicBool::new(true)),
+            save_control_file_enabled: std::sync::RwLock::new(std::sync::atomic::AtomicBool::new(
+                true,
+            )),
             dependency: std::sync::RwLock::new(None),
         }
     }

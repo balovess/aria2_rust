@@ -15,6 +15,7 @@ use aria2_core::constants as core_constants;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::util::rwlock_ext::RwLockRecover;
+use tokio_util::sync::CancellationToken;
 
 impl RpcEngine {
     /// Handle `aria2.addUri` - Add a new download task from URI(s).
@@ -370,6 +371,13 @@ impl RpcEngine {
             Some(state) => {
                 state.status.status = DownloadStatus::Active;
 
+                // Replace the cancelled CancellationToken with a fresh one so
+                // the resumed download does not immediately abort. The old token
+                // was cancelled during handle_pause / handle_force_pause and
+                // would otherwise cause the download loop to exit on its first
+                // check_cancelled() call.
+                state.cancel_token = Some(CancellationToken::new());
+
                 // When the RPC server is wired to a running DownloadEngine,
                 // create a new DownloadCommand for the paused group and submit
                 // it so the download actually resumes. Without this, the status
@@ -629,7 +637,9 @@ impl RpcEngine {
     /// This method performs a graceful shutdown:
     /// 1. Saves current session state
     /// 2. Marks all active downloads as paused
-    /// 3. Returns "OK. N active downloads paused." to indicate shutdown initiated
+    /// 3. Sends `EngineCommand::HaltAll` to the engine loop so it stops
+    ///    accepting new downloads and waits for in-flight chunks to finish
+    /// 4. Returns "OK. N active downloads paused." to indicate shutdown initiated
     pub async fn handle_shutdown(
         &self,
         req: &JsonRpcRequest,
@@ -648,6 +658,15 @@ impl RpcEngine {
         }
         drop(tasks);
 
+        // Propagate HaltAll to the engine loop so it stops running.
+        if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
+            use aria2_core::engine::engine_command::EngineCommand;
+            use aria2_core::request::request_group::HaltReason;
+            let _ = engine_cmd_tx.send(EngineCommand::HaltAll {
+                reason: HaltReason::ShutdownSignal,
+            });
+        }
+
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::Value::String(format!("OK. {} active downloads paused.", active_count)),
@@ -659,7 +678,9 @@ impl RpcEngine {
     /// This method performs an immediate shutdown:
     /// 1. Cancels all active downloads via CancellationToken
     /// 2. Clears all task state
-    /// 3. Returns "OK" to indicate shutdown completed
+    /// 3. Sends `EngineCommand::ForceHaltAll` to the engine loop so it
+    ///    terminates immediately
+    /// 4. Returns "OK" to indicate shutdown completed
     pub async fn handle_force_shutdown(
         &self,
         req: &JsonRpcRequest,
@@ -676,6 +697,15 @@ impl RpcEngine {
         }
         let cancelled_count = tasks.len();
         tasks.clear();
+
+        // Propagate ForceHaltAll to the engine loop so it terminates immediately.
+        if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
+            use aria2_core::engine::engine_command::EngineCommand;
+            use aria2_core::request::request_group::HaltReason;
+            let _ = engine_cmd_tx.send(EngineCommand::ForceHaltAll {
+                reason: HaltReason::ShutdownSignal,
+            });
+        }
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),

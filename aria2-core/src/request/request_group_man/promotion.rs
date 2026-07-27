@@ -42,7 +42,10 @@ impl RequestGroupMan {
             // In C++ this is: `if((*i)->isPauseRequested()) continue;`
             if group.recover().is_pause_requested() {
                 self.reserved.push_front(group);
-                debug!(gid = gid.value(), "Skipping paused group, stopping promotion");
+                debug!(
+                    gid = gid.value(),
+                    "Skipping paused group, stopping promotion"
+                );
                 break;
             }
 
@@ -144,7 +147,10 @@ impl RequestGroupMan {
         }
 
         if paused > 0 {
-            info!(paused, "Paused excess active downloads to respect max_concurrent limit");
+            info!(
+                paused,
+                "Paused excess active downloads to respect max_concurrent limit"
+            );
         }
         paused
     }

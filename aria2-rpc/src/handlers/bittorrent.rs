@@ -6,7 +6,7 @@
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{
-    DownloadStatus, FileInfo, ServerInfo, ServerInfoIndex, SessionInfo, UriEntry, VersionInfo,
+    DownloadStatus, FileInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo,
 };
 use crate::websocket::{DownloadEvent, EventType};
 
@@ -260,11 +260,13 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.getSessionInfo` - Get session identifier and start time.
+    ///
+    /// Returns the same `sessionId` for every call within a session, matching
+    /// C++ aria2 which generates `sessionId_` once at engine construction.
     pub fn handle_session_info(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let session_info = SessionInfo::new();
         JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            session_info.to_json_value(),
+            self.session_info.to_json_value(),
         )
     }
 

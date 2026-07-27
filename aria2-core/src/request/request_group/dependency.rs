@@ -73,7 +73,8 @@ impl CompletionDependency {
 
     /// Manually mark this dependency as resolved (for testing).
     pub fn mark_resolved(&self) {
-        self.completed.store(true, std::sync::atomic::Ordering::Release);
+        self.completed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 

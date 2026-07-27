@@ -118,16 +118,25 @@ fn test_peer_connection_state_equality() {
 
 #[test]
 fn test_interaction_result_variants() {
-    let r = InteractionResult::Continue { pex_pending: false, pex_update: None };
+    let r = InteractionResult::Continue {
+        pex_pending: false,
+        pex_update: None,
+    };
     match r {
-        InteractionResult::Continue { pex_pending, pex_update } => {
+        InteractionResult::Continue {
+            pex_pending,
+            pex_update,
+        } => {
             assert!(!pex_pending);
             assert!(pex_update.is_none());
         }
         _ => panic!("Expected Continue variant"),
     }
 
-    let r = InteractionResult::Continue { pex_pending: true, pex_update: None };
+    let r = InteractionResult::Continue {
+        pex_pending: true,
+        pex_update: None,
+    };
     match r {
         InteractionResult::Continue { pex_pending, .. } => {
             assert!(pex_pending);

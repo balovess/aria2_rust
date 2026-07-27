@@ -46,38 +46,33 @@ impl super::RequestGroup {
                     (DownloadResultCode::Finished, "OK".to_string())
                 }
             }
-            DownloadStatus::Removed => {
-                (
-                    DownloadResultCode::Removed,
-                    "Download removed by user".to_string(),
-                )
-            }
-            DownloadStatus::Paused => {
-                (DownloadResultCode::Paused, "Download paused".to_string())
-            }
+            DownloadStatus::Removed => (
+                DownloadResultCode::Removed,
+                "Download removed by user".to_string(),
+            ),
+            DownloadStatus::Paused => (DownloadResultCode::Paused, "Download paused".to_string()),
             DownloadStatus::Error(_) => {
                 // Use structured error code if available
                 if last_code != DownloadResultCode::UnknownError {
                     (last_code, last_msg)
                 } else {
-                    (DownloadResultCode::UnknownError, "Unknown error".to_string())
+                    (
+                        DownloadResultCode::UnknownError,
+                        "Unknown error".to_string(),
+                    )
                 }
             }
             DownloadStatus::Waiting | DownloadStatus::Active => {
                 // Download was interrupted (e.g. by shutdown)
                 match halt_reason {
-                    HaltReason::ShutdownSignal => {
-                        (
-                            DownloadResultCode::InProgress,
-                            "Download interrupted by shutdown".to_string(),
-                        )
-                    }
-                    HaltReason::UserRequest => {
-                        (
-                            DownloadResultCode::Removed,
-                            "Download removed by user".to_string(),
-                        )
-                    }
+                    HaltReason::ShutdownSignal => (
+                        DownloadResultCode::InProgress,
+                        "Download interrupted by shutdown".to_string(),
+                    ),
+                    HaltReason::UserRequest => (
+                        DownloadResultCode::Removed,
+                        "Download removed by user".to_string(),
+                    ),
                     HaltReason::None => {
                         if last_code != DownloadResultCode::UnknownError {
                             (last_code, last_msg)

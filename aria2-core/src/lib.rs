@@ -82,6 +82,8 @@ pub mod checksum;
 pub mod colorized_stream;
 pub mod config;
 pub mod constants;
+#[cfg(feature = "bittorrent")]
+pub mod dht;
 pub mod dns;
 pub mod download;
 pub mod engine;

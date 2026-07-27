@@ -13,8 +13,9 @@ pub(super) enum ChunkState {
     ReadingSize,
     /// Reading chunk data
     ReadingData { remaining: usize },
-    /// Reading \r\n after data (chunk data end marker)
-    ReadingDataEnd,
+    /// Reading CRLF after data (chunk data end marker).
+    /// Strictly expects `\r\n` in sequence, matching C++ ChunkedDecodeFilter.
+    ReadingDataEnd { saw_cr: bool },
     /// Chunked encoding complete (encountered size=0 terminator chunk)
     Complete,
     /// Error occurred
@@ -227,8 +228,8 @@ impl StreamFilter for ChunkedDecoder {
                     let new_remaining = remaining_bytes - to_copy;
 
                     if new_remaining == 0 {
-                        // Current chunk data fully read, expect next \r\n
-                        self.state = ChunkState::ReadingDataEnd;
+                        // Current chunk data fully read, expect CRLF
+                        self.state = ChunkState::ReadingDataEnd { saw_cr: false };
                         self.current_chunk_remaining = 0;
                     } else {
                         // Update remaining count in state
@@ -239,17 +240,45 @@ impl StreamFilter for ChunkedDecoder {
                     }
                 }
 
-                ChunkState::ReadingDataEnd => {
-                    // Skip \r\n after chunk data
+                ChunkState::ReadingDataEnd { saw_cr } => {
+                    // Strictly expect CRLF after chunk data, matching C++ ChunkedDecodeFilter.
                     let byte = input[pos];
-                    if byte == b'\r' || byte == b'\n' {
-                        pos += 1; // Skip \r or \n
-                    // Continue in ReadingDataEnd state
+                    if !saw_cr {
+                        if byte == b'\r' {
+                            // Saw CR, now expect LF
+                            self.state = ChunkState::ReadingDataEnd { saw_cr: true };
+                            pos += 1;
+                        } else if byte == b'\n' {
+                            // Tolerate bare LF for robustness (some servers send just \n)
+                            // C++ is strict, but real-world compatibility requires this
+                            self.state = ChunkState::ReadingSize;
+                            pos += 1;
+                        } else {
+                            // Expected CRLF but got unexpected byte — protocol error
+                            self.state = ChunkState::Error(format!(
+                                "Expected CRLF after chunk data, got byte 0x{:02x}",
+                                byte
+                            ));
+                            return Err(Aria2Error::Parse(format!(
+                                "Expected CRLF after chunk data, got byte 0x{:02x}",
+                                byte
+                            )));
+                        }
                     } else {
-                        // Non-newline character encountered, \r\n has been consumed
-                        // Switch to ReadingSize to process this character
-                        self.state = ChunkState::ReadingSize;
-                        // Don't increment pos, let next loop iteration handle this character
+                        // Already saw CR, expect LF
+                        if byte == b'\n' {
+                            self.state = ChunkState::ReadingSize;
+                            pos += 1;
+                        } else {
+                            self.state = ChunkState::Error(format!(
+                                "Expected LF after CR in chunk terminator, got byte 0x{:02x}",
+                                byte
+                            ));
+                            return Err(Aria2Error::Parse(format!(
+                                "Expected LF after CR in chunk terminator, got byte 0x{:02x}",
+                                byte
+                            )));
+                        }
                     }
                 }
 
@@ -285,7 +314,7 @@ impl StreamFilter for ChunkedDecoder {
             }
             ChunkState::ReadingSize
             | ChunkState::ReadingData { .. }
-            | ChunkState::ReadingDataEnd => {
+            | ChunkState::ReadingDataEnd { .. } => {
                 // Incomplete state, data may be lost
                 let remaining = std::mem::take(&mut self.output_buffer);
                 if remaining.is_empty() {

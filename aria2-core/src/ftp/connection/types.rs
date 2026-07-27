@@ -1,10 +1,12 @@
 //! FTP types and data structures
 //!
 //! Defines the core types used throughout the FTP client implementation:
-//! connection mode, server response, file metadata, and the client struct.
+//! connection mode, TLS mode, server response, file metadata, and the client struct.
 
-use tokio::io::BufReader;
+use std::path::PathBuf;
+
 use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
 use tokio::time::Duration;
 
 /// FTP data connection mode
@@ -15,6 +17,100 @@ pub enum FtpMode {
     Passive,
     /// Active mode (server connects to client data port)
     Active,
+}
+
+/// FTPS (FTP over TLS) connection mode per RFC 4217.
+///
+/// Controls when and how TLS is applied to the FTP session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FtpTlsMode {
+    /// No TLS — plain FTP on the standard control/data channels.
+    #[default]
+    None,
+    /// Explicit FTPS — connect in plaintext, then upgrade via AUTH TLS.
+    ///
+    /// After the 220 greeting, the client sends `AUTH TLS`, receives 234,
+    /// and upgrades the control stream to TLS. Data connections are also
+    /// upgraded if `PROT P` was negotiated.
+    ///
+    /// This is the most common FTPS mode (RFC 4217 section 3).
+    Explicit,
+    /// Implicit FTPS — TLS from the very start (typically on port 990).
+    ///
+    /// The TCP connection is immediately wrapped in TLS before any FTP
+    /// protocol exchange. No `AUTH TLS` command is sent. This is the
+    /// legacy FTPS mode predating RFC 4217.
+    Implicit,
+}
+
+/// FTPS (FTP over TLS) configuration per RFC 4217.
+///
+/// Controls TLS handshake behaviour when upgrading an FTP control
+/// connection after `AUTH TLS`. Matches the C++ aria2 options
+/// `--check-certificate` and `--ca-certificate`.
+#[derive(Debug, Clone)]
+pub struct FtpsConfig {
+    /// Enable FTPS: send `AUTH TLS` after connecting and upgrade to TLS.
+    /// Corresponds to C++ aria2 `--ftp-tls` (off by default; explicit FTPS
+    /// via `ftps://` URL also sets this to true).
+    pub enabled: bool,
+
+    /// Verify the server's TLS certificate chain.
+    /// When `false`, accepts any certificate (insecure, for testing only).
+    /// Corresponds to C++ aria2 `--check-certificate`.
+    pub check_certificate: bool,
+
+    /// Path to a PEM file containing trusted CA certificates.
+    /// When `None`, falls back to bundled Mozilla roots (webpki-roots).
+    /// Corresponds to C++ aria2 `--ca-certificate`.
+    pub ca_certificate: Option<PathBuf>,
+
+    /// Minimum TLS protocol version to negotiate.
+    pub min_tls_version: TlsVersion,
+}
+
+impl Default for FtpsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_certificate: true,
+            ca_certificate: None,
+            min_tls_version: TlsVersion::Tls12,
+        }
+    }
+}
+
+/// Minimum TLS protocol version for FTPS connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TlsVersion {
+    /// TLS 1.2 (RFC 5246) — default, widely supported
+    #[default]
+    Tls12,
+    /// TLS 1.3 (RFC 8446) — latest, preferred when available
+    Tls13,
+}
+
+/// Polymorphic stream that wraps either a plain or TLS-encrypted FTP connection.
+///
+/// After `AUTH TLS` is accepted (RFC 4217 section 3), the underlying
+/// `TcpStream` is replaced with `TlsStream<TcpStream>`. This enum lets the
+/// `FtpClient` hold either variant without boxing or generics.
+///
+/// Both variants implement `AsyncRead + AsyncWrite + Unpin`, so the enum
+/// dispatches I/O calls to the active variant at zero cost (no vtable).
+#[derive(Debug)]
+pub enum FtpControlStream {
+    /// Unencrypted TCP connection (plain FTP)
+    Plain(TcpStream),
+    /// TLS-encrypted connection (FTPS, RFC 4217)
+    Tls(TlsStream<TcpStream>),
+}
+
+impl FtpControlStream {
+    /// Returns `true` if this stream is TLS-encrypted.
+    pub fn is_tls(&self) -> bool {
+        matches!(self, FtpControlStream::Tls(_))
+    }
 }
 
 /// FTP response struct
@@ -66,6 +162,7 @@ pub struct FtpFileInfo {
 /// - Binary/ASCII transfer mode switching
 /// - Resume transfer (REST command)
 /// - Directory listing parsing (Unix/Windows format)
+/// - FTPS (FTP over TLS) with explicit (AUTH TLS) and implicit modes
 ///
 /// # Examples
 ///
@@ -88,8 +185,11 @@ pub struct FtpFileInfo {
 /// }
 /// ```
 pub struct FtpClient {
-    /// Control connection stream (buffered)
-    pub(crate) control_stream: BufReader<TcpStream>,
+    /// Control connection stream (buffered, polymorphic over plain/TLS).
+    ///
+    /// For plain FTP, this wraps `FtpControlStream::Plain(TcpStream)`.
+    /// For FTPS, this wraps `FtpControlStream::Tls(TlsStream<TcpStream>)`.
+    pub(crate) control_stream: tokio::io::BufReader<FtpControlStream>,
     /// Data connection mode
     pub(crate) mode: FtpMode,
     /// Current binary mode state
@@ -110,6 +210,16 @@ pub struct FtpClient {
     /// Server features detected from FEAT command response.
     /// Populated after `send_feat()` is called; None until then.
     pub(crate) features: Option<super::feat::FtpFeatures>,
+    /// FTPS TLS mode for this connection.
+    /// When set to Explicit or Implicit, data connections will also
+    /// be upgraded to TLS after PROT P is negotiated.
+    pub(crate) tls_mode: FtpTlsMode,
+    /// Whether PROT P (Private data channel protection) has been negotiated.
+    /// When true, data connections must also be upgraded to TLS.
+    pub(crate) data_channel_protected: bool,
+    /// FTPS TLS configuration. Used to build TLS connectors for both
+    /// control and data channel upgrades.
+    pub(crate) ftps_config: Option<FtpsConfig>,
 }
 
 // Re-export FtpFeatures from the feat module so public API stays accessible

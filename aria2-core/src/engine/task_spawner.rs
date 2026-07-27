@@ -55,11 +55,7 @@ pub async fn spawn_download_task(
     };
 
     // Create the appropriate command based on URI scheme.
-    let cmd_result = create_command_for_uri(
-        &first_uri,
-        Arc::clone(&group),
-        &options,
-    );
+    let cmd_result = create_command_for_uri(&first_uri, Arc::clone(&group), &options);
 
     let mut cmd: Box<dyn Command> = match cmd_result {
         Ok(c) => c,
@@ -81,7 +77,10 @@ pub async fn spawn_download_task(
                 TaskResult::Success
             }
             Err(Aria2Error::Recoverable(recoverable)) => {
-                warn!(gid = gid.value(), "Download task failed with recoverable error");
+                warn!(
+                    gid = gid.value(),
+                    "Download task failed with recoverable error"
+                );
                 TaskResult::Failed(Aria2Error::Recoverable(recoverable))
             }
             Err(e) => {
@@ -93,7 +92,10 @@ pub async fn spawn_download_task(
         // Send completion notification. If the channel is closed, the engine
         // has already shut down; just log and move on.
         if completion_tx.send((gid, task_result)).is_err() {
-            debug!(gid = gid.value(), "Completion channel closed, engine likely shut down");
+            debug!(
+                gid = gid.value(),
+                "Completion channel closed, engine likely shut down"
+            );
         }
     });
 
@@ -117,8 +119,7 @@ fn create_command_for_uri(
     if uri_lower.starts_with("magnet:") {
         let output_dir = options.dir.as_deref();
         let cmd = crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
-            group,
-            output_dir,
+            group, output_dir,
         )?;
         return Ok(Box::new(cmd));
     }

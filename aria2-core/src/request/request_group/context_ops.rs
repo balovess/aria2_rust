@@ -46,20 +46,20 @@ impl super::RequestGroup {
     /// of `DownloadContext`. In Rust, `DownloadContext` may be created
     /// independently (e.g. by `BtDownloadCommand` after parsing torrent
     /// metadata), so we transfer URIs lazily at the point of attachment.
-    pub fn set_download_context(&self, ctx: Arc<DownloadContext>) {
+    pub fn set_download_context(&self, mut ctx: Arc<DownloadContext>) {
         let mut guard = self.download_context.recover_mut();
 
         // Transfer initial URIs to the first FileEntry's remaining_uris.
         // This mirrors C++ where RequestGroup constructor adds URIs to FileEntry.
         // We only do this if the first FileEntry has no remaining URIs yet
         // (i.e. this is a fresh context, not one loaded from torrent metadata).
-        {
-            // SAFETY: We have exclusive access via the RwLock on download_context,
-            // and no other reference to this DownloadContext exists yet (we just
-            // created the Arc). The Arc is being stored for the first time.
-            // This is the standard pattern for initializing Arc contents.
-            let ctx_mut = Arc::as_ptr(&ctx) as *mut DownloadContext;
-            let ctx_ref = unsafe { &mut *ctx_mut };
+        //
+        // We use Arc::get_mut which requires exclusive ownership of the Arc.
+        // Since we just received this Arc and it hasn't been stored yet, we
+        // should have the only reference. If Arc::get_mut fails (shouldn't
+        // happen here), we skip the URI transfer — the context is still
+        // stored correctly.
+        if let Some(ctx_ref) = Arc::get_mut(&mut ctx) {
             let first_fe = match ctx_ref.get_file_entries_mut().first_mut() {
                 Some(fe) => fe,
                 None => {
@@ -185,7 +185,11 @@ impl super::RequestGroup {
         let mut guard = self.download_context.recover_mut();
         if let Some(ref mut ctx) = *guard {
             if let Some(ctx_inner) = Arc::get_mut(ctx) {
-                if let Some(fe) = ctx_inner.get_file_entries_mut().iter_mut().find(|fe| fe.is_requested()) {
+                if let Some(fe) = ctx_inner
+                    .get_file_entries_mut()
+                    .iter_mut()
+                    .find(|fe| fe.is_requested())
+                {
                     fe.add_uri_result(uri, result_code);
                 }
             }
@@ -203,7 +207,11 @@ impl super::RequestGroup {
         let mut guard = self.download_context.recover_mut();
         if let Some(ref mut ctx) = *guard {
             if let Some(ctx_inner) = Arc::get_mut(ctx) {
-                if let Some(fe) = ctx_inner.get_file_entries_mut().iter_mut().find(|fe| fe.is_requested()) {
+                if let Some(fe) = ctx_inner
+                    .get_file_entries_mut()
+                    .iter_mut()
+                    .find(|fe| fe.is_requested())
+                {
                     fe.reuse_uri(ignore_hosts);
                 }
             }

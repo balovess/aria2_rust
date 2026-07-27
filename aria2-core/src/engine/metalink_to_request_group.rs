@@ -21,7 +21,7 @@
 //! | `generate_from_bytes()` | `generate(groups, binaryStream, option, baseUri)` |
 //! | `create_request_groups()` | `createRequestGroup(groups, entries, option)` |
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::engine::metalink_download_command::MetalinkDownloadCommand;
 use crate::error::{Aria2Error, Result};
@@ -177,7 +177,7 @@ impl MetalinkToRequestGroup {
     /// Mirrors C++ `Metalink2RequestGroup::createRequestGroup()`.
     fn create_request_groups(
         &self,
-        mut doc: MetalinkDocument,
+        doc: MetalinkDocument,
         options: &DownloadOptions,
     ) -> Result<Vec<MetalinkDownloadCommand>> {
         // Step 1: Query entries by version/language/os
@@ -253,7 +253,7 @@ impl MetalinkToRequestGroup {
 
         // Skip entries with no resources AND no metaurls
         // (mirrors C++ `if(entry->resources.empty() && entry->metaurls.empty()) continue;`)
-        let mut files: Vec<MetalinkFile> = filtered_doc
+        let files: Vec<MetalinkFile> = filtered_doc
             .files
             .into_iter()
             .filter(|f| !f.urls.is_empty() || !f.meta_urls.is_empty())

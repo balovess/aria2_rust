@@ -151,7 +151,7 @@ impl RpcEngine {
                 for (_, group_lock) in man.all_groups() {
                     let g = group_lock.recover();
                     dl += g.get_download_speed_cached();
-                    ul += g.get_uploaded_length();
+                    ul += g.get_upload_speed_cached();
                     match g.status() {
                         DownloadStatus::Active => active_n += 1,
                         DownloadStatus::Waiting | DownloadStatus::Paused => waiting_n += 1,
