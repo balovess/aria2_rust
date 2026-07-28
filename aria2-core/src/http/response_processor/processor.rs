@@ -112,7 +112,10 @@ impl HttpResponseProcessor {
             // Metalink/HTTP Link headers
             if accept_metalink
                 && response_head.header("link").is_some() {
-                    let metalink_result = MetalinkHttpParser::parse_response(response_head);
+                    let metalink_result = MetalinkHttpParser::parse_response(
+                        response_head,
+                        &self.config.metalink_location,
+                    );
                     for link in &metalink_result.links {
                         metalink_uris.push(link.uri.clone());
                         debug!(uri = %link.uri, "Adding Metalink/HTTP URI");
@@ -121,10 +124,14 @@ impl HttpResponseProcessor {
                 }
 
             // Digest header (standalone, not from Link)
-            if response_head.header("digest").is_some() && digests.is_empty()
-                && let Some(digest_value) = response_head.header("digest") {
-                    digests = MetalinkHttpParser::parse_digest_header(digest_value);
+            if response_head.header("digest").is_some() && digests.is_empty() {
+                // When there's no Link header but there is a Digest header,
+                // parse just the Digest values. Use header_all to get all
+                // Digest header values (matches C++ getDigest equalRange).
+                for dv in response_head.header_all("digest") {
+                    digests.extend(MetalinkHttpParser::parse_digest_header(dv));
                 }
+            }
         }
 
         // --- Non-2xx status codes (3xx/4xx/5xx) ---

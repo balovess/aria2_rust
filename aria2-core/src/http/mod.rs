@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod auth_challenge_handler;
 pub mod client_pool;
 pub mod conditional_get;
 pub mod connection;
@@ -71,3 +72,6 @@ pub use response_processor::{
     determine_filename, should_inflate_content_encoding, supports_persistent_connection,
     validate_response, validate_response_range,
 };
+
+// Re-export auth challenge handler types for convenient access
+pub use auth_challenge_handler::{AuthChallengeResult, handle_auth_challenge};

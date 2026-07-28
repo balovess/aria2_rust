@@ -231,21 +231,31 @@ impl Default for ConditionalRequest {
 }
 
 impl ConditionalRequest {
-    /// Build headers for conditional request.
-    /// If both Last-Modified and ETag present, prefer ETag (stronger validation).
+    /// Build headers for conditional GET request.
+    ///
+    /// Matches C++ `HttpRequestCommand` logic: only sends `If-Modified-Since`
+    /// (from the local file's mtime) and/or `If-None-Match` (from a stored
+    /// ETag). We intentionally do **not** send `If-Match` or
+    /// `If-Unmodified-Since` — those are preconditions that would cause a
+    /// 412 response if the resource changed, which is not what aria2 wants.
+    /// C++ aria2 only sends `If-Modified-Since` for conditional GET.
     pub fn to_headers(&self) -> Vec<(String, String)> {
         let mut headers = Vec::new();
 
+        // Prefer ETag (stronger validator per RFC 7232 § 6) — matches
+        // C++ behaviour where If-None-Match is used when ETag is available.
         if let Some(ref etag) = self.etag {
             headers.push(("If-None-Match".into(), etag.clone()));
-            headers.push(("If-Match".into(), etag.clone()));
         }
 
+        // If-Modified-Since: matches C++ `HttpRequestCommand` L167-170
+        // which sends the local file's mtime as an HTTP-date.
         if let Some(ref lm) = self.last_modified {
             headers.push(("If-Modified-Since".into(), lm.format_imf_fixdate()));
-            headers.push(("If-Unmodified-Since".into(), lm.format_imf_fixdate()));
         }
 
+        // Range header for resume — only when we have a known content length
+        // and a partial download. This is separate from conditional GET.
         if let Some(len) = self.content_length {
             headers.push(("Range".into(), format!("bytes={}-", len)));
         }
@@ -381,16 +391,16 @@ mod tests {
 
         let headers = cond.to_headers();
 
-        // Should have If-None-Match and If-Match with the etag value
+        // Should have If-None-Match with the etag value (matches C++ aria2)
         assert!(
             headers
                 .iter()
                 .any(|(k, v)| k == "If-None-Match" && v == "\"abc123\"")
         );
+        // Should NOT have If-Match (C++ aria2 only sends If-None-Match)
         assert!(
-            headers
-                .iter()
-                .any(|(k, v)| k == "If-Match" && v == "\"abc123\"")
+            !headers.iter().any(|(k, _)| k == "If-Match"),
+            "If-Match should not be sent (matches C++ aria2)"
         );
 
         // ETag value should be trimmed of quotes when stored but preserved in headers
@@ -411,9 +421,13 @@ mod tests {
 
         let headers = cond.to_headers();
 
-        // Should have If-Modified-Since and If-Unmodified-Since headers
+        // Should have If-Modified-Since header (matches C++ aria2)
         assert!(headers.iter().any(|(k, _)| k == "If-Modified-Since"));
-        assert!(headers.iter().any(|(k, _)| k == "If-Unmodified-Since"));
+        // Should NOT have If-Unmodified-Since (C++ aria2 only sends If-Modified-Since)
+        assert!(
+            !headers.iter().any(|(k, _)| k == "If-Unmodified-Since"),
+            "If-Unmodified-Since should not be sent (matches C++ aria2)"
+        );
 
         // Verify the date format follows IMF-fixdate pattern (RFC 7231)
         let ims_header = headers

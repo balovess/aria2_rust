@@ -367,6 +367,25 @@ impl App {
             on_download_pause: options.get("on-download-pause").cloned(),
             on_download_stop: options.get("on-download-stop").cloned(),
             on_bt_download_complete: options.get("on-bt-download-complete").cloned(),
+            // HTTP authentication
+            http_auth_challenge: options
+                .get("http-auth-challenge")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            http_user: options.get("http-user").cloned(),
+            http_passwd: options.get("http-passwd").cloned(),
+            ftp_user: options.get("ftp-user").cloned(),
+            ftp_passwd: options.get("ftp-passwd").cloned(),
+            no_netrc: options
+                .get("no-netrc")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            netrc_path: options.get("netrc-path").cloned(),
+            // Conditional GET
+            conditional_get: options
+                .get("conditional-get")
+                .map(|v| v == "true")
+                .unwrap_or(false),
         }
     }
 }

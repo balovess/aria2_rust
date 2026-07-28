@@ -361,6 +361,37 @@ pub struct DownloadOptions {
     pub follow_metalink: Option<bool>,
 
     // ------------------------------------------------------------------
+    // HTTP authentication options (C++ PREF_HTTP_AUTH_CHALLENGE, PREF_HTTP_USER, etc.)
+    // ------------------------------------------------------------------
+    /// Whether to enable HTTP authentication challenge handling.
+    /// When true, 401 responses trigger BasicCred activation and retry.
+    /// Maps to C++ `PREF_HTTP_AUTH_CHALLENGE`. Default: `false`.
+    pub http_auth_challenge: bool,
+    /// HTTP authentication username. Maps to C++ `PREF_HTTP_USER`.
+    pub http_user: Option<String>,
+    /// HTTP authentication password. Maps to C++ `PREF_HTTP_PASSWD`.
+    pub http_passwd: Option<String>,
+    /// FTP authentication username. Maps to C++ `PREF_FTP_USER`.
+    pub ftp_user: Option<String>,
+    /// FTP authentication password. Maps to C++ `PREF_FTP_PASSWD`.
+    pub ftp_passwd: Option<String>,
+    /// Whether to disable Netrc lookups. Maps to C++ `PREF_NO_NETRC`.
+    pub no_netrc: bool,
+    /// Path to the .netrc file for credential lookup.
+    /// If not set, the default ~/.netrc path is used.
+    pub netrc_path: Option<String>,
+
+    // ------------------------------------------------------------------
+    // Conditional GET options (C++ PREF_CONDITIONAL_GET)
+    // ------------------------------------------------------------------
+    /// Whether to enable HTTP conditional GET (If-Modified-Since).
+    /// When true and the local file exists without a control file, sends
+    /// If-Modified-Since with the file's modification time. If the server
+    /// returns 304 Not Modified, the download is marked complete without
+    /// transferring data. Maps to C++ `PREF_CONDITIONAL_GET`. Default: `false`.
+    pub conditional_get: bool,
+
+    // ------------------------------------------------------------------
     // Download event hooks (C++ PREF_ON_DOWNLOAD_*)
     // ------------------------------------------------------------------
     /// Shell command to execute when a download starts.
@@ -456,6 +487,16 @@ impl Default for DownloadOptions {
             // Follow options
             follow_torrent: None,
             follow_metalink: None,
+            // HTTP authentication
+            http_auth_challenge: false,
+            http_user: None,
+            http_passwd: None,
+            ftp_user: None,
+            ftp_passwd: None,
+            no_netrc: false,
+            netrc_path: None,
+            // Conditional GET
+            conditional_get: false,
             // Event hooks
             on_download_start: None,
             on_download_complete: None,

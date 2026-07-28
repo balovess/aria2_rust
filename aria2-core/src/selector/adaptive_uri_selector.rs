@@ -1,4 +1,4 @@
-﻿//! Adaptive URI selector matching C++ aria2's `AdaptiveURISelector`.
+//! Adaptive URI selector matching C++ aria2's `AdaptiveURISelector`.
 //!
 //! This selector returns one of the best mirrors for first and reserved
 //! connections. For supplementary ones, it returns mirrors that have not
@@ -303,10 +303,23 @@ impl AdaptiveUriSelector {
         });
 
         if bests.is_empty() {
+            // All hosts are used — fall back to any host with speed > 0
+            bests = self.get_uris_by_speed(hosts, 0);
+            bests.retain(|idx| {
+                hosts
+                    .get(*idx)
+                    .is_some_and(|(_, h, _)| !used_set.contains(h.as_str()))
+            });
+        }
+
+        // If still empty after filtering (all hosts used), accept any host
+        if bests.is_empty() {
             bests = self.get_uris_by_speed(hosts, 0);
         }
 
-        if bests.len() < 2 {
+        if bests.len() == 1 {
+            Some(bests[0])
+        } else if bests.len() < 2 {
             self.get_max_download_speed_uri(hosts)
         } else {
             let idx = self.select_random_uri(&bests);

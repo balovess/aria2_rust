@@ -958,6 +958,16 @@ http://example.com/file
             on_download_pause: None,
             on_download_stop: None,
             on_bt_download_complete: None,
+            // HTTP authentication
+            http_auth_challenge: false,
+            http_user: None,
+            http_passwd: None,
+            ftp_user: None,
+            ftp_passwd: None,
+            no_netrc: false,
+            netrc_path: None,
+            // Conditional GET
+            conditional_get: false,
         };
 
         let map = download_options_to_map(&opts);

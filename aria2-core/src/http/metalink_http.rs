@@ -159,17 +159,61 @@ impl MetalinkHttpParser {
     /// Parse `Link` and `Digest` headers from a complete HTTP response.
     ///
     /// Extracts all `Link` header values (there may be multiple), parses them
-    /// into `MetalinkHttpLink` entries, and similarly parses the `Digest`
-    /// header if present. Links are sorted by priority.
-    pub fn parse_response(response: &HttpResponseHead) -> MetalinkHttpResult {
+    /// into `MetalinkHttpLink` entries, and similarly parses **all** `Digest`
+    /// header values. Links are sorted by priority. Digests are deduplicated
+    /// per algorithm (conflicting values for the same algorithm are removed,
+    /// matching C++ `getDigest()` behavior).
+    ///
+    /// # metalink-location preference
+    ///
+    /// When `preferred_locations` is non-empty, entries whose `geo` matches
+    /// a preferred location get their priority boosted (pri reduced by
+    /// `DEFAULT_PRI`), matching C++ `getMetalinKHttpEntries()` which does
+    /// `r.pri -= 999999`. This ensures geo-preferred mirrors are tried first.
+    pub fn parse_response(
+        response: &HttpResponseHead,
+        preferred_locations: &[String],
+    ) -> MetalinkHttpResult {
         let mut all_links = Vec::new();
         for value in response.header_all("link") {
             all_links.extend(Self::parse_link_header(value));
         }
 
+        // Apply metalink-location preference (matches C++ getMetalinKHttpEntries)
+        // C++ code: if (std::find(locs.begin(), locs.end(), r.geo) != locs.end())
+        //   { r.pri -= 999999; }
+        if !all_links.is_empty() && !preferred_locations.is_empty() {
+            // Pre-lowercase preferred locations for comparison
+            let locs_lower: Vec<String> =
+                preferred_locations.iter().map(|l| l.to_lowercase()).collect();
+            for link in &mut all_links {
+                if let Some(ref geo) = link.geo {
+                    if locs_lower.iter().any(|l| l == geo) {
+                        // Boost priority: reduce effective pri by DEFAULT_PRI
+                        // C++ does r.pri -= 999999 which makes it a very high
+                        // priority (low number). In Rust, pri is Option<u64>,
+                        // so we need to handle the arithmetic carefully.
+                        let current_pri = link.pri.unwrap_or(DEFAULT_PRI);
+                        link.pri = Some(current_pri.saturating_sub(DEFAULT_PRI as u64));
+                    }
+                }
+            }
+            // Re-sort after priority adjustment
+            all_links.sort_by_key(|l| l.sort_key());
+        }
+
+        // Parse ALL Digest header values, not just the first one.
+        // Matches C++ getDigest() which iterates equalRange(DIGEST).
         let mut all_digests = Vec::new();
-        if let Some(digest_value) = response.header("digest") {
-            all_digests = Self::parse_digest_header(digest_value);
+        for digest_value in response.header_all("digest") {
+            all_digests.extend(Self::parse_digest_header(digest_value));
+        }
+
+        // Deduplicate digests per algorithm (matches C++ getDigest behavior).
+        // C++ logic: for each hash type, if multiple entries with different
+        // values exist, all entries of that type are removed (inconsistent).
+        if !all_digests.is_empty() {
+            all_digests = deduplicate_digests(all_digests);
         }
 
         debug!(
@@ -183,6 +227,49 @@ impl MetalinkHttpParser {
             digests: all_digests,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Internal: Digest deduplication (matches C++ getDigest logic)
+// ---------------------------------------------------------------------------
+
+/// Deduplicate digests per algorithm.
+///
+/// Matches C++ `getDigest()` behavior: for each hash algorithm, if multiple
+/// entries with different values exist (inconsistent digests), ALL entries
+/// for that algorithm are removed. If all entries for the same algorithm
+/// have the same value, only one is kept.
+fn deduplicate_digests(digests: Vec<MetalinkHttpDigest>) -> Vec<MetalinkHttpDigest> {
+    if digests.is_empty() {
+        return digests;
+    }
+
+    // Group by algorithm
+    let mut groups: std::collections::HashMap<String, Vec<MetalinkHttpDigest>> =
+        std::collections::HashMap::new();
+    for d in digests {
+        groups.entry(d.algorithm.clone()).or_default().push(d);
+    }
+
+    let mut result = Vec::new();
+    for (_, entries) in groups {
+        if entries.is_empty() {
+            continue;
+        }
+
+        // Check if all values for this algorithm are consistent
+        let first_value = &entries[0].value;
+        let consistent = entries.iter().all(|e| e.value == *first_value);
+
+        if consistent {
+            // Keep only one entry per algorithm (the first)
+            result.push(entries.into_iter().next().unwrap());
+        }
+        // If inconsistent, discard all entries for this algorithm
+        // (matches C++ behavior: conflicting digests are removed entirely)
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +658,7 @@ mod tests {
         proc.feed(b"HTTP/1.1 200 OK\r\nLink: <http://mirror>; rel=\"duplicate\"; pri=\"1\"\r\nDigest: sha-256=abc123\r\n\r\n");
         let head = proc.get_result().unwrap();
 
-        let result = MetalinkHttpParser::parse_response(&head);
+        let result = MetalinkHttpParser::parse_response(&head, &[]);
         assert_eq!(result.links.len(), 1);
         assert_eq!(result.links[0].uri, "http://mirror");
         assert_eq!(result.digests.len(), 1);
@@ -586,7 +673,7 @@ mod tests {
         proc.feed(b"HTTP/1.1 200 OK\r\nLink: <http://m1>; rel=\"duplicate\"; pri=\"1\"\r\nLink: <http://m2>; rel=\"duplicate\"; pri=\"2\"\r\n\r\n");
         let head = proc.get_result().unwrap();
 
-        let result = MetalinkHttpParser::parse_response(&head);
+        let result = MetalinkHttpParser::parse_response(&head, &[]);
         assert_eq!(result.links.len(), 2);
         assert_eq!(result.links[0].uri, "http://m1");
         assert_eq!(result.links[1].uri, "http://m2");
@@ -600,9 +687,105 @@ mod tests {
         proc.feed(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n");
         let head = proc.get_result().unwrap();
 
-        let result = MetalinkHttpParser::parse_response(&head);
+        let result = MetalinkHttpParser::parse_response(&head, &[]);
         assert!(result.links.is_empty());
         assert!(result.digests.is_empty());
+    }
+
+    // ---- metalink-location preference ----
+
+    #[test]
+    fn test_metalink_location_preference() {
+        use super::super::header_processor::HttpHeaderProcessor;
+
+        let mut proc = HttpHeaderProcessor::new();
+        proc.feed(b"HTTP/1.1 200 OK\r\nLink: <http://us-mirror>; rel=\"duplicate\"; pri=\"1\"; geo=\"us\"\r\nLink: <http://jp-mirror>; rel=\"duplicate\"; pri=\"2\"; geo=\"jp\"\r\n\r\n");
+        let head = proc.get_result().unwrap();
+
+        // Without location preference: us-mirror (pri=1) comes first
+        let result = MetalinkHttpParser::parse_response(&head, &[]);
+        assert_eq!(result.links[0].uri, "http://us-mirror");
+        assert_eq!(result.links[1].uri, "http://jp-mirror");
+
+        // With JP location preference: jp-mirror should be boosted
+        let result = MetalinkHttpParser::parse_response(&head, &["JP".to_string()]);
+        // jp-mirror should now come first (pri boosted from 2 to 2-999999)
+        assert_eq!(
+            result.links[0].uri, "http://jp-mirror",
+            "JP mirror should be first after location preference"
+        );
+    }
+
+    // ---- Digest deduplication ----
+
+    #[test]
+    fn test_digest_deduplication_consistent() {
+        let digests = vec![
+            MetalinkHttpDigest {
+                algorithm: "sha-256".to_string(),
+                value: "abc123".to_string(),
+            },
+            MetalinkHttpDigest {
+                algorithm: "sha-256".to_string(),
+                value: "abc123".to_string(),
+            },
+        ];
+        let deduped = deduplicate_digests(digests);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].algorithm, "sha-256");
+    }
+
+    #[test]
+    fn test_digest_deduplication_inconsistent() {
+        let digests = vec![
+            MetalinkHttpDigest {
+                algorithm: "sha-256".to_string(),
+                value: "abc123".to_string(),
+            },
+            MetalinkHttpDigest {
+                algorithm: "sha-256".to_string(),
+                value: "different".to_string(),
+            },
+        ];
+        let deduped = deduplicate_digests(digests);
+        assert!(
+            deduped.is_empty(),
+            "Inconsistent digests should be removed entirely"
+        );
+    }
+
+    #[test]
+    fn test_digest_deduplication_multiple_algorithms() {
+        let digests = vec![
+            MetalinkHttpDigest {
+                algorithm: "sha-256".to_string(),
+                value: "abc123".to_string(),
+            },
+            MetalinkHttpDigest {
+                algorithm: "md5".to_string(),
+                value: "def456".to_string(),
+            },
+        ];
+        let deduped = deduplicate_digests(digests);
+        assert_eq!(deduped.len(), 2);
+    }
+
+    // ---- Multiple Digest headers ----
+
+    #[test]
+    fn test_parse_response_multiple_digest_headers() {
+        use super::super::header_processor::HttpHeaderProcessor;
+
+        let mut proc = HttpHeaderProcessor::new();
+        proc.feed(b"HTTP/1.1 200 OK\r\nDigest: sha-256=abc123\r\nDigest: md5=def456\r\n\r\n");
+        let head = proc.get_result().unwrap();
+
+        let result = MetalinkHttpParser::parse_response(&head, &[]);
+        assert_eq!(result.digests.len(), 2);
+        // Order from HashMap is not guaranteed, so check by content
+        let algorithms: Vec<&str> = result.digests.iter().map(|d| d.algorithm.as_str()).collect();
+        assert!(algorithms.contains(&"sha-256"));
+        assert!(algorithms.contains(&"md5"));
     }
 
     // ---- Internal helpers ----

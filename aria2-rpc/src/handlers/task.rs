@@ -1119,5 +1119,24 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         on_download_pause: get_str("on-download-pause"),
         on_download_stop: get_str("on-download-stop"),
         on_bt_download_complete: get_str("on-bt-download-complete"),
+        // HTTP authentication
+        http_auth_challenge: opts
+            .get("http-auth-challenge")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        http_user: get_str("http-user"),
+        http_passwd: get_str("http-passwd"),
+        ftp_user: get_str("ftp-user"),
+        ftp_passwd: get_str("ftp-passwd"),
+        no_netrc: opts
+            .get("no-netrc")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        netrc_path: get_str("netrc-path"),
+        // Conditional GET
+        conditional_get: opts
+            .get("conditional-get")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     }
 }

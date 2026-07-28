@@ -228,4 +228,44 @@ impl super::RequestGroup {
             !self.uris.is_empty()
         }
     }
+
+    /// Add a redirect URI to the first requested file entry's remaining URIs.
+    ///
+    /// Matches C++ aria2 behavior where `HttpSkipResponseCommand` adds
+    /// redirect target URIs to the `FileEntry`'s URI pool so they can be
+    /// used for future download attempts (e.g. when the original URI fails
+    /// but the redirect target succeeded before).
+    ///
+    /// If no `DownloadContext` is set yet, the URI is appended to the
+    /// group's initial URI list instead.
+    pub fn add_redirect_uri(&mut self, uri: &str) {
+        let mut guard = self.download_context.recover_mut();
+        if let Some(ref mut ctx) = *guard {
+            // Try to get exclusive mutable access to the inner DownloadContext.
+            // Arc::get_mut succeeds only when we hold the sole Arc reference,
+            // which is typical during download execution.
+            if let Some(ctx_inner) = Arc::get_mut(ctx) {
+                if let Some(fe) = ctx_inner
+                    .get_file_entries_mut()
+                    .iter_mut()
+                    .find(|fe| fe.is_requested())
+                {
+                    if fe.add_uri(uri) {
+                        trace!("Added redirect URI to FileEntry: {}", uri);
+                    }
+                    return;
+                }
+            }
+            // If Arc is shared (rare during download), fall back to the
+            // initial URI list. The URI will be available for the next
+            // download attempt via reuse_uri().
+            drop(guard);
+            self.uris.push(uri.to_string());
+            trace!("Added redirect URI to initial URI list (shared Arc): {}", uri);
+        } else {
+            drop(guard);
+            self.uris.push(uri.to_string());
+            trace!("Added redirect URI to initial URI list (no context): {}", uri);
+        }
+    }
 }

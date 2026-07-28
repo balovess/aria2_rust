@@ -72,6 +72,18 @@ fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
             "console-log-level",
             OptionValue::Str(String::from("notice")),
         ),
+        // HTTP authentication defaults (C++ PREF_* compatible)
+        ("http-auth-challenge", OptionValue::Bool(false)),
+        ("http-user", OptionValue::Str(String::new())),
+        ("http-passwd", OptionValue::Str(String::new())),
+        ("ftp-user", OptionValue::Str(String::from("anonymous"))),
+        (
+            "ftp-passwd",
+            OptionValue::Str(String::from("anonymous@")),
+        ),
+        ("no-netrc", OptionValue::Bool(false)),
+        ("netrc-path", OptionValue::Str(String::new())),
+        ("conditional-get", OptionValue::Bool(false)),
     ]
 }
 
@@ -533,6 +545,16 @@ impl OptionHandler {
             on_download_pause: get_str("on-download-pause"),
             on_download_stop: get_str("on-download-stop"),
             on_bt_download_complete: get_str("on-bt-download-complete"),
+            // HTTP authentication
+            http_auth_challenge: self.get("http-auth-challenge").as_bool().unwrap_or(false),
+            http_user: get_str("http-user"),
+            http_passwd: get_str("http-passwd"),
+            ftp_user: get_str("ftp-user"),
+            ftp_passwd: get_str("ftp-passwd"),
+            no_netrc: self.get("no-netrc").as_bool().unwrap_or(false),
+            netrc_path: get_str("netrc-path"),
+            // Conditional GET
+            conditional_get: self.get("conditional-get").as_bool().unwrap_or(false),
         }
     }
 

@@ -95,6 +95,10 @@ pub struct ResponseProcessorConfig {
     pub dry_run: bool,
     /// Maximum pipelined requests (only relevant if persistent connection).
     pub max_pipelined_request: u32,
+    /// Preferred geographic locations for Metalink/HTTP mirror selection.
+    /// Matches C++ `PREF_METALINK_LOCATION`: comma-separated location strings
+    /// that boost the priority of matching mirrors.
+    pub metalink_location: Vec<String>,
 }
 
 impl Default for ResponseProcessorConfig {
@@ -106,6 +110,7 @@ impl Default for ResponseProcessorConfig {
             remote_time: false,
             dry_run: false,
             max_pipelined_request: 1,
+            metalink_location: Vec::new(),
         }
     }
 }
