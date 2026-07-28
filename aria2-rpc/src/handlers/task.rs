@@ -1109,5 +1109,15 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         pause: opts.get("pause").and_then(|v| v.as_bool()).unwrap_or(false),
+        // Follow options
+        follow_torrent: opts.get("follow-torrent").and_then(|v| v.as_bool()),
+        follow_metalink: opts.get("follow-metalink").and_then(|v| v.as_bool()),
+        // Event hooks
+        on_download_start: get_str("on-download-start"),
+        on_download_complete: get_str("on-download-complete"),
+        on_download_error: get_str("on-download-error"),
+        on_download_pause: get_str("on-download-pause"),
+        on_download_stop: get_str("on-download-stop"),
+        on_bt_download_complete: get_str("on-bt-download-complete"),
     }
 }

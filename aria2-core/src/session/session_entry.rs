@@ -283,6 +283,26 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert("referer".to_string(), v.clone());
     }
 
+    // --- Event hooks ---
+    if let Some(ref v) = opts.on_download_start {
+        map.insert("on-download-start".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.on_download_complete {
+        map.insert("on-download-complete".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.on_download_error {
+        map.insert("on-download-error".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.on_download_pause {
+        map.insert("on-download-pause".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.on_download_stop {
+        map.insert("on-download-stop".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.on_bt_download_complete {
+        map.insert("on-bt-download-complete".to_string(), v.clone());
+    }
+
     map
 }
 
@@ -928,6 +948,16 @@ http://example.com/file
             bt_lpd_interface: None,
             enable_rpc: false,
             pause: false,
+            // Follow options
+            follow_torrent: None,
+            follow_metalink: None,
+            // Event hooks
+            on_download_start: None,
+            on_download_complete: None,
+            on_download_error: None,
+            on_download_pause: None,
+            on_download_stop: None,
+            on_bt_download_complete: None,
         };
 
         let map = download_options_to_map(&opts);

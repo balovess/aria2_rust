@@ -26,6 +26,8 @@ pub mod retry_policy;
 pub mod sequential_download;
 pub mod task_spawner;
 pub mod timer;
+pub mod post_download_handler;
+pub mod download_event_hooks;
 
 // ── BitTorrent feature-gated modules ──────────────────────────────────
 #[cfg(feature = "bittorrent")]
@@ -73,7 +75,9 @@ pub mod bt_piece_downloader;
 #[cfg(feature = "bittorrent")]
 pub mod bt_piece_selector;
 #[cfg(feature = "bittorrent")]
-pub mod bt_post_download_handler;
+pub mod hook_manager;
+#[cfg(feature = "bittorrent")]
+pub mod bt_torrent_post_download_handler;
 #[cfg(feature = "bittorrent")]
 pub mod bt_progress_info_file;
 #[cfg(all(test, feature = "bittorrent"))]

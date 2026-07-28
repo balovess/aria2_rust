@@ -4,6 +4,8 @@
 //! remove, complete, error, and halt. These methods mutate the download
 //! status and record timing information.
 
+use tracing::debug;
+
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -194,6 +196,23 @@ impl super::RequestGroup {
     /// download options; may be overridden per-group in the future.
     pub fn timeout(&self) -> Option<std::time::Duration> {
         self.options.timeout.map(std::time::Duration::from_secs)
+    }
+
+    /// Drop piece storage and segment data.
+    ///
+    /// Called during promotion (reserved → active) to release resources
+    /// held by a previously paused download. Paused downloads hold
+    /// references to PieceStorage via their segment list; releasing
+    /// them before the download restarts prevents stale state.
+    ///
+    /// Mirrors C++ `RequestGroup::dropPieceStorage()` which resets
+    /// `segmentMan_` and `pieceStorage_`.
+    pub fn drop_piece_storage(&self) {
+        self.segments.recover_mut().clear();
+        debug!(
+            gid = self.gid.value(),
+            "Dropped piece storage and segment data"
+        );
     }
 
     /// BT info hash as hex string. Returns `None` for non-BT downloads.

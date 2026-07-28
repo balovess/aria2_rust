@@ -357,6 +357,16 @@ impl App {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             pause: options.get("pause").map(|v| v == "true").unwrap_or(false),
+            // Follow options
+            follow_torrent: options.get("follow-torrent").and_then(|v| v.parse::<bool>().ok()),
+            follow_metalink: options.get("follow-metalink").and_then(|v| v.parse::<bool>().ok()),
+            // Event hooks
+            on_download_start: options.get("on-download-start").cloned(),
+            on_download_complete: options.get("on-download-complete").cloned(),
+            on_download_error: options.get("on-download-error").cloned(),
+            on_download_pause: options.get("on-download-pause").cloned(),
+            on_download_stop: options.get("on-download-stop").cloned(),
+            on_bt_download_complete: options.get("on-bt-download-complete").cloned(),
         }
     }
 }

@@ -12,6 +12,7 @@ use super::bt_registry::BtRegistry;
 use super::command::{Command, ProgressUpdate};
 use super::engine_command::EngineCommand;
 use super::engine_loop::EngineLoopContext;
+use super::download_event_hooks::DownloadEventHooks;
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -298,6 +299,12 @@ impl DownloadEngine {
         self.shutdown_tx.take()
     }
 
+    /// Get a clone of the engine command sender for sending commands like
+    /// `ForceHaltAll` from external tasks (e.g., second Ctrl+C handler).
+    pub fn engine_cmd_tx(&self) -> mpsc::UnboundedSender<EngineCommand> {
+        self.engine_cmd_tx.clone()
+    }
+
     /// Run the v2 engine loop using `EngineCommand` and `RequestGroupMan`
     /// promotion/demotion. This is the new main loop that mirrors the C++
     /// `DownloadEngine::run()` architecture with active/reserved/stopped
@@ -325,6 +332,7 @@ impl DownloadEngine {
             ftp_pool: Arc::clone(&self.ftp_pool),
             dns_cache: Arc::clone(&self.dns_cache),
             auto_save: self.auto_save.take(),
+            event_hooks: Arc::new(DownloadEventHooks::new()),
             keep_alive: self.keep_alive,
         };
 

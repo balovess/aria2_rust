@@ -662,6 +662,27 @@ impl DownloadContext {
     }
 
     // -----------------------------------------------------------------------
+    // Post-download handler support
+    // -----------------------------------------------------------------------
+
+    /// Return the path of the first file entry, if any.
+    ///
+    /// Used by post-download handlers to determine the downloaded file's
+    /// location. Mirrors C++ `RequestGroup::getFirstFilePath()`.
+    pub fn first_file_path(&self) -> Option<&str> {
+        self.file_entries.first().map(|fe| fe.path()).filter(|s| !s.is_empty())
+    }
+
+    /// Return a reference to the first file entry, if any.
+    ///
+    /// Unlike `get_first_file_entry()` which panics if empty, this
+    /// returns `None`. Used by post-download handlers to safely
+    /// access file entry metadata.
+    pub fn first_file_entry(&self) -> Option<&FileEntry> {
+        self.file_entries.first()
+    }
+
+    // -----------------------------------------------------------------------
     // Network Stats
     // -----------------------------------------------------------------------
 

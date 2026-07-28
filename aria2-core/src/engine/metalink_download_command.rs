@@ -341,6 +341,14 @@ impl MetalinkDownloadCommand {
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         self.group.recover()
     }
+
+    /// Consume this command and return the inner `RequestGroup` Arc.
+    ///
+    /// Used by post-download handlers that need to extract the group
+    /// for insertion into the reserved queue without cloning.
+    pub fn into_group(self) -> Arc<std::sync::RwLock<RequestGroup>> {
+        self.group
+    }
 }
 
 /// Build the shared HTTP client for Metalink downloads.

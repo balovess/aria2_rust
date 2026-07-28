@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
 use super::engine_command::{EngineCommand, TaskResult};
 use super::task_spawner::spawn_download_task;
 use crate::dns::dns_cache::DnsCache;
@@ -48,6 +49,10 @@ pub struct EngineLoopContext {
 
     /// Auto-save session manager (optional).
     pub auto_save: Option<Arc<tokio::sync::Mutex<AutoSaveSession>>>,
+
+    /// Download event hooks for firing on-download-start/complete/error/pause/stop.
+    /// Mirrors C++ `util::executeHookByOptName()`.
+    pub event_hooks: Arc<DownloadEventHooks>,
 
     /// Whether the engine should stay alive even with no active downloads
     /// (used for RPC listen mode). Mirrors C++ `keepRunning_`.
@@ -135,15 +140,17 @@ pub async fn run_engine_loop(
                         gid = gid.value(),
                         "Spawned download task for promoted group"
                     );
+
+                    // Fire on-download-start hook.
+                    // C++: `util::executeHookByOptName(groupToAdd, e->getOption(),
+                    //            PREF_ON_DOWNLOAD_START)`
+                    ctx.event_hooks.fire_event(DownloadEvent::Start, &group.recover());
                 }
                 None => {
                     warn!(
                         gid = gid.value(),
                         "Failed to spawn download task for promoted group"
                     );
-                    // Decrement the num_commands that spawn_download_task
-                    // already incremented (it increments before checking URIs).
-                    // Actually, spawn_download_task decrements on failure too.
                 }
             }
         }
@@ -160,7 +167,7 @@ pub async fn run_engine_loop(
         // Mirrors C++ `removeStoppedGroup()`.
         let demoted_gids = {
             let man = ctx.group_man.read().await;
-            man.remove_stopped_groups()
+            man.remove_stopped_groups(Some(&ctx.event_hooks))
         };
 
         if !demoted_gids.is_empty() {
@@ -440,7 +447,7 @@ async fn on_end_of_run(
     // Demote any remaining stopped groups.
     let demoted = {
         let man = ctx.group_man.read().await;
-        man.remove_stopped_groups()
+        man.remove_stopped_groups(Some(&ctx.event_hooks))
     };
     if !demoted.is_empty() {
         info!("Demoted {} final groups on shutdown", demoted.len());

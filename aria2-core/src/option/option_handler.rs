@@ -524,6 +524,15 @@ impl OptionHandler {
             bt_lpd_interface: get_str("bt-lpd-interface"),
             enable_rpc: self.get("enable-rpc").as_bool().unwrap_or(false),
             pause: self.get("pause").as_bool().unwrap_or(false),
+            follow_torrent: None,
+            follow_metalink: None,
+            // Event hooks
+            on_download_start: get_str("on-download-start"),
+            on_download_complete: get_str("on-download-complete"),
+            on_download_error: get_str("on-download-error"),
+            on_download_pause: get_str("on-download-pause"),
+            on_download_stop: get_str("on-download-stop"),
+            on_bt_download_complete: get_str("on-bt-download-complete"),
         }
     }
 

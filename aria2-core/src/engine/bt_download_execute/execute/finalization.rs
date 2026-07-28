@@ -2,7 +2,7 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_post_download_handler::{DownloadStatus, HookContext};
+use crate::engine::hook_manager::{DownloadStatus, HookContext};
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -115,7 +115,7 @@ impl BtDownloadCommand {
                 gid,
                 file_path: self.output_path.clone(),
                 status: DownloadStatus::Complete,
-                stats: crate::engine::bt_post_download_handler::DownloadStats {
+                stats: crate::engine::hook_manager::DownloadStats {
                     uploaded_bytes: self.total_uploaded,
                     downloaded_bytes: self.completed_bytes,
                     upload_speed: 0.0,

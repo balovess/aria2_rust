@@ -3,22 +3,38 @@
 //! Mirrors C++ `RequestGroupMan::fillRequestGroupFromReserver()`.
 //! When active slots are available, the engine promotes groups from the
 //! reserved queue to the active DashMap and spawns their download commands.
+//!
+//! # C++ Equivalence
+//!
+//! | Rust | C++ |
+//! |---|---|
+//! | `fill_from_reserver()` | `fillRequestGroupFromReserver()` |
+//! | `configure_request_group()` | `configureRequestGroup()` |
+//! | `drop_piece_storage()` | `dropPieceStorage()` |
 
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use super::RequestGroupMan;
 use crate::request::request_group::DownloadStatus;
 use crate::util::rwlock_ext::RwLockRecover;
 
-impl RequestGroupMan {
+impl super::RequestGroupMan {
     /// Promote groups from the reserved queue to the active DashMap
     /// until `max_concurrent` is reached or the reserved queue is empty.
     ///
     /// Returns the list of groups that were promoted (so the engine can
     /// create and spawn their download commands).
     ///
-    /// Mirrors C++ `RequestGroupMan::fillRequestGroupFromReserver()`.
+    /// # C++ Flow
+    ///
+    /// Mirrors `RequestGroupMan::fillRequestGroupFromReserver()`:
+    /// 1. Remove paused/dependency-blocked groups → pending list
+    /// 2. `dropPieceStorage()` — release piece storage from paused state
+    /// 3. `configureRequestGroup()` — set URI selector (feedback/inorder/adaptive)
+    /// 4. Set state to Active, increment numActive
+    /// 5. `createInitialCommand()` — create download commands (with error handling)
+    /// 6. Fire `on-download-start` hook
+    /// 7. Re-insert pending groups at front of reserved queue
     pub fn fill_from_reserver(&self) -> Vec<Arc<std::sync::RwLock<super::RequestGroup>>> {
         let max = self.max_concurrent();
         let current_active = self.active_count();
@@ -29,6 +45,7 @@ impl RequestGroupMan {
         }
 
         let mut promoted = Vec::new();
+        let mut pending = Vec::new(); // Paused/dependency-blocked groups
 
         for _ in 0..slots_available {
             let group = match self.reserved.pop_front() {
@@ -38,21 +55,23 @@ impl RequestGroupMan {
 
             let gid = group.recover().gid();
 
-            // Skip if pause requested — push back to front and stop loop.
-            // In C++ this is: `if((*i)->isPauseRequested()) continue;`
+            // Skip if pause requested — collect in pending.
+            // C++: `if((*i)->isPauseRequested()) continue;`
+            // Unlike the old Rust code which broke on the first paused group,
+            // C++ continues iterating (skipping paused groups). We match C++
+            // by collecting paused groups into `pending` and continuing.
             if group.recover().is_pause_requested() {
-                self.reserved.push_front(group);
                 debug!(
                     gid = gid.value(),
-                    "Skipping paused group, stopping promotion"
+                    "Skipping paused group, adding to pending"
                 );
-                break;
+                pending.push(group);
+                continue;
             }
 
             // Check dependency resolution (C++ `isDependencyResolved()`).
-            // If the dependency is not yet resolved, push the group back to
-            // the front of the reserved queue and stop promoting — all
-            // subsequent groups would also need to wait.
+            // If not resolved, collect in pending — all subsequent groups
+            // would also need to wait.
             if !group.recover().is_dependency_resolved() {
                 let dep_desc = group
                     .recover()
@@ -61,10 +80,24 @@ impl RequestGroupMan {
                     .as_ref()
                     .map(|d| d.description())
                     .unwrap_or_default();
-                self.reserved.push_front(group);
                 debug!(gid = gid.value(), "Dependency not resolved: {}", dep_desc);
-                break;
+                pending.push(group);
+                continue;
             }
+
+            // ── Drop piece storage before promotion ────────────────────
+            // C++: `groupToAdd->dropPieceStorage()` — paused downloads
+            // hold piece storage references; releasing them prevents stale
+            // state when the download restarts.
+            group.recover().drop_piece_storage();
+
+            // ── Configure request group ────────────────────────────────
+            // C++: `configureRequestGroup(groupToAdd)` — sets URI selector
+            // based on the "uri-selector" option (feedback/inorder/adaptive).
+            // In Rust, URI selection is handled differently (the selector
+            // is embedded in the download command logic rather than stored
+            // on the group), but we still need to validate the configuration.
+            // No-op for now: URI selector logic lives in mirror_coordinator.
 
             // Transition: set status Active, move to active DashMap.
             {
@@ -95,6 +128,14 @@ impl RequestGroupMan {
                 "Promoted group from reserved to active"
             );
             promoted.push(group);
+        }
+
+        // ── Re-insert pending groups at front of reserved queue ─────────
+        // C++: `reservedGroups_.insert(reservedGroups_.begin(), ...)`
+        // Pending groups (paused / dependency-blocked) go back to the front
+        // so they are checked again on the next tick.
+        for group in pending.into_iter().rev() {
+            self.reserved.push_front(group);
         }
 
         promoted

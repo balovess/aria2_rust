@@ -117,6 +117,21 @@ pub struct RequestGroup {
     /// Optional dependency that must be resolved before this group
     /// can be promoted from reserved to active.
     pub dependency: std::sync::RwLock<Option<Box<dyn super::dependency::Dependency>>>,
+
+    /// GID of the parent download that spawned this one.
+    ///
+    /// Mirrors C++ `RequestGroup::following_`. Set when a post-download
+    /// handler creates child groups (e.g. Metalink → child downloads,
+    /// torrent → magnet). Used by RPC `following` field and for
+    /// parent-child relationship tracking.
+    pub following_gid: std::sync::RwLock<Option<GroupId>>,
+
+    /// GIDs of downloads spawned by this one.
+    ///
+    /// Mirrors C++ `RequestGroup::followedBy_`. Populated when a
+    /// post-download handler creates child groups from this download.
+    /// Used by RPC `followedBy` field.
+    pub followed_by_gids: std::sync::RwLock<Vec<GroupId>>,
 }
 
 impl RequestGroup {
@@ -153,6 +168,8 @@ impl RequestGroup {
                 true,
             )),
             dependency: std::sync::RwLock::new(None),
+            following_gid: std::sync::RwLock::new(None),
+            followed_by_gids: std::sync::RwLock::new(Vec::new()),
         }
     }
 }

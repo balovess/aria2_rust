@@ -330,12 +330,34 @@ impl App {
             self.engine.lock().await;
         if let Some(mut engine) = engine_lock.take() {
             engine.set_keep_alive(keep_alive);
-            // Take shutdown sender and wire to Ctrl+C (always, so user can interrupt)
+            // Two-stage Ctrl+C handling (mirrors C++ aria2 behavior):
+            // 1st Ctrl+C: graceful halt (finish in-flight downloads, save session)
+            // 2nd Ctrl+C: force halt (abort all downloads immediately)
             if let Some(tx) = engine.take_shutdown_sender() {
+                let cmd_tx = engine.engine_cmd_tx();
                 tokio::spawn(async move {
+                    // First Ctrl+C: graceful shutdown
                     if tokio::signal::ctrl_c().await.is_ok() {
-                        tracing::info!("Ctrl+C received, shutting down...");
+                        tracing::info!(
+                            "Ctrl+C received, shutting down gracefully \
+                             (press again to force halt)..."
+                        );
                         let _ = tx.send(());
+                    }
+                    // Second Ctrl+C: force halt
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        tracing::warn!(
+                            "Second Ctrl+C received, force halting all downloads!"
+                        );
+                        let _ = cmd_tx.send(
+                            aria2_core::engine::engine_command::EngineCommand::ForceHaltAll {
+                                reason: aria2_core::request::request_group::HaltReason::ShutdownSignal,
+                            },
+                        );
+                    }
+                    // Ignore subsequent Ctrl+C signals
+                    loop {
+                        let _ = tokio::signal::ctrl_c().await;
                     }
                 });
             }

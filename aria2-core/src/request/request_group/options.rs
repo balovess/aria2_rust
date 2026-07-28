@@ -344,6 +344,43 @@ pub struct DownloadOptions {
     /// Start downloads in a paused state. Default: `false`.
     /// Maps to C++ `PREF_PAUSE`.
     pub pause: bool,
+
+    // ------------------------------------------------------------------
+    // Follow options (C++ PREF_FOLLOW_TORRENT / PREF_FOLLOW_METALINK)
+    // ------------------------------------------------------------------
+    /// Whether to follow torrent downloads by creating child request groups
+    /// when a .torrent file is downloaded. Default: `true`.
+    /// Maps to C++ `PREF_FOLLOW_TORRENT` (true = follow, false = just save,
+    /// "mem" = in-memory-only follow).
+    pub follow_torrent: Option<bool>,
+
+    /// Whether to follow Metalink downloads by creating child request groups
+    /// when a Metalink document is downloaded. Default: `true`.
+    /// Maps to C++ `PREF_FOLLOW_METALINK` (true = follow, false = just save,
+    /// "mem" = in-memory-only follow).
+    pub follow_metalink: Option<bool>,
+
+    // ------------------------------------------------------------------
+    // Download event hooks (C++ PREF_ON_DOWNLOAD_*)
+    // ------------------------------------------------------------------
+    /// Shell command to execute when a download starts.
+    /// C++: `PREF_ON_DOWNLOAD_START`. Arguments: GID hex, numFiles, firstFilePath.
+    pub on_download_start: Option<String>,
+    /// Shell command to execute when a download completes successfully.
+    /// C++: `PREF_ON_DOWNLOAD_COMPLETE`. Arguments: GID hex, numFiles, firstFilePath.
+    pub on_download_complete: Option<String>,
+    /// Shell command to execute when a download fails with an error.
+    /// C++: `PREF_ON_DOWNLOAD_ERROR`. Arguments: GID hex, numFiles, firstFilePath.
+    pub on_download_error: Option<String>,
+    /// Shell command to execute when a download is paused.
+    /// C++: `PREF_ON_DOWNLOAD_PAUSE`. Arguments: GID hex, numFiles, firstFilePath.
+    pub on_download_pause: Option<String>,
+    /// Shell command to execute when a download is stopped (not complete/error).
+    /// C++: `PREF_ON_DOWNLOAD_STOP`. Arguments: GID hex, numFiles, firstFilePath.
+    pub on_download_stop: Option<String>,
+    /// Shell command to execute when a BitTorrent download completes fully.
+    /// C++: `PREF_ON_BT_DOWNLOAD_COMPLETE`. Arguments: GID hex, numFiles, firstFilePath.
+    pub on_bt_download_complete: Option<String>,
 }
 
 // Manual Default impl: `enable_dht` and `enable_public_trackers` default to
@@ -416,6 +453,16 @@ impl Default for DownloadOptions {
             bt_lpd_interface: None,
             enable_rpc: false,
             pause: false,
+            // Follow options
+            follow_torrent: None,
+            follow_metalink: None,
+            // Event hooks
+            on_download_start: None,
+            on_download_complete: None,
+            on_download_error: None,
+            on_download_pause: None,
+            on_download_stop: None,
+            on_bt_download_complete: None,
         }
     }
 }

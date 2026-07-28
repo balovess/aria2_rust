@@ -7,6 +7,7 @@
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::download_result::DownloadResult;
+use super::group_id::GroupId;
 use super::halt_reason::HaltReason;
 use super::result_code::DownloadResultCode;
 use super::status::DownloadStatus;
@@ -89,6 +90,39 @@ impl super::RequestGroup {
 
         let mut result = DownloadResult::new(gid, status, code);
         result.fill_from_group(self);
+
+        // Fill parent-child relationships from RequestGroup fields.
+        // Mirrors C++ `DownloadResult::followedBy` / `following`.
+        result.following = *self.following_gid.recover();
+        result.followed_by = self.followed_by_gids.recover().clone();
+
         result
+    }
+
+    /// Set the GID of the parent download that spawned this one.
+    ///
+    /// Mirrors C++ `RequestGroup::following(gid)`. Called when a
+    /// post-download handler creates a child group.
+    pub fn set_following_gid(&self, parent_gid: GroupId) {
+        *self.following_gid.recover_mut() = Some(parent_gid);
+    }
+
+    /// Get the GID of the parent download that spawned this one.
+    pub fn following_gid(&self) -> Option<GroupId> {
+        *self.following_gid.recover()
+    }
+
+    /// Add a child GID to the followed-by list.
+    ///
+    /// Mirrors C++ `RequestGroup::followedBy()` which registers
+    /// child groups on the parent. Called when a post-download handler
+    /// creates child groups.
+    pub fn add_followed_by_gid(&self, child_gid: GroupId) {
+        self.followed_by_gids.recover_mut().push(child_gid);
+    }
+
+    /// Get the list of child GIDs spawned by this download.
+    pub fn followed_by_gids(&self) -> Vec<GroupId> {
+        self.followed_by_gids.recover().clone()
     }
 }

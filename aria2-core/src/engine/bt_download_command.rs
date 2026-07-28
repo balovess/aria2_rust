@@ -9,7 +9,7 @@ use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
     on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
 };
-use crate::engine::bt_post_download_handler::HookManager;
+use crate::engine::hook_manager::HookManager;
 use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::bt_tracker_comm::announce_to_public_tracker;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
@@ -553,14 +553,14 @@ impl BtDownloadCommand {
     ///
     /// # Arguments
     ///
-    /// * `manager` - A configured [`HookManager`](super::bt_post_download_handler::HookManager) with registered hooks, wrapped in `Arc`
+    /// * `manager` - A configured [`HookManager`](super::hook_manager::HookManager) with registered hooks, wrapped in `Arc`
     ///
     /// # Example
     ///
     /// ```rust,no_run
     /// use std::collections::HashMap;
     /// use std::sync::Arc;
-    /// use aria2_core::engine::bt_post_download_handler::{HookManager, HookConfig, MoveHook, ExecHook};
+    /// use aria2_core::engine::hook_manager::{HookManager, HookConfig, MoveHook, ExecHook};
     ///
     /// let config = HookConfig::default();
     /// let mut hooks = HookManager::new(config);
