@@ -336,9 +336,10 @@ fn test_mse_encrypted_pex_roundtrip() {
     use crate::bittorrent::extension::mse_crypto::{MseCryptoState, MseDerivedKeys};
 
     let original_payload = b"d5:added12:....6:added.f2:..e";
-    let secret = b"pex_encryption_test_secret_key";
+    let secret = [0xAAu8; 96];
+    let info_hash = [0xBBu8; 20];
 
-    let keys = MseDerivedKeys::derive(secret);
+    let keys = MseDerivedKeys::derive(&secret, &info_hash);
     let mut sender_crypto = MseCryptoState::new_encrypted(&keys, true);
     let mut receiver_crypto = MseCryptoState::new_encrypted(&keys, false);
 

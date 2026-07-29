@@ -1,4 +1,4 @@
-//! MSE DH Key Exchange using the 768-bit prime from the MSE specification.
+﻿//! MSE DH Key Exchange using the 768-bit prime from the MSE specification.
 //!
 //! Matches C++ aria2 `InternalDHKeyExchange.cc` which uses:
 //! - PRIME_BITS = 768, KEY_LENGTH = 96 bytes
@@ -274,7 +274,7 @@ mod tests {
         for _ in 0..5 {
             let pair = DhKeyPair::generate();
             let pub_val = BigUint::from_bytes_be(&pair.public);
-            let one: BigUint = One::one();
+            let one: BigUint = 1u32.into();
             let p = DhKeyPair::get_prime();
             assert!(
                 pub_val > one && pub_val < p,

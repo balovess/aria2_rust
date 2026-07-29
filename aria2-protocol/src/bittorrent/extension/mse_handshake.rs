@@ -25,9 +25,6 @@ use super::mse_dh::{
 };
 use rand::Rng;
 
-/// Maximum buffer length for the receiver, matching C++ `MAX_BUFFER_LENGTH = 636`.
-const MAX_BUFFER_LENGTH: usize = 636;
-
 /// Synchronization limit for the initiator: 616 bytes max before finding VC marker.
 const INITIATOR_SYNC_LIMIT: usize = 616;
 
@@ -736,7 +733,7 @@ mod tests {
         assert_eq!(method_i, MseCryptoMethod::Rc4);
 
         // Finalize both sides
-        let crypto_i = initiator.finalize().expect("I finalize");
+        let mut crypto_i = initiator.finalize().expect("I finalize");
         let crypto_r = responder.finalize().expect("R finalize");
 
         assert!(crypto_i.is_encrypted());

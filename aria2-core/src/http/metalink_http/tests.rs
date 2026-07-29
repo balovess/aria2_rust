@@ -2,7 +2,7 @@
 
 use super::helpers::{split_link_entries, unquote};
 use super::parser::{deduplicate_digests, MetalinkHttpParser};
-use super::types::{MetalinkHttpDigest, MetalinkHttpLink, MetalinkHttpResult};
+use super::types::MetalinkHttpDigest;
 
 // ---- Link header parsing ----
 

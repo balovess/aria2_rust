@@ -20,6 +20,7 @@ use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
 use super::engine_command::{EngineCommand, TaskResult};
 use super::task_spawner::spawn_download_task;
 use crate::dns::dns_cache::DnsCache;
+use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::ftp::FtpConnectionPool;
 use crate::request::request_group::GroupId;
 use crate::request::request_group_man::RequestGroupMan;
@@ -53,6 +54,12 @@ pub struct EngineLoopContext {
     /// Download event hooks for firing on-download-start/complete/error/pause/stop.
     /// Mirrors C++ `util::executeHookByOptName()`.
     pub event_hooks: Arc<DownloadEventHooks>,
+
+    /// File allocation manager for sequential disk pre-allocation.
+    /// Mirrors C++ `DownloadEngine::fileAllocationMan_` (a `SequentialPicker`).
+    /// When a download needs file allocation, the entry is queued here and
+    /// processed one at a time to avoid disk thrashing.
+    pub file_alloc_man: Arc<tokio::sync::RwLock<FileAllocationMan>>,
 
     /// Whether the engine should stay alive even with no active downloads
     /// (used for RPC listen mode). Mirrors C++ `keepRunning_`.
@@ -357,6 +364,43 @@ async fn process_engine_commands(
                             paused,
                             "Paused excess active downloads after max-concurrent reduction"
                         );
+                    }
+                }
+            }
+
+            EngineCommand::FileAllocationCompleted { gid } => {
+                // Mirrors C++ FileAllocationCommand::executeInternal() when
+                // finished() returns true: drop the picked entry and proceed
+                // to spawn the actual download task.
+                {
+                    let mut alloc_man = ctx.file_alloc_man.write().await;
+                    alloc_man.complete_current();
+                }
+                debug!(
+                    gid = gid.value(),
+                    "File allocation completed, spawning download task"
+                );
+                // The group is now in the active DashMap; the engine loop's
+                // normal promotion/demotion cycle will handle spawning the
+                // download task on the next tick.
+            }
+
+            EngineCommand::FileAllocationFailed { gid, error } => {
+                {
+                    let mut alloc_man = ctx.file_alloc_man.write().await;
+                    alloc_man.drop_picked();
+                }
+                warn!(
+                    gid = gid.value(),
+                    error = %error,
+                    "File allocation failed"
+                );
+                // Try to find the group in active set and mark it as halted.
+                let man = ctx.group_man.read().await;
+                for group in man.get_active_groups() {
+                    if group.recover().gid() == gid {
+                        group.recover().request_halt(crate::request::request_group::HaltReason::UserRequest);
+                        break;
                     }
                 }
             }

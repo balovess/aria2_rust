@@ -1,25 +1,57 @@
 //! MSE (Message Stream Encryption) encrypted handshake module
 //!
-//! Implements BitTorrent BEP 10 encryption layer protocol, overlaying optional encrypted handshake on BT protocol handshake.
-//! Contains three-phase handshake: Method Selection, PAD/DH key exchange, SKEY/SVC verification.
-//!
-//! # ⚠️ DEPRECATED — Use `aria2_protocol::bittorrent::extension::mse_handshake` instead
+//! # DEPRECATED — Use `aria2_protocol::bittorrent::extension::mse_handshake` instead
 //!
 //! This module uses **X25519** (via the `ring` crate) for the DH key exchange,
 //! which is **NOT compliant** with the MSE specification. The MSE spec requires
-//! 1024-bit DH with the RFC 3526 prime (the same parameters used in C++ aria2).
+//! 768-bit DH with the MSE prime (the same parameters used in C++ aria2).
+//!
+//! Additionally, the key derivation and wire format in this module are completely
+//! wrong and will **NOT** interoperate with any standard BT client:
+//! - Uses X25519 instead of 768-bit DH
+//! - Wrong key derivation: missing info_hash in keyA/keyB, truncated to 16 bytes
+//! - Wrong wire format: custom 3-step protocol instead of the C++ 4-step format
+//! - VC is SHA1-based instead of RC4-encrypted zeros
 //!
 //! The correct implementation lives in the `aria2-protocol` crate:
 //! - `aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake` —
-//!   correct 3-step handshake using 1024-bit DH via `num-bigint-dig`
+//!   correct 4-step handshake using 768-bit DH matching C++ MSEHandshake.cc
 //! - `aria2_protocol::bittorrent::extension::mse_crypto::MseCryptoState` —
-//!   correct RC4 stream cipher with 1024-byte keystream discard
-//! - `aria2_protocol::bittorrent::extension::mse_dh::DhKeyPair` —
-//!   correct 1024-bit DH key exchange matching C++ `InternalDHKeyExchange`
+//!   correct RC4 stream cipher with C++ key derivation (full 20-byte keys)
+//! - `aria2_protocol::bittorrent::extension::mse_dh::MseDhKeyExchange` —
+//!   correct 768-bit DH key exchange matching C++ InternalDHKeyExchange
 //!
 //! This module is retained temporarily for reference but should NOT be used
 //! in new code. It will be removed once all call sites are migrated to the
 //! protocol-level MSE implementation.
+//!
+//! ## Migration Guide
+//!
+//! Replace:
+//! ```ignore
+//! use crate::engine::bt_mse_handshake::MseHandshakeManager;
+//! let mgr = MseHandshakeManager::new(info_hash)?;
+//! ```
+//!
+//! With:
+//! ```ignore
+//! use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake;
+//! let mut initiator = MseHandshake::new_initiator(info_hash);
+//! let step1 = initiator.build_step1();
+//! // ... exchange step1 with peer ...
+//! initiator.receive_step1(&remote_step1)?;
+//! let step3 = initiator.build_initiator_step2()?;
+//! // ... exchange step3 with peer ...
+//! let method = initiator.receive_receiver_step2(&remote_step4)?;
+//! let crypto = initiator.finalize()?;
+//! ```
+
+#![deprecated(
+    since = "0.2.8",
+    note = "Use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake instead. \
+            This module uses X25519 instead of 768-bit DH and has completely wrong key \
+            derivation and wire format. It cannot interoperate with any standard BT client."
+)]
 
 use rc4::{KeyInit, Rc4 as Rc4Cipher, StreamCipher};
 use ring::agreement::{self, EphemeralPrivateKey, UnparsedPublicKey};
@@ -30,6 +62,10 @@ use std::sync::Mutex;
 use crate::error::{Aria2Error, Result};
 
 /// MSE encryption method
+#[deprecated(
+    since = "0.2.8",
+    note = "Use aria2_protocol::bittorrent::extension::mse_crypto::MseCryptoMethod instead"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoMethod {
     /// Plaintext transmission, no encryption
@@ -41,6 +77,7 @@ pub enum CryptoMethod {
 }
 
 impl CryptoMethod {
+    #[allow(deprecated)]
     /// Create CryptoMethod from u16 value
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
@@ -58,6 +95,10 @@ impl CryptoMethod {
 }
 
 /// MSE handshake state machine
+#[deprecated(
+    since = "0.2.8",
+    note = "Use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshakePhase instead"
+)]
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum MseState {
@@ -76,6 +117,10 @@ pub enum MseState {
 }
 
 /// MSE encryption context (used for encrypting/decrypting BT messages after handshake complete)
+#[deprecated(
+    since = "0.2.8",
+    note = "Use aria2_protocol::bittorrent::extension::mse_crypto::MseCryptoState instead"
+)]
 pub struct MseCryptoContext {
     send_key: Vec<u8>,
     recv_key: Vec<u8>,
@@ -84,6 +129,7 @@ pub struct MseCryptoContext {
     rc4_recv: Option<Rc4Cipher>,
 }
 
+#[allow(deprecated)]
 impl std::fmt::Debug for MseCryptoContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MseCryptoContext")
@@ -96,6 +142,7 @@ impl std::fmt::Debug for MseCryptoContext {
     }
 }
 
+#[allow(deprecated)]
 impl Clone for MseCryptoContext {
     fn clone(&self) -> Self {
         // Note: RC4 state cannot truly be cloned (will lose state), here creating new instance
@@ -115,6 +162,7 @@ impl Clone for MseCryptoContext {
     }
 }
 
+#[allow(deprecated)]
 impl PartialEq for MseCryptoContext {
     fn eq(&self, other: &Self) -> bool {
         self.send_key == other.send_key
@@ -123,6 +171,7 @@ impl PartialEq for MseCryptoContext {
     }
 }
 
+#[allow(deprecated)]
 impl MseCryptoContext {
     /// Create new encryption context using derived keys
     ///
@@ -213,6 +262,7 @@ impl MseCryptoContext {
 }
 
 /// Plaintext fallback: create unencrypted context
+#[allow(deprecated)]
 impl Default for MseCryptoContext {
     fn default() -> Self {
         Self {
@@ -226,6 +276,10 @@ impl Default for MseCryptoContext {
 }
 
 /// MSE handshake manager
+#[deprecated(
+    since = "0.2.8",
+    note = "Use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake instead"
+)]
 pub struct MseHandshakeManager {
     /// Handshake state machine.
     /// Uses std::sync::Mutex because the lock is only held for short synchronous
@@ -239,6 +293,7 @@ pub struct MseHandshakeManager {
     pad_length: u16,
 }
 
+#[allow(deprecated)]
 impl MseHandshakeManager {
     /// Create new MSE handshake instance
     pub fn new(info_hash: [u8; 20]) -> Result<Self> {
@@ -553,6 +608,7 @@ impl MseHandshakeManager {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

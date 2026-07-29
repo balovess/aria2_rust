@@ -1,6 +1,14 @@
 //! Integration tests for the MSE handshake module
 //!
 //! Tests cover all three handshake phases, state machine transitions, encryption/decryption, etc.
+//!
+//! # Deprecation Note
+//!
+//! The module under test (`bt_mse_handshake`) is deprecated. These tests
+//! are retained for regression but new code should use the corrected
+//! implementation in `aria2-protocol`.
+
+#![allow(deprecated)]
 
 use crate::engine::bt_mse_handshake::*;
 use sha1::{Digest, Sha1};

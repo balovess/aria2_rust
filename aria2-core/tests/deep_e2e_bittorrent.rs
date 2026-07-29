@@ -4,6 +4,8 @@
 //! MSE encrypted handshake, and tracker multi-peer distribution end-to-end.
 
 #![cfg(feature = "bittorrent")]
+// bt_mse_handshake module is deprecated; suppress warnings in this test file
+#![allow(deprecated)]
 
 mod fixtures;
 

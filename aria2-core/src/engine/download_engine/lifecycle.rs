@@ -39,6 +39,9 @@ impl DownloadEngine {
             dns_cache: Arc::clone(&self.dns_cache),
             auto_save: self.auto_save.take(),
             event_hooks: Arc::new(super::super::download_event_hooks::DownloadEventHooks::new()),
+            file_alloc_man: Arc::new(tokio::sync::RwLock::new(
+                super::super::super::filesystem::file_allocation_man::FileAllocationMan::new(),
+            )),
             keep_alive: self.keep_alive,
         };
 

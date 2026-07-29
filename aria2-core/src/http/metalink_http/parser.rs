@@ -86,15 +86,15 @@ impl MetalinkHttpParser {
             let locs_lower: Vec<String> =
                 preferred_locations.iter().map(|l| l.to_lowercase()).collect();
             for link in &mut all_links {
-                if let Some(ref geo) = link.geo {
-                    if locs_lower.iter().any(|l| l == geo) {
-                        // Boost priority: reduce effective pri by DEFAULT_PRI
-                        // C++ does r.pri -= 999999 which makes it a very high
-                        // priority (low number). In Rust, pri is Option<u64>,
-                        // so we need to handle the arithmetic carefully.
-                        let current_pri = link.pri.unwrap_or(DEFAULT_PRI);
-                        link.pri = Some(current_pri.saturating_sub(DEFAULT_PRI));
-                    }
+                if let Some(ref geo) = link.geo
+                    && locs_lower.iter().any(|l| l == geo)
+                {
+                    // Boost priority: reduce effective pri by DEFAULT_PRI
+                    // C++ does r.pri -= 999999 which makes it a very high
+                    // priority (low number). In Rust, pri is Option<u64>,
+                    // so we need to handle the arithmetic carefully.
+                    let current_pri = link.pri.unwrap_or(DEFAULT_PRI);
+                    link.pri = Some(current_pri.saturating_sub(DEFAULT_PRI));
                 }
             }
             // Re-sort after priority adjustment
