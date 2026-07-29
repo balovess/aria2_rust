@@ -145,11 +145,14 @@ impl HttpResponseProcessor {
         }
 
         // --- 2xx: Unique protocol URI cleanup ---
-        if is_unique_protocol {
-            // The caller (download engine) should remove URIs whose hostname
-            // matches the current request's hostname. We log this intent.
-            debug!("Unique protocol: caller should remove same-host URIs");
-        }
+        // C++ aria2: if (fe->isUniqueProtocol()) {
+        //   uri_split_result us; uri_split(&us, uri.c_str());
+        //   std::string host = getFieldString(us, USR_HOST, uri.c_str());
+        //   fe->removeURIWhoseHostnameIs(host);
+        // }
+        // We pass the flag to the caller so it can execute the cleanup
+        // at the RequestGroup level (since the processor doesn't have
+        // direct access to FileEntry).
 
         // --- 2xx: Determine download parameters ---
         let entity_length = range::compute_entity_length(response_head);
@@ -224,6 +227,7 @@ impl HttpResponseProcessor {
             digests,
             content_range,
             last_modified,
+            is_unique_protocol,
         })
     }
 

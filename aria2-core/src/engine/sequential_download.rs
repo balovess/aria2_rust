@@ -555,6 +555,14 @@ impl SequentialDownloader {
             g.set_total_length(actual_total);
         }
 
+        // Extract Last-Modified header for remote-time option.
+        // C++ `updateLastModifiedTime()`: when the `remote-time` option is
+        // enabled, the file's mtime is set to the server's Last-Modified time
+        // after download completion.
+        let last_modified = response.headers().get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let start_offset = if resume_state.should_resume {
             resume_state.start_offset
         } else {
@@ -695,6 +703,43 @@ impl SequentialDownloader {
             self.output_path.display(),
             completed_bytes
         );
+
+        // Apply remote-time: set file mtime to server's Last-Modified.
+        // Matches C++ `updateLastModifiedTime()`:
+        //   if (getOption()->getAsBool(PREF_REMOTE_TIME)) {
+        //     getRequestGroup()->updateLastModifiedTime(lastModified);
+        //   }
+        // The actual file mtime update happens here, after the file is closed.
+        if let Some(ref lm_str) = last_modified {
+            let g = self.group.recover();
+            if g.options().remote_time {
+                // Use the cookie module's RFC 6265 HTTP-date parser which
+                // supports IMF-fixdate, RFC 850, and asctime formats.
+                if let Some(epoch_secs) = crate::http::cookie::parsing::parse_http_date(lm_str) {
+                    let mtime_file = std::time::SystemTime::from(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs as u64),
+                    );
+                    // Use std::fs::metadata + set_file_mtime via filetime crate
+                    // for cross-platform support. If filetime is not available,
+                    // we can use platform-specific calls.
+                    // For now, use std::fs which supports setting modification time.
+                    if let Err(e) = std::fs::File::open(&self.output_path)
+                        .and_then(|f| {
+                            f.set_modified(mtime_file)
+                                .map_err(|e2| std::io::Error::new(e2.kind(), e2.to_string()))
+                        })
+                    {
+                        tracing::warn!(
+                            "Failed to set file mtime from Last-Modified '{}': {}",
+                            lm_str, e
+                        );
+                    } else {
+                        tracing::debug!("Set file mtime from Last-Modified: {}", lm_str);
+                    }
+                }
+            }
+        }
+
         // ADR-0001: Delete control file on successful completion.
         drop(ctrl_file);
         if ctrl_path.exists()

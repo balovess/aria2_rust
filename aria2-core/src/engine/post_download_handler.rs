@@ -28,6 +28,7 @@
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use crate::error::Aria2Error;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 /// Metadata extracted from a completed download for handler matching.
@@ -75,7 +76,7 @@ pub trait PostDownloadHandler: Send + Sync + std::fmt::Debug {
     fn create_child_groups(
         &self,
         info: &CompletedDownloadInfo,
-    ) -> Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, String>;
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error>;
 
     /// Handler name for logging.
     fn name(&self) -> &'static str;
@@ -284,7 +285,7 @@ mod tests {
         fn create_child_groups(
             &self,
             _info: &CompletedDownloadInfo,
-        ) -> Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, String> {
+        ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
             Ok(self.groups.clone())
         }
 
@@ -344,8 +345,8 @@ mod tests {
             fn create_child_groups(
                 &self,
                 _info: &CompletedDownloadInfo,
-            ) -> Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, String> {
-                Err("parse error".to_string())
+            ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
+                Err(Aria2Error::Parse("parse error".to_string()))
             }
             fn name(&self) -> &'static str {
                 "fail"

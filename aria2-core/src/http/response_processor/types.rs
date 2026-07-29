@@ -46,6 +46,11 @@ pub enum ResponseProcessResult {
         /// Last-Modified header value as IMF-fixdate string, if present.
         /// Used by the `remote-time` option to set the local file's mtime.
         last_modified: Option<String>,
+        /// Whether all URIs in the RequestGroup use the same protocol.
+        /// When true, the caller should remove URIs whose hostname matches
+        /// the current request's hostname from the FileEntry, matching
+        /// C++ `FileEntry::removeURIWhoseHostnameIs()`.
+        is_unique_protocol: bool,
     },
 
     /// 304 Not Modified -- the file is already current; all pieces are done.

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::engine::post_download_handler::{CompletedDownloadInfo, PostDownloadHandler};
+use crate::error::Aria2Error;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -105,13 +106,13 @@ impl BtTorrentPostDownloadHandler {
         torrent_data: &[u8],
         parent_gid: GroupId,
         options: &DownloadOptions,
-    ) -> Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, String> {
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
         use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
 
         // Parse the bencode metainfo.
         // C++: `bittorrent::ValueBaseBencodeParser().parseFinal(content, size, error)`
         let meta = TorrentMeta::parse(torrent_data).map_err(|e| {
-            format!("Could not parse BitTorrent metainfo: {}", e)
+            Aria2Error::Parse(format!("Could not parse BitTorrent metainfo: {}", e))
         })?;
 
         let info_hash_hex = meta.info_hash.as_hex();
@@ -215,28 +216,28 @@ impl PostDownloadHandler for BtTorrentPostDownloadHandler {
     fn create_child_groups(
         &self,
         info: &CompletedDownloadInfo,
-    ) -> Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, String> {
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
         // Get torrent data: either from in-memory (magnet metadata) or disk
         let torrent_data = if info.in_memory_download {
             // C++: reads from BencodeDiskWriter for in-memory downloads
             info.in_memory_data
                 .as_ref()
-                .ok_or_else(|| "In-memory download has no data".to_string())?
+                .ok_or_else(|| Aria2Error::Parse("In-memory download has no data".to_string()))?
                 .clone()
         } else {
             // C++: `diskAdaptor->openExistingFile()` then `util::toString()`
             let path = info
                 .file_path
                 .as_ref()
-                .ok_or_else(|| "File-based torrent download has no file path".to_string())?;
+                .ok_or_else(|| Aria2Error::Io("File-based torrent download has no file path".to_string()))?;
 
             std::fs::read(path).map_err(|e| {
-                format!("Failed to read torrent file '{}': {}", path, e)
+                Aria2Error::Io(format!("Failed to read torrent file '{}': {}", path, e))
             })?
         };
 
         if torrent_data.is_empty() {
-            return Err("Torrent file is empty".to_string());
+            return Err(Aria2Error::Parse("Torrent file is empty".to_string()));
         }
 
         self.create_request_group_from_torrent(

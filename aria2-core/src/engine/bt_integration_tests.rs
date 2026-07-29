@@ -13,8 +13,8 @@ mod tests {
     use std::time::Duration;
     use tracing::info;
 
-    use crate::engine::bt_post_download_handler::{
-        DownloadStats as HookDownloadStats, DownloadStatus, HookContext, HookManager,
+    use crate::engine::hook_manager::{
+        DownloadStats as HookDownloadStats, DownloadStatus, HookContext, HookConfig, HookManager,
         PostDownloadHook,
     };
     use crate::engine::bt_progress_info_file::{
@@ -126,10 +126,12 @@ mod tests {
         let loaded = manager.load_progress(&info_hash).unwrap();
         assert_eq!(loaded.info_hash, info_hash);
         assert_eq!(loaded.num_pieces, 2);
-        // Binary format persists upload_length but not stats (matching C++)
+        // Binary format persists upload_length (matching C++)
         assert_eq!(loaded.upload_length, 512);
-        // stats.uploaded_bytes is NOT persisted in binary format (defaults to 0)
-        assert_eq!(loaded.stats.uploaded_bytes, 0);
+        // C++ restores uploadLength into the runtime stats via
+        // btRuntime_->setUploadLengthAtStartup(uploadLength).
+        // Our deserialize_binary mirrors this by setting uploaded_bytes from upload_length.
+        assert_eq!(loaded.stats.uploaded_bytes, 512);
 
         // Cleanup
         let _ = manager.remove_progress(&info_hash);
@@ -234,10 +236,10 @@ mod tests {
         assert_eq!(loaded.piece_length, original.piece_length);
         assert_eq!(loaded.total_size, original.total_size);
         assert_eq!(loaded.version, original.version);
-        // Binary format persists upload_length; stats are NOT persisted (matching C++)
+        // Binary format persists upload_length (matching C++)
         assert_eq!(loaded.upload_length, original.upload_length);
-        // stats.uploaded_bytes defaults to 0 after loading from binary format
-        assert_eq!(loaded.stats.uploaded_bytes, 0);
+        // C++ restores uploadLength into runtime stats. Our deserialize mirrors this.
+        assert_eq!(loaded.stats.uploaded_bytes, original.upload_length);
 
         info!(
             hash = %loaded.to_hex_hash(),
@@ -315,7 +317,7 @@ mod tests {
         }
 
         let mut manager =
-            HookManager::new(crate::engine::bt_post_download_handler::HookConfig::default());
+            HookManager::new(HookConfig::default());
         manager.add_hook(Box::new(TestHook));
 
         let ctx = HookContext {

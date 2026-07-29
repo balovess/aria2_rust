@@ -237,8 +237,14 @@ pub fn deserialize_binary(data: &[u8], expected_info_hash: &[u8; 20]) -> Result<
             *expected_info_hash
         },
         bitfield,
-        peers: Vec::new(),               // Binary format does not persist peers
-        stats: DownloadStats::default(), // Not stored in binary format
+        peers: Vec::new(), // Binary format does not persist peers
+        stats: DownloadStats {
+            // C++ restores uploadLength into the runtime stats via
+            // btRuntime_->setUploadLengthAtStartup(uploadLength).
+            // Mirror this by setting uploaded_bytes from the persisted field.
+            uploaded_bytes: upload_length,
+            ..DownloadStats::default()
+        },
         piece_length,
         total_size,
         num_pieces: num_pieces as u32,
@@ -314,6 +320,9 @@ mod tests {
         assert_eq!(loaded.piece_length, progress.piece_length);
         assert_eq!(loaded.total_size, progress.total_size);
         assert_eq!(loaded.upload_length, progress.upload_length);
+        // C++ restores uploadLength into the runtime stats.
+        // Our deserialize mirrors this by setting uploaded_bytes from upload_length.
+        assert_eq!(loaded.stats.uploaded_bytes, progress.upload_length);
         assert_eq!(loaded.in_flight_pieces.len(), 1);
         assert_eq!(loaded.in_flight_pieces[0].index, 0);
         assert_eq!(loaded.in_flight_pieces[0].length, 16384);

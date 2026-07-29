@@ -166,19 +166,19 @@ impl MetalinkPostDownloadHandler {
     /// Read the Metalink data from the completed download.
     ///
     /// C++: `diskAdaptor->openExistingFile()` then `util::toString(diskAdaptor)`.
-    fn read_metalink_data(info: &CompletedDownloadInfo) -> Result<Vec<u8>, String> {
+    fn read_metalink_data(info: &CompletedDownloadInfo) -> std::result::Result<Vec<u8>, Aria2Error> {
         if info.in_memory_download {
             info.in_memory_data
                 .clone()
-                .ok_or_else(|| "In-memory download has no data".to_string())
+                .ok_or_else(|| Aria2Error::Parse("In-memory download has no data".to_string()))
         } else {
             let path = info
                 .file_path
                 .as_ref()
-                .ok_or_else(|| "File-based Metalink download has no file path".to_string())?;
+                .ok_or_else(|| Aria2Error::Io("File-based Metalink download has no file path".to_string()))?;
 
             std::fs::read(path).map_err(|e| {
-                format!("Failed to read Metalink file '{}': {}", path, e)
+                Aria2Error::Io(format!("Failed to read Metalink file '{}': {}", path, e))
             })
         }
     }
@@ -211,12 +211,12 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
     fn create_child_groups(
         &self,
         info: &CompletedDownloadInfo,
-    ) -> Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, String> {
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
         // Read the Metalink data from the completed download
         let metalink_data = Self::read_metalink_data(info)?;
 
         if metalink_data.is_empty() {
-            return Err("Metalink file is empty".to_string());
+            return Err(Aria2Error::Parse("Metalink file is empty".to_string()));
         }
 
         // Parse and create MetalinkDownloadCommands
@@ -231,8 +231,7 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
                 &metalink_data,
                 info.base_uri.as_deref(),
                 &child_options,
-            )
-            .map_err(|e| format!("Metalink processing failed: {}", e))?;
+            )?;
 
         // Extract RequestGroup from each MetalinkDownloadCommand.
         // C++: `groups.insert(groups.end(), newRgs.begin(), newRgs.end())`

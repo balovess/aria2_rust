@@ -18,7 +18,7 @@ use fixtures::mock_tracker::MockTrackerServer;
 use test_harness::{assert_file_contents, generate_test_data, setup_temp_dir};
 
 use aria2_core::engine::bt_mse_handshake::{CryptoMethod, MseCryptoContext, MseHandshakeManager};
-use aria2_core::engine::bt_post_download_handler::{
+use aria2_core::engine::hook_manager::{
     DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
     HookManager, MoveHook, PostDownloadHook, TouchHook,
 };

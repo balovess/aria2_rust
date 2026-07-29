@@ -438,6 +438,9 @@ async fn test_skip_entries_with_zero_progress() {
     let session_file = temp_dir.path().join("zero_progress_session.txt");
 
     // Create session file where all entries have no progress
+    // Per C++ aria2 behavior, 0/0 entries are still restored (they may
+    // be newly added downloads that haven't started yet). Only "removed"
+    // entries are skipped.
     // Note: Property lines must have leading space prefix (aria2 session format)
     let session_content = r#"http://example.com/new1.zip
  GID=1
@@ -481,13 +484,16 @@ http://example.com/new2.iso
 
     let result = app.restore_session().await;
     assert!(result.is_ok(), "Should return Ok");
+    // C++ aria2 restores ALL non-finished entries, including 0/0 progress
+    // entries (they may be newly added downloads). Only "removed" entries
+    // are skipped.
     assert_eq!(
         result.unwrap(),
-        0,
-        "Entries with no progress should all be skipped"
+        2,
+        "C++ aria2 restores all non-finished entries including 0/0 progress"
     );
 
     let man = app.request_man.read().await;
     let group_count = man.count();
-    assert_eq!(group_count, 0, "Should not add any groups");
+    assert_eq!(group_count, 2, "Should restore both 0/0 progress groups");
 }

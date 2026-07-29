@@ -454,7 +454,7 @@ async fn engine_bt_progress_persistence() {
 #[tokio::test]
 async fn engine_bt_hook_chain_fires() {
     use aria2_core::engine::bt_download_command::BtDownloadCommand;
-    use aria2_core::engine::bt_post_download_handler::HookManager;
+    use aria2_core::engine::hook_manager::HookManager;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -465,7 +465,7 @@ async fn engine_bt_hook_chain_fires() {
     let touch_executed = Arc::new(AtomicBool::new(false));
 
     // Create HookManager with custom hooks (simulating MoveHook + TouchHook)
-    let hook_config = aria2_core::engine::bt_post_download_handler::HookConfig::default();
+    let hook_config = aria2_core::engine::hook_manager::HookConfig::default();
     let hook_mgr = HookManager::new(hook_config);
     // GAP: HookManager::add_move_hook() and add_touch_hook() may not exist yet
     // or may have different API signatures. Adjust based on actual implementation.

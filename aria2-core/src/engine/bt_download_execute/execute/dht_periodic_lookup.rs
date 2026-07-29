@@ -318,13 +318,24 @@ mod tests {
     }
 
     #[test]
-    fn retry_caps_at_max() {
+    fn retry_reaches_max_then_resets() {
         let mut lookup = DhtPeriodicLookup::new();
-        for _ in 0..15 {
+
+        // After 10 lookups with 0 peers, retry reaches MAX_RETRIES.
+        // This matches C++ DHTGetPeersCommand::execute() where numRetry_
+        // increments while numRetry_ < MAX_RETRIES.
+        for _ in 0..10 {
             lookup.on_lookup_started();
             lookup.on_lookup_completed(0);
         }
         assert_eq!(lookup.retry_count(), MAX_RETRIES);
+
+        // On the 11th completion, num_retry >= MAX_RETRIES, so the else
+        // branch resets to 0 (C++ design: after exhausting retries, back
+        // off from aggressive 5-second retry interval to normal interval).
+        lookup.on_lookup_started();
+        lookup.on_lookup_completed(0);
+        assert_eq!(lookup.retry_count(), 0);
     }
 
     #[test]
