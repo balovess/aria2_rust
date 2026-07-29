@@ -1,4 +1,4 @@
-﻿use async_trait::async_trait;
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -169,6 +169,11 @@ impl Command for DownloadCommand {
 
         self.spawn_progress_aggregator();
 
+        // Initialize tail reclaim progress tracking before the download loop.
+        // Mirrors C++ DownloadCommand constructor which initializes
+        // lastTailReclaimSessionDownloadLength_ to 0.
+        self.update_tail_reclaim_progress();
+
         let download_result: Result<()> = async {
             if total_length > 0 {
                 file_allocation::preallocate_file(
@@ -257,6 +262,12 @@ impl Command for DownloadCommand {
             ).await
         }
         .await;
+
+        // Update tail reclaim tracking after download attempt completes.
+        // In C++ this is called on every data chunk (executeInternal loop);
+        // here we update at the boundary since the Rust architecture uses
+        // async downloaders that manage their own data loops internally.
+        self.update_tail_reclaim_progress();
 
         self.drain_progress_aggregator().await;
 

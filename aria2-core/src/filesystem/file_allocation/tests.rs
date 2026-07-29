@@ -335,15 +335,15 @@ async fn test_preallocate_small_file_no_progress_callback() {
     );
 }
 
-/// Verify the workspace default file allocation strategy is `falloc` and
-/// that it parses to `AllocationStrategy::Falloc`.
+/// Verify the workspace default file allocation strategy is `trunc` (aria2-next default)
+/// and that it parses to `AllocationStrategy::Trunc`.
 #[test]
-fn test_default_allocation_is_falloc() {
+fn test_default_allocation_is_trunc() {
     use crate::constants;
-    assert_eq!(constants::DEFAULT_FILE_ALLOCATION, "falloc");
+    assert_eq!(constants::DEFAULT_FILE_ALLOCATION, "trunc");
     assert_eq!(
         AllocationStrategy::from_str(constants::DEFAULT_FILE_ALLOCATION),
-        AllocationStrategy::Falloc
+        AllocationStrategy::Trunc
     );
 }
 

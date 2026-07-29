@@ -1,4 +1,4 @@
-﻿//! Centralized OptionHandler with config file parser (.aria2rc format).
+//! Centralized OptionHandler with config file parser (.aria2rc format).
 //!
 //! This module provides [`OptionHandler`], a self-contained option management
 //! struct that holds all aria2 configuration values with built-in defaults,
@@ -48,7 +48,7 @@ pub(super) fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
     vec![
         ("dir", OptionValue::Str(String::from("."))),
         ("max-concurrent-downloads", OptionValue::Usize(5)),
-        ("max-connection-per-server", OptionValue::Usize(16)),
+        ("max-connection-per-server", OptionValue::Usize(1)),
         ("min-split-size", OptionValue::Usize(1_048_576)), // 1 MiB
         ("split", OptionValue::Usize(5)),
         ("max-overall-download-limit", OptionValue::Usize(0)), // unlimited
@@ -60,7 +60,7 @@ pub(super) fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
         ("allow-overwrite", OptionValue::Bool(true)),
         (
             "file-allocation",
-            OptionValue::Str(String::from("falloc")),
+            OptionValue::Str(String::from("trunc")),
         ),
         (
             "mmap-threshold",
@@ -77,7 +77,7 @@ pub(super) fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
         ("quiet", OptionValue::Bool(false)),
         (
             "console-log-level",
-            OptionValue::Str(String::from("notice")),
+            OptionValue::Str(String::from("info")),
         ),
         // HTTP authentication defaults (C++ PREF_* compatible)
         ("http-auth-challenge", OptionValue::Bool(false)),

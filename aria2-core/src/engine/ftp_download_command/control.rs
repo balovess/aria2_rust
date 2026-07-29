@@ -17,7 +17,7 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 // ---------------------------------------------------------------------------
 
 /// URL-encoded string decoder
-pub(super) fn urlencoding_decode(s: &str) -> String {
+pub(crate) fn urlencoding_decode(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {

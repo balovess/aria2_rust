@@ -27,8 +27,8 @@ mod piece_selection;
 mod pipeline;
 mod tests;
 
-pub use piece_selection::*;
-pub use pipeline::*;
+// Sub-modules define `impl BtRequestFactory` blocks; no new public items to re-export.
+
 
 use std::collections::VecDeque;
 

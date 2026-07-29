@@ -3,8 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::filesystem::disk_adaptor::DiskAdaptor;
-
 use super::*;
 
 mod allocation_tests;

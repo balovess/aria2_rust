@@ -242,61 +242,27 @@ impl LpdAnnouncer {
                             debug!(
                                 info_hash = %peer.info_hash[..8.min(peer.info_hash.len())],
                                 addr = %src_addr.ip(),
-                                "Received valid LPD announcement"
+                port = peer.port,
+                                "Discovered peer via LPD"
                             );
                             peers.push(peer);
-                        } else {
-                            debug!(
-                                addr = %src_addr.ip(),
-                                "Duplicate LPD announcement suppressed"
-                            );
                         }
                     }
                 }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Timeout reached, no more data
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    break;
+                }
                 Err(e) => {
-                    let kind = e.kind();
-                    if kind == std::io::ErrorKind::TimedOut
-                        || kind == std::io::ErrorKind::WouldBlock
-                    {
-                        break;
-                    }
-                    // Other errors: log but continue trying
-                    warn!(error = %e, "LPD receive error, continuing");
-                    // Small sleep to avoid busy-looping on persistent errors
-                    std::thread::sleep(Duration::from_millis(10));
+                    warn!(error = %e, "LPD receive error");
+                    break;
                 }
             }
         }
 
-        debug!(count = peers.len(), "LPD receive completed");
         peers
-    }
-
-    /// Perform a single announce+receive cycle (announce then collect responses)
-    ///
-    /// Sends our announcement, waits briefly, then collects any responses
-    /// from other peers who also announced in that window.
-    pub fn announce_and_discover(
-        &self,
-        info_hash: &str,
-        port: u16,
-        discover_timeout: Duration,
-    ) -> Result<Vec<LpdPeer>, String> {
-        // Announce ourselves
-        self.announce(info_hash, port)?;
-
-        // Wait a bit for others to respond
-        std::thread::sleep(Duration::from_millis(500));
-
-        // Collect announcements
-        let peers = self.receive_announcements(discover_timeout);
-
-        // Filter out our own announcement (by matching our info_hash + port)
-        let peers: Vec<LpdPeer> = peers
-            .into_iter()
-            .filter(|p| !(p.info_hash == info_hash && p.port == port))
-            .collect();
-
-        Ok(peers)
     }
 }

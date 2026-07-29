@@ -1,4 +1,6 @@
-﻿//! Tests for disk_writer module.
+//! Tests for disk_writer module.
+
+use std::sync::Arc;
 
 use super::*;
 

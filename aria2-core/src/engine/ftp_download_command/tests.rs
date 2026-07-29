@@ -1,7 +1,7 @@
 //! Tests for FTP download command.
 
-use super::control::{parse_epsv_response, parse_pasv_response, RawFtpControl};
-use super::types::{urlencoding_decode, FtpDownloadCommand};
+use super::control::{parse_epsv_response, parse_pasv_response, urlencoding_decode, RawFtpControl};
+use super::types::FtpDownloadCommand;
 
 #[test]
 fn test_parse_uri_simple() {

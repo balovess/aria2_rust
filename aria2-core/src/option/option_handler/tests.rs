@@ -1,8 +1,9 @@
-﻿//! Tests for OptionHandler.
+//! Tests for OptionHandler.
 
 #[cfg(test)]
 mod tests {
     use super::super::{OptionHandler, built_in_defaults, detect_value_type};
+    use super::super::apply::OptionHandlerApply;
     use crate::config::option::OptionValue;
 
     #[test]
@@ -17,7 +18,7 @@ mod tests {
         assert_eq!(handler.get("dir").as_str().unwrap_or(""), ".");
         assert_eq!(handler.get("split").as_usize(), 5);
         assert_eq!(handler.get("max-concurrent-downloads").as_usize(), 5);
-        assert_eq!(handler.get("max-connection-per-server").as_usize(), 16);
+        assert_eq!(handler.get("max-connection-per-server").as_usize(), 1);
         assert_eq!(handler.get("min-split-size").as_usize(), 1_048_576);
         assert!(handler.get("continue").as_bool().unwrap_or(false));
         assert!(!handler.get("quiet").as_bool().unwrap_or(false));
@@ -25,7 +26,7 @@ mod tests {
         assert_eq!(handler.get("rpc-listen-port").as_usize(), 6800);
         assert_eq!(
             handler.get("console-log-level").as_str().unwrap_or(""),
-            "notice"
+            "info"
         );
     }
 
@@ -202,7 +203,7 @@ quiet=false
         let handler2 = OptionHandler::new();
         let opts2 = handler2.to_download_options();
         assert_eq!(opts2.split, Some(5)); // default split=5 which is > 0
-        assert_eq!(opts2.max_connection_per_server, Some(16)); // default is 16
+        assert_eq!(opts2.max_connection_per_server, Some(1)); // default is 1 (aria2-next)
         assert_eq!(opts2.dir, Some(".".to_string())); // default dir is "."
         assert_eq!(opts2.out, None); // "out" has no default -> None
 

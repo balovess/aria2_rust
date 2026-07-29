@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::request::request_group::DownloadOptions;
-use crate::session::session_entry::{SessionEntry, decode_hex, download_options_to_map, escape_uri, unescape_uri};
+use crate::session::session_entry::{SessionEntry, download_options_to_map};
 
 #[test]
 fn test_serialize_single_entry() {

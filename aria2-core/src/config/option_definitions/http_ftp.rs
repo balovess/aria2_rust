@@ -230,7 +230,7 @@ impl crate::config::OptionRegistry {
             short_name: Some('x'),
             default_value: OptionValue::Int(1),
             min: Some(1),
-            max: Some(16),
+            max: Some(1024),
             description: "Max connections per server".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

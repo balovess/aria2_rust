@@ -12,7 +12,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use crate::engine::lpd_manager::{
+use super::{
     LpdManager, LpdPeer, is_private_address, parse_lpd_announcement,
 };
 

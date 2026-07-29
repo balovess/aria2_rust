@@ -1,9 +1,10 @@
-﻿mod execute;
+mod execute;
+mod tail_reclaim;
 #[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -47,6 +48,35 @@ pub struct DownloadCommand {
     pub(super) progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
     pub(super) progress_receiver: Option<mpsc::UnboundedReceiver<ProgressUpdate>>,
     pub(super) progress_aggregator_handle: Option<tokio::task::JoinHandle<()>>,
+
+    // ── Tail reclaim progress tracking ─────────────────────────────────
+    // Mirrors C++ DownloadCommand fields:
+    //   lastTailReclaimSessionDownloadLength_, tailReclaimLastProgress_,
+    //   startupIdleTime_, lowestDownloadSpeedLimit_
+    //
+    // These fields track when data was last received so that the tail
+    // reclaim policy can detect stalled connections.  In C++ these are
+    // updated on every data chunk via updateTailReclaimProgress().  In Rust
+    // they are updated via update_tail_reclaim_progress() which reads from
+    // the lock-free AtomicProgress counter.
+
+    /// Completed length at the last time progress was detected.
+    /// Mirrors C++ `lastTailReclaimSessionDownloadLength_`.
+    pub(super) last_tail_reclaim_session_download_length: u64,
+
+    /// Timestamp of the last time progress was detected.
+    /// Mirrors C++ `tailReclaimLastProgress_`.
+    pub(super) tail_reclaim_last_progress: Instant,
+
+    /// Stall threshold — if no progress for this duration, the connection
+    /// is considered stalled.  Mirrors C++ `startupIdleTime_`.
+    /// Defaults to 10 seconds (C++ `PREF_STARTUP_IDLE_TIME` default).
+    pub(super) startup_idle_time: Duration,
+
+    /// Lowest download speed limit in bytes/sec.  Downloads slower than
+    /// this are aborted.  Mirrors C++ `lowestDownloadSpeedLimit_`.
+    /// 0 means no limit.
+    pub(super) lowest_speed_limit: u64,
 }
 
 impl DownloadCommand {
@@ -189,6 +219,13 @@ impl DownloadCommand {
             progress_sender: Some(progress_tx),
             progress_receiver: Some(progress_rx),
             progress_aggregator_handle: None,
+            // Tail reclaim fields — mirrors C++ DownloadCommand constructor.
+            last_tail_reclaim_session_download_length: 0,
+            tail_reclaim_last_progress: Instant::now(),
+            startup_idle_time: Duration::from_secs(
+                options.startup_idle_time.unwrap_or(10),
+            ),
+            lowest_speed_limit: options.lowest_speed_limit.unwrap_or(0),
         })
     }
 
@@ -310,6 +347,13 @@ impl DownloadCommand {
             progress_sender: Some(progress_tx),
             progress_receiver: Some(progress_rx),
             progress_aggregator_handle: None,
+            // Tail reclaim fields — mirrors C++ DownloadCommand constructor.
+            last_tail_reclaim_session_download_length: 0,
+            tail_reclaim_last_progress: Instant::now(),
+            startup_idle_time: Duration::from_secs(
+                options.startup_idle_time.unwrap_or(10),
+            ),
+            lowest_speed_limit: options.lowest_speed_limit.unwrap_or(0),
         })
     }
 

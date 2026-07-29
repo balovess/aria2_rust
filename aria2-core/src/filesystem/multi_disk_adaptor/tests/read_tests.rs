@@ -1,6 +1,5 @@
 //! Read operation tests for multi_disk_adaptor.
 
-use crate::filesystem::disk_adaptor::DiskAdaptor;
 use super::*;
 
 // -- Cross-file read tests ---------------------------------------------
