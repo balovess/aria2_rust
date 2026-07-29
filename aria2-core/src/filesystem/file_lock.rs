@@ -1,4 +1,4 @@
-//! File locking to prevent concurrent aria2 instances from writing to same file.
+﻿//! File locking to prevent concurrent aria2 instances from writing to same file.
 //!
 //! This module provides platform-appropriate file locking mechanisms:
 //!
@@ -95,6 +95,9 @@ impl FileLock {
 
         // Attempt non-blocking exclusive lock (flock LOCK_EX | LOCK_NB)
         // Returns 0 on success, -1 on error (EAGAIN/EWOULDBLOCK if locked)
+        // SAFETY: fd is a valid open file descriptor from File::create above.
+        // flock(2) is a standard POSIX advisory lock syscall. The fd remains
+        // valid for the lifetime of the FileLock (held in self.file).
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
 
         if ret != 0 {
@@ -190,6 +193,9 @@ impl FileLock {
             use std::os::fd::AsRawFd;
             if let Some(f) = &self.file {
                 let fd = f.as_raw_fd();
+                // SAFETY: fd is a valid open file descriptor. The lock was
+                // acquired by this FileLock, so LOCK_UN is safe. Errors are
+                // intentionally ignored (lock release is best-effort on drop).
                 let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
                 tracing::debug!(
                     path = %self.path.display(),
@@ -275,6 +281,9 @@ impl Drop for FileLock {
             use std::os::fd::AsRawFd;
             if let Some(ref f) = self.file {
                 let fd = f.as_raw_fd();
+                // SAFETY: fd is a valid open file descriptor. The lock was
+                // acquired by this FileLock, so LOCK_UN is safe. Errors are
+                // intentionally ignored (lock release is best-effort on drop).
                 let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
                 tracing::debug!(
                     path = %self.path.display(),

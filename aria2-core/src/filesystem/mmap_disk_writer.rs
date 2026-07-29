@@ -1,4 +1,4 @@
-//! Memory-mapped disk writer using `memmap2::MmapMut` for direct memory access
+﻿//! Memory-mapped disk writer using `memmap2::MmapMut` for direct memory access
 //! to the file's page cache.
 //!
 //! # Architecture
@@ -143,9 +143,11 @@ impl MmapDiskWriter {
         }
 
         // Try to create the memory mapping.
-        // Safety: The file was opened with read+write access. The file is not
-        // modified externally while the mapping is active (we hold the only
-        // file handle in this writer). The file size is non-zero.
+        // SAFETY: The file was opened with read+write access above. We hold
+        // the only file handle, so the file is not modified externally while
+        // the mapping is active. The file size is non-zero (checked above).
+        // The mapping is valid for the file's current size and will be
+        // dropped (unmapped) when the Inner::Mmap variant is dropped.
         match unsafe { MmapMut::map_mut(&file) } {
             Ok(mmap) => {
                 debug!(
@@ -195,7 +197,8 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = offset as usize;
+                let start = usize::try_from(offset)
+                    .map_err(|_| Aria2Error::Io("write offset exceeds usize range".into()))?;
                 let end = start
                     .checked_add(data.len())
                     .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
@@ -224,7 +227,8 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = offset as usize;
+                let start = usize::try_from(offset)
+                    .map_err(|_| Aria2Error::Io("write offset exceeds usize range".into()))?;
                 let end = start
                     .checked_add(data.len())
                     .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
@@ -248,7 +252,8 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = offset as usize;
+                let start = usize::try_from(offset)
+                    .map_err(|_| Aria2Error::Io("read offset exceeds usize range".into()))?;
                 if start >= mmap.len() {
                     return Ok(0); // EOF
                 }

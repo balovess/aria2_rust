@@ -1,0 +1,538 @@
+//! Unit tests for session_entry module
+
+use std::collections::HashMap;
+
+use crate::request::request_group::DownloadOptions;
+use crate::session::session_entry::{SessionEntry, decode_hex, download_options_to_map, escape_uri, unescape_uri};
+
+#[test]
+fn test_serialize_single_entry() {
+    let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
+    let text = entry.serialize();
+    assert!(
+        text.contains("http://example.com/file.zip"),
+        "Should contain URI"
+    );
+    assert!(text.contains("GID=d270c8a2"), "Should contain GID");
+}
+
+#[test]
+fn test_serialize_multiple_entries_roundtrip() {
+    let entries = vec![
+        SessionEntry::new(1, vec!["http://a.com/1.bin".to_string()]).with_options({
+            let mut m = HashMap::new();
+            m.insert("split".to_string(), "4".to_string());
+            m.insert("dir".to_string(), "/tmp".to_string());
+            m
+        }),
+        SessionEntry::new(
+            2,
+            vec![
+                "ftp://b.com/2.iso".to_string(),
+                "http://mirror.b.com/2.iso".to_string(),
+            ],
+        )
+        .paused(),
+    ];
+
+    let mut serialized = String::new();
+    for e in &entries {
+        serialized.push_str(&e.serialize());
+        serialized.push('\n');
+    }
+
+    // Parse individually using deserialize_line
+    let parts: Vec<&str> = serialized.split("\n\n").collect();
+    assert!(parts.len() >= 2, "Should have at least 2 entries");
+
+    let entry1 = SessionEntry::deserialize_line(parts[0]).unwrap();
+    assert_eq!(entry1.uris.len(), 1);
+    assert_eq!(entry1.uris[0], "http://a.com/1.bin");
+    assert_eq!(entry1.options.get("split").unwrap(), "4");
+
+    let entry2 = SessionEntry::deserialize_line(parts[1]).unwrap();
+    assert_eq!(entry2.uris.len(), 2);
+    assert!(entry2.paused);
+}
+
+#[test]
+fn test_deserialize_empty_file() {
+    let entry = SessionEntry::deserialize_line("").unwrap();
+    assert!(entry.uris.is_empty());
+
+    let entry = SessionEntry::deserialize_line("\n\n\n").unwrap();
+    assert!(entry.uris.is_empty());
+}
+
+#[test]
+fn test_deserialize_skip_comments_and_blanks() {
+    let input = r#"# This is a comment
+# Another comment
+
+http://example.com/file
+ GID=abc123
+ dir=/downloads
+"#;
+    let entry = SessionEntry::deserialize_line(input).unwrap();
+    // Should parse first entry and ignore comments
+    assert_eq!(entry.uris.len(), 1);
+    assert_eq!(entry.uris[0], "http://example.com/file");
+}
+
+#[test]
+fn test_deserialize_options_parsing() {
+    let input = r#"http://example.com/file.zip
+ GID=1
+ split=4
+ max-connection-per-server=2
+ dir=C:\Users\test\Downloads
+ out=file.zip
+"#;
+    let entry = SessionEntry::deserialize_line(input).unwrap();
+    assert_eq!(entry.options.get("split").unwrap(), "4");
+    assert_eq!(entry.options.get("max-connection-per-server").unwrap(), "2");
+    assert_eq!(
+        entry.options.get("dir").unwrap(),
+        "C:\\Users\\test\\Downloads"
+    );
+    assert_eq!(entry.options.get("out").unwrap(), "file.zip");
+}
+
+#[test]
+fn test_pause_flag_serialization() {
+    let input = r#"http://example.com/pause.me
+ GID=42
+ PAUSE=true
+"#;
+    let entry = SessionEntry::deserialize_line(input).unwrap();
+    assert!(entry.paused);
+
+    let text = entry.serialize();
+    assert!(text.contains("PAUSE=true"));
+}
+
+#[test]
+fn test_serialize_tab_separated_uris() {
+    let entry = SessionEntry::new(
+        99,
+        vec![
+            "http://mirror1.com/f".to_string(),
+            "http://mirror2.com/f".to_string(),
+            "http://mirror3.com/f".to_string(),
+        ],
+    );
+    let text = entry.serialize();
+    let uri_line = text.lines().next().unwrap();
+    assert_eq!(
+        uri_line.matches('\t').count(),
+        2,
+        "3 URIs should have 2 tab separators"
+    );
+}
+
+// ==================== New Field Tests (Session Persistence Enhancement) ====================
+
+#[test]
+fn test_serialize_new_fields() {
+    let mut entry = SessionEntry::new(1, vec!["http://example.com/file.bin".to_string()]);
+    entry.total_length = 1024 * 1024; // 1MB
+    entry.completed_length = 512 * 1024; // 512KB
+    entry.upload_length = 1024;
+    entry.download_speed = 2048;
+    entry.status = "active".to_string();
+    entry.error_code = None;
+
+    let text = entry.serialize();
+
+    // Verify new fields appear in output
+    assert!(
+        text.contains("TOTAL_LENGTH=1048576"),
+        "Should contain TOTAL_LENGTH"
+    );
+    assert!(
+        text.contains("COMPLETED_LENGTH=524288"),
+        "Should contain COMPLETED_LENGTH"
+    );
+    assert!(
+        text.contains("UPLOAD_LENGTH=1024"),
+        "Should contain UPLOAD_LENGTH"
+    );
+    assert!(
+        text.contains("DOWNLOAD_SPEED=2048"),
+        "Should contain DOWNLOAD_SPEED"
+    );
+    assert!(text.contains("STATUS=active"), "Should contain STATUS");
+}
+
+#[test]
+fn test_deserialize_with_all_fields() {
+    let input = r#"http://example.com/bigfile.zip
+ GID=1
+ TOTAL_LENGTH=10485760
+ COMPLETED_LENGTH=5242880
+ UPLOAD_LENGTH=2048
+ DOWNLOAD_SPEED=4096
+ STATUS=active
+ ERROR_CODE=
+ BITFIELD=
+ NUM_PIECES=0
+ PIECE_LENGTH=0
+ INFO_HASH=
+ RESUME_OFFSET=5242880
+"#;
+
+    let entry = SessionEntry::deserialize_line(input).unwrap();
+
+    assert_eq!(entry.total_length, 10485760);
+    assert_eq!(entry.completed_length, 5242880);
+    assert_eq!(entry.upload_length, 2048);
+    assert_eq!(entry.download_speed, 4096);
+    assert_eq!(entry.status, "active");
+    assert_eq!(entry.error_code, None);
+    assert_eq!(entry.resume_offset, Some(5242880));
+}
+
+#[test]
+fn test_deserialize_user_options() {
+    // User-defined options should be stored in options map
+    let input = r#"http://example.com/file.zip
+ GID=1
+ split=4
+ dir=/downloads
+ TOTAL_LENGTH=1000
+"#;
+
+    let entry = SessionEntry::deserialize_line(input).unwrap();
+
+    // Known fields parsed normally
+    assert_eq!(entry.total_length, 1000);
+
+    // User options stored in options
+    assert_eq!(entry.options.get("split").unwrap(), "4");
+    assert_eq!(entry.options.get("dir").unwrap(), "/downloads");
+}
+
+#[test]
+fn test_bitfield_roundtrip() {
+    let mut entry =
+        SessionEntry::new(1, vec!["http://example.com/torrent.torrent".to_string()]);
+
+    // Set bitfield: [0xFF, 0xF0, 0x0F] - indicates some pieces completed
+    entry.bitfield = Some(vec![0xFF, 0xF0, 0x0F]);
+    entry.num_pieces = Some(24); // 3 bytes * 8 bits = 24 pieces
+    entry.piece_length = Some(262144); // 256KB
+
+    let text = entry.serialize();
+
+    // Verify hex encoding
+    assert!(
+        text.contains("BITFIELD=fff00f"),
+        "bitfield should be encoded as hex string"
+    );
+
+    // Deserialize verification
+    let restored = SessionEntry::deserialize_line(&text).unwrap();
+    assert_eq!(
+        restored.bitfield,
+        Some(vec![0xFF, 0xF0, 0x0F]),
+        "bitfield should be restored correctly"
+    );
+    assert_eq!(restored.num_pieces, Some(24));
+    assert_eq!(restored.piece_length, Some(262144));
+}
+
+#[test]
+fn test_empty_bitfield_serialized_as_empty() {
+    let entry = SessionEntry::new(1, vec!["http://example.com/file.zip".to_string()]);
+    // bitfield defaults to None
+
+    let text = entry.serialize();
+
+    // None bitfield should produce empty value
+    assert!(
+        text.contains("BITFIELD=\n"),
+        "None bitfield should be serialized as empty value"
+    );
+
+    // Deserialize verification
+    let restored = SessionEntry::deserialize_line(&text).unwrap();
+    assert_eq!(
+        restored.bitfield, None,
+        "Empty bitfield should restore to None"
+    );
+}
+
+#[test]
+fn test_default_session_entry_has_zero_progress() {
+    let entry = SessionEntry::new(99, vec!["http://test.com/f".to_string()]);
+
+    // Verify all new fields have correct defaults
+    assert_eq!(entry.total_length, 0);
+    assert_eq!(entry.completed_length, 0);
+    assert_eq!(entry.upload_length, 0);
+    assert_eq!(entry.download_speed, 0);
+    assert_eq!(entry.status, "active", "Default status should be 'active'");
+    assert_eq!(entry.error_code, None);
+    assert_eq!(entry.bitfield, None);
+    assert_eq!(entry.num_pieces, None);
+    assert_eq!(entry.piece_length, None);
+    assert_eq!(entry.info_hash_hex, None);
+    assert_eq!(entry.resume_offset, None);
+}
+
+#[test]
+fn test_status_field_values() {
+    let statuses = ["active", "waiting", "paused", "error"];
+
+    for status in statuses {
+        let mut entry = SessionEntry::new(1, vec!["http://example.com/f".to_string()]);
+        entry.status = status.to_string();
+
+        let text = entry.serialize();
+        assert!(
+            text.contains(&format!("STATUS={}", status)),
+            "Status '{}' should be serialized correctly",
+            status
+        );
+
+        // Deserialize verification
+        let restored = SessionEntry::deserialize_line(&text).unwrap();
+        assert_eq!(
+            restored.status, status,
+            "Status '{}' should be deserialized correctly",
+            status
+        );
+    }
+}
+
+#[test]
+fn test_resume_offset_for_http_ftp() {
+    let mut entry = SessionEntry::new(1, vec!["http://example.com/large-file.iso".to_string()]);
+
+    // Simulate HTTP download with partial data written
+    entry.total_length = 1073741824; // 1GB
+    entry.completed_length = 536870912; // 512MB completed
+    entry.resume_offset = Some(536870912); // Resume from 512MB
+    entry.status = "paused".to_string();
+
+    let text = entry.serialize();
+
+    // Verify resume offset is serialized correctly
+    assert!(
+        text.contains("RESUME_OFFSET=536870912"),
+        "resume offset should be serialized correctly"
+    );
+
+    // Deserialize and verify
+    let restored = SessionEntry::deserialize_line(&text).unwrap();
+    assert_eq!(
+        restored.resume_offset,
+        Some(536870912),
+        "resume offset should be restored correctly"
+    );
+    assert_eq!(restored.status, "paused");
+}
+
+#[test]
+fn test_bt_specific_fields_only_when_present() {
+    // Test that BT-specific fields are truly optional
+    let mut entry = SessionEntry::new(1, vec!["magnet:?xt=urn:btih:abc123".to_string()]);
+
+    // Don't set any BT fields (keep them as None)
+    let text_without_bt = entry.serialize();
+    let restored_without_bt = SessionEntry::deserialize_line(&text_without_bt).unwrap();
+
+    assert_eq!(restored_without_bt.bitfield, None);
+    assert_eq!(restored_without_bt.num_pieces, None);
+    assert_eq!(restored_without_bt.piece_length, None);
+    assert_eq!(restored_without_bt.info_hash_hex, None);
+
+    // Now set BT fields
+    entry.bitfield = Some(vec![0xAA, 0xBB]);
+    entry.num_pieces = Some(16);
+    entry.piece_length = Some(524288);
+    entry.info_hash_hex = Some("abc123def456".to_string());
+
+    let text_with_bt = entry.serialize();
+    let restored_with_bt = SessionEntry::deserialize_line(&text_with_bt).unwrap();
+
+    assert_eq!(restored_with_bt.bitfield, Some(vec![0xAA, 0xBB]));
+    assert_eq!(restored_with_bt.num_pieces, Some(16));
+    assert_eq!(restored_with_bt.piece_length, Some(524288));
+    assert_eq!(
+        restored_with_bt.info_hash_hex,
+        Some("abc123def456".to_string())
+    );
+}
+
+#[test]
+fn test_download_options_to_map_all_fields() {
+    // Verify that all non-default fields are serialized to the map
+    let opts = DownloadOptions {
+        split: Some(8),
+        max_connection_per_server: Some(4),
+        max_download_limit: Some(102400),
+        max_upload_limit: Some(51200),
+        dir: Some("/downloads".to_string()),
+        out: Some("file.bin".to_string()),
+        seed_time: Some(3600.0),
+        seed_ratio: Some(2.0),
+        // File allocation
+        file_allocation: Some("trunc".to_string()),
+        mmap_threshold: Some(128 * 1024 * 1024),
+        secure_falloc: true,
+        // Checksum
+        checksum: Some(("sha256".to_string(), "abc123".to_string())),
+        // Cookies
+        cookie_file: Some("/tmp/cookies.txt".to_string()),
+        cookies: Some("key=value".to_string()),
+        // BT
+        bt_force_encrypt: true,
+        bt_require_crypto: true,
+        enable_dht: false,
+        dht_listen_port: Some(6881),
+        dht_entry_point: Some(vec!["router.bittorrent.com:6881".to_string()]),
+        enable_public_trackers: false,
+        bt_piece_selection_strategy: "sequential".to_string(),
+        bt_endgame_threshold: 10,
+        bt_max_upload_slots: Some(4),
+        bt_optimistic_unchoke_interval: Some(30),
+        bt_snubbed_timeout: Some(60),
+        bt_prioritize_piece: "head".to_string(),
+        enable_utp: true,
+        utp_listen_port: Some(6882),
+        // Retry
+        max_retries: 5,
+        retry_wait: 3,
+        // DHT file
+        dht_file_path: Some("/tmp/dht.dat".to_string()),
+        // Proxy
+        http_proxy: Some("http://proxy:8080".to_string()),
+        all_proxy: Some("socks5://proxy:1080".to_string()),
+        https_proxy: Some("http://proxy:8443".to_string()),
+        ftp_proxy: Some("http://proxy:8021".to_string()),
+        no_proxy: Some("localhost,127.0.0.1".to_string()),
+        // HTTP headers
+        header: vec!["X-Custom: foo".to_string(), "X-Other: bar".to_string()],
+        user_agent: Some("aria2-rust/1.0".to_string()),
+        referer: Some("http://example.com".to_string()),
+        // Metalink
+        metalink_location: None,
+        metalink_preferred_protocol: None,
+        select_file: None,
+        piece_length: None,
+        metalink_enable_unique_protocol: true,
+        // FTP
+        timeout: None,
+        connect_timeout: None,
+        startup_idle_time: None,
+        lowest_speed_limit: None,
+        ftp_pasv: true,
+        remote_time: false,
+        dry_run: false,
+        ftp_reuse_connection: true,
+        // Download
+        realtime_chunk_checksum: true,
+        bt_stop_timeout: None,
+        // BitTorrent extended
+        disable_ipv6: false,
+        listen_port: None,
+        bt_enable_lpd: false,
+        bt_lpd_interface: None,
+        enable_rpc: false,
+        pause: false,
+        // Follow options
+        follow_torrent: None,
+        follow_metalink: None,
+        // Event hooks
+        on_download_start: None,
+        on_download_complete: None,
+        on_download_error: None,
+        on_download_pause: None,
+        on_download_stop: None,
+        on_bt_download_complete: None,
+        // HTTP authentication
+        http_auth_challenge: false,
+        http_user: None,
+        http_passwd: None,
+        ftp_user: None,
+        ftp_passwd: None,
+        no_netrc: false,
+        netrc_path: None,
+        // Conditional GET
+        conditional_get: false,
+    };
+
+    let map = download_options_to_map(&opts);
+
+    // File allocation
+    assert_eq!(map.get("file-allocation").unwrap(), "trunc");
+    assert_eq!(map.get("mmap-threshold").unwrap(), "134217728");
+    assert_eq!(map.get("secure-falloc").unwrap(), "true");
+
+    // Checksum
+    assert_eq!(map.get("checksum").unwrap(), "sha256=abc123");
+
+    // Cookies
+    assert_eq!(map.get("cookie-file").unwrap(), "/tmp/cookies.txt");
+    assert_eq!(map.get("cookies").unwrap(), "key=value");
+
+    // BT
+    assert_eq!(map.get("bt-force-encrypt").unwrap(), "true");
+    assert_eq!(map.get("bt-require-crypto").unwrap(), "true");
+    assert_eq!(map.get("enable-dht").unwrap(), "false");
+    assert_eq!(map.get("dht-listen-port").unwrap(), "6881");
+    assert_eq!(
+        map.get("dht-entry-point").unwrap(),
+        "router.bittorrent.com:6881"
+    );
+    assert_eq!(map.get("enable-public-trackers").unwrap(), "false");
+    assert_eq!(
+        map.get("bt-piece-selection-strategy").unwrap(),
+        "sequential"
+    );
+    assert_eq!(map.get("bt-endgame-threshold").unwrap(), "10");
+    assert_eq!(map.get("bt-max-upload-slots").unwrap(), "4");
+    assert_eq!(map.get("bt-optimistic-unchoke-interval").unwrap(), "30");
+    assert_eq!(map.get("bt-snubbed-timeout").unwrap(), "60");
+    assert_eq!(map.get("bt-prioritize-piece").unwrap(), "head");
+    assert_eq!(map.get("enable-utp").unwrap(), "true");
+    assert_eq!(map.get("utp-listen-port").unwrap(), "6882");
+
+    // Retry
+    assert_eq!(map.get("max-retries").unwrap(), "5");
+    assert_eq!(map.get("retry-wait").unwrap(), "3");
+
+    // DHT file
+    assert_eq!(map.get("dht-file-path").unwrap(), "/tmp/dht.dat");
+
+    // Proxy
+    assert_eq!(map.get("http-proxy").unwrap(), "http://proxy:8080");
+    assert_eq!(map.get("all-proxy").unwrap(), "socks5://proxy:1080");
+    assert_eq!(map.get("https-proxy").unwrap(), "http://proxy:8443");
+    assert_eq!(map.get("ftp-proxy").unwrap(), "http://proxy:8021");
+    assert_eq!(map.get("no-proxy").unwrap(), "localhost,127.0.0.1");
+
+    // HTTP headers
+    assert_eq!(map.get("header").unwrap(), "X-Custom: foo,X-Other: bar");
+    assert_eq!(map.get("user-agent").unwrap(), "aria2-rust/1.0");
+    assert_eq!(map.get("referer").unwrap(), "http://example.com");
+}
+
+#[test]
+fn test_download_options_to_map_defaults_excluded() {
+    // Default DownloadOptions should produce a minimal map.
+    // enable_dht and enable_public_trackers default to true (matching the
+    // load path's `unwrap_or(true)`), so they are NOT saved when at the
+    // default value -- the save logic only serializes them when disabled.
+    let opts = DownloadOptions::default();
+    let map = download_options_to_map(&opts);
+
+    // secure_falloc defaults to false -> should NOT be in map
+    assert!(!map.contains_key("secure-falloc"));
+    // file_allocation defaults to None -> should NOT be in map
+    assert!(!map.contains_key("file-allocation"));
+    // enable_dht and enable_public_trackers default to true -> NOT saved
+    assert!(!map.contains_key("enable-dht"));
+    assert!(!map.contains_key("enable-public-trackers"));
+}

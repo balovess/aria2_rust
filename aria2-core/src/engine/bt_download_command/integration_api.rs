@@ -1,0 +1,144 @@
+﻿use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{debug, info};
+
+use crate::engine::bt_progress_info_file::BtProgressManager;
+use crate::engine::hook_manager::HookManager;
+use crate::engine::lpd_manager::LpdManager;
+
+use super::BtDownloadCommand;
+
+/// P1/P2 (progress, LPD, hooks, bt_registry) + PEX + endgame integration API.
+pub trait BtDownloadCommandIntegrationApi {
+    // ---- P1/P2 ----
+    fn set_progress_manager(&mut self, manager: BtProgressManager);
+    fn set_progress_save_interval(&mut self, interval_secs: u64);
+    fn set_lpd_manager(&mut self, manager: Arc<LpdManager>);
+    fn set_hook_manager(&mut self, manager: Arc<HookManager>);
+    fn get_progress_manager(&self) -> Option<&BtProgressManager>;
+    fn get_lpd_manager(&self) -> Option<&Arc<LpdManager>>;
+    fn get_hook_manager(&self) -> Option<&Arc<HookManager>>;
+    fn set_bt_registry(
+        &mut self,
+        registry: Arc<std::sync::RwLock<super::super::bt_registry::BtRegistry>>,
+    );
+
+    // ---- PEX (BEP 11) ----
+    fn add_pex_peer(
+        &mut self,
+        peer_addr: aria2_protocol::bittorrent::peer::connection::PeerAddr,
+    );
+    fn set_pex_known_peers(
+        &mut self,
+        peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    );
+    fn get_pex_known_peers(&self) -> &[aria2_protocol::bittorrent::peer::connection::PeerAddr];
+    fn set_pex_send_interval(&mut self, interval_secs: u64);
+    fn should_send_pex(&self) -> bool;
+    fn update_pex_last_send(&mut self);
+
+    // ---- Endgame (Phase 14 - B1/B2) ----
+    fn endgame_state_mut(&mut self) -> &mut super::super::bt_download_execute::EndgameState;
+    fn endgame_state(&self) -> &super::super::bt_download_execute::EndgameState;
+}
+
+impl BtDownloadCommandIntegrationApi for BtDownloadCommand {
+    // ==================== P1/P2 Integration API ====================
+
+    fn set_progress_manager(&mut self, manager: BtProgressManager) {
+        info!("BT progress manager enabled");
+        self.progress_manager = Some(manager);
+    }
+
+    fn set_progress_save_interval(&mut self, interval_secs: u64) {
+        self.progress_save_interval = Duration::from_secs(interval_secs);
+        info!(interval_secs, "Progress save interval updated");
+    }
+
+    fn set_lpd_manager(&mut self, manager: Arc<LpdManager>) {
+        info!("LPD manager enabled for local peer discovery");
+        self.lpd_manager = Some(manager);
+    }
+
+    fn set_hook_manager(&mut self, manager: Arc<HookManager>) {
+        info!(
+            hook_count = manager.hook_count(),
+            "Hook manager enabled with {} hooks",
+            manager.hook_count()
+        );
+        self.hook_manager = Some(manager);
+    }
+
+    fn get_progress_manager(&self) -> Option<&BtProgressManager> {
+        self.progress_manager.as_ref()
+    }
+
+    fn get_lpd_manager(&self) -> Option<&Arc<LpdManager>> {
+        self.lpd_manager.as_ref()
+    }
+
+    fn get_hook_manager(&self) -> Option<&Arc<HookManager>> {
+        self.hook_manager.as_ref()
+    }
+
+    fn set_bt_registry(
+        &mut self,
+        registry: Arc<std::sync::RwLock<super::super::bt_registry::BtRegistry>>,
+    ) {
+        info!("BtRegistry reference set for BT download self-registration");
+        self.bt_registry = Some(registry);
+    }
+
+    // ==================== PEX (BEP 11) Integration API ====================
+
+    fn add_pex_peer(
+        &mut self,
+        peer_addr: aria2_protocol::bittorrent::peer::connection::PeerAddr,
+    ) {
+        if !self.pex_known_peers.contains(&peer_addr) {
+            debug!(addr = %format!("{}:{}", peer_addr.ip, peer_addr.port), "Adding peer to PEX known list");
+            self.pex_known_peers.push(peer_addr);
+        }
+    }
+
+    fn set_pex_known_peers(
+        &mut self,
+        peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    ) {
+        self.pex_known_peers = peers;
+        info!(
+            count = self.pex_known_peers.len(),
+            "PEX known peers updated"
+        );
+    }
+
+    fn get_pex_known_peers(&self) -> &[aria2_protocol::bittorrent::peer::connection::PeerAddr] {
+        &self.pex_known_peers
+    }
+
+    fn set_pex_send_interval(&mut self, interval_secs: u64) {
+        self.pex_send_interval = Duration::from_secs(interval_secs);
+        info!(interval_secs, "PEX send interval updated");
+    }
+
+    fn should_send_pex(&self) -> bool {
+        match self.pex_last_send_time {
+            Some(last) => last.elapsed() >= self.pex_send_interval,
+            None => true,
+        }
+    }
+
+    fn update_pex_last_send(&mut self) {
+        self.pex_last_send_time = Some(Instant::now());
+    }
+
+    // ==================== Endgame Mode (Phase 14 - B1/B2) API ====================
+
+    fn endgame_state_mut(&mut self) -> &mut super::super::bt_download_execute::EndgameState {
+        &mut self.endgame_state
+    }
+
+    fn endgame_state(&self) -> &super::super::bt_download_execute::EndgameState {
+        &self.endgame_state
+    }
+}

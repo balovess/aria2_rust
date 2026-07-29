@@ -1,4 +1,4 @@
-//! LPD Receive Loop — background task for continuous Local Peer Discovery
+﻿//! LPD Receive Loop — background task for continuous Local Peer Discovery
 //!
 //! This module implements the background receive loop for Local Peer
 //! Discovery (LPD, BEP 14). The loop continuously reads LPD multicast
@@ -221,12 +221,21 @@ fn create_lpd_socket() -> Result<UdpSocket, String> {
         use std::os::unix::io::{AsRawFd, FromRawFd};
 
         // Create an unbound UDP socket.
+        // SAFETY: `libc::socket` is a standard POSIX syscall. AF_INET and
+        // SOCK_DGRAM are valid constants. The protocol argument 0 lets the
+        // kernel choose the default protocol for SOCK_DGRAM (UDP).
         let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if fd < 0 {
-            return Err("Failed to create LPD UDP socket".to_string());
+            return Err(format!(
+                "Failed to create LPD UDP socket: {}",
+                std::io::Error::last_os_error()
+            ));
         }
 
         // Set SO_REUSEADDR before binding.
+        // SAFETY: `fd` is a valid open socket descriptor (checked above).
+        // `optval` is a valid `i32` on the stack whose reference outlives the
+        // call. `size_of::<i32>()` correctly describes the option value size.
         let optval: i32 = 1;
         let result = unsafe {
             libc::setsockopt(
@@ -238,10 +247,16 @@ fn create_lpd_socket() -> Result<UdpSocket, String> {
             )
         };
         if result != 0 {
-            warn!("Failed to set SO_REUSEADDR on LPD socket (non-fatal)");
+            warn!(
+                "Failed to set SO_REUSEADDR on LPD socket (non-fatal): {}",
+                std::io::Error::last_os_error()
+            );
         }
 
-        // Wrap in std::net::UdpSocket and bind.
+        // SAFETY: `fd` is a valid open socket descriptor returned by a
+        // successful `socket()` call above (fd >= 0). `from_raw_fd` takes
+        // ownership of the descriptor, and the socket will be closed when
+        // the `UdpSocket` is dropped. This is the only owner of this fd.
         let socket = unsafe { UdpSocket::from_raw_fd(fd) };
         let bind_addr = SocketAddrV4::new(multicast_ip, port);
         socket

@@ -86,16 +86,35 @@ impl BtProgressManager {
     ///
     /// Uses atomic write (write to temp file, then rename) for crash safety.
     /// The file is written in binary format (big-endian, C++ compatible).
+    ///
+    /// Each save uses a unique temp file name so that concurrent saves for the
+    /// same info hash do not clobber each other's temp files. On Windows,
+    /// `fs::rename` fails if the destination already exists, so the existing
+    /// file is removed first (last-writer-wins semantics).
     pub fn save_progress(&self, info_hash: &[u8; 20], progress: &BtProgress) -> Result<()> {
         let path = self.get_progress_file_path(info_hash);
         let data = binary::serialize_binary(progress)?;
 
-        // Atomic write: write to temp file, then rename
-        let temp_path = path.with_extension("aria2.tmp");
+        // Unique temp file per save to avoid collisions when multiple threads
+        // save the same progress concurrently.
+        let temp_path = path.with_extension(format!("aria2.tmp{}", rand::random::<u32>()));
         std::fs::write(&temp_path, &data)
             .map_err(|e| Aria2Error::Io(format!("Failed to write temp progress file: {}", e)))?;
-        std::fs::rename(&temp_path, &path)
-            .map_err(|e| Aria2Error::Io(format!("Failed to rename temp progress file: {}", e)))?;
+
+        // On Windows, fs::rename fails if the destination already exists.
+        // Remove it first; for progress files this is acceptable since the
+        // last writer wins and the data is always complete.
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(&path);
+
+        if let Err(e) = std::fs::rename(&temp_path, &path) {
+            // Clean up temp file on failure
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(Aria2Error::Io(format!(
+                "Failed to rename temp progress file: {}",
+                e
+            )));
+        }
 
         debug!(
             path = ?path,

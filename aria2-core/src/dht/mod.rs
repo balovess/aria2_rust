@@ -104,8 +104,9 @@ pub use routing_table_ser::{
     serialize_to_writer,
 };
 pub use task::{
-    DhtBucketRefreshTask, DhtLookupTask, DhtPingTask, DhtReplaceNodeTask, DhtTask, DhtTaskQueue,
-    LookupEntry, LookupKind, LookupResult, LookupState, TaskExecutor,
+    lookup_result_channel, DhtAnnounceTask, DhtBucketRefreshTask, DhtLookupTask, DhtPingTask,
+    DhtReplaceNodeTask, DhtTask, DhtTaskQueue, LookupEntry, LookupKind, LookupResult,
+    LookupResultReceiver, LookupResultSender, LookupState, TaskExecutor,
 };
 pub use token_tracker::TokenTracker;
 pub use tracker::{DhtMessageTracker, MatchResult, TimeoutEntry, TrackerEntry};
