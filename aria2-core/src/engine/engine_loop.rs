@@ -336,6 +336,7 @@ async fn process_engine_commands(
 
             EngineCommand::SetMaxConcurrent { max } => {
                 let man = ctx.group_man.read().await;
+                let old_max = man.max_concurrent();
                 man.set_max_concurrent(max);
                 info!(
                     "Max concurrent downloads set to {}",
@@ -345,6 +346,19 @@ async fn process_engine_commands(
                         max.to_string()
                     }
                 );
+
+                // Mirrors C++ `RequestGroupMan::reduceActiveDownloadsToLimit()`.
+                // When the limit is reduced at runtime (via changeGlobalOption),
+                // immediately pause excess active downloads.
+                if max > 0 && (old_max == 0 || (max as usize) < old_max) {
+                    let paused = man.reduce_to_limit();
+                    if paused > 0 {
+                        info!(
+                            paused,
+                            "Paused excess active downloads after max-concurrent reduction"
+                        );
+                    }
+                }
             }
         }
     }

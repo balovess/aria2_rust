@@ -164,6 +164,14 @@ impl super::RequestGroupMan {
     /// by pausing the excess groups.
     ///
     /// Mirrors C++ `RequestGroupMan::reduceActiveDownloadsToLimit()`.
+    ///
+    /// In C++ aria2-next, this method iterates from the end (most recently
+    /// added groups first) and for each excess group:
+    /// 1. Sets `haltRequested` (graceful halt)
+    /// 2. Sets `pauseRequested` (will pause after halt)
+    /// 3. Sets `restartRequested` (will re-queue when limit increases)
+    /// This ensures paused downloads automatically resume when the concurrent
+    /// limit is raised again.
     pub fn reduce_to_limit(&self) -> usize {
         let max = self.max_concurrent();
         if max == 0 {
@@ -176,13 +184,26 @@ impl super::RequestGroupMan {
         }
 
         let mut paused = 0;
-        for entry in self.active.iter() {
+        // Collect active groups in order, then iterate in reverse so that
+        // most recently added groups get paused first — matching C++ which
+        // iterates from `requestGroups_.end()`.
+        let entries: Vec<_> = self.active.iter().collect();
+        for entry in entries.into_iter().rev() {
             if paused >= excess {
                 break;
             }
             let mut g = entry.recover_mut();
-            if matches!(g.status(), DownloadStatus::Active) {
-                g.pause().ok(); // Sets status to Paused
+            // Skip groups that are already seeding, halted, or paused
+            // (mirrors C++ `isSeedOnlyEnabled() || isHaltRequested() || isPauseRequested()`)
+            if !matches!(g.status(), DownloadStatus::Active) {
+                continue;
+            }
+            // In C++, the group gets: haltRequested + pauseRequested + restartRequested
+            // The restart flag ensures it will be re-queued when limit increases.
+            // Our `pause()` sets the pause flag; `request_restart()` sets the
+            // restart flag so the engine re-queues it on next promotion cycle.
+            if g.pause().is_ok() {
+                g.request_restart();
                 paused += 1;
             }
         }
