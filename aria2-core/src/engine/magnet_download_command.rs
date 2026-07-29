@@ -277,7 +277,7 @@ impl Command for MagnetDownloadCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::bt_download_command_tests::tests::{
+    use crate::engine::bt_download_command_tests::{
         build_private_test_torrent, build_test_torrent,
     };
 
