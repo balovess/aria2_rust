@@ -60,7 +60,7 @@ impl HashState {
 
 /// Finalizes the hash computation, consuming the state and returning the raw
 /// hash bytes.
-pub fn finalize_hash(state: HashState) -> Vec<u8> {
+pub(crate) fn finalize_hash(state: HashState) -> Vec<u8> {
     match state {
         HashState::Sha1(ctx) => ctx.finalize().to_vec(),
         HashState::Sha256(ctx) => ctx.finalize().to_vec(),

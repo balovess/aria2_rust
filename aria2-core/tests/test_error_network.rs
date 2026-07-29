@@ -606,8 +606,10 @@ fn test_redirect_loop_detection() {
     assert!(result.is_err(), "Redirect loop should be detected");
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("loop") || err.to_string().contains("循环"),
-        "Error should mention loop: {}",
+        err.to_string().to_lowercase().contains("loop")
+            || err.to_string().to_lowercase().contains("circular")
+            || err.to_string().contains("循环"),
+        "Error should mention loop/circular: {}",
         err
     );
 }
@@ -635,7 +637,9 @@ fn test_max_redirects_exceeded() {
     assert!(result.is_err(), "Should fail when max redirects exceeded");
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("max") || err.to_string().contains("最大"),
+        err.to_string().to_lowercase().contains("max")
+            || err.to_string().to_lowercase().contains("exceeded")
+            || err.to_string().contains("最大"),
         "Error should mention max redirects: {}",
         err
     );

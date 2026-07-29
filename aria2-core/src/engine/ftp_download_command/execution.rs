@@ -33,15 +33,15 @@ pub(super) async fn execute(cmd: &mut FtpDownloadCommand) -> Result<()> {
     );
 
     // Create output directory if needed
-    if let Some(parent) = cmd.output_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "mkdir failed: {}",
-                    e
-                )))
-            })?;
-        }
+    if let Some(parent) = cmd.output_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "mkdir failed: {}",
+                e
+            )))
+        })?;
     }
 
     // Retry loop for transient errors
