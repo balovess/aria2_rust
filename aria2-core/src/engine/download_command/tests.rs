@@ -1,13 +1,10 @@
-//! Tests for DownloadCommand.
-
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use crate::engine::command::ProgressUpdate;
+use crate::engine::download_command::DownloadCommand;
 use crate::error::Aria2Error;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
-
-use super::DownloadCommand;
 
 impl DownloadCommand {
     fn has_progress_sender(&self) -> bool {
@@ -98,9 +95,9 @@ async fn test_progress_updates_flow_through_channel() {
     );
 }
 
-/// Verify that `check_cancelled()` returns `Ok(())` for a fresh group
-/// (status = Waiting) and `Err(DownloadFailed)` after the group is
-/// marked `Removed`.
+/// Verify that check_cancelled() returns Ok(()) for a fresh group
+/// (status = Waiting) and Err(DownloadFailed) after the group is
+/// marked Removed.
 #[tokio::test]
 async fn test_check_cancelled_returns_ok_for_active_group() {
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
@@ -118,7 +115,7 @@ async fn test_check_cancelled_returns_ok_for_active_group() {
     )
     .expect("DownloadCommand::new_with_group should succeed");
 
-    // Fresh group (Waiting status) — not cancelled.
+    // Fresh group (Waiting status) -- not cancelled.
     assert!(
         cmd.check_cancelled().is_ok(),
         "check_cancelled() should return Ok for a fresh (non-removed) group"
@@ -142,7 +139,7 @@ async fn test_check_cancelled_returns_err_after_remove() {
     )
     .expect("DownloadCommand::new_with_group should succeed");
 
-    // Simulate `aria2.remove` / `aria2.forceRemove` which calls
+    // Simulate ria2.remove / ria2.forceRemove which calls
     // RequestGroupMan::remove_group -> group.remove().
     {
         let mut g = group.recover_mut();

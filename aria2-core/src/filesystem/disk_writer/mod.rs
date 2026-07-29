@@ -1,0 +1,62 @@
+//! Disk writer traits and concrete implementations.
+//!
+//! This module provides two trait hierarchies:
+//! - [`DiskWriter`] — simple sequential write + finalize (used for control files, etc.)
+//! - [`SeekableDiskWriter`] — positioned (offset-based) read/write with cache support
+//!
+//! Concrete implementations:
+//! - [`DefaultDiskWriter`] — direct file writer (sequential writes)
+//! - [`ByteArrayDiskWriter`] — in-memory byte buffer writer
+//! - [`CachedDiskWriter`] — write-back cache layered over positioned I/O
+
+mod atomic;
+mod buffered;
+
+#[cfg(test)]
+mod tests;
+
+pub use atomic::{ByteArrayDiskWriter, DefaultDiskWriter};
+pub use buffered::CachedDiskWriter;
+
+use crate::error::Result;
+use async_trait::async_trait;
+use std::path::Path;
+
+// ── Sequential writer trait ──────────────────────────────────────────────
+
+#[async_trait]
+pub trait DiskWriter: Send + Sync {
+    async fn write(&mut self, data: &[u8]) -> Result<()>;
+    async fn finalize(&mut self) -> Result<Vec<u8>>;
+}
+
+// ── Positioned (seekable) writer trait ───────────────────────────────────
+
+#[async_trait]
+#[allow(clippy::len_without_is_empty)]
+pub trait SeekableDiskWriter: Send + Sync {
+    async fn open(&mut self) -> Result<()>;
+    async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
+
+    /// Zero-copy write method accepting `bytes::Bytes` directly.
+    /// This avoids the intermediate copy when the caller already has Bytes.
+    async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
+        // Default implementation: delegate to write_at with slice
+        self.write_at(offset, &data).await
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize>;
+    async fn truncate(&mut self, length: u64) -> Result<()>;
+    async fn flush(&mut self) -> Result<()>;
+    async fn len(&self) -> Result<u64>;
+    fn path(&self) -> &Path;
+
+    /// Close the writer and release underlying file resources.
+    ///
+    /// Default implementation is a no-op; implementors should override to
+    /// truly release file handles and memory mappings. After `close`, the
+    /// writer can be reopened with `open()`.
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}

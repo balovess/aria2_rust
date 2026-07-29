@@ -1,16 +1,12 @@
 //! Tests for FTP download command.
 
 use super::control::{parse_epsv_response, parse_pasv_response, RawFtpControl};
-use super::types::{extract_filename, parse_uri, urlencoding_decode};
-
-// ---------------------------------------------------------------------------
-// URI parsing
-// ---------------------------------------------------------------------------
+use super::types::{urlencoding_decode, FtpDownloadCommand};
 
 #[test]
 fn test_parse_uri_simple() {
     let uri = "ftp://example.com/file.txt";
-    let result = parse_uri(uri).unwrap();
+    let result = FtpDownloadCommand::parse_uri(uri).unwrap();
     assert_eq!(result.0, "example.com");
     assert_eq!(result.1, 21);
     assert_eq!(result.2, "anonymous");
@@ -21,7 +17,7 @@ fn test_parse_uri_simple() {
 #[test]
 fn test_parse_uri_with_port() {
     let uri = "ftp://example.com:2121/file.txt";
-    let result = parse_uri(uri).unwrap();
+    let result = FtpDownloadCommand::parse_uri(uri).unwrap();
     assert_eq!(result.0, "example.com");
     assert_eq!(result.1, 2121);
 }
@@ -29,7 +25,7 @@ fn test_parse_uri_with_port() {
 #[test]
 fn test_parse_uri_with_auth() {
     let uri = "ftp://user:pass@example.com/file.txt";
-    let result = parse_uri(uri).unwrap();
+    let result = FtpDownloadCommand::parse_uri(uri).unwrap();
     assert_eq!(result.2, "user");
     assert_eq!(result.3, "pass");
 }
@@ -37,38 +33,30 @@ fn test_parse_uri_with_auth() {
 #[test]
 fn test_parse_uri_with_encoded_chars() {
     let uri = "ftp://example.com/my%20file.txt";
-    let result = parse_uri(uri).unwrap();
+    let result = FtpDownloadCommand::parse_uri(uri).unwrap();
     assert_eq!(result.4, "/my file.txt");
 }
 
 #[test]
 fn test_parse_uri_invalid_protocol() {
     let uri = "http://example.com/file.txt";
-    let result = parse_uri(uri);
+    let result = FtpDownloadCommand::parse_uri(uri);
     assert!(result.is_err());
 }
-
-// ---------------------------------------------------------------------------
-// Filename extraction
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_extract_filename_from_path() {
     assert_eq!(
-        extract_filename("/path/to/file.txt"),
+        FtpDownloadCommand::extract_filename("/path/to/file.txt"),
         Some("file.txt".to_string())
     );
     assert_eq!(
-        extract_filename("/file.txt"),
+        FtpDownloadCommand::extract_filename("/file.txt"),
         Some("file.txt".to_string())
     );
-    assert_eq!(extract_filename("/"), None);
-    assert_eq!(extract_filename(""), None);
+    assert_eq!(FtpDownloadCommand::extract_filename("/"), None);
+    assert_eq!(FtpDownloadCommand::extract_filename(""), None);
 }
-
-// ---------------------------------------------------------------------------
-// URL encoding
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_urlencoding_decode() {
@@ -77,10 +65,6 @@ fn test_urlencoding_decode() {
     assert_eq!(urlencoding_decode("normal"), "normal");
     assert_eq!(urlencoding_decode("%41"), "A");
 }
-
-// ---------------------------------------------------------------------------
-// PASV / EPSV parsing
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_parse_pasv_response_standard() {
@@ -118,10 +102,6 @@ fn test_parse_epsv_response_minimal() {
     assert_eq!(result, 60000);
 }
 
-// ---------------------------------------------------------------------------
-// Error classification
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_classify_ftp_error_transient() {
     // These should be classified as transient/recoverable
@@ -148,10 +128,6 @@ fn test_classify_ftp_error_permanent() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Resume offset
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_resume_offset_calculation() {
     // Test that resume offset would be calculated correctly from existing file
@@ -166,10 +142,6 @@ fn test_resume_offset_calculation() {
         assert_eq!(0u64, 0);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Integration (requires network, expected to fail gracefully)
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_raw_ftp_control_connect_invalid_address() {

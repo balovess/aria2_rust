@@ -1,4 +1,4 @@
-mod execute;
+﻿mod execute;
 #[cfg(test)]
 mod tests;
 
@@ -27,7 +27,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 /// checksum verification.
 pub struct DownloadCommand {
     pub(super) group: Arc<std::sync::RwLock<RequestGroup>>,
-    /// Direct access to progress counters — avoids `RwLock` on the hot path.
+    /// Direct access to progress counters -- avoids RwLock on the hot path.
     pub(super) progress: Arc<AtomicProgress>,
     pub(super) client: Arc<reqwest::Client>,
     pub(super) output_path: std::path::PathBuf,
@@ -431,15 +431,15 @@ impl DownloadCommand {
     }
 
     /// Non-blocking check whether the underlying RequestGroup has been
-    /// cancelled (status set to `Removed` by `aria2.remove` /
-    /// `aria2.forceRemove`) or paused (status set to `Paused` by
-    /// `aria2.pause` / `aria2.forcePause`).
+    /// cancelled (status set to Removed by ria2.remove /
+    /// ria2.forceRemove) or paused (status set to Paused by
+    /// ria2.pause / ria2.forcePause).
     ///
-    /// Returns `Err` with a `DownloadFailed` error when the group has been
+    /// Returns Err with a DownloadFailed error when the group has been
     /// removed or paused, so the caller can abort the download promptly.
-    /// Uses `try_read` on the outer group lock so it is safe to call from
+    /// Uses 	ry_read on the outer group lock so it is safe to call from
     /// hot download loops; when the lock is contended the method treats the
-    /// download as still running (returns `Ok(())`) and the caller will
+    /// download as still running (returns Ok(())) and the caller will
     /// re-check on the next iteration.
     pub(super) fn check_cancelled(&self) -> Result<()> {
         match self.group.try_read() {

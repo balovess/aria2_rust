@@ -1,0 +1,109 @@
+﻿//! Atomic (non-buffered) disk writers.
+//!
+//! - [`DefaultDiskWriter`] - direct file writer (sequential writes to a file on disk)
+//! - [`ByteArrayDiskWriter`] - in-memory byte buffer writer (no I/O)
+
+use crate::error::Result;
+use async_trait::async_trait;
+use std::path::Path;
+
+use super::DiskWriter;
+
+// -- DefaultDiskWriter -------------------------------------------------------
+
+pub struct DefaultDiskWriter {
+    path: std::path::PathBuf,
+    file: Option<tokio::fs::File>,
+}
+
+impl DefaultDiskWriter {
+    pub fn new(path: &Path) -> Self {
+        DefaultDiskWriter {
+            path: path.to_path_buf(),
+            file: None,
+        }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[async_trait]
+impl DiskWriter for DefaultDiskWriter {
+    async fn write(&mut self, data: &[u8]) -> Result<()> {
+        if self.file.is_none() {
+            let f = tokio::fs::File::create(&self.path)
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            self.file = Some(f);
+        }
+        if let Some(ref mut file) = self.file {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(data)
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn finalize(&mut self) -> Result<Vec<u8>> {
+        if let Some(mut file) = self.file.take() {
+            use tokio::io::AsyncWriteExt;
+            file.flush()
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            // Close the file synchronously by converting to std::fs::File.
+            // tokio::fs::File's Drop spawns a background close task, which on
+            // Windows can leave the handle open briefly and cause "Access denied"
+            // (os error 5) when the caller immediately reads the file.
+            drop(file.into_std().await);
+        }
+        Ok(vec![])
+    }
+}
+
+// -- ByteArrayDiskWriter -----------------------------------------------------
+
+pub struct ByteArrayDiskWriter {
+    buffer: Vec<u8>,
+}
+
+impl ByteArrayDiskWriter {
+    pub fn new() -> Self {
+        ByteArrayDiskWriter { buffer: Vec::new() }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        ByteArrayDiskWriter {
+            buffer: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+}
+
+impl Default for ByteArrayDiskWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl DiskWriter for ByteArrayDiskWriter {
+    async fn write(&mut self, data: &[u8]) -> Result<()> {
+        self.buffer.extend_from_slice(data);
+        Ok(())
+    }
+
+    async fn finalize(&mut self) -> Result<Vec<u8>> {
+        let buffer = self.buffer.clone();
+        Ok(buffer)
+    }
+}

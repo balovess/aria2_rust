@@ -11,3 +11,4 @@ bindings/python/tests/__pycache__/
 *.txt
 *.md
 *.7z
+*.bak

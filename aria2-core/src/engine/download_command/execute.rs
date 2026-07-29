@@ -1,10 +1,4 @@
-//! `Command` trait implementation for `DownloadCommand`.
-//!
-//! Contains the full download execution lifecycle: HEAD probe, resume detection,
-//! file pre-allocation, concurrent/sequential download strategy selection,
-//! checksum verification, and progress aggregation.
-
-use async_trait::async_trait;
+﻿use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -134,7 +128,7 @@ impl Command for DownloadCommand {
         let resume_helper = ResumeHelper::new(&self.output_path, true);
         let resume_state = resume_helper.detect(total_length).await?;
 
-        // When resuming from a paused state, never short-circuit as "complete" —
+        // When resuming from a paused state, never short-circuit as "complete" --
         // the file on disk may be a preallocated sparse file that matches
         // total_length but hasn't actually been fully written. A download that
         // was explicitly paused by the user must always continue from where it
@@ -164,7 +158,7 @@ impl Command for DownloadCommand {
         // Final cancellation check before kicking off the (potentially long)
         // network transfer. If the task was removed during the HEAD probe or
         // resume detection, abort now rather than downloading data that will
-        // just be discarded. This is placed before `spawn_progress_aggregator`
+        // just be discarded. This is placed before spawn_progress_aggregator
         // so a cancelled task does not spawn an unnecessary aggregator task.
         // Release the registered output path so future downloads can reuse
         // the filename.
@@ -212,20 +206,19 @@ impl Command for DownloadCommand {
                     self.mmap_threshold,
                     self.file_allocation.clone(),
                 );
-                match concurrent_downloader
-                    .execute_with_retry(&uri, total_length, &resume_state, max_retries)
-                    .await
-                {
+                match concurrent_downloader.execute_with_retry(
+                    &uri,
+                    total_length,
+                    &resume_state,
+                    max_retries,
+                ).await {
                     Ok(ConcurrentDownloadResult::Complete) => return Ok(()),
                     Ok(ConcurrentDownloadResult::Fallback { completed_ranges }) => {
                         warn!(
                             "Concurrent download falling back to sequential mode, preserving {} completed ranges",
                             completed_ranges.len()
                         );
-                        let retry_policy = RetryPolicy::new(
-                            options.max_retries,
-                            options.retry_wait * 1000,
-                        );
+                        let retry_policy = RetryPolicy::new(options.max_retries, options.retry_wait * 1000);
                         let mut sequential_downloader = SequentialDownloader::new(
                             Arc::clone(&self.client),
                             self.output_path.clone(),
@@ -235,14 +228,12 @@ impl Command for DownloadCommand {
                             Arc::clone(&self.group),
                             Arc::clone(&self.progress),
                         );
-                        return sequential_downloader
-                            .execute_with_gaps_with_retry(
-                                &uri,
-                                total_length,
-                                &completed_ranges,
-                                &retry_policy,
-                            )
-                            .await;
+                        return sequential_downloader.execute_with_gaps_with_retry(
+                            &uri,
+                            total_length,
+                            &completed_ranges,
+                            &retry_policy,
+                        ).await;
                     }
                     Err(e) => return Err(e),
                 }
@@ -258,9 +249,12 @@ impl Command for DownloadCommand {
                 Arc::clone(&self.group),
                 Arc::clone(&self.progress),
             );
-            sequential_downloader
-                .execute_with_retry(&uri, &resume_state, total_length, &retry_policy)
-                .await
+            sequential_downloader.execute_with_retry(
+                &uri,
+                &resume_state,
+                total_length,
+                &retry_policy,
+            ).await
         }
         .await;
 
@@ -268,8 +262,7 @@ impl Command for DownloadCommand {
 
         if download_result.is_ok() {
             // Verify checksum if configured
-            // Extract checksum config before any .await to avoid holding
-            // std::sync::RwLockReadGuard across await points
+            // Extract checksum config before any .await to avoid holding std::sync::RwLockReadGuard across await points
             let checksum_config = {
                 let g = self.group.recover();
                 g.options().checksum.clone()
@@ -291,10 +284,7 @@ impl Command for DownloadCommand {
                 let mut buf = vec![0u8; 65536];
                 loop {
                     let n = reader.read(&mut buf).await.map_err(|e| {
-                        Aria2Error::Io(format!(
-                            "Read error during checksum verification: {}",
-                            e
-                        ))
+                        Aria2Error::Io(format!("Read error during checksum verification: {}", e))
                     })?;
                     if n == 0 {
                         break;

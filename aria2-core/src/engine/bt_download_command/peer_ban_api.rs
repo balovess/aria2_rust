@@ -1,32 +1,20 @@
-﻿use tracing::{debug, warn};
+use tracing::{debug, warn};
 
 use crate::engine::peer_stats::BAD_DATA_THRESHOLD;
 
 use super::BtDownloadCommand;
 
-/// Bad peer detection and ban system API (H3).
-pub trait BtDownloadCommandPeerBanApi {
-    /// Record that a peer sent invalid piece data.
+impl BtDownloadCommand {
+    /// Record that a specific peer sent invalid piece data (hash verification failed).
+    ///
+    /// This method:
+    /// 1. Increments the peer's bad_data_count in the choking algorithm's PeerStats
+    /// 2. If the count reaches BAD_DATA_THRESHOLD, automatically bans the peer
+    /// 3. Logs the event at WARN level
+    ///
     /// Returns Ok(true) if the peer was banned, Ok(false) if not yet, Err(()) on invalid index.
     #[allow(clippy::result_unit_err)]
-    fn record_bad_piece_for_peer(
-        &mut self,
-        peer_idx: usize,
-        piece_index: u32,
-    ) -> std::result::Result<bool, ()>;
-
-    /// Record that a valid, verified piece was received from a peer (gradual recovery).
-    fn record_valid_piece_for_peer(&mut self, peer_idx: usize);
-
-    /// Check if a peer is currently banned.
-    fn is_peer_banned(&self, peer_idx: usize) -> bool;
-
-    /// Get a reference to a peer's stats for RPC/display purposes.
-    fn get_peer_stats(&self, peer_idx: usize) -> Option<&crate::engine::peer_stats::PeerStats>;
-}
-
-impl BtDownloadCommandPeerBanApi for BtDownloadCommand {
-    fn record_bad_piece_for_peer(
+    pub fn record_bad_piece_for_peer(
         &mut self,
         peer_idx: usize,
         piece_index: u32,
@@ -57,7 +45,11 @@ impl BtDownloadCommandPeerBanApi for BtDownloadCommand {
         Err(()) // Invalid peer index or no choking algorithm
     }
 
-    fn record_valid_piece_for_peer(&mut self, peer_idx: usize) {
+    /// Record that a valid, verified piece was received from a peer.
+    ///
+    /// This triggers gradual recovery by decrementing the peer's bad_data_count.
+    /// Call this after successful hash verification to allow peers to recover reputation.
+    pub fn record_valid_piece_for_peer(&mut self, peer_idx: usize) {
         if let Some(ref mut algo) = self.choking_algo
             && let Some(peer) = algo.get_peer_mut(peer_idx)
         {
@@ -69,7 +61,10 @@ impl BtDownloadCommandPeerBanApi for BtDownloadCommand {
         }
     }
 
-    fn is_peer_banned(&self, peer_idx: usize) -> bool {
+    /// Check if a peer is currently banned.
+    ///
+    /// Returns true if the peer is banned or peer not found (safety default).
+    pub fn is_peer_banned(&self, peer_idx: usize) -> bool {
         self.choking_algo
             .as_ref()
             .and_then(|algo| algo.get_peer(peer_idx))
@@ -77,7 +72,8 @@ impl BtDownloadCommandPeerBanApi for BtDownloadCommand {
             .unwrap_or(true) // If not found, treat as banned for safety
     }
 
-    fn get_peer_stats(&self, peer_idx: usize) -> Option<&crate::engine::peer_stats::PeerStats> {
+    /// Get a reference to a peer's stats for RPC/display purposes.
+    pub fn get_peer_stats(&self, peer_idx: usize) -> Option<&crate::engine::peer_stats::PeerStats> {
         self.choking_algo.as_ref()?.get_peer(peer_idx)
     }
 }

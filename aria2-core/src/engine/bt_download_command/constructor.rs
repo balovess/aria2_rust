@@ -1,13 +1,11 @@
-﻿use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::constants;
-use crate::engine::bt_choke_manager::add_peer_to_tracking;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::http_tracker_client::TrackerState;
-use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
@@ -15,20 +13,8 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 use super::BtDownloadCommand;
 
-/// Constructor trait for BtDownloadCommand -- separated for file-size discipline.
-pub trait BtDownloadCommandConstructor {
-    fn new(
-        gid: GroupId,
-        torrent_bytes: &[u8],
-        options: &DownloadOptions,
-        output_dir: Option<&str>,
-    ) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-impl BtDownloadCommandConstructor for BtDownloadCommand {
-    fn new(
+impl BtDownloadCommand {
+    pub fn new(
         gid: GroupId,
         torrent_bytes: &[u8],
         options: &DownloadOptions,
@@ -71,7 +57,7 @@ impl BtDownloadCommandConstructor for BtDownloadCommand {
         );
 
         // Create DownloadContext from torrent metadata and set TorrentAttribute.
-        // In C++ aria2, this is done by ittorrent_helper::processRootDictionary()
+        // In C++ aria2, this is done by bittorrent_helper::processRootDictionary()
         // which calls ctx->setAttribute(CTX_ATTR_BT, torrent) with all torrent
         // metadata fields. We replicate this here.
         {
@@ -191,7 +177,7 @@ impl BtDownloadCommandConstructor for BtDownloadCommand {
         // NOTE: always pass the output DIRECTORY, not the file path. For
         // single-file torrents effective_output_path is dir/filename (a file
         // path); passing it to acquire_for_download would cause create_dir_all to
-        // create ilename as a directory, which then makes File::create fail
+        // create filename as a directory, which then makes File::create fail
         // with "Access denied" (os error 5) on Windows.
         let download_path_lock =
             match DownloadPathLock::acquire_for_download(std::path::Path::new(&dir)) {

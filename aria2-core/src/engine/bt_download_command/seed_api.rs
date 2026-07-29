@@ -1,4 +1,4 @@
-﻿use tracing::{debug, info};
+use tracing::{debug, info};
 
 use crate::error::Result;
 
@@ -17,25 +17,16 @@ pub struct SeedStats {
     pub elapsed: std::time::Duration,
 }
 
-/// Seeding mode (Phase 16) API.
-pub trait BtDownloadCommandSeedApi {
+impl BtDownloadCommand {
     /// Check if download is complete and start seeding if enabled.
-    fn check_and_start_seeding(
-        &mut self,
-        piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
-        meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
-        connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
-        piece_provider: std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
-    ) -> Result<bool>;
-
-    fn get_seed_manager(&self) -> Option<&super::super::bt_seed_manager::BtSeedManager>;
-    fn get_seed_manager_mut(&mut self) -> Option<&mut super::super::bt_seed_manager::BtSeedManager>;
-    fn is_seeding(&self) -> bool;
-    fn get_seed_stats(&self) -> Option<SeedStats>;
-}
-
-impl BtDownloadCommandSeedApi for BtDownloadCommand {
-    fn check_and_start_seeding(
+    ///
+    /// This method should be called after the download loop completes.
+    /// It initializes the seed manager if:
+    /// - All pieces are complete
+    /// - Seeding is enabled (seed_ratio > 0 or seed_time > 0)
+    ///
+    /// Returns Ok(true) if seeding was started, Ok(false) if not.
+    pub fn check_and_start_seeding(
         &mut self,
         piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
@@ -93,19 +84,25 @@ impl BtDownloadCommandSeedApi for BtDownloadCommand {
         Ok(true)
     }
 
-    fn get_seed_manager(&self) -> Option<&super::super::bt_seed_manager::BtSeedManager> {
+    /// Get a reference to the seed manager.
+    pub fn get_seed_manager(&self) -> Option<&super::super::bt_seed_manager::BtSeedManager> {
         self.seed_manager.as_ref()
     }
 
-    fn get_seed_manager_mut(&mut self) -> Option<&mut super::super::bt_seed_manager::BtSeedManager> {
+    /// Get a mutable reference to the seed manager.
+    pub fn get_seed_manager_mut(&mut self) -> Option<&mut super::super::bt_seed_manager::BtSeedManager> {
         self.seed_manager.as_mut()
     }
 
-    fn is_seeding(&self) -> bool {
+    /// Check if seeding is active.
+    pub fn is_seeding(&self) -> bool {
         self.seed_manager.is_some()
     }
 
-    fn get_seed_stats(&self) -> Option<SeedStats> {
+    /// Get seeding statistics.
+    ///
+    /// Returns None if not seeding.
+    pub fn get_seed_stats(&self) -> Option<SeedStats> {
         self.seed_manager.as_ref().map(|mgr| {
             let (total_uploaded, upload_speed) = mgr.get_upload_stats();
             let total_downloaded = mgr.total_downloaded();

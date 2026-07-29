@@ -1,4 +1,8 @@
 //! Raw FTP control channel handler and PASV/EPSV response parsers.
+//!
+//! Contains the `RawFtpControl` struct for managing FTP command/response
+//! interactions, plus helper functions for parsing passive mode responses
+//! and URL-encoded strings.
 
 use std::time::Duration;
 
@@ -9,18 +13,42 @@ use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 
 // ---------------------------------------------------------------------------
+// URL decoding
+// ---------------------------------------------------------------------------
+
+/// URL-encoded string decoder
+pub(super) fn urlencoding_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            } else {
+                result.push(c);
+                result.push_str(&hex);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // RawFtpControl
 // ---------------------------------------------------------------------------
 
-/// Raw FTP control connection handler.
-pub(crate) struct RawFtpControl {
+/// Raw FTP control connection handler
+pub(super) struct RawFtpControl {
     reader: BufReader<tokio::net::TcpStream>,
     host: String,
 }
 
 impl RawFtpControl {
-    /// Establish connection to FTP server and read welcome message.
-    pub(crate) async fn connect(host: &str, port: u16) -> Result<Self> {
+    /// Establish connection to FTP server and read welcome message
+    pub(super) async fn connect(host: &str, port: u16) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
         let socket_addr: std::net::SocketAddr = addr.parse().map_err(|_| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -64,8 +92,8 @@ impl RawFtpControl {
         Ok(ctrl)
     }
 
-    /// Send a command to the FTP server.
-    pub(crate) async fn send_command(&mut self, cmd: &str) -> Result<()> {
+    /// Send a command to the FTP server
+    pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
         debug!("FTP CMD: {}", cmd.trim());
         self.reader
             .get_mut()
@@ -84,8 +112,8 @@ impl RawFtpControl {
         Ok(())
     }
 
-    /// Read response from FTP server with timeout.
-    pub(crate) async fn read_response(&mut self, timeout_dur: Duration) -> Result<(u16, String)> {
+    /// Read response from FTP server with timeout
+    pub(super) async fn read_response(&mut self, timeout_dur: Duration) -> Result<(u16, String)> {
         let mut line = String::new();
         let mut code: Option<u16> = None;
         let mut message = String::new();
@@ -153,15 +181,15 @@ impl RawFtpControl {
         Ok((code_val, message))
     }
 
-    /// Send command and read response in one operation.
-    pub(crate) async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
+    /// Send command and read response in one operation
+    pub(super) async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
         self.send_command(cmd).await?;
         self.read_response(Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS))
             .await
     }
 
-    /// Authenticate with USER/PASS commands.
-    pub(crate) async fn authenticate(&mut self, username: &str, password: &str) -> Result<()> {
+    /// Authenticate with USER/PASS commands
+    pub(super) async fn authenticate(&mut self, username: &str, password: &str) -> Result<()> {
         info!("Authenticating as user: {}", username);
 
         let user_resp = self.command(&format!("USER {}", username)).await?;
@@ -184,16 +212,13 @@ impl RawFtpControl {
                 Ok(())
             }
             _ => Err(Aria2Error::Fatal(FatalError::PermissionDenied {
-                path: format!(
-                    "Unexpected USER response: {} {}",
-                    user_resp.0, user_resp.1
-                ),
+                path: format!("Unexpected USER response: {} {}", user_resp.0, user_resp.1),
             })),
         }
     }
 
-    /// Set binary transfer mode (TYPE I).
-    pub(crate) async fn set_binary_mode(&mut self) -> Result<()> {
+    /// Set binary transfer mode (TYPE I)
+    pub(super) async fn set_binary_mode(&mut self) -> Result<()> {
         debug!("Setting transfer mode to binary (TYPE I)");
         let resp = self.command("TYPE I").await?;
         if !(200..300).contains(&resp.0) {
@@ -206,26 +231,23 @@ impl RawFtpControl {
         Ok(())
     }
 
-    /// Set resume offset (REST command).
-    pub(crate) async fn set_resume_offset(&mut self, offset: u64) -> Result<()> {
+    /// Set resume offset (REST command)
+    pub(super) async fn set_resume_offset(&mut self, offset: u64) -> Result<()> {
         if offset == 0 {
             return Ok(());
         }
         debug!("Setting resume offset: {} bytes", offset);
         let resp = self.command(&format!("REST {}", offset)).await?;
         if resp.0 != 350 {
-            warn!(
-                "REST command not accepted by server: {} {}",
-                resp.0, resp.1
-            );
+            warn!("REST command not accepted by server: {} {}", resp.0, resp.1);
             // Some servers don't support REST, continue without resume
             return Ok(());
         }
         Ok(())
     }
 
-    /// Get file size (SIZE command).
-    pub(crate) async fn get_file_size(&mut self, remote_path: &str) -> Result<Option<u64>> {
+    /// Get file size (SIZE command)
+    pub(super) async fn get_file_size(&mut self, remote_path: &str) -> Result<Option<u64>> {
         debug!("Querying file size: {}", remote_path);
         let resp = self.command(&format!("SIZE {}", remote_path)).await?;
         if resp.0 == 213 {
@@ -238,8 +260,8 @@ impl RawFtpControl {
         Ok(None)
     }
 
-    /// Enter passive mode (PASV/EPSV).
-    pub(crate) async fn enter_passive_mode(&mut self) -> Result<(String, u16)> {
+    /// Enter passive mode (PASV/EPSV)
+    pub(super) async fn enter_passive_mode(&mut self) -> Result<(String, u16)> {
         // Try EPSV first (supports IPv6), fallback to PASV
         debug!("Attempting extended passive mode (EPSV)");
         let epsv_resp = self.command("EPSV").await;
@@ -282,8 +304,8 @@ impl RawFtpControl {
         }
     }
 
-    /// Initiate file retrieval (RETR command).
-    pub(crate) async fn initiate_retr(&mut self, remote_path: &str) -> Result<()> {
+    /// Initiate file retrieval (RETR command)
+    pub(super) async fn initiate_retr(&mut self, remote_path: &str) -> Result<()> {
         debug!("Initiating file retrieval: {}", remote_path);
         let resp = self.command(&format!("RETR {}", remote_path)).await?;
         if resp.0 != 150 && resp.0 != 125 {
@@ -296,8 +318,8 @@ impl RawFtpControl {
         Ok(())
     }
 
-    /// Read final transfer completion response.
-    pub(crate) async fn read_transfer_complete(&mut self) -> Result<()> {
+    /// Read final transfer completion response
+    pub(super) async fn read_transfer_complete(&mut self) -> Result<()> {
         match self
             .read_response(Duration::from_secs(
                 constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS,
@@ -320,8 +342,8 @@ impl RawFtpControl {
         }
     }
 
-    /// Gracefully disconnect from server.
-    pub(crate) async fn quit(mut self) -> Result<()> {
+    /// Gracefully disconnect from server
+    pub(super) async fn quit(mut self) -> Result<()> {
         debug!("Sending QUIT command");
         let _ = self.command("QUIT").await.ok(); // Ignore errors on quit
         Ok(())
@@ -332,8 +354,8 @@ impl RawFtpControl {
 // PASV / EPSV response parsers
 // ---------------------------------------------------------------------------
 
-/// Parse PASV response to extract IP and port.
-pub(crate) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
+/// Parse PASV response to extract IP and port
+pub(super) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
     let start = response.find('(')?;
     let end = response.rfind(')')?;
     let inner = &response[start + 1..end];
@@ -350,8 +372,8 @@ pub(crate) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
     Some((format!("{}.{}.{}.{}", h1, h2, h3, h4), p1 * 256 + p2))
 }
 
-/// Parse EPSV response to extract port.
-pub(crate) fn parse_epsv_response(response: &str) -> Option<u16> {
+/// Parse EPSV response to extract port
+pub(super) fn parse_epsv_response(response: &str) -> Option<u16> {
     let start = response.rfind('|')?;
     let prev_pipe = response[..start].rfind('|')?;
     let port_str = &response[prev_pipe + 1..start];

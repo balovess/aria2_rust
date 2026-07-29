@@ -1,18 +1,10 @@
-﻿use tracing::info;
+use tracing::info;
 
 use super::BtDownloadCommand;
 
-/// Web seed (BEP 19) integration API.
-pub trait BtDownloadCommandWebSeedApi {
-    fn init_web_seed_manager(&mut self, piece_length: u32, total_length: u64);
-    fn get_web_seed_manager(&self) -> Option<&crate::engine::bt_web_seed::WebSeedManager>;
-    fn get_web_seed_manager_mut(&mut self) -> Option<&mut crate::engine::bt_web_seed::WebSeedManager>;
-    fn has_web_seeds(&self) -> bool;
-    fn web_seed_stats(&self) -> Option<&crate::engine::bt_web_seed::WebSeedStats>;
-}
-
-impl BtDownloadCommandWebSeedApi for BtDownloadCommand {
-    fn init_web_seed_manager(&mut self, piece_length: u32, total_length: u64) {
+impl BtDownloadCommand {
+    /// Initialize the web seed manager if web seeds are configured.
+    pub fn init_web_seed_manager(&mut self, piece_length: u32, total_length: u64) {
         if !self.web_seed_urls.is_empty() && self.web_seed_manager.is_none() {
             info!(
                 count = self.web_seed_urls.len(),
@@ -27,19 +19,23 @@ impl BtDownloadCommandWebSeedApi for BtDownloadCommand {
         }
     }
 
-    fn get_web_seed_manager(&self) -> Option<&crate::engine::bt_web_seed::WebSeedManager> {
+    /// Get a reference to the web seed manager.
+    pub fn get_web_seed_manager(&self) -> Option<&crate::engine::bt_web_seed::WebSeedManager> {
         self.web_seed_manager.as_ref()
     }
 
-    fn get_web_seed_manager_mut(&mut self) -> Option<&mut crate::engine::bt_web_seed::WebSeedManager> {
+    /// Get a mutable reference to the web seed manager.
+    pub fn get_web_seed_manager_mut(&mut self) -> Option<&mut crate::engine::bt_web_seed::WebSeedManager> {
         self.web_seed_manager.as_mut()
     }
 
-    fn has_web_seeds(&self) -> bool {
+    /// Check if web seeds are available.
+    pub fn has_web_seeds(&self) -> bool {
         !self.web_seed_urls.is_empty()
     }
 
-    fn web_seed_stats(&self) -> Option<&crate::engine::bt_web_seed::WebSeedStats> {
+    /// Get web seed download statistics.
+    pub fn web_seed_stats(&self) -> Option<&crate::engine::bt_web_seed::WebSeedStats> {
         self.web_seed_manager.as_ref().map(|m| m.stats())
     }
 }
