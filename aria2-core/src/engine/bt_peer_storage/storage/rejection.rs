@@ -16,7 +16,7 @@ impl DefaultPeerStorage {
 
     /// Check whether a peer IP is temporarily rejected.
     ///
-    /// If the timeout has expired, the entry is removed and alse is returned.
+    /// If the timeout has expired, the entry is removed and false is returned.
     /// Matches C++ DefaultPeerStorage::isTemporarilyRejectedPeer.
     pub fn is_temporarily_rejected(&mut self, ipaddr: &str) -> bool {
         let Some(timeout) = self.temporarily_rejected_peers.get(ipaddr) else {

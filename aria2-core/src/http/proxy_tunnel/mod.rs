@@ -1,4 +1,4 @@
-﻿//! HTTP proxy tunneling module
+//! HTTP proxy tunneling module
 //!
 //! Implements HTTP-over-HTTP-proxy connections, supporting both CONNECT
 //! tunneling (for HTTPS/FTP) and forward proxy mode (absolute URI for

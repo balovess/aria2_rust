@@ -1,6 +1,6 @@
 //! HTTP forward proxy for non-HTTPS downloads.
 //!
-//! Also provides the [orward_get_with_auth] convenience function that
+//! Also provides the [forward_get_with_auth] convenience function that
 //! combines proxy connection, request sending, and auth handling.
 
 use tokio::net::TcpStream;
@@ -161,7 +161,7 @@ impl HttpProxyForward {
     ///
     /// # Arguments
     /// * method - HTTP method (GET, HEAD, etc.)
-    /// * ull_url - The full URL including scheme and host (e.g., http://target:80/path)
+    /// * full_url - The full URL including scheme and host (e.g., http://target:80/path)
     /// * path - The path component (used for Digest auth URI)
     /// * proxy_auth - Optional Proxy-Authorization header value
     pub fn build_forward_request(

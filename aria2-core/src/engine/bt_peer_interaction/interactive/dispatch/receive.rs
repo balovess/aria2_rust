@@ -1,6 +1,6 @@
 //! Message reception loop for `BtPeerInteractive`.
 //!
-//! Contains [eceive_messages()] which reads all available messages
+//! Contains [receive_messages()] which reads all available messages
 //! from the peer connection and dispatches each one.
 
 use std::time::Instant;
@@ -10,8 +10,8 @@ use crate::engine::extension_registry::ExtensionUpdate;
 use crate::error::Result;
 use tracing::{trace, warn};
 
-use super::super::types::*;
-use super::BtPeerInteractive;
+use crate::engine::bt_peer_interaction::types::*;
+use super::super::BtPeerInteractive;
 
 impl BtPeerInteractive {
     /// Receive messages from the peer connection and dispatch each one.

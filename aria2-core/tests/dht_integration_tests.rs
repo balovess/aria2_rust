@@ -330,11 +330,8 @@ async fn test_dht_engine_find_peers_mocked() {
     server.expect_get_peers(peers, closer_nodes).await;
     server.expect_ping().await;
 
-    // Start DhtEngine with default config (port 0 picks random port)
-    let config = DhtEngineConfig {
-        port: 0,
-        ..Default::default()
-    };
+    // Local-only config: ephemeral port, no public bootstrap.
+    let config = DhtEngineConfig::local();
 
     // Engine start should not panic even though bootstrap routers won't respond
     let engine = DhtEngine::start(config)
@@ -539,10 +536,9 @@ async fn test_dht_engine_lifecycle() {
     // --- Phase 1: Start engine with persistence path ---
     let custom_self_id = [0xDEu8; 20];
     let config = DhtEngineConfig {
-        port: 0,
         self_id: custom_self_id,
         dht_file_path: Some(dht_path.clone()),
-        ..Default::default()
+        ..DhtEngineConfig::local()
     };
 
     let engine = DhtEngine::start(config)
@@ -669,10 +665,7 @@ fn test_token_rotation_grace_period() {
 fn test_engine_uses_token_tracker() {
     use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
-    let config = DhtEngineConfig {
-        port: 0,
-        ..Default::default()
-    };
+    let config = DhtEngineConfig::local();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result: Result<(), String> = rt.block_on(async {
@@ -844,10 +837,9 @@ fn test_concurrent_query_faster_than_sequential() {
     use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
     let config = DhtEngineConfig {
-        port: 0,
         query_timeout: Duration::from_millis(200), // short timeout for speed test
         max_concurrent_lookups: 8,
-        ..Default::default()
+        ..DhtEngineConfig::local()
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -888,10 +880,7 @@ fn test_concurrent_query_faster_than_sequential() {
 fn test_concurrent_announce_multiple_nodes() {
     use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
-    let config = DhtEngineConfig {
-        port: 0,
-        ..Default::default()
-    };
+    let config = DhtEngineConfig::local();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result: Result<(), String> = rt.block_on(async {

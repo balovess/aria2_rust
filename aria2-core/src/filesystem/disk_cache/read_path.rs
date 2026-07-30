@@ -17,14 +17,14 @@ impl WrDiskCache {
     /// start after offset).
     ///
     /// # Zero-Copy
-    /// Returns ytes::Bytes slice instead of Vec<u8>, avoiding memory allocation.
+    /// Returns bytes::Bytes slice instead of Vec<u8>, avoiding memory allocation.
     pub async fn read(&self, offset: u64, length: u64) -> Result<Option<bytes::Bytes>> {
         let entries = self.entries.lock().await;
 
         let end = offset + length;
 
         // The only candidate is the entry with the largest key <= offset.
-        // ange(..=offset).next_back() returns exactly that in O(log n).
+        // range(..=offset).next_back() returns exactly that in O(log n).
         if let Some((&entry_offset, entry)) = entries.range(..=offset).next_back() {
             let entry_end = entry_offset + entry.data.len() as u64;
             if entry_end >= end {
@@ -46,7 +46,7 @@ impl WrDiskCache {
     /// (eligible for future LRU eviction). The caller is responsible for
     /// writing the returned entries to durable storage.
     ///
-    /// The returned CacheEntry clones are O(1): ytes::Bytes is an
+    /// The returned CacheEntry clones are O(1): bytes::Bytes is an
     /// Arc-backed buffer, so cloning only bumps a reference count -- no
     /// data copy occurs.
     pub async fn flush(&self) -> Result<Vec<super::CacheEntry>> {

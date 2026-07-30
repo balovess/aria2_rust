@@ -5,7 +5,7 @@
 //! Sub-modules:
 //! - [interaction] - Main interaction processing loop (`do_interaction_processing`)
 //! - [dispatch_message] - Central message dispatch (`dispatch_message`)
-//! - [eceive] - Message reception loop (`receive_messages`)
+//! - [receive] - Message reception loop (`receive_messages`)
 //! - [handshake] - Handshake peer-ID validation (`validate_handshake_peer_id`)
 
 pub mod interaction;

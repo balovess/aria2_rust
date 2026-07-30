@@ -9,8 +9,8 @@ use crate::engine::extension_registry::ExtensionUpdate;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 use tracing::{debug, trace, warn};
 
-use super::super::types::*;
-use super::BtPeerInteractive;
+use crate::engine::bt_peer_interaction::types::*;
+use super::super::BtPeerInteractive;
 
 impl BtPeerInteractive {
     // -- Message dispatch -----------------------------------------------------

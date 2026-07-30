@@ -12,7 +12,7 @@ impl DefaultPeerStorage {
 
     /// Add a single peer to the unused list.
     ///
-    /// Returns 	rue if the peer was added, alse if rejected.
+    /// Returns true if the peer was added, false if rejected.
     ///
     /// A peer is rejected if:
     /// - The unused list is full (unused_peers.len() >= max_peer_list_size)

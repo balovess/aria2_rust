@@ -34,7 +34,7 @@ type SegmentFetchFuture = std::pin::Pin<
 /// Run the single-mirror concurrent download pipeline.
 ///
 /// Spawns up to max_conn segment fetches concurrently using a
-/// FuturesUnordered, drains write chunks via 	okio::select!, and
+/// FuturesUnordered, drains write chunks via tokio::select!, and
 /// handles 416-based fallback detection.
 pub async fn execute(
     dl: &mut ConcurrentDownloader,
@@ -154,13 +154,13 @@ pub async fn execute(
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
 
     // Pause/remove check interval — allows the download loop to detect
-    // ria2.pause / ria2.remove within ~200ms even when segment
+    // aria2.pause / aria2.remove within ~200ms even when segment
     // futures are blocked on slow network reads.
     let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
 
     loop {
         // Check whether the task was removed. This is the primary
-        // cancellation signal: ria2.remove / ria2.forceRemove sets
+        // cancellation signal: aria2.remove / aria2.forceRemove sets
         // the RequestGroup status to Removed, which is_removed()
         // observes without blocking. We check at the top of the loop so a
         // cancellation is detected before spawning new segment fetches and
@@ -429,7 +429,7 @@ pub async fn execute(
                 })?;
             }
             // Periodic pause/remove check — ensures the download loop
-            // detects ria2.pause / ria2.remove within ~200ms even
+            // detects aria2.pause / aria2.remove within ~200ms even
             // when segment futures are blocked on slow network reads.
             _ = cancel_tick.tick() => {
                 if let Err(e) = dl.check_cancelled() {

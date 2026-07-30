@@ -73,7 +73,7 @@ impl ConcurrentDownloader {
     /// Non-blocking cancellation check.
     ///
     /// Returns Err when the underlying RequestGroup has been marked
-    /// removed or paused. Uses 	ry_read on the outer group lock so it is
+    /// removed or paused. Uses try_read on the outer group lock so it is
     /// safe to call from the download loop; a contended lock is treated as
     /// `not cancelled'' and the caller will re-check on the next iteration.
     pub(crate) fn check_cancelled(&self) -> Result<()> {

@@ -20,7 +20,7 @@ use super::serialize::serialize_groups;
 ///
 /// # Arguments
 ///
-/// * path - Path to the session file to load
+/// * `path` - Path to the session file to load
 ///
 /// # Returns
 ///
@@ -64,8 +64,8 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 ///
 /// # Arguments
 ///
-/// * path - Target path for the session file
-/// * groups - Slice of Arc<std::sync::RwLock<RequestGroup>> references to serialize
+/// * `path` - Target path for the session file
+/// * `groups` - Slice of Arc<std::sync::RwLock<RequestGroup>> references to serialize
 ///
 /// # Returns
 ///
@@ -74,7 +74,7 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 /// # Atomic Write Strategy
 ///
 /// 1. Serialize all groups to memory
-/// 2. Write to {path}.sess.tmp temporary file
+/// 2. Write to `{path}.sess.tmp` temporary file
 /// 3. Rename temp file to target path (atomic on most filesystems)
 ///
 /// # Errors
@@ -129,8 +129,8 @@ pub async fn save_to_file(
 ///
 /// # Arguments
 ///
-/// * path - Target path for the session file
-/// * entries - Slice of SessionEntry objects to serialize and save
+/// * `path` - Target path for the session file
+/// * `entries` - Slice of SessionEntry objects to serialize and save
 ///
 /// # Returns
 ///
@@ -144,7 +144,7 @@ pub async fn save_to_file(
 ///
 /// # Atomic Write Strategy
 ///
-/// Same as [save_to_file()]: write to .sess.tmp then rename atomically.
+/// Same as [`save_to_file()`]: write to `.sess.tmp` then rename atomically.
 ///
 /// # Example
 ///

@@ -4,7 +4,7 @@
 //! - [ChokingAlgorithm] - Main struct and public API
 //! - [selection] - Unchoke candidate selection (tit-for-tat rotation)
 //! - [optimistic] - Optimistic unchoke logic (round-robin)
-//! - [	ests] - Comprehensive test suite
+//! - [tests] - Comprehensive test suite
 
 mod selection;
 mod optimistic;
@@ -166,8 +166,8 @@ impl ChokingAlgorithm {
 
     /// Remove a peer from the explicit snubbed set (they sent data again).
     ///
-    /// Returns 	rue if the peer was actually in the snubbed set (newly un-snubbed),
-    /// alse if they were not snubbed.
+    /// Returns true if the peer was actually in the snubbed set (newly un-snubbed),
+    /// false if they were not snubbed.
     pub fn unsnub_peer(&mut self, peer_id: usize) -> bool {
         if self.snubbed_peers.remove(&peer_id) {
             tracing::debug!("[BT] Peer {} un-snubbed (data received)", peer_id);

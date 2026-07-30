@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 
 use crate::engine::command::ProgressUpdate;
 use crate::engine::download_command::DownloadCommand;
@@ -139,7 +139,7 @@ async fn test_check_cancelled_returns_err_after_remove() {
     )
     .expect("DownloadCommand::new_with_group should succeed");
 
-    // Simulate ria2.remove / ria2.forceRemove which calls
+    // Simulate aria2.remove / aria2.forceRemove which calls
     // RequestGroupMan::remove_group -> group.remove().
     {
         let mut g = group.recover_mut();

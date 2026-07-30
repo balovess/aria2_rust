@@ -1,5 +1,3 @@
-//! Tests for the DNS cache module.
-
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 

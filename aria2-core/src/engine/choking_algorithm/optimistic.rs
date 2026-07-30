@@ -52,7 +52,7 @@ pub(super) fn optimistically_unchoke(algo: &mut ChokingAlgorithm) -> Option<usiz
 /// cycling through eligible peers in order.
 ///
 /// # Arguments
-/// * lgo - The choking algorithm (for accessing rotation state)
+/// * algo - The choking algorithm (for accessing rotation state)
 /// * eligible_peers - Indices of peers that are eligible for optimistic unchoke
 ///
 /// # Returns

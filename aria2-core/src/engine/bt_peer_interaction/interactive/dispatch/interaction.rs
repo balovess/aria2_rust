@@ -1,6 +1,6 @@
 //! Main interaction processing loop for `BtPeerInteractive`.
 //!
-//! Contains the core per-tick method `do_interaction_processing()` that
+//! Contains the core per-tick method [`do_interaction_processing()`] that
 //! implements the 12-step C++ `DefaultBtInteractive::doInteractionProcessing()`
 //! flow.
 
@@ -10,12 +10,12 @@ use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::Result;
 use tracing::{debug, trace, warn};
 
-use super::super::piece_provider::PieceProvider;
-use super::super::types::*;
-use super::BtPeerInteractive;
+use crate::engine::bt_peer_interaction::piece_provider::PieceProvider;
+use crate::engine::bt_peer_interaction::types::*;
+use super::super::BtPeerInteractive;
 
 impl BtPeerInteractive {
-    // -- Main interaction loop -----------------------------------------------
+    // ── Main interaction loop ──────────────────────────────────────────
 
     /// Main interaction processing loop, matching C++
     /// `DefaultBtInteractive::doInteractionProcessing()`.
@@ -23,37 +23,37 @@ impl BtPeerInteractive {
     /// This is the core per-tick method called each time the peer
     /// interaction command executes in the `Wired` state.
     ///
-    /// # Flow (normal mode - all 12 C++ steps)
+    /// # Flow (normal mode — all 12 C++ steps)
     ///
-    /// 1. `check_active_interaction()` - disconnect idle peers
+    /// 1. `check_active_interaction()` — disconnect idle peers
     /// 2. Per-second: check request slots for timeouts
     /// 3. Receive messages and dispatch to handlers
-    /// 4. `detect_flooding()` - detect choke/keepalive flooding
-    /// 5. `decide_choking()` - send choke/unchoke if needed
-    /// 6. `decide_interest()` - send interested/not-interested if needed
-    /// 7. `check_have()` - advertise newly completed pieces
-    /// 8. `should_send_keepalive()` - send keepalive if interval elapsed
-    /// 9. `remove_completed_piece()` - handled by handler
-    /// 10. `add_requests()` - request more pieces if not finished
+    /// 4. `detect_flooding()` — detect choke/keepalive flooding
+    /// 5. `decide_choking()` — send choke/unchoke if needed
+    /// 6. `decide_interest()` — send interested/not-interested if needed
+    /// 7. `check_have()` — advertise newly completed pieces
+    /// 8. `should_send_keepalive()` — send keepalive if interval elapsed
+    /// 9. `remove_completed_piece()` — handled by handler
+    /// 10. `add_requests()` — request more pieces if not finished
     /// 11. PEX message if applicable
-    /// 12. `send_pending_message()` - flush outgoing queue
+    /// 12. `send_pending_message()` — flush outgoing queue
     ///
     /// # Callbacks
     ///
     /// Several steps require access to piece storage or peer storage
     /// that this struct does not own. These are provided as closures:
     ///
-    /// * `has_missing_piece` - returns true if the peer has pieces we need
-    /// * `get_advertised_pieces` - returns newly completed piece indexes
-    /// * `is_in_allowed_fast` - returns true if a piece is in the allowed-fast set
-    /// * `is_block_acquired` - returns true if a block was obtained from another peer
+    /// * `has_missing_piece` — returns true if the peer has pieces we need
+    /// * `get_advertised_pieces` — returns newly completed piece indexes
+    /// * `is_in_allowed_fast` — returns true if a piece is in the allowed-fast set
+    /// * `is_block_acquired` — returns true if a block was obtained from another peer
     ///
     /// # Returns
     ///
-    /// - `InteractionResult::Continue { pex_pending }` - normal tick, keep running; if pex_pending is true, caller should send PEX
-    /// - `InteractionResult::Disconnect(reason)` - peer should be dropped
-    /// - `InteractionResult::FloodingDetected` - flooding detected
-    /// - `InteractionResult::WaitingForHandshake` - not yet wired
+    /// - `InteractionResult::Continue { pex_pending }` — normal tick, keep running; if pex_pending is true, caller should send PEX
+    /// - `InteractionResult::Disconnect(reason)` — peer should be dropped
+    /// - `InteractionResult::FloodingDetected` — flooding detected
+    /// - `InteractionResult::WaitingForHandshake` — not yet wired
     #[allow(clippy::too_many_arguments)]
     pub async fn do_interaction_processing(
         &mut self,
@@ -86,13 +86,13 @@ impl BtPeerInteractive {
             });
         }
 
-        // -- Step 1: checkActiveInteraction -----------------------------------
+        // ── Step 1: checkActiveInteraction ──────────────────────────────
         if let Some(reason) = self.check_active_interaction(conn) {
             conn.disconnected_gracefully = true;
             return Ok(InteractionResult::Disconnect(reason));
         }
 
-        // -- Step 2: per-second request slot check ---------------------------
+        // ── Step 2: per-second request slot check ──────────────────────
         if self.per_sec_timer.elapsed() >= Duration::from_secs(PER_SEC_INTERVAL_SECS) {
             self.per_sec_timer = Instant::now();
             let result = self.handler.check_request_slots(is_block_acquired);
@@ -115,19 +115,19 @@ impl BtPeerInteractive {
             trace!("Per-second timer fired, request slot check done");
         }
 
-        // -- Step 3: receiveMessages ------------------------------------------
+        // ── Step 3: receiveMessages ─────────────────────────────────────
         let (received_count, pex_update) = self
             .receive_messages(conn, is_in_allowed_fast.clone())
             .await?;
         self.num_received_message = received_count;
 
-        // -- Step 4: detectMessageFlooding ------------------------------------
+        // ── Step 4: detectMessageFlooding ───────────────────────────────
         if self.detect_flooding() {
             warn!("Message flooding detected, disconnecting peer");
             return Ok(InteractionResult::FloodingDetected);
         }
 
-        // -- Step 5: decideChoking --------------------------------------------
+        // ── Step 5: decideChoking ───────────────────────────────────────
         let choking_decision = self.decide_choking(conn);
         match choking_decision {
             ChokingDecision::Choke => {
@@ -150,7 +150,7 @@ impl BtPeerInteractive {
             ChokingDecision::NoChange => {}
         }
 
-        // -- Step 6: decideInterest -------------------------------------------
+        // ── Step 6: decideInterest ─────────────────────────────────────
         let interest_decision = self.decide_interest_with_callback(conn, &has_missing_piece);
         match interest_decision {
             InterestDecision::Interested => {
@@ -170,7 +170,7 @@ impl BtPeerInteractive {
             InterestDecision::NoChange => {}
         }
 
-        // -- Step 7: checkHave ------------------------------------------------
+        // ── Step 7: checkHave ───────────────────────────────────────────
         // C++ checkHave(): query PieceStorage for newly completed pieces and
         // send Have messages. Optimization: if there are many new pieces,
         // send a single Bitfield message instead.
@@ -223,7 +223,7 @@ impl BtPeerInteractive {
             }
         }
 
-        // -- Step 8: sendKeepAlive --------------------------------------------
+        // ── Step 8: sendKeepAlive ───────────────────────────────────────
         if self.should_send_keepalive() {
             if let Err(e) = conn.send_keepalive().await {
                 warn!("Failed to send keepalive: {}", e);
@@ -231,7 +231,7 @@ impl BtPeerInteractive {
             self.reset_keep_alive_timer();
         }
 
-        // -- Step 9: removeCompletedPiece -------------------------------------
+        // ── Step 9: removeCompletedPiece ────────────────────────────────
         // Remove target pieces that have been fully downloaded.
         // C++ calls: btRequestFactory_->removeCompletedPiece()
         let completed_indices = self.remove_completed_piece();
@@ -243,7 +243,7 @@ impl BtPeerInteractive {
             );
         }
 
-        // -- Step 10: addRequests ---------------------------------------------
+        // ── Step 10: addRequests ────────────────────────────────────────
         // Generate new piece requests if the download is not finished.
         // C++ calls: if(!pieceStorage_->downloadFinished()) { addRequests(); }
         if !self.download_finished {
@@ -253,7 +253,7 @@ impl BtPeerInteractive {
                     trace!("addRequests: generated {} new requests", requests.len());
                 }
             } else {
-                // No piece storage provided - legacy path: just log readiness
+                // No piece storage provided — legacy path: just log readiness
                 if !self.peer_choking && self.handler.can_send_request() {
                     trace!(
                         "Ready to add requests (outstanding={})",
@@ -263,7 +263,7 @@ impl BtPeerInteractive {
             }
         }
 
-        // -- Step 11: addPeerExchangeMessage ----------------------------------
+        // ── Step 11: addPeerExchangeMessage ─────────────────────────────
         // In C++ aria2, DefaultBtInteractive::addPeerExchangeMessage() accesses
         // PeerStorage to get the list of connected/dropped peers and builds a
         // ut_pex Extended message. Here we signal that PEX is due so the caller
@@ -276,7 +276,7 @@ impl BtPeerInteractive {
             trace!("PEX timer fired, peer exchange message due");
         }
 
-        // -- Step 12: sendPendingMessage --------------------------------------
+        // ── Step 12: sendPendingMessage ────────────────────────────────
         // Drain sendable messages from the handler's dispatcher queue
         // first, then flush the connection's send buffer.
         let pending = self.handler.drain_sendable_messages();

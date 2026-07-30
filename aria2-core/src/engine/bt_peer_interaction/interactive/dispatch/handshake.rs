@@ -1,7 +1,7 @@
 //! Handshake reception and same-peer-ID duplicate detection for
 //! `BtPeerInteractive`.
 //!
-//! Contains [alidate_handshake_peer_id()] which checks a received
+//! Contains [validate_handshake_peer_id()] which checks a received
 //! handshake against our own peer ID and all currently connected peers.
 
 use aria2_protocol::bittorrent::message::handshake::Handshake;
@@ -9,8 +9,8 @@ use aria2_protocol::bittorrent::message::handshake::Handshake;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use tracing::{info, warn};
 
-use super::super::types::*;
-use super::BtPeerInteractive;
+use crate::engine::bt_peer_interaction::types::*;
+use super::super::BtPeerInteractive;
 
 impl BtPeerInteractive {
     // -- Handshake reception --------------------------------------------------

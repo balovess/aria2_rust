@@ -13,15 +13,16 @@
 //!
 //! # Architecture
 //!
-//! This module builds upon [SessionEntry] from the session_entry module:
-//! - Individual entry parsing/serialization is handled by SessionEntry
+//! This module builds upon [`SessionEntry`] from the `session_entry` module:
+//! - Individual entry parsing/serialization is handled by `SessionEntry`
 //! - This module handles multi-entry files and RequestGroup conversions
 //! - File I/O operations use atomic write patterns (write tmp + rename)
 //!
 //! # File Format
 //!
 //! Session files contain one or more entries separated by blank lines:
-//! `	ext
+//!
+//! ```text
 //! uri1	uri2
 //!  GID=hex_value
 //!  option=value
@@ -42,22 +43,20 @@
 //!     let path = Path::new("aria2.session");
 //!     let _entries = load_from_file(path).await.unwrap();
 //! }
-//! `
+//! ```
 
 // Re-export core types from session_entry module
 pub use super::session_entry::{
     SessionEntry, decode_hex, download_options_to_map, escape_uri, unescape_uri,
 };
 
-pub mod deserialization;
+mod deserialization;
 mod file_io;
 mod serialize;
 #[cfg(test)]
 mod tests;
 
 // Re-export all public functions from sub-modules
-// Note: `deserialize` is both a module name and a function inside it.
-// We re-export the function with an explicit path.
-pub use deserialization::deserialize as deserialize_entries;
+pub use deserialization::deserialize;
 pub use file_io::{load_from_file, save_to_file, save_to_file_with_entries};
 pub use serialize::{group_to_entry, serialize_groups};

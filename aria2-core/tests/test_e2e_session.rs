@@ -4,7 +4,7 @@ use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::auto_save_session::AutoSaveSession;
 use aria2_core::session::session_entry::download_options_to_map;
 use aria2_core::session::session_serializer::{
-    SessionEntry, deserialize_entries as deserialize, load_from_file, save_to_file,
+    SessionEntry, deserialize, load_from_file, save_to_file,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;

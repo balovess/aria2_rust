@@ -32,5 +32,6 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+// Re-export all public items so they remain accessible via header_processor::
 pub use processor::HttpHeaderProcessor;
 pub use types::{HttpHeaderParseState, HttpResponseHead};

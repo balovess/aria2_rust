@@ -110,8 +110,8 @@ impl DefaultPeerStorage {
 
     /// Check whether a peer IP is blocked by the blocklist.
     ///
-    /// Returns alse if no blocklist is configured.
-    fn is_blocked_by_blocklist(&self, ipaddr: &str) -> bool {
+    /// Returns false if no blocklist is configured.
+    pub(super) fn is_blocked_by_blocklist(&self, ipaddr: &str) -> bool {
         match &self.peer_blocklist {
             Some(bl) => bl.contains(ipaddr),
             None => false,
@@ -122,7 +122,7 @@ impl DefaultPeerStorage {
     /// MAX_DROPPED_PEERS.
     ///
     /// Matches C++ DefaultPeerStorage::addDroppedPeer.
-    fn add_dropped_peer(&mut self, peer: &PeerEntry) {
+    pub(super) fn add_dropped_peer(&mut self, peer: &PeerEntry) {
         // Remove any existing entry with the same (ip, port) to avoid
         // duplicates -- the new entry replaces the old one.
         if let Some(pos) = self
@@ -144,9 +144,9 @@ impl DefaultPeerStorage {
     /// Verify internal invariant: uniq_peers == keys(unused) U keys(used).
     ///
     /// This mirrors the C++ destructor assertion:
-    /// ssert(uniqPeers_.size() == unusedPeers_.size() + usedPeers_.size()).
+    /// assert(uniqPeers_.size() == unusedPeers_.size() + usedPeers_.size()).
     #[cfg(test)]
-    pub(super) fn verify_invariant(&self) {
+    pub(in crate::engine::bt_peer_storage) fn verify_invariant(&self) {
         assert_eq!(
             self.uniq_peers.len(),
             self.unused_peers.len() + self.used_peers.len(),

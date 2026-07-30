@@ -273,10 +273,9 @@ fn test_dht_engine_set_and_get() {
     use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let config = DhtEngineConfig {
-        port: 0,
-        ..Default::default()
-    };
+    // Local-only config: ephemeral port, no public bootstrap — keeps the
+    // test hermetic and instant.
+    let config = DhtEngineConfig::local();
     let engine = rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
     let mut registry = BtRegistry::new();
@@ -290,10 +289,9 @@ fn test_dht_engine_clear() {
     use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let config = DhtEngineConfig {
-        port: 0,
-        ..Default::default()
-    };
+    // Local-only config: ephemeral port, no public bootstrap — keeps the
+    // test hermetic and instant.
+    let config = DhtEngineConfig::local();
     let engine = rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
     let mut registry = BtRegistry::new();

@@ -1,5 +1,13 @@
 use std::collections::BTreeMap;
 
+/// Maximum nesting depth accepted by the decoder.
+///
+/// Mirrors the C++ `BencodeParser::pushState` guard (`stateStack_.size() >= 50`
+/// -> `ERR_STRUCTURE_TOO_DEEP`). Without this limit a hostile `.torrent`
+/// consisting of a long run of `l`/`d` opener bytes drives unbounded recursion
+/// and aborts the process on stack overflow, which Rust cannot catch.
+pub const MAX_NESTING_DEPTH: usize = 50;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BencodeValue {
     Int(i64),
@@ -10,20 +18,36 @@ pub enum BencodeValue {
 
 impl BencodeValue {
     pub fn decode(bytes: &[u8]) -> Result<(Self, usize), String> {
+        Self::decode_at_depth(bytes, 0)
+    }
+
+    fn decode_at_depth(bytes: &[u8], depth: usize) -> Result<(Self, usize), String> {
         if bytes.is_empty() {
             return Err("Empty byte stream".to_string());
         }
 
         match bytes[0] {
             b'i' => Self::decode_int(bytes),
-            b'l' => Self::decode_list(bytes),
-            b'd' => Self::decode_dict(bytes),
+            b'l' => Self::decode_list(bytes, depth),
+            b'd' => Self::decode_dict(bytes, depth),
             b'0'..=b'9' => Self::decode_bytes(bytes),
             c => Err(format!(
                 "Invalid bencode start character: '{}' (0x{:02x})",
                 c as char, c
             )),
         }
+    }
+
+    /// Returns the depth a nested container's children live at, or an error when
+    /// the structure would exceed [`MAX_NESTING_DEPTH`].
+    fn descend(depth: usize) -> Result<usize, String> {
+        if depth >= MAX_NESTING_DEPTH {
+            return Err(format!(
+                "Bencode structure too deep: exceeds maximum nesting depth of {}",
+                MAX_NESTING_DEPTH
+            ));
+        }
+        Ok(depth + 1)
     }
 
     fn decode_int(bytes: &[u8]) -> Result<(Self, usize), String> {
@@ -59,7 +83,15 @@ impl BencodeValue {
             .parse()
             .map_err(|e| format!("Failed to parse byte string length: {}", e))?;
         let data_start = colon_pos + 1;
-        let data_end = data_start + length;
+        // `length` comes straight off the wire; a value near `usize::MAX` would
+        // wrap on a plain add and make the bounds check below pass, then panic
+        // inside the slice index. Reject the overflow explicitly instead.
+        let data_end = data_start.checked_add(length).ok_or_else(|| {
+            format!(
+                "Byte string length overflows address space: declared length={}",
+                length
+            )
+        })?;
         if data_end > bytes.len() {
             return Err(format!(
                 "Byte string data insufficient: declared length={}, available={}",
@@ -73,14 +105,15 @@ impl BencodeValue {
         ))
     }
 
-    fn decode_list(bytes: &[u8]) -> Result<(Self, usize), String> {
+    fn decode_list(bytes: &[u8], depth: usize) -> Result<(Self, usize), String> {
         if !bytes.starts_with(b"l") {
             return Err("List does not start with 'l'".to_string());
         }
+        let inner_depth = Self::descend(depth)?;
         let mut pos = 1;
         let mut items = Vec::new();
         while pos < bytes.len() && bytes[pos] != b'e' {
-            let (item, consumed) = Self::decode(&bytes[pos..])?;
+            let (item, consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             items.push(item);
             pos += consumed;
         }
@@ -90,14 +123,15 @@ impl BencodeValue {
         Ok((BencodeValue::List(items), pos + 1))
     }
 
-    fn decode_dict(bytes: &[u8]) -> Result<(Self, usize), String> {
+    fn decode_dict(bytes: &[u8], depth: usize) -> Result<(Self, usize), String> {
         if !bytes.starts_with(b"d") {
             return Err("Dictionary does not start with 'd'".to_string());
         }
+        let inner_depth = Self::descend(depth)?;
         let mut pos = 1;
         let mut entries = BTreeMap::new();
         while pos < bytes.len() && bytes[pos] != b'e' {
-            let (key, key_consumed) = Self::decode(&bytes[pos..])?;
+            let (key, key_consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             let key_bytes = match key {
                 BencodeValue::Bytes(b) => b,
                 _ => return Err("Dict key must be a byte string".to_string()),
@@ -107,7 +141,7 @@ impl BencodeValue {
             if pos >= bytes.len() || bytes[pos] == b'e' {
                 return Err("Dict value missing (odd number of elements)".to_string());
             }
-            let (value, val_consumed) = Self::decode(&bytes[pos..])?;
+            let (value, val_consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             entries.insert(key_bytes, value);
             pos += val_consumed;
         }
@@ -361,5 +395,62 @@ mod tests {
         assert_eq!(val, BencodeValue::Int(42));
         assert_eq!(consumed, 4);
         assert_eq!(&input[consumed..], b"4:test");
+    }
+
+    /// Builds `open`-repeated ... `e`-repeated, e.g. depth 3 with `l` => "llleee".
+    fn nested(open: u8, depth: usize) -> Vec<u8> {
+        let mut v = vec![open; depth];
+        v.extend(std::iter::repeat(b'e').take(depth));
+        v
+    }
+
+    #[test]
+    fn test_nesting_at_limit_is_accepted() {
+        let input = nested(b'l', MAX_NESTING_DEPTH);
+        assert!(
+            BencodeValue::decode(&input).is_ok(),
+            "exactly MAX_NESTING_DEPTH levels must still parse"
+        );
+    }
+
+    #[test]
+    fn test_nesting_beyond_limit_is_rejected() {
+        let input = nested(b'l', MAX_NESTING_DEPTH + 1);
+        let err = BencodeValue::decode(&input).unwrap_err();
+        assert!(err.contains("too deep"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_dict_nesting_beyond_limit_is_rejected() {
+        // d1:a d1:a ... i0e e...e  -- nest dictionaries through their values.
+        let depth = MAX_NESTING_DEPTH + 5;
+        let mut input = Vec::new();
+        for _ in 0..depth {
+            input.extend_from_slice(b"d1:a");
+        }
+        input.extend_from_slice(b"i0e");
+        input.extend(std::iter::repeat(b'e').take(depth));
+        let err = BencodeValue::decode(&input).unwrap_err();
+        assert!(err.contains("too deep"), "unexpected error: {err}");
+    }
+
+    /// A hostile torrent used to abort the process via stack overflow here.
+    #[test]
+    fn test_pathological_nesting_does_not_overflow_stack() {
+        let input = vec![b'l'; 200_000];
+        let err = BencodeValue::decode(&input).unwrap_err();
+        assert!(err.contains("too deep"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_byte_string_length_overflow_is_rejected() {
+        // `usize::MAX` as the length prefix wrapped the `data_start + length`
+        // add and panicked inside the slice index before the checked_add fix.
+        let input = format!("{}:", usize::MAX).into_bytes();
+        let err = BencodeValue::decode(&input).unwrap_err();
+        assert!(
+            err.contains("overflow") || err.contains("insufficient"),
+            "unexpected error: {err}"
+        );
     }
 }

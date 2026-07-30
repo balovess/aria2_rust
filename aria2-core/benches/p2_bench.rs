@@ -105,6 +105,9 @@ fn create_large_progress(num_pieces: u32) -> BtProgress {
         piece_length: 256 * 1024,
         total_size: num_pieces as u64 * 256 * 1024,
         num_pieces,
+        upload_length: num_pieces as u64 * 256 * 1024,
+        in_flight_pieces: Vec::new(),
+        is_torrent: true,
         save_time: std::time::SystemTime::now(),
         version: 1,
     }

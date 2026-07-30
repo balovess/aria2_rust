@@ -295,14 +295,15 @@ mod tests {
         .expect("Failed to create test MagnetDownloadCommand")
     }
 
-    /// Start a real DhtEngine on an ephemeral port (port 0) for testing.
+    /// Start a real DhtEngine on an ephemeral port for testing.
+    ///
+    /// Uses `DhtEngineConfig::local()`: an OS-assigned port (avoids conflicts)
+    /// and no public bootstrap, so the test performs no outbound network I/O
+    /// and cannot stall on DNS or unreachable entry points.
     async fn start_test_dht_engine()
     -> std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine> {
         aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
-            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
-                port: 0, // OS-assigned ephemeral port to avoid conflicts
-                ..Default::default()
-            },
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
         )
         .await
         .expect("Failed to start DhtEngine for test")

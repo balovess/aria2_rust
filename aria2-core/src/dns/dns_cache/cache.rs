@@ -1,4 +1,4 @@
-//! DnsCache - DNS resolution cache with TTL support and negative caching.
+//! DNS cache with TTL support, negative caching, and resolution logic.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};

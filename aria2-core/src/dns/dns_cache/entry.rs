@@ -1,4 +1,4 @@
-//! DnsEntry - a single cached DNS resolution record.
+//! DNS cache entry type.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};

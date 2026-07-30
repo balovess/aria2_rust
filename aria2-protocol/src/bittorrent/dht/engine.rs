@@ -51,6 +51,20 @@ pub struct DhtEngineConfig {
     pub node_contact_interval: Duration,
     /// Maximum concurrent lookup tasks.
     pub max_concurrent_lookups: usize,
+    /// Whether to bootstrap into the public DHT network when the engine starts.
+    ///
+    /// Bootstrapping resolves public entry-point hostnames and performs network
+    /// I/O. Disable it for private torrents and in tests. Bootstrap always runs
+    /// **in the background** — [`DhtEngine::start`] never waits for it, mirroring
+    /// C++ aria2 where `DHTEntryPointNameResolveCommand` is dispatched into the
+    /// event loop rather than blocking startup.
+    pub bootstrap_on_start: bool,
+    /// Upper bound for the background bootstrap procedure.
+    ///
+    /// If bootstrap has not finished within this window it is abandoned and the
+    /// engine transitions to `Running` anyway, so an unreachable network can
+    /// never leave the engine stuck in `Bootstrapping` forever.
+    pub bootstrap_timeout: Duration,
 }
 
 impl Default for DhtEngineConfig {
@@ -64,6 +78,20 @@ impl Default for DhtEngineConfig {
             token_rotation_interval: Duration::from_secs(600), // 10 min
             node_contact_interval: Duration::from_secs(900),   // 15 min
             max_concurrent_lookups: 16,
+            bootstrap_on_start: true,
+            bootstrap_timeout: Duration::from_secs(60),
+        }
+    }
+}
+
+impl DhtEngineConfig {
+    /// Configuration for a fully local engine: ephemeral port, no public
+    /// bootstrap. Intended for tests and private-torrent DHT instances.
+    pub fn local() -> Self {
+        Self {
+            port: 0,
+            bootstrap_on_start: false,
+            ..Default::default()
         }
     }
 }
@@ -161,8 +189,20 @@ impl DhtEngine {
     /// Start the DHT engine with the given configuration.
     ///
     /// Binds a UDP socket on the configured port, loads the routing table
-    /// from disk (if available), bootstraps into the network, and returns
-    /// a shared reference to the running engine.
+    /// from disk (if available), spawns the receive loop and periodic tasks,
+    /// and returns a shared reference to the running engine.
+    ///
+    /// Bootstrap into the public DHT network is **not awaited**: it is spawned
+    /// as a background task guarded by
+    /// [`DhtEngineConfig::bootstrap_timeout`], so `start` returns as soon as
+    /// the socket is bound. This matches C++ aria2, where
+    /// `DHTEntryPointNameResolveCommand` is queued into the event loop rather
+    /// than blocking startup, and it keeps the engine usable (and tests fast)
+    /// on hosts with no DHT connectivity.
+    ///
+    /// Use [`DhtEngine::state`] to observe the transition from
+    /// `Bootstrapping` to `Running`, or [`DhtEngineConfig::local`] to skip
+    /// bootstrap entirely.
     pub async fn start(config: DhtEngineConfig) -> std::io::Result<Arc<Self>> {
         // Generate random node ID if not specified
         let self_id = if config.self_id == [0u8; 20] {
@@ -239,10 +279,36 @@ impl DhtEngine {
         // Spawn periodic tasks
         engine.spawn_periodic_tasks();
 
-        // Bootstrap: ping entry point nodes
-        engine.bootstrap().await;
+        // Bootstrap runs in the background so `start` never blocks on network
+        // I/O. Without a bootstrap the engine is immediately usable for
+        // inbound queries and for peers added manually (e.g. from a torrent's
+        // `nodes` list), so we move straight to `Running`.
+        if config.bootstrap_on_start {
+            engine.spawn_bootstrap();
+        } else {
+            engine.inner.write().await.state = DhtEngineState::Running;
+        }
 
         Ok(engine)
+    }
+
+    /// Spawn the bootstrap procedure as a background task.
+    ///
+    /// The task is bounded by [`DhtEngineConfig::bootstrap_timeout`]; on
+    /// timeout the engine still transitions to `Running` so that lookups are
+    /// not blocked indefinitely by an unreachable network.
+    pub fn spawn_bootstrap(self: &Arc<Self>) {
+        let engine = Arc::clone(self);
+        let limit = self.config.bootstrap_timeout;
+        tokio::spawn(async move {
+            if tokio::time::timeout(limit, engine.bootstrap()).await.is_err() {
+                warn!(
+                    timeout = ?limit,
+                    "DHT bootstrap timed out; continuing without entry-point nodes"
+                );
+                engine.inner.write().await.state = DhtEngineState::Running;
+            }
+        });
     }
 
     /// Return a snapshot of the current engine state.
@@ -466,10 +532,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_dht_engine_start_shutdown() {
+        // `local()` disables public-network bootstrap so the engine reaches
+        // `Running` deterministically without any outbound traffic.
         let config = DhtEngineConfig {
-            port: 0, // random port
             dht_file_path: None,
-            ..Default::default()
+            ..DhtEngineConfig::local()
         };
 
         let engine = DhtEngine::start(config)
@@ -483,9 +550,8 @@ mod tests {
     #[tokio::test]
     async fn test_dht_engine_stats() {
         let config = DhtEngineConfig {
-            port: 0,
             dht_file_path: None,
-            ..Default::default()
+            ..DhtEngineConfig::local()
         };
 
         let engine = DhtEngine::start(config)
@@ -501,9 +567,8 @@ mod tests {
     async fn test_find_peers_when_stopped() {
         // Create an engine in ShuttingDown state
         let config = DhtEngineConfig {
-            port: 0,
             dht_file_path: None,
-            ..Default::default()
+            ..DhtEngineConfig::local()
         };
 
         let engine = DhtEngine::start(config)

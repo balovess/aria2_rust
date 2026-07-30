@@ -96,7 +96,7 @@ pub async fn execute_with_coordinator(
     while coordinator.has_pending_segments() || !coordinator.is_complete() {
         // Check whether the task was removed before spawning the next
         // segment download. This is the primary cancellation signal:
-        // ria2.remove / ria2.forceRemove sets the RequestGroup
+        // aria2.remove / aria2.forceRemove sets the RequestGroup
         // status to Removed, which is_removed() observes without
         // blocking.
         dl.check_cancelled()?;
