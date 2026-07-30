@@ -3,7 +3,7 @@
 use crate::engine::bt_message_dispatcher::RequestSlot;
 use tracing::{debug, trace};
 
-use super::types::PeerStateUpdate;
+use super::super::types::PeerStateUpdate;
 use super::BtPeerMessageHandler;
 
 impl BtPeerMessageHandler {

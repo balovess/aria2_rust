@@ -90,6 +90,7 @@ pub mod bt_request_factory;
 pub mod bt_runtime;
 #[cfg(feature = "bittorrent")]
 pub mod bt_seed_manager;
+pub mod bt_setup;
 #[cfg(feature = "bittorrent")]
 pub mod bt_tracker_comm;
 #[cfg(feature = "bittorrent")]

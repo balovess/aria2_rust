@@ -1,11 +1,11 @@
 //! HTTP header types: parse state, response head, and size constants.
 
 /// Maximum allowed size for a single header field name (bytes).
-pub const MAX_FIELD_NAME_LEN: usize = 1024;
+pub(super) const MAX_FIELD_NAME_LEN: usize = 1024;
 /// Maximum allowed size for a single header field value (bytes).
-pub const MAX_FIELD_VALUE_LEN: usize = 8192;
+pub(super) const MAX_FIELD_VALUE_LEN: usize = 8192;
 /// Maximum total header block size (bytes). Prevents OOM from malicious servers.
-pub const MAX_HEADER_SIZE: usize = 65536;
+pub(super) const MAX_HEADER_SIZE: usize = 65536;
 
 // ---------------------------------------------------------------------------
 // HttpHeaderParseState
@@ -54,6 +54,23 @@ pub struct HttpResponseHead {
     pub reason_phrase: String,
     /// Ordered header name-value pairs; names are lowercase.
     headers: Vec<(String, String)>,
+}
+
+impl HttpResponseHead {
+    /// Create a new `HttpResponseHead` from its components.
+    pub(crate) fn new(
+        http_version: String,
+        status_code: u16,
+        reason_phrase: String,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            http_version,
+            status_code,
+            reason_phrase,
+            headers,
+        }
+    }
 }
 
 impl HttpResponseHead {

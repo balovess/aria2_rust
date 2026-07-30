@@ -59,6 +59,14 @@ pub enum EngineCommand {
     /// Change the maximum concurrent download limit.
     SetMaxConcurrent { max: u32 },
 
+    /// Request file allocation for a download group before starting the
+    /// actual download. The engine will queue the allocation and dispatch
+    /// it when a slot is available.
+    /// Mirrors C++ adding a FileAllocationEntry to FileAllocationMan.
+    FileAllocationRequest {
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+    },
+
     /// File allocation completed for a group; the engine should now
     /// spawn the actual download task.
     /// Mirrors C++ `FileAllocationCommand::executeInternal()` when `finished()`

@@ -2,7 +2,7 @@
 
 use tracing::{debug, trace};
 
-use super::types::{PeerStateUpdate, RequestResponse};
+use super::super::types::{PeerStateUpdate, RequestResponse};
 use super::BtPeerMessageHandler;
 
 impl BtPeerMessageHandler {

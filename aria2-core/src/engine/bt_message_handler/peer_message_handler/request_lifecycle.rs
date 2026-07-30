@@ -3,7 +3,7 @@
 use crate::engine::bt_message_dispatcher::RequestSlot;
 use tracing::debug;
 
-use super::types::{BLOCK_SIZE, UB_MAX_OUTSTANDING_REQUEST};
+use super::super::types::{BLOCK_SIZE, UB_MAX_OUTSTANDING_REQUEST};
 use super::BtPeerMessageHandler;
 
 impl BtPeerMessageHandler {

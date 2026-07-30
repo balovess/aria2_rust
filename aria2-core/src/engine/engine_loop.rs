@@ -404,6 +404,26 @@ async fn process_engine_commands(
                     }
                 }
             }
+
+            EngineCommand::FileAllocationRequest { group } => {
+                use crate::filesystem::file_allocation_man::{
+                    FileAllocationEntry, FileAllocationProtocol,
+                };
+                use crate::util::rwlock_ext::RwLockRecover;
+                use std::time::Instant;
+
+                let gid = group.recover().gid();
+                let entry = FileAllocationEntry {
+                    gid: gid.value(),
+                    path: String::new(),
+                    total_length: 0,
+                    protocol: FileAllocationProtocol::Http,
+                    created_at: Instant::now(),
+                };
+                let mut alloc_man = ctx.file_alloc_man.write().await;
+                alloc_man.push_entry(entry);
+                debug!(gid = gid.value(), "File allocation request queued");
+            }
         }
     }
 }
