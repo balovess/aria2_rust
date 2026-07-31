@@ -118,7 +118,15 @@ pub async fn run_engine_loop(
 
         // ── 2. Promote reserved → active + spawn download tasks ──────────
         // Mirrors C++ `fillRequestGroupFromReserver()`.
-        let promoted = {
+        //
+        // Once a halt has been requested the engine must stop admitting new
+        // work. C++ enforces this in `FillRequestGroupCommand::execute()`,
+        // which returns early when `e_->isHaltRequested()` — without this
+        // gate a graceful shutdown would keep promoting reserved groups and
+        // never converge.
+        let promoted = if halt_requested || force_halt_requested {
+            Vec::new()
+        } else {
             let man = ctx.group_man.read().await;
             man.fill_from_reserver()
         };
@@ -192,9 +200,20 @@ pub async fn run_engine_loop(
         let all_done = man.download_finished() && running_downloads.is_empty();
         drop(man);
 
-        if (all_done && !ctx.keep_alive) || force_halt_requested {
+        // A graceful halt must wind the engine down even in keep-alive (RPC)
+        // mode. C++ achieves this because every routine command (RPC
+        // listener, fill-request-group, …) returns `true` — removing itself
+        // from `commands_` — once `isHaltRequested()`, so `run()`'s
+        // `while (!commands_.empty())` terminates. Without this branch
+        // `aria2.shutdown` would hang forever whenever `--enable-rpc` is set,
+        // since `all_done && !keep_alive` can never be true there.
+        let graceful_done = halt_requested && running_downloads.is_empty();
+
+        if force_halt_requested || graceful_done || (all_done && !ctx.keep_alive) {
             if force_halt_requested {
                 info!("Force halt requested, shutting down engine");
+            } else if graceful_done {
+                info!("Graceful halt completed, engine shutting down");
             } else {
                 info!("All downloads completed, engine shutting down");
             }
@@ -541,5 +560,105 @@ async fn on_end_of_run(
     if let Some(ref auto_save) = ctx.auto_save {
         let mut save = auto_save.lock().await;
         save.force_save().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::request::request_group::HaltReason;
+
+    /// Build a context with no downloads queued. `keep_alive` mirrors
+    /// `--enable-rpc`, which is where the halt semantics used to break.
+    fn test_ctx(keep_alive: bool) -> EngineLoopContext {
+        EngineLoopContext {
+            group_man: Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new())),
+            ftp_pool: Arc::new(FtpConnectionPool::new(1)),
+            dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+            auto_save: None,
+            event_hooks: Arc::new(DownloadEventHooks::new()),
+            file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
+            keep_alive,
+        }
+    }
+
+    /// Drive the loop until it exits, failing the test if it outlives
+    /// `budget`. Guards the exact regression this suite exists for: a halt
+    /// that never converges would otherwise hang CI instead of failing.
+    async fn run_until_exit(
+        ctx: EngineLoopContext,
+        cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+        budget: Duration,
+    ) {
+        let loop_fut = run_engine_loop(ctx, cmd_rx, shutdown_rx, Duration::from_millis(5));
+        tokio::time::timeout(budget, loop_fut)
+            .await
+            .expect("engine loop failed to terminate after halt");
+    }
+
+    #[tokio::test]
+    async fn graceful_halt_exits_even_in_keep_alive_mode() {
+        // Regression: `halt_requested` used to be write-only, so the exit
+        // condition `(all_done && !keep_alive) || force_halt` could never fire
+        // under `--enable-rpc` and `aria2.shutdown` hung forever.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+
+        tx.send(EngineCommand::HaltAll {
+            reason: HaltReason::ShutdownSignal,
+        })
+        .unwrap();
+
+        run_until_exit(test_ctx(true), rx, sd_rx, Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn force_halt_exits_in_keep_alive_mode() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+
+        tx.send(EngineCommand::ForceHaltAll {
+            reason: HaltReason::ShutdownSignal,
+        })
+        .unwrap();
+
+        run_until_exit(test_ctx(true), rx, sd_rx, Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_exits_in_keep_alive_mode() {
+        // The Ctrl+C path sets `halt_requested` directly rather than going
+        // through an EngineCommand, so it needs its own coverage.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+
+        sd_tx.send(()).unwrap();
+
+        run_until_exit(test_ctx(true), rx, sd_rx, Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn keep_alive_without_halt_does_not_exit() {
+        // The flip side: keep-alive must still hold the loop open when no halt
+        // was requested, otherwise an idle RPC server would shut itself down.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+
+        let loop_fut = run_engine_loop(test_ctx(true), rx, sd_rx, Duration::from_millis(5));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), loop_fut)
+                .await
+                .is_err(),
+            "keep-alive loop exited without a halt request"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_loop_exits_without_keep_alive() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+
+        run_until_exit(test_ctx(false), rx, sd_rx, Duration::from_secs(5)).await;
     }
 }

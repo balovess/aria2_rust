@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::checksum::message_digest::HashType;
 
 // ── Test fixture helpers ─────────────────────────────────────────────────
 
@@ -522,4 +523,64 @@ fn test_piece_validation_result_debug() {
     let r2 = PieceValidationResult::Failed { piece_index: 1 };
     assert!(format!("{:?}", r1).contains("Verified"));
     assert!(format!("{:?}", r2).contains("Failed"));
+}
+
+// ── Piece hash algorithm selection ────────────────────────────────────
+//
+// `compute_hash` used to hardcode SHA-1 while C++
+// `IteratableChunkChecksumValidator` builds its MessageDigest from
+// `dctx->getPieceHashType()`. Any download whose piece hashes were not SHA-1
+// (Metalink `<pieces type="sha-256">`, HTTP piece hashes) therefore compared a
+// 40-char digest against a 64-char expected value and failed every piece.
+
+/// Build a validator whose DownloadContext declares `hash_type` piece hashes.
+fn validator_with_hash_type(hash_type: &str) -> PieceHashValidator {
+    let mut ctx = crate::download::DownloadContext::new(4, 8, "/tmp/hash_type.bin".to_string());
+    if !hash_type.is_empty() {
+        ctx.set_piece_hashes(hash_type.to_string(), vec!["x".to_string(), "y".to_string()]);
+    }
+    PieceHashValidator::new(Arc::new(ctx), make_ps(4, 8), 2, 8, 4)
+}
+
+#[test]
+fn test_compute_hash_honours_sha256_piece_hash_type() {
+    let v = validator_with_hash_type("sha-256");
+    let got = v.compute_hash(b"abc").expect("sha-256 must be supported");
+    assert_eq!(
+        got, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "must hash with SHA-256, not SHA-1"
+    );
+}
+
+#[test]
+fn test_compute_hash_honours_sha512_piece_hash_type() {
+    let v = validator_with_hash_type("sha-512");
+    let got = v.compute_hash(b"abc").expect("sha-512 must be supported");
+    assert_eq!(got.len(), 128, "SHA-512 hex digest is 128 chars");
+}
+
+#[test]
+fn test_compute_hash_honours_md5_piece_hash_type() {
+    let v = validator_with_hash_type("md5");
+    let got = v.compute_hash(b"abc").expect("md5 must be supported");
+    assert_eq!(got, "900150983cd24fb0d6963f7d28e17f72");
+}
+
+#[test]
+fn test_compute_hash_defaults_to_sha1_when_type_empty() {
+    // Empty piece hash type means BitTorrent, whose piece hashes are SHA-1.
+    let v = validator_with_hash_type("");
+    assert_eq!(v.resolve_hash_type(), Some(HashType::Sha1));
+    let got = v.compute_hash(b"abc").expect("sha-1 fallback");
+    assert_eq!(got, "a9993e364706816aba3e25717850c26c9cd0d89d");
+}
+
+#[test]
+fn test_compute_hash_rejects_unknown_algorithm() {
+    let v = validator_with_hash_type("not-a-real-hash");
+    assert_eq!(v.resolve_hash_type(), None);
+    assert!(
+        v.compute_hash(b"abc").is_none(),
+        "an unrecognised algorithm must not silently fall back to SHA-1"
+    );
 }

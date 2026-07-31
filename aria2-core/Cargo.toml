@@ -84,6 +84,13 @@ webpki-roots = "0.26"
 rc4 = { version = "0.2", optional = true }
 once_cell = "1.19"
 dashmap = "5.5"
+# Firefox/Chromium cookie import reads `cookies.sqlite` / `Cookies` directly
+# (C++ `Sqlite3CookieParser`). `bundled` statically compiles SQLite into the
+# binary, so there is no system libsqlite3 requirement on any platform and no
+# version skew between what we test against and what a user happens to have
+# installed. `default-features = false` drops extras we never touch — the
+# parser only ever opens a database read-only and runs a single SELECT.
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

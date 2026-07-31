@@ -17,6 +17,13 @@ use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use tokio_util::sync::CancellationToken;
 
+/// Delay between answering a shutdown RPC and actually halting the engine.
+///
+/// Mirrors the hard-coded `3_s` in C++ `RpcMethodImpl::goingShutdown()`, which
+/// schedules a `TimedHaltCommand` so the JSON-RPC response is flushed before
+/// the engine (and with it the RPC listener) goes away.
+const RPC_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl RpcEngine {
     /// Handle `aria2.addUri` - Add a new download task from URI(s).
     pub async fn handle_add_uri(
@@ -657,13 +664,19 @@ impl RpcEngine {
         }
         drop(tasks);
 
-        // Propagate HaltAll to the engine loop so it stops running.
+        // Propagate HaltAll to the engine loop so it stops running — but only
+        // after RPC_SHUTDOWN_GRACE. Sending it inline would race the response
+        // below: the engine tears down the runtime that owns this connection,
+        // so the client can observe a dropped socket instead of the `OK`.
+        // C++ solves this the same way, quoting `RpcMethodImpl::goingShutdown`:
+        // "Schedule shutdown after 3seconds to give time to client to receive
+        // RPC response."
         if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-            use aria2_core::engine::engine_command::EngineCommand;
-            use aria2_core::request::request_group::HaltReason;
-            let _ = engine_cmd_tx.send(EngineCommand::HaltAll {
-                reason: HaltReason::ShutdownSignal,
-            });
+            aria2_core::engine::halt_watchers::spawn_timed_halt(
+                engine_cmd_tx.clone(),
+                RPC_SHUTDOWN_GRACE,
+                false,
+            );
         }
 
         Ok(JsonRpcResponse::success(
@@ -697,13 +710,17 @@ impl RpcEngine {
         let cancelled_count = tasks.len();
         tasks.clear();
 
-        // Propagate ForceHaltAll to the engine loop so it terminates immediately.
+        // Downloads are already cancelled above, so the engine has nothing
+        // left to do; the delay here exists purely so the client receives this
+        // response before the engine tears the process down. C++ routes
+        // `aria2.forceShutdown` through the same 3-second `TimedHaltCommand`,
+        // differing only in the `forceHalt` flag.
         if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-            use aria2_core::engine::engine_command::EngineCommand;
-            use aria2_core::request::request_group::HaltReason;
-            let _ = engine_cmd_tx.send(EngineCommand::ForceHaltAll {
-                reason: HaltReason::ShutdownSignal,
-            });
+            aria2_core::engine::halt_watchers::spawn_timed_halt(
+                engine_cmd_tx.clone(),
+                RPC_SHUTDOWN_GRACE,
+                true,
+            );
         }
 
         Ok(JsonRpcResponse::success(

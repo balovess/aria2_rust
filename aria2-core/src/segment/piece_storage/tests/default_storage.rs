@@ -196,6 +196,44 @@ fn test_remove_advertised_piece() {
     assert!(indexes.is_empty());
 }
 
+/// `advertise_piece` folds the TTL sweep that C++ delegates to
+/// `HaveEraseCommand` into the single insertion point, so the `haves` queue can
+/// never grow unbounded. Inject an artificially stale entry and confirm the
+/// next advertisement evicts it while keeping the fresh ones.
+#[test]
+fn test_advertise_piece_evicts_expired_entries() {
+    let mut storage = DefaultPieceStorage::new(1024, 4096);
+
+    // A fresh entry recorded through the normal path.
+    storage.advertise_piece(1, 0);
+    assert_eq!(storage.haves.len(), 1);
+
+    // Backdate it well beyond the 5s TTL window, simulating an entry that the
+    // C++ sweeper would have collected.
+    storage.haves[0].registered_time_ms = 0;
+
+    // The next advertisement must drop the stale entry and keep only the new one.
+    storage.advertise_piece(2, 1);
+    assert_eq!(storage.haves.len(), 1);
+    assert_eq!(storage.haves[0].index, 1);
+    assert_eq!(storage.haves[0].cuid, 2);
+}
+
+/// Entries younger than the TTL must survive an advertisement — the inline
+/// sweep must not become an "erase everything but the newest" bug.
+#[test]
+fn test_advertise_piece_keeps_fresh_entries() {
+    let mut storage = DefaultPieceStorage::new(1024, 4096);
+    storage.advertise_piece(1, 0);
+    storage.advertise_piece(1, 1);
+    storage.advertise_piece(2, 2);
+    assert_eq!(storage.haves.len(), 3);
+
+    let (indexes, last) = storage.get_advertised_piece_indexes(3, 0);
+    assert_eq!(indexes, vec![0, 1, 2]);
+    assert_eq!(last, 3);
+}
+
 #[test]
 fn test_in_flight_pieces() {
     let mut storage = DefaultPieceStorage::new(1024, 4096);

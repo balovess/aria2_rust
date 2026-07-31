@@ -6,6 +6,13 @@ use crate::segment::piece_storage::types::StreamPieceSelectorKind;
 
 use super::struct_def::DefaultPieceStorage;
 
+/// How long an advertised-have entry stays visible to peer connections.
+///
+/// C++ `HaveEraseCommand` runs on a 10s period and drops everything older
+/// than 5s (`expiry.sub(5_s)`), so a consumer is guaranteed at least a 5s
+/// window to pick an entry up. This constant preserves that guarantee.
+const HAVE_ENTRY_TTL_MS: u64 = 5_000;
+
 impl PieceStorage for DefaultPieceStorage {
     // -- Piece query ---------------------------------------------------------
 
@@ -396,6 +403,24 @@ impl PieceStorage for DefaultPieceStorage {
         };
         self.next_have_index += 1;
         self.haves.push(entry);
+
+        // Evict expired entries inline instead of relying on an external
+        // sweeper. C++ needs `HaveEraseCommand` — a routine command firing
+        // every 10s that calls `removeAdvertisedPiece(now - 5s)` — because
+        // `haves_` is otherwise unbounded. Folding the eviction into the only
+        // insertion point gives the same TTL guarantee without a second
+        // scheduled task, and makes it impossible to grow the queue without
+        // also collecting it. Entries stay visible for at least
+        // `HAVE_ENTRY_TTL_MS`, matching the C++ expiry window.
+        let expiry_ms = now_ms.saturating_sub(HAVE_ENTRY_TTL_MS);
+        if self
+            .haves
+            .first()
+            .is_some_and(|e| e.registered_time_ms <= expiry_ms)
+        {
+            self.haves
+                .retain(|entry| entry.registered_time_ms > expiry_ms);
+        }
     }
 
     fn get_advertised_piece_indexes(

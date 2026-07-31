@@ -20,6 +20,7 @@ pub mod response_processor;
 pub mod skip_response;
 pub mod socks_connector;
 pub mod splice_http;
+pub mod sqlite_cookie_parser;
 pub mod stream_filter;
 pub mod tail_reclaim;
 

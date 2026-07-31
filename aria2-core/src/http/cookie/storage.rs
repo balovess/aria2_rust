@@ -21,6 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Aria2Error, Result};
 use crate::http::ns_cookie_parser::NsCookieParser;
+use crate::http::sqlite_cookie_parser::{Sqlite3CookieParser, is_sqlite_file};
 
 use super::Cookie;
 
@@ -387,13 +388,28 @@ impl CookieStorage {
         false
     }
 
-    /// Load cookies from a Netscape-format file.
+    /// Load cookies from a Netscape-format file or a browser SQLite cookie jar.
     ///
-    /// Equivalent to C++ `CookieStorage::load()`. Each parsed cookie is
-    /// stored via `add()`, which handles deduplication and eviction.
+    /// Equivalent to C++ `CookieStorage::load()`. The format is detected from
+    /// the file's first 16 bytes rather than its name — Firefox
+    /// (`cookies.sqlite`) and Chromium (`Cookies`, no extension) both start
+    /// with the SQLite magic, everything else is treated as Netscape
+    /// `cookies.txt`. Each parsed cookie is stored via `add()`, which handles
+    /// deduplication and eviction.
     pub fn load_file(&self, path: &Path) -> Result<usize> {
-        let data = fs::read_to_string(path).map_err(|e| Aria2Error::Io(e.to_string()))?;
-        let parsed = NsCookieParser::parse_str(&data)?;
+        let bytes = fs::read(path).map_err(|e| Aria2Error::Io(e.to_string()))?;
+
+        let parsed = if is_sqlite_file(&bytes) {
+            // The magic identifies SQLite but not the browser, so the schema is
+            // probed (Firefox first, then Chromium), matching C++.
+            Sqlite3CookieParser::parse_auto(path)?
+        } else {
+            // Netscape files are text; lossy conversion keeps a stray invalid
+            // byte from discarding the whole jar.
+            let text = String::from_utf8_lossy(&bytes);
+            NsCookieParser::parse_str(&text)?
+        };
+
         let n = parsed.len();
         for cookie in parsed {
             self.add(cookie);

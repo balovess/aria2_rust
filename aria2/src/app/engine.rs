@@ -313,6 +313,39 @@ impl App {
         Ok(gids)
     }
 
+    /// Arm the `--stop` and `--stop-with-process` shutdown triggers.
+    ///
+    /// C++ registers these as routine commands in `DownloadEngineFactory`
+    /// (`TimedHaltCommand` and `WatchProcessCommand`); here they become
+    /// detached tokio tasks that push a `HaltAll` onto the engine's command
+    /// channel. Both use a graceful (non-forced) halt, matching C++, which
+    /// constructs them with the default `forceHalt = false`.
+    async fn spawn_halt_watchers(
+        &self,
+        cmd_tx: tokio::sync::mpsc::UnboundedSender<
+            aria2_core::engine::engine_command::EngineCommand,
+        >,
+    ) {
+        use aria2_core::engine::halt_watchers;
+
+        // `--stop=0` means "no timer" in C++ (`if (stopSec > 0)`).
+        if let Some(secs) = self.get_opt_i64("stop").await.filter(|v| *v > 0) {
+            info!("Engine will halt after {}s (--stop)", secs);
+            halt_watchers::spawn_timed_halt(
+                cmd_tx.clone(),
+                std::time::Duration::from_secs(secs as u64),
+                false,
+            );
+        }
+
+        // C++ only checks `op->defined(PREF_STOP_WITH_PROCESS)`, so any PID
+        // that was explicitly supplied arms the watcher.
+        if let Some(pid) = self.get_opt_i64("stop-with-process").await.filter(|v| *v > 0) {
+            info!("Engine will halt when process {} exits", pid);
+            halt_watchers::spawn_process_watch(cmd_tx, pid as u32, false);
+        }
+    }
+
     /// Run the download engine event loop.
     ///
     /// # Arguments
@@ -361,6 +394,12 @@ impl App {
                     }
                 });
             }
+
+            // `--stop=N` / `--stop-with-process=PID` shutdown triggers.
+            // Mirrors C++ `DownloadEngineFactory`, which registers a
+            // `TimedHaltCommand` / `WatchProcessCommand` as routine commands.
+            self.spawn_halt_watchers(engine.engine_cmd_tx()).await;
+
             drop(engine_lock);
             info!(
                 "Starting download engine, {} tasks total",

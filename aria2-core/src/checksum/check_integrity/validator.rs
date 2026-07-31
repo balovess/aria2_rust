@@ -1,3 +1,5 @@
+use crate::checksum::message_digest::{HashType, MessageDigest};
+
 // ---------------------------------------------------------------------------
 // PieceValidationResult — per-piece validation outcome
 // ---------------------------------------------------------------------------
@@ -288,8 +290,21 @@ impl PieceHashValidator {
         // Here we use the PieceStorage's read interface.
         match self.piece_storage.read_data(piece_index) {
             Ok(data) if data.len() as u64 == piece_len => {
-                // Compute the hash of the piece data.
-                let computed_hash = self.compute_hash(&data);
+                // Compute the hash of the piece data using the algorithm the
+                // DownloadContext declares (SHA-1 for BitTorrent, but Metalink
+                // and HTTP piece hashes may be SHA-256/512).
+                let Some(computed_hash) = self.compute_hash(&data) else {
+                    tracing::error!(
+                        piece_index,
+                        hash_type = %self.download_context.get_piece_hash_type(),
+                        "Unsupported piece hash algorithm — cannot verify piece"
+                    );
+                    self.validation_results
+                        .push(PieceValidationResult::Failed { piece_index });
+                    self.pieces_failed += 1;
+                    self.advance();
+                    return;
+                };
 
                 if has_expected {
                     if computed_hash.eq_ignore_ascii_case(expected_hash) {
@@ -346,7 +361,14 @@ impl PieceHashValidator {
             }
         }
 
-        // Advance to next piece
+        self.advance();
+    }
+
+    /// Move the cursor to the next piece and flip `finished` once the last
+    /// piece has been consumed. Shared by every exit path of
+    /// [`validate_chunk`](Self::validate_chunk) so no path can stall the
+    /// iteration.
+    fn advance(&mut self) {
         self.current_piece_index += 1;
         self.current_offset = self.current_piece_index as u64 * self.piece_length;
 
@@ -393,17 +415,30 @@ impl PieceHashValidator {
         }
     }
 
-    /// Compute the SHA-1 hash of a piece's data and return as hex string.
+    /// Resolve the digest algorithm used for piece hashes.
     ///
-    /// In C++, this uses `MessageDigest` with the algorithm from
-    /// `dctx->getPieceHashType()`. Currently only SHA-1 is supported
-    /// (the standard for BitTorrent and most HTTP downloads).
-    fn compute_hash(&self, data: &[u8]) -> String {
-        use sha1::{Digest, Sha1};
-        let mut hasher = Sha1::new();
-        hasher.update(data);
-        let result = hasher.finalize();
-        hex::encode(result)
+    /// Mirrors C++ `IteratableChunkChecksumValidator`, which builds its
+    /// `MessageDigest` from `dctx->getPieceHashType()`. An empty type means
+    /// BitTorrent, whose piece hashes are always SHA-1.
+    ///
+    /// Returns `None` for an unrecognised algorithm so the caller can surface a
+    /// hard failure instead of silently comparing against the wrong digest.
+    pub(super) fn resolve_hash_type(&self) -> Option<HashType> {
+        let name = self.download_context.get_piece_hash_type();
+        if name.is_empty() {
+            return Some(HashType::Sha1);
+        }
+        HashType::from_str(name)
+    }
+
+    /// Hash a piece and return the lowercase hex digest.
+    ///
+    /// Returns `None` when the configured piece hash algorithm is unknown.
+    /// Previously this hardcoded SHA-1, so a Metalink or HTTP download whose
+    /// piece hashes were SHA-256/512 compared a SHA-1 digest against a longer
+    /// expected value and failed every single piece.
+    pub(super) fn compute_hash(&self, data: &[u8]) -> Option<String> {
+        Some(MessageDigest::hash_hex(self.resolve_hash_type()?, data))
     }
 
     /// Whether validation has completed all pieces.
