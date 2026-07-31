@@ -241,7 +241,7 @@ impl Command for MagnetDownloadCommand {
         let mut bt_cmd = BtDownloadCommand::new(
             self.group.recover().gid(),
             &torrent_bytes,
-            &DownloadOptions::default(),
+            self.group.recover().options(),
             self.output_path.parent().and_then(|p| p.to_str()),
         )?;
 

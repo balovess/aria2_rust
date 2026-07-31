@@ -210,6 +210,12 @@ impl BtDownloadCommand {
             public_trackers: None,
             choking_algo,
             multi_file_layout,
+            file_allocation: options
+                .file_allocation
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+            secure_falloc: options.secure_falloc,
+            check_integrity: options.check_integrity,
 
             // P1/P2 integration field defaults (all None, backward compatible)
             progress_manager: None,

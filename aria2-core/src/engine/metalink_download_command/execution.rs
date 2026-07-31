@@ -27,12 +27,14 @@ impl Command for MetalinkDownloadCommand {
         let sorted_urls_owned: Vec<aria2_protocol::metalink::parser::UrlEntry>;
         let expected_size: Option<u64>;
         let hash_entry_owned: Option<aria2_protocol::metalink::parser::HashEntry>;
+        let pieces_owned: Option<aria2_protocol::metalink::parser::PieceInfo>;
 
         match &self.file_info {
             Some(info) => {
                 sorted_urls_owned = info.sorted_urls.clone();
                 expected_size = info.expected_size;
                 hash_entry_owned = info.hash_entry.clone();
+                pieces_owned = info.pieces.clone();
             }
             None => {
                 let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(
@@ -57,6 +59,7 @@ impl Command for MetalinkDownloadCommand {
                     .collect();
                 expected_size = file.size;
                 hash_entry_owned = file.hashes.first().cloned();
+                pieces_owned = file.pieces.clone();
 
                 if sorted_urls_owned.is_empty() {
                     return Err(Aria2Error::Fatal(FatalError::Config(
@@ -118,6 +121,22 @@ impl Command for MetalinkDownloadCommand {
                                     "Hash verification failed: {}",
                                     hash.algo.as_standard_name()
                                 ),
+                            },
+                        ));
+                        continue;
+                    }
+
+                    // Chunk-level verification (<pieces>) — mirrors C++
+                    // `MetalinkEntry::chunkChecksum` checking after download.
+                    if let Some(ref pieces) = pieces_owned
+                        && !self.verify_pieces(&data, pieces)?
+                    {
+                        warn!(
+                            "Chunk hash verification failed: trying next mirror"
+                        );
+                        last_error = Some(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: "Chunk hash verification failed".to_string(),
                             },
                         ));
                         continue;
@@ -267,37 +286,91 @@ impl MetalinkDownloadCommand {
         data: &[u8],
         hash: &aria2_protocol::metalink::parser::HashEntry,
     ) -> Result<bool> {
-        use aria2_protocol::metalink::parser::HashAlgorithm;
+        let digest = digest_hex(data, hash.algo);
+        Ok(digest == hash.value)
+    }
 
-        match hash.algo {
-            HashAlgorithm::Md5 => {
-                use md5::Digest;
-                let mut hasher = md5::Md5::new();
-                hasher.update(data);
-                let digest = hasher.finalize();
-                Ok(format!("{:x}", digest) == hash.value)
+    /// Verify a whole-file download against Metalink `<pieces>` chunk hashes.
+    ///
+    /// Mirrors C++ `MetalinkEntry::checksum` / `ChunkChecksum` verification:
+    /// the data is split into `pieces.length`-sized chunks and each chunk is
+    /// compared against its corresponding digest. Returns `Ok(false)` on any
+    /// mismatch, when the number of digests does not match the expected piece
+    /// count, or when a digest has the wrong hex length.
+    pub(crate) fn verify_pieces(
+        &self,
+        data: &[u8],
+        pieces: &aria2_protocol::metalink::parser::PieceInfo,
+    ) -> Result<bool> {
+        if pieces.hashes.is_empty() {
+            return Ok(true);
+        }
+        let hex_len = pieces.type_.hash_len();
+        if pieces.hashes.iter().any(|h| h.len() != hex_len) {
+            warn!(
+                algo = ?pieces.type_,
+                "Metalink pieces digest length mismatch, verification failed"
+            );
+            return Ok(false);
+        }
+
+        let expected = pieces.num_pieces(data.len() as u64);
+        if pieces.hashes.len() != expected {
+            warn!(
+                expected,
+                actual = pieces.hashes.len(),
+                "Metalink pieces count mismatch, verification failed"
+            );
+            return Ok(false);
+        }
+
+        let chunk_len = pieces.length as usize;
+        for (i, expected_hash) in pieces.hashes.iter().enumerate() {
+            let start = i * chunk_len;
+            let end = ((i + 1) * chunk_len).min(data.len());
+            let chunk = &data[start..end];
+            let actual = digest_hex(chunk, pieces.type_);
+            if actual != *expected_hash {
+                warn!(
+                    piece = i,
+                    "Metalink piece hash mismatch ({} / {})",
+                    i + 1,
+                    pieces.hashes.len()
+                );
+                return Ok(false);
             }
-            HashAlgorithm::Sha1 => {
-                use sha1::Digest;
-                let mut hasher = sha1::Sha1::new();
-                hasher.update(data);
-                let result = hasher.finalize();
-                Ok(format!("{:x}", result) == hash.value)
-            }
-            HashAlgorithm::Sha256 => {
-                use sha2::Digest;
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(data);
-                let result = hasher.finalize();
-                Ok(format!("{:x}", result) == hash.value)
-            }
-            HashAlgorithm::Sha512 => {
-                use sha2::Digest;
-                let mut hasher = sha2::Sha512::new();
-                hasher.update(data);
-                let result = hasher.finalize();
-                Ok(format!("{:x}", result) == hash.value)
-            }
+        }
+        Ok(true)
+    }
+}
+
+/// Compute the lowercase hex digest of `data` for a Metalink hash algorithm.
+fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm) -> String {
+    use aria2_protocol::metalink::parser::HashAlgorithm;
+    match algo {
+        HashAlgorithm::Md5 => {
+            use md5::Digest;
+            let mut hasher = md5::Md5::new();
+            hasher.update(data);
+            format!("{:x}", hasher.finalize())
+        }
+        HashAlgorithm::Sha1 => {
+            use sha1::Digest;
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(data);
+            format!("{:x}", hasher.finalize())
+        }
+        HashAlgorithm::Sha256 => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(data);
+            format!("{:x}", hasher.finalize())
+        }
+        HashAlgorithm::Sha512 => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha512::new();
+            hasher.update(data);
+            format!("{:x}", hasher.finalize())
         }
     }
 }

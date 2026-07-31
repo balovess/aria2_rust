@@ -11,6 +11,8 @@ pub(crate) struct FileDownloadInfo {
     pub(crate) expected_size: Option<u64>,
     /// First hash entry for verification.
     pub(crate) hash_entry: Option<aria2_protocol::metalink::parser::HashEntry>,
+    /// Per-chunk piece hashes (`<pieces>`) for chunk-level verification.
+    pub(crate) pieces: Option<aria2_protocol::metalink::parser::PieceInfo>,
 }
 
 // =========================================================================

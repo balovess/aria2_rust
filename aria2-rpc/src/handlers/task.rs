@@ -1033,6 +1033,7 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         file_allocation: get_str("file-allocation"),
         mmap_threshold: get_u64("mmap-threshold"),
         secure_falloc: get_bool("secure-falloc"),
+        check_integrity: get_bool("check-integrity"),
         // Checksum
         checksum,
         // Cookies

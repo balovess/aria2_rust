@@ -210,6 +210,7 @@ impl MetalinkDownloadCommand {
                 expected_size: file.size,
                 hash_entry: file.strongest_hash().cloned(),
                 sorted_urls,
+                pieces: file.pieces.clone(),
             };
 
             info!(
@@ -301,6 +302,7 @@ impl MetalinkDownloadCommand {
             expected_size: file.size,
             hash_entry: file.strongest_hash().cloned(),
             sorted_urls,
+            pieces: file.pieces.clone(),
         };
 
         info!(

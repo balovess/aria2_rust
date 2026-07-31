@@ -39,9 +39,10 @@ impl DownloadEngine {
             dns_cache: Arc::clone(&self.dns_cache),
             auto_save: self.auto_save.take(),
             event_hooks: Arc::new(super::super::download_event_hooks::DownloadEventHooks::new()),
-            file_alloc_man: Arc::new(tokio::sync::RwLock::new(
-                super::super::super::filesystem::file_allocation_man::FileAllocationMan::new(),
-            )),
+            // Process-wide shared manager: download commands enqueue through
+            // the same instance the engine owns, mirroring C++ where
+            // `FileAllocationMan` lives on the DownloadEngine singleton.
+            file_alloc_man: super::super::super::filesystem::file_allocation_man::shared(),
             keep_alive: self.keep_alive,
         };
 

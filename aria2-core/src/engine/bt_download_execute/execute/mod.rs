@@ -84,6 +84,81 @@ impl Command for BtDownloadCommand {
 
         let (meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
 
+        // --check-integrity: verify existing data against the torrent's piece
+        // hashes before allocating/downloading (mirrors C++
+        // CheckIntegrityMan + CheckIntegrityCommand). Only single-file
+        // torrents for now — multi-file layouts need per-file piece range
+        // mapping (tracked in the gap analysis).
+        if self.check_integrity && self.multi_file_layout.is_none() {
+            use crate::checksum::check_integrity::man as ci_man;
+            use crate::checksum::message_digest::HashType;
+            use crate::util::rwlock_ext::RwLockRecover;
+            let gid = self.group.recover().gid().value();
+            let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
+            if let Some(task) = ci_man::file_task(
+                &self.output_path,
+                piece_length as u64,
+                total_size,
+                piece_hashes_hex,
+                HashType::Sha1,
+            )? {
+                info!(gid, "Checking integrity of existing data against piece hashes");
+                let ok = ci_man::enqueue(&ci_man::shared(), gid, task).await?;
+                if !ok {
+                    return Err(Aria2Error::Fatal(FatalError::Config(
+                        "Integrity check failed: existing file does not match torrent piece hashes"
+                            .to_string(),
+                    )));
+                }
+                info!(gid, "Integrity check passed, proceeding with download");
+            }
+        }
+
+        // File pre-allocation (mirrors C++ BtFileAllocationEntry queued into
+        // FileAllocationMan after integrity checking). Single-file torrents
+        // allocate `output_path`; multi-file torrents allocate every file in
+        // layout order. Already-completed files are skipped by the worker.
+        // The worker runs chunked, cooperative allocation sequentially across
+        // downloads, so a huge zero-fill never blocks this task or the engine.
+        {
+            use crate::filesystem::file_allocation::AllocationStrategy;
+            use crate::filesystem::file_allocation_man;
+            let strategy = AllocationStrategy::from_str(&self.file_allocation);
+            if strategy != AllocationStrategy::None {
+                let gid = self.group.recover().gid().value();
+                let man = file_allocation_man::shared();
+                if let Some(ref layout) = self.multi_file_layout {
+                    let files: Vec<(std::path::PathBuf, u64)> = layout
+                        .file_list()
+                        .iter()
+                        .filter_map(|f| {
+                            layout
+                                .file_absolute_path(f.index)
+                                .map(|p| (p.to_path_buf(), f.length))
+                        })
+                        .collect();
+                    file_allocation_man::enqueue_multi(
+                        &man,
+                        files,
+                        strategy,
+                        self.secure_falloc,
+                        gid,
+                    )
+                    .await?;
+                } else {
+                    file_allocation_man::enqueue_path(
+                        &man,
+                        &self.output_path,
+                        total_size,
+                        strategy,
+                        self.secure_falloc,
+                        gid,
+                    )
+                    .await?;
+                }
+            }
+        }
+
         // P1 integration: try to resume from saved .aria2 progress file
         if let Some(ref mgr) = self.progress_manager {
             match mgr.load_progress(&meta.info_hash.bytes) {

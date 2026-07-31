@@ -249,6 +249,7 @@ impl OptionHandlerApply for OptionHandler {
             file_allocation: get_str("file-allocation"),
             mmap_threshold: get_u64("mmap-threshold"),
             secure_falloc: self.get("secure-falloc").as_bool().unwrap_or(false),
+            check_integrity: self.get("check-integrity").as_bool().unwrap_or(false),
             // Metalink
             metalink_location: get_str("metalink-location"),
             metalink_preferred_protocol: get_str("metalink-preferred-protocol"),

@@ -45,6 +45,7 @@
 
 pub mod bt_check;
 pub mod kind;
+pub mod man;
 pub mod stream_check;
 pub mod validator;
 
@@ -55,5 +56,6 @@ mod tests;
 // `crate::checksum::check_integrity::X` still works.
 pub use bt_check::BtCheckIntegrity;
 pub use kind::CheckIntegrityKind;
+pub use man::{CheckIntegrityEntry, CheckIntegrityMan, CheckIntegrityTask, FileChunkValidator};
 pub use stream_check::StreamCheckIntegrity;
 pub use validator::{PieceHashValidator, PieceValidationResult, ValidatorKind};

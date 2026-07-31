@@ -381,6 +381,7 @@ fn test_download_options_to_map_all_fields() {
         file_allocation: Some("trunc".to_string()),
         mmap_threshold: Some(128 * 1024 * 1024),
         secure_falloc: true,
+        check_integrity: false,
         // Checksum
         checksum: Some(("sha256".to_string(), "abc123".to_string())),
         // Cookies

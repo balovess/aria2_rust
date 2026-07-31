@@ -16,6 +16,7 @@ use crate::engine::retry_policy::RetryPolicy;
 use crate::engine::sequential_download::SequentialDownloader;
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::file_allocation;
+use crate::filesystem::file_allocation_man;
 use crate::filesystem::resume_helper::ResumeHelper;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -175,14 +176,70 @@ impl Command for DownloadCommand {
         self.update_tail_reclaim_progress();
 
         let download_result: Result<()> = async {
+            // --check-integrity: when the download context carries piece
+            // hashes (e.g. Metalink), verify the existing file chunk-by-chunk
+            // before allocating/downloading (mirrors C++ CheckIntegrityMan +
+            // CheckIntegrityCommand). No-op when there is nothing to validate.
+            if self.check_integrity && total_length > 0 {
+                use crate::checksum::check_integrity::man as ci_man;
+                use crate::checksum::message_digest::HashType;
+                // Extract owned data first so the RwLock guard is dropped
+                // before any await (guard is not Send).
+                let piece_info = self
+                    .group
+                    .recover()
+                    .get_download_context()
+                    .map(|ctx| {
+                        (
+                            ctx.get_piece_hashes().to_vec(),
+                            ctx.get_piece_length() as u64,
+                            ctx.get_piece_hash_type().to_string(),
+                        )
+                    });
+                if let Some((hashes, piece_len, hash_type)) = piece_info {
+                    let algo =
+                        HashType::from_str(&hash_type).unwrap_or(HashType::Sha1);
+                    if let Some(task) = ci_man::file_task(
+                        &self.output_path,
+                        piece_len.max(1),
+                        total_length,
+                        hashes,
+                        algo,
+                    )? {
+                        let gid = self.group.recover().gid().value();
+                        info!(gid, "Checking integrity of existing data against piece hashes");
+                        let ok = ci_man::enqueue(&ci_man::shared(), gid, task).await?;
+                        if !ok {
+                            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                                "Integrity check failed: existing file does not match piece hashes"
+                                    .to_string(),
+                            )));
+                        }
+                        info!(gid, "Integrity check passed, proceeding with download");
+                    }
+                }
+            }
+
             if total_length > 0 {
-                file_allocation::preallocate_file(
-                    &self.output_path,
-                    total_length,
-                    &self.file_allocation,
-                    self.secure_falloc,
-                )
-                .await?;
+                // Queue the allocation through the shared FileAllocationMan
+                // (mirrors C++ FileAllocationMan + FileAllocationCommand):
+                // the background worker drives chunked allocation sequentially
+                // across downloads and yields between chunks, so a huge
+                // zero-fill never blocks a worker thread or starves other
+                // downloads. This task resumes once the file is ready.
+                let strategy = file_allocation::AllocationStrategy::from_str(&self.file_allocation);
+                if strategy != file_allocation::AllocationStrategy::None {
+                    let gid = self.group.recover().gid().value();
+                    file_allocation_man::enqueue_path(
+                        &file_allocation_man::shared(),
+                        &self.output_path,
+                        total_length,
+                        strategy,
+                        self.secure_falloc,
+                        gid,
+                    )
+                    .await?;
+                }
             }
 
             let options = self.group.recover().options_arc();

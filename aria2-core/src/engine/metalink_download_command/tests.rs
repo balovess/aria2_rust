@@ -175,6 +175,67 @@ fn test_new_accepts_multi_file_metalink() {
     assert!(result.is_ok(), "new() should accept multi-file Metalink");
 }
 
+/// Compute a lowercase hex sha-256 digest (test helper).
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+#[test]
+fn test_verify_pieces() {
+    use aria2_protocol::metalink::parser::{HashAlgorithm, PieceInfo};
+
+    let options = DownloadOptions::default();
+    let cmd = MetalinkDownloadCommand::new(GroupId::new(1), &make_multi_file_xml(), &options, None)
+        .expect("command constructs");
+
+    // 8 bytes split into 2 chunks of 4 bytes.
+    let data = b"aaaabbbb".to_vec();
+    let h0 = sha256_hex(&data[0..4]);
+    let h1 = sha256_hex(&data[4..8]);
+    let pieces = PieceInfo {
+        length: 4,
+        type_: HashAlgorithm::Sha256,
+        hashes: vec![h0.clone(), h1.clone()],
+    };
+
+    // All chunks match.
+    assert!(cmd.verify_pieces(&data, &pieces).unwrap());
+
+    // Tampered byte in chunk 0 → mismatch.
+    let mut bad = data.clone();
+    bad[0] ^= 0xFF;
+    assert!(!cmd.verify_pieces(&bad, &pieces).unwrap());
+
+    // Tampered byte in the last chunk → mismatch.
+    let mut bad_last = data.clone();
+    bad_last[7] ^= 0x01;
+    assert!(!cmd.verify_pieces(&bad_last, &pieces).unwrap());
+
+    // Digest count mismatch → fail loudly.
+    let short = PieceInfo {
+        hashes: vec![h0],
+        ..pieces.clone()
+    };
+    assert!(!cmd.verify_pieces(&data, &short).unwrap());
+
+    // Wrong digest length → fail.
+    let wrong_len = PieceInfo {
+        hashes: vec!["deadbeef".to_string(), h1],
+        ..pieces.clone()
+    };
+    assert!(!cmd.verify_pieces(&data, &wrong_len).unwrap());
+
+    // Empty hash list → trivially passes (no chunk verification requested).
+    let empty = PieceInfo {
+        hashes: Vec::new(),
+        ..pieces
+    };
+    assert!(cmd.verify_pieces(&data, &empty).unwrap());
+}
+
 #[test]
 fn test_create_multi_file_returns_all_files() {
     let options = DownloadOptions::default();

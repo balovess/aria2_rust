@@ -8,10 +8,10 @@ mod tests;
 
 // Re-exports: preserve the original public API surface.
 pub use strategies::get_available_space;
+pub use crate::filesystem::disk_space::check_disk_space;
 
 use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use crate::error::{Aria2Error, FatalError, Result};
-use crate::filesystem::disk_space::check_disk_space;
 use std::path::Path;
 
 /// One-time warning emitted when `fallocate`-style allocation succeeds but

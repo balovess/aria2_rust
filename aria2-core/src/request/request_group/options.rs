@@ -191,6 +191,10 @@ pub struct DownloadOptions {
     /// Has no effect on Linux. Defaults to `false` (matches
     /// `constants::DEFAULT_SECURE_FALLOC`).
     pub secure_falloc: bool,
+    /// Verify the existing file chunk-by-chunk against known piece hashes
+    /// before downloading (C++ `--check-integrity`). Only meaningful when
+    /// piece hashes are available (BitTorrent / Metalink). Defaults to `false`.
+    pub check_integrity: bool,
     /// Seeding time in seconds. C++ aria2 stores this as a float (minutes x 60).
     pub seed_time: Option<f64>,
     /// Seeding ratio threshold. Default: 1.0 (matches C++ PREF_SEED_RATIO default).
@@ -429,6 +433,7 @@ impl Default for DownloadOptions {
             file_allocation: None,
             mmap_threshold: None,
             secure_falloc: false,
+            check_integrity: false,
             seed_time: None,
             seed_ratio: Some(1.0),
             checksum: None,

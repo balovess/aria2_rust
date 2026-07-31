@@ -203,9 +203,31 @@ impl PieceInfo {
         file_size.div_ceil(self.length as u64) as usize
     }
 
+    /// Number of piece hashes parsed so far.
+    ///
+    /// Each entry of `hashes` is one complete hex digest of one piece
+    /// (mirroring C++ `ChunkChecksum::getPieceHashes()` where each element is
+    /// a binary digest of one chunk). Previously this divided by the hex
+    /// length, which was wrong for both supported encodings.
     pub fn piece_count(&self) -> usize {
-        self.hashes.len() / (self.type_.hash_len() / 2)
+        self.hashes.len()
     }
+}
+
+/// Split raw `<pieces>` character data into one complete hex digest per piece.
+///
+/// The Metalink v3-style document may write the digests either whitespace
+/// separated or as one contiguous run (e.g. `hash1hash2`). C++ feeds each
+/// digest individually through `MessageDigest::isValidHash`; we chunk by the
+/// hex length of the algorithm and drop any trailing partial digest.
+fn split_piece_hashes(text: &str, hex_len: usize) -> Vec<String> {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    compact
+        .as_bytes()
+        .chunks(hex_len)
+        .filter(|c| c.len() == hex_len)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -569,6 +591,12 @@ impl MetalinkDocument {
         let mut text_buf = String::new();
         let mut pending_attrs: Vec<(String, String)> = Vec::new();
         let mut saw_files_wrapper = false;
+        // `<pieces>` state: `Some((length, algo))` while inside the element.
+        // `pieces_sub_element` turns true when v4 `<hash>` children are seen
+        // (each child is one digest); otherwise the character data is treated
+        // as v3-style concatenated digests and chunked on element end.
+        let mut pending_pieces: Option<(u32, HashAlgorithm)> = None;
+        let mut pieces_sub_element = false;
 
         loop {
             match reader.read_event() {
@@ -609,6 +637,37 @@ impl MetalinkDocument {
                                 }
                             };
                             current_file = Some(MetalinkFile::new(&file_name));
+                        }
+                        "pieces" => {
+                            // `<pieces length="N" type="sha-256">` — V4 uses
+                            // `<hash>` children (one digest each); V3-style
+                            // docs may inline the digests as element text.
+                            let attrs = collect_attrs(&e);
+                            let len_s = find_attr(&attrs, "length");
+                            let type_s = find_attr(&attrs, "type");
+                            let length: u32 = len_s.parse().unwrap_or(0);
+                            let algo =
+                                HashAlgorithm::parse(&type_s).unwrap_or(HashAlgorithm::Sha256);
+                            pending_pieces = Some((length, algo));
+                            pieces_sub_element = false;
+                            if let Some(ref mut f) = current_file {
+                                f.pieces = Some(PieceInfo {
+                                    length,
+                                    type_: algo,
+                                    hashes: Vec::new(),
+                                });
+                            }
+                            text_buf.clear();
+                            pending_attrs = attrs;
+                        }
+                        "hash" => {
+                            if pending_pieces.is_some() {
+                                // V4: `<pieces>` children — each `<hash>` is
+                                // one complete digest of one piece.
+                                pieces_sub_element = true;
+                            }
+                            text_buf.clear();
+                            pending_attrs = collect_attrs(&e);
                         }
                         _ => {
                             text_buf.clear();
@@ -655,7 +714,15 @@ impl MetalinkDocument {
                             }
                         }
                         "hash" => {
-                            if let Some(ref mut f) = current_file
+                            if pending_pieces.is_some() {
+                                // V4 `<pieces>` child: one digest per piece.
+                                if let Some(ref mut f) = current_file
+                                    && let Some(pi) = f.pieces.as_mut()
+                                    && !text_buf.is_empty()
+                                {
+                                    pi.hashes.push(text_buf.clone());
+                                }
+                            } else if let Some(ref mut f) = current_file
                                 && let Some(algo) =
                                     HashAlgorithm::parse(&find_attr(&pending_attrs, "type"))
                             {
@@ -743,20 +810,21 @@ impl MetalinkDocument {
                             }
                         }
                         "pieces" => {
-                            if let Some(ref mut f) = current_file {
-                                let len_s = find_attr(&pending_attrs, "length");
-                                let type_s = find_attr(&pending_attrs, "type");
-                                let length: u32 = len_s.parse().unwrap_or(0);
-                                let algo =
-                                    HashAlgorithm::parse(&type_s).unwrap_or(HashAlgorithm::Sha256);
-                                let hashes: Vec<String> =
-                                    text_buf.split_whitespace().map(|s| s.to_string()).collect();
-                                f.pieces = Some(PieceInfo {
-                                    length,
-                                    type_: algo,
-                                    hashes,
-                                });
+                            if !pieces_sub_element
+                                && let Some((length, algo)) = pending_pieces
+                            {
+                                // V3-style: concatenated digests in the element
+                                // text, chunked by the algorithm's hex length.
+                                let hashes = split_piece_hashes(&text_buf, algo.hash_len());
+                                if let Some(ref mut f) = current_file {
+                                    f.pieces = Some(PieceInfo {
+                                        length,
+                                        type_: algo,
+                                        hashes,
+                                    });
+                                }
                             }
+                            pending_pieces = None;
                         }
                         "generator" => {
                             doc.generator = Some(text_buf.clone());
@@ -1030,6 +1098,59 @@ mod tests {
         let p = pieces.as_ref().unwrap();
         assert_eq!(p.length, 262144);
         assert_eq!(p.type_, HashAlgorithm::Sha256);
+        // "hash1hash2" is 10 chars < 64: no complete sha-256 digest, so the
+        // text-mode chunker must drop it entirely (count 0, not garbage).
+        assert_eq!(p.piece_count(), 0);
+    }
+
+    #[test]
+    fn test_pieces_concatenated_text_is_chunked() {
+        // Two real 64-char sha-256 digests concatenated with no whitespace.
+        let h1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let h2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="f.bin">
+    <size>524288</size>
+    <pieces length="262144" type="sha-256">{h1}{h2}</pieces>
+  </file>
+</metalink>"#
+        );
+        let doc = MetalinkDocument::parse(xml.as_bytes(), None).unwrap();
+        let p = doc.files[0].pieces.as_ref().unwrap();
+        assert_eq!(p.piece_count(), 2, "contiguous digests must be chunked by hex length");
+        assert_eq!(p.hashes[0], h1);
+        assert_eq!(p.hashes[1], h2);
+        assert_eq!(p.num_pieces(524288), 2);
+    }
+
+    #[test]
+    fn test_pieces_v4_hash_children() {
+        // V4 spec: `<pieces>` contains one `<hash>` element per piece.
+        let h1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let h2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="f.bin">
+    <size>524288</size>
+    <pieces length="262144" type="sha-256">
+      <hash>{h1}</hash>
+      <hash>{h2}</hash>
+    </pieces>
+  </file>
+</metalink>"#
+        );
+        let doc = MetalinkDocument::parse(xml.as_bytes(), None).unwrap();
+        let p = doc.files[0].pieces.as_ref().unwrap();
+        assert_eq!(p.piece_count(), 2, "v4 <hash> children must be collected per piece");
+        assert_eq!(p.hashes[0], h1);
+        assert_eq!(p.hashes[1], h2);
+        assert_eq!(p.length, 262144);
+        assert_eq!(p.type_, HashAlgorithm::Sha256);
+        // Verification hashes (whole-file) must NOT be polluted by pieces.
+        assert!(doc.files[0].hashes.is_empty());
     }
 
     #[test]

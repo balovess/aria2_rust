@@ -298,6 +298,10 @@ impl App {
                 .get("secure-falloc")
                 .map(|v| v == "true")
                 .unwrap_or(false),
+            check_integrity: options
+                .get("check-integrity")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             // Metalink
             metalink_location: options.get("metalink-location").cloned(),
             metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),

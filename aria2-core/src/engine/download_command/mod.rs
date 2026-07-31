@@ -38,6 +38,10 @@ pub struct DownloadCommand {
     pub(super) file_allocation: String,
     pub(super) mmap_threshold: u64,
     pub(super) secure_falloc: bool,
+    /// `--check-integrity`: verify existing data against context piece hashes
+    /// before downloading (C++ `CheckIntegrityMan`). Only meaningful when the
+    /// DownloadContext carries piece hashes (e.g. Metalink).
+    pub(super) check_integrity: bool,
     pub(super) cookie_storage: Arc<CookieStorage>,
     pub(super) cookie_file: Option<String>,
     pub(super) no_proxy_matcher: Option<NoProxyMatcher>,
@@ -206,6 +210,7 @@ impl DownloadCommand {
                 .unwrap_or_else(|| constants::DEFAULT_FILE_ALLOCATION.to_string()),
             mmap_threshold: options.mmap_threshold.unwrap_or(256 * 1024 * 1024),
             secure_falloc: options.secure_falloc,
+            check_integrity: options.check_integrity,
             cookie_storage,
             cookie_file,
             no_proxy_matcher: options
@@ -334,6 +339,7 @@ impl DownloadCommand {
                 .unwrap_or_else(|| constants::DEFAULT_FILE_ALLOCATION.to_string()),
             mmap_threshold: options.mmap_threshold.unwrap_or(256 * 1024 * 1024),
             secure_falloc: options.secure_falloc,
+            check_integrity: options.check_integrity,
             cookie_storage,
             cookie_file,
             no_proxy_matcher: options

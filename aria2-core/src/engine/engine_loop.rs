@@ -386,63 +386,6 @@ async fn process_engine_commands(
                     }
                 }
             }
-
-            EngineCommand::FileAllocationCompleted { gid } => {
-                // Mirrors C++ FileAllocationCommand::executeInternal() when
-                // finished() returns true: drop the picked entry and proceed
-                // to spawn the actual download task.
-                {
-                    let mut alloc_man = ctx.file_alloc_man.write().await;
-                    alloc_man.complete_current();
-                }
-                debug!(
-                    gid = gid.value(),
-                    "File allocation completed, spawning download task"
-                );
-                // The group is now in the active DashMap; the engine loop's
-                // normal promotion/demotion cycle will handle spawning the
-                // download task on the next tick.
-            }
-
-            EngineCommand::FileAllocationFailed { gid, error } => {
-                {
-                    let mut alloc_man = ctx.file_alloc_man.write().await;
-                    alloc_man.drop_picked();
-                }
-                warn!(
-                    gid = gid.value(),
-                    error = %error,
-                    "File allocation failed"
-                );
-                // Try to find the group in active set and mark it as halted.
-                let man = ctx.group_man.read().await;
-                for group in man.get_active_groups() {
-                    if group.recover().gid() == gid {
-                        group.recover().request_halt(crate::request::request_group::HaltReason::UserRequest);
-                        break;
-                    }
-                }
-            }
-
-            EngineCommand::FileAllocationRequest { group } => {
-                use crate::filesystem::file_allocation_man::{
-                    FileAllocationEntry, FileAllocationProtocol,
-                };
-                use crate::util::rwlock_ext::RwLockRecover;
-                use std::time::Instant;
-
-                let gid = group.recover().gid();
-                let entry = FileAllocationEntry {
-                    gid: gid.value(),
-                    path: String::new(),
-                    total_length: 0,
-                    protocol: FileAllocationProtocol::Http,
-                    created_at: Instant::now(),
-                };
-                let mut alloc_man = ctx.file_alloc_man.write().await;
-                alloc_man.push_entry(entry);
-                debug!(gid = gid.value(), "File allocation request queued");
-            }
         }
     }
 }
@@ -540,6 +483,11 @@ async fn on_end_of_run(
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
 ) {
     info!("Engine loop cleanup: removing stopped groups and saving state");
+
+    // Cancel any pending file allocations so commands waiting on the
+    // completion channel are woken with an error instead of hanging forever.
+    // Mirrors C++ where the engine's commands are all dropped at exit.
+    crate::filesystem::file_allocation_man::cancel_all(&ctx.file_alloc_man).await;
 
     // Demote any remaining stopped groups.
     let demoted = {

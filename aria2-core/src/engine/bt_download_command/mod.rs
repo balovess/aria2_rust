@@ -52,6 +52,16 @@ pub struct BtDownloadCommand {
     pub(crate) choking_algo: Option<ChokingAlgorithm>,
     pub(crate) multi_file_layout: Option<MultiFileLayout>,
 
+    /// File allocation strategy from options
+    /// ("none" / "prealloc" / "falloc" / "trunc" / "mmap"). Mirrors C++
+    /// `FileAllocationEntry` choosing an iterator from `PREF_FILE_ALLOCATION`.
+    pub(crate) file_allocation: String,
+    /// Zero-fill after fallocate on platforms that don't zero-fill.
+    pub(crate) secure_falloc: bool,
+    /// `--check-integrity`: verify existing data against piece hashes before
+    /// downloading (C++ `CheckIntegrityMan`).
+    pub(crate) check_integrity: bool,
+
     // P1/P2 integration fields (all use Option for backward compatibility)
     /// BT progress persistence manager
     pub(crate) progress_manager: Option<crate::engine::bt_progress_info_file::BtProgressManager>,
