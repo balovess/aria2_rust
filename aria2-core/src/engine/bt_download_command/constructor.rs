@@ -257,6 +257,9 @@ impl BtDownloadCommand {
 
             // BtRegistry integration (set via set_bt_registry after construction)
             bt_registry: None,
+
+            // Process-wide rate limiter (set via set_global_limiter after construction)
+            global_limiter: None,
         })
     }
 }

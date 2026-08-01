@@ -12,6 +12,7 @@ use aria2_protocol::metalink::parser::UrlEntry;
 use tracing::info;
 
 use crate::error::{Aria2Error, FatalError, Result};
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -42,6 +43,9 @@ pub struct MetalinkDownloadCommand {
     /// Parsed file info for per-file mode (set by create_multi_file).
     /// When present, execute() uses this instead of re-parsing metalink_data.
     pub(crate) file_info: Option<FileDownloadInfo>,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// When `Some`, passed down to `ThrottledWriter` for mirror downloads.
+    pub(crate) global_limiter: Option<RateLimiter>,
 }
 
 impl MetalinkDownloadCommand {
@@ -135,6 +139,7 @@ impl MetalinkDownloadCommand {
             completed_bytes: 0,
             metalink_data: metalink_bytes.to_vec(),
             file_info: None,
+            global_limiter: None,
         })
     }
 
@@ -245,6 +250,7 @@ impl MetalinkDownloadCommand {
                     completed_bytes: 0,
                     metalink_data: Vec::new(),
                     file_info: Some(file_info),
+                    global_limiter: None,
                 },
                 file_index: i,
             });
@@ -342,6 +348,7 @@ impl MetalinkDownloadCommand {
                 completed_bytes: 0,
                 metalink_data: Vec::new(),
                 file_info: Some(file_info),
+                global_limiter: None,
             },
             file_index: 0,
         }])
@@ -350,6 +357,14 @@ impl MetalinkDownloadCommand {
     /// Get the output path for this download.
     pub fn output_path(&self) -> &std::path::Path {
         &self.output_path
+    }
+
+    /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
+    ///
+    /// When set, mirror downloads acquire tokens from this limiter in addition
+    /// to the per-download limiter.
+    pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
+        self.global_limiter = Some(limiter);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {

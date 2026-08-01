@@ -18,7 +18,7 @@ use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use aria2_protocol::sftp::connection::SshConnection;
-use aria2_protocol::sftp::file_ops::{OpenFlags, SftpFileOps};
+use aria2_protocol::sftp::file_ops::{FileOpError, OpenFlags, SftpFileOps};
 use aria2_protocol::sftp::session::SftpSession;
 
 use super::types::SftpDownloadCommand;
@@ -115,7 +115,8 @@ impl Command for SftpDownloadCommand {
             Ok(attrs) => attrs,
             Err(e) => {
                 let _ = conn.disconnect().await;
-                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
+                let err = FileOpError::from(e);
+                return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
             }
         };
 
@@ -142,14 +143,15 @@ impl Command for SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 4: Open Remote File for Reading
         // -----------------------------------------------------------------
-        let remote_file = match ops
+        let mut remote_file = match ops
             .open(&self.remote_path, OpenFlags::readonly(), 0)
             .await
         {
             Ok(f) => f,
             Err(e) => {
                 let _ = conn.disconnect().await;
-                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
+                let err = FileOpError::from(e);
+                return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
             }
         };
 
@@ -163,12 +165,25 @@ impl Command for SftpDownloadCommand {
             let g = self.group.recover();
             g.options().max_download_limit
         };
-        let mut writer: Box<dyn DiskWriter> = match rate_limit {
-            Some(rate) if rate > 0 => Box::new(ThrottledWriter::new(
-                raw_writer,
-                RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)),
-            )),
-            _ => Box::new(raw_writer),
+        // Global (process-wide) limiter: when present and enabled, the writer
+        // acquires tokens after the per-download limiter so all concurrent
+        // downloads share a single bandwidth ceiling.
+        let global_limited = self
+            .global_limiter
+            .as_ref()
+            .is_some_and(|g| g.is_download_limited());
+        let mut writer: Box<dyn DiskWriter> = if rate_limit.is_some() || global_limited {
+            let per_rate = rate_limit.filter(|&r| r > 0);
+            let limiter = per_rate
+                .map(|rate| RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)))
+                .unwrap_or_else(RateLimiter::unlimited);
+            let mut tw = ThrottledWriter::new(raw_writer, limiter);
+            if let Some(ref gl) = self.global_limiter {
+                tw = tw.with_global_limiter(gl.clone());
+            }
+            Box::new(tw)
+        } else {
+            Box::new(raw_writer)
         };
 
         // -----------------------------------------------------------------
@@ -210,7 +225,8 @@ impl Command for SftpDownloadCommand {
                     );
                     let _ = remote_file.close().await;
                     let _ = conn.disconnect().await;
-                    return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
+                    let err = FileOpError::from(e);
+                    return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
                 }
             };
             let n = data.len();

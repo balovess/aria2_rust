@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -33,6 +34,9 @@ pub struct FtpDownloadCommand {
     pub(super) max_retries: u32,
     /// Current retry attempt count
     pub(super) current_retry: u32,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// When `Some`, passed down to `ThrottledWriter` for this download.
+    pub(super) global_limiter: Option<RateLimiter>,
 }
 
 impl FtpDownloadCommand {
@@ -120,6 +124,7 @@ impl FtpDownloadCommand {
             passive_mode: true, // Default to passive mode
             max_retries: constants::DEFAULT_MAX_RETRIES,
             current_retry: 0,
+            global_limiter: None,
         })
     }
 
@@ -184,6 +189,14 @@ impl FtpDownloadCommand {
     /// Get read access to the request group
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         self.group.recover()
+    }
+
+    /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
+    ///
+    /// When set, the disk writer created in `execute_single_attempt` acquires
+    /// tokens from this limiter in addition to the per-download limiter.
+    pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
+        self.global_limiter = Some(limiter);
     }
 
     /// Classify FTP response code to determine error handling strategy

@@ -29,6 +29,78 @@ use super::packet::{
 use super::session::SftpSession;
 
 // =============================================================================
+// FileOpError -- classified SFTP file operation error
+// =============================================================================
+
+/// Classified SFTP file operation error.
+///
+/// Converted from the `String` errors returned by `SftpFileOps` methods,
+/// which have the format: `"<Operation> failed (code=N): message"`.
+/// The SFTP status code N determines the variant.
+///
+/// SFTP status codes (from `packet.rs`): `SSH_FX_NO_SUCH_FILE=2`,
+/// `SSH_FX_PERMISSION_DENIED=3`, `SSH_FX_NO_CONNECTION=6`,
+/// `SSH_FX_CONNECTION_LOST=7`.
+#[derive(Debug, Clone)]
+pub enum FileOpError {
+    /// SSH_FX_NO_SUCH_FILE (code=2)
+    NotFound { path: String },
+    /// SSH_FX_PERMISSION_DENIED (code=3)
+    PermissionDenied { path: String },
+    /// SSH_FX_NO_CONNECTION (6) or SSH_FX_CONNECTION_LOST (7)
+    Network { operation: String, message: String },
+    /// All other errors
+    Other { message: String },
+}
+
+impl From<String> for FileOpError {
+    fn from(s: String) -> Self {
+        // Error strings look like: "Open failed (code=2): No such file"
+        // Extract the status code to classify.
+        if let Some(code_start) = s.find("(code=") {
+            let rest = &s[code_start + 6..];
+            if let Some(paren_end) = rest.find(')')
+                && let Ok(code) = rest[..paren_end].parse::<u32>()
+            {
+                // Extract operation name (text before " failed").
+                let operation = s
+                    .split(" failed")
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string();
+                // Extract message after "): ".
+                let message = s
+                    .split("): ")
+                    .nth(1)
+                    .unwrap_or(&s)
+                    .to_string();
+
+                return match code {
+                    2 => FileOpError::NotFound { path: String::new() },
+                    3 => FileOpError::PermissionDenied { path: String::new() },
+                    6 | 7 => FileOpError::Network { operation, message },
+                    _ => FileOpError::Other { message: s.clone() },
+                };
+            }
+        }
+        FileOpError::Other { message: s }
+    }
+}
+
+impl std::fmt::Display for FileOpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileOpError::NotFound { path } => write!(f, "File not found: {}", path),
+            FileOpError::PermissionDenied { path } => write!(f, "Permission denied: {}", path),
+            FileOpError::Network { operation, message } => {
+                write!(f, "{} failed: {}", operation, message)
+            }
+            FileOpError::Other { message } => write!(f, "{}", message),
+        }
+    }
+}
+
+// =============================================================================
 // OpenFlags -- SFTP file open flags
 // =============================================================================
 

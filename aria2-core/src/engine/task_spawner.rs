@@ -126,11 +126,12 @@ fn create_command_for_uri(
     #[cfg(feature = "bittorrent")]
     if uri_lower.starts_with("magnet:") {
         let output_dir = options.dir.as_deref();
-        let cmd = crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
+        let mut cmd = crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
             group, output_dir,
         )?;
-        // TODO: Wire global_limiter into BT download paths once they support
-        // per-download rate limiting via ThrottledWriter.
+        if let Some(limiter) = global_limiter.clone() {
+            cmd.set_global_limiter(limiter);
+        }
         return Ok(Box::new(cmd));
     }
 
@@ -138,13 +139,14 @@ fn create_command_for_uri(
     if uri_lower.starts_with("ftp://") || uri_lower.starts_with("ftps://") {
         let output_dir = options.dir.as_deref();
         let output_name = options.out.as_deref();
-        let cmd = crate::engine::ftp_download_command::FtpDownloadCommand::new_with_group(
+        let mut cmd = crate::engine::ftp_download_command::FtpDownloadCommand::new_with_group(
             group,
             output_dir,
             output_name,
         )?;
-        // TODO: Wire global_limiter into FTP download paths once they support
-        // per-download rate limiting via ThrottledWriter.
+        if let Some(limiter) = global_limiter.clone() {
+            cmd.set_global_limiter(limiter);
+        }
         return Ok(Box::new(cmd));
     }
 

@@ -55,6 +55,7 @@ fn test_build_ssh_options_without_password() {
         username: "user".to_string(),
         password: None,
         remote_path: "/file".to_string(),
+        global_limiter: None,
     };
     let opts = cmd.build_ssh_options();
     assert!(opts.password.is_none());
@@ -149,5 +150,6 @@ fn create_test_cmd() -> SftpDownloadCommand {
         username: "testuser".to_string(),
         password: Some("secretpass".to_string()),
         remote_path: "/path/to/file.zip".to_string(),
+        global_limiter: None,
     }
 }

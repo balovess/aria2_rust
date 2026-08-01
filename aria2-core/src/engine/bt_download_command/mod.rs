@@ -13,6 +13,7 @@ use crate::engine::choking_algorithm::ChokingAlgorithm;
 use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
 
 pub use crate::engine::bt_message_handler::{
@@ -132,12 +133,27 @@ pub struct BtDownloadCommand {
     // blocklist, and cross-download coordination work end-to-end.
     // Set via set_bt_registry() after construction by the engine or caller.
     pub(crate) bt_registry: Option<Arc<std::sync::RwLock<super::bt_registry::BtRegistry>>>,
+
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// When `Some`, passed down to `ThrottledWriter` so that this torrent's
+    /// piece writes share a single bandwidth ceiling with all concurrent
+    /// downloads.
+    pub(crate) global_limiter: Option<RateLimiter>,
 }
 
 impl BtDownloadCommand {
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         use crate::util::rwlock_ext::RwLockRecover;
         self.group.recover()
+    }
+
+    /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
+    ///
+    /// When set, piece writes performed by this command acquire tokens from
+    /// this limiter (in addition to any per-download limiter) so that all
+    /// concurrent downloads share a global bandwidth ceiling.
+    pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
+        self.global_limiter = Some(limiter);
     }
 
     pub fn is_multi_file(&self) -> bool {

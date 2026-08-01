@@ -60,12 +60,25 @@ impl BtDownloadCommand {
             let g = self.group.recover();
             g.options().max_download_limit
         };
-        let mut writer: Box<dyn SeekableDiskWriter> = match rate_limit {
-            Some(rate) if rate > 0 => Box::new(ThrottledWriter::new(
-                raw_writer,
-                RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)),
-            )),
-            _ => raw_writer,
+        // Global (process-wide) limiter: when present and enabled, the writer
+        // acquires tokens after the per-download limiter so all concurrent
+        // downloads share a single bandwidth ceiling.
+        let global_limited = self
+            .global_limiter
+            .as_ref()
+            .is_some_and(|g| g.is_download_limited());
+        let mut writer: Box<dyn SeekableDiskWriter> = if rate_limit.is_some() || global_limited {
+            let per_limiter = rate_limit
+                .filter(|&r| r > 0)
+                .map(|rate| RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)));
+            let limiter = per_limiter.unwrap_or_else(RateLimiter::unlimited);
+            let mut tw = ThrottledWriter::new(raw_writer, limiter);
+            if let Some(ref gl) = self.global_limiter {
+                tw = tw.with_global_limiter(gl.clone());
+            }
+            Box::new(tw)
+        } else {
+            raw_writer
         };
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();

@@ -15,6 +15,32 @@
 //!   `defaultUTF8` mode); ISO-8859-1 bytes are converted to UTF-8 when the
 //!   charset is explicitly `iso-8859-1`.
 //! - Directory-traversal filenames (`..`, `/`, `\`, etc.) are rejected.
+//!
+//! # Strictness (C++ parity)
+//!
+//! The C++ state machine is deliberately strict, and so is this port. The
+//! following are **rejected outright** — the whole header fails and
+//! [`ContentDispositionResult::disposition_type`] comes back empty:
+//!
+//! - An empty parameter in the *middle* of the header:
+//!   `attachment; ;filename=foo` — the `BeforeParmName` state rejects a
+//!   non-token byte such as `;`. A *trailing* `;`
+//!   (`attachment; filename=foo.html ;`) is, however, **accepted**: RFC 6266
+//!   grammar is `*( ";" disposition-parm )`, so zero or more trailing empty
+//!   parameters are permitted. (Upstream C++ aria2 rejects a trailing `;` —
+//!   GitHub issue #1118 — which breaks S3 / CloudFront / nginx downloads;
+//!   aria2_rust deliberately diverges.)
+//! - An empty unquoted value: `attachment; filename=` and
+//!   `attachment; filename=;` — a token may not be empty. An *empty quoted*
+//!   value (`filename=""`) is legal and simply yields no filename, as is an
+//!   empty ext-value (`filename*=UTF-8''`).
+//! - A parameter with no `=`: `attachment; filename; x=y`.
+//! - Two completed `filename=` parameters. Note that a `filename=` following an
+//!   already accepted `filename*=` is *ignored* rather than counted, so it can
+//!   never trigger the duplicate error (C++ leaves `in_file_parm == 0`).
+//! - An ext-value whose octets do not match its declared charset: invalid UTF-8
+//!   under `utf-8`, or non-ISO-8859-1 octets under `iso-8859-1`. This applies to
+//!   *every* extended parameter, not just `filename*`.
 
 mod encoding;
 mod parser;

@@ -170,13 +170,28 @@ impl Command for MetalinkDownloadCommand {
                         let g = self.group.recover();
                         g.options().max_download_limit
                     };
-                    let mut writer: Box<dyn DiskWriter> = match rate_limit {
-                        Some(rate) if rate > 0 => Box::new(ThrottledWriter::new(
-                            raw_writer,
-                            RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)),
-                        )),
-                        _ => Box::new(raw_writer),
-                    };
+                    // Global (process-wide) limiter: when present and enabled,
+                    // the writer acquires tokens after the per-download limiter.
+                    let global_limited = self
+                        .global_limiter
+                        .as_ref()
+                        .is_some_and(|g| g.is_download_limited());
+                    let mut writer: Box<dyn DiskWriter> =
+                        if rate_limit.is_some() || global_limited {
+                            let per_rate = rate_limit.filter(|&r| r > 0);
+                            let limiter = per_rate
+                                .map(|rate| {
+                                    RateLimiter::new(&RateLimiterConfig::new(Some(rate), None))
+                                })
+                                .unwrap_or_else(RateLimiter::unlimited);
+                            let mut tw = ThrottledWriter::new(raw_writer, limiter);
+                            if let Some(ref gl) = self.global_limiter {
+                                tw = tw.with_global_limiter(gl.clone());
+                            }
+                            Box::new(tw)
+                        } else {
+                            Box::new(raw_writer)
+                        };
                     writer.write(&data).await?;
                     writer.finalize().await.ok();
 
@@ -274,6 +289,9 @@ impl MetalinkDownloadCommand {
                             &options,
                             dir,
                         )?;
+                    if let Some(gl) = self.global_limiter.clone() {
+                        bt_cmd.set_global_limiter(gl);
+                    }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().total_length();
                     self.completed = true;

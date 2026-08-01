@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -16,6 +17,9 @@ pub struct MagnetDownloadCommand {
     started: bool,
     completed_bytes: u64,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// Carried through to the internally-created `BtDownloadCommand`.
+    global_limiter: Option<RateLimiter>,
 }
 
 impl MagnetDownloadCommand {
@@ -31,6 +35,14 @@ impl MagnetDownloadCommand {
             options.clone(),
         )));
         Self::new_with_group(group, output_dir)
+    }
+
+    /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
+    ///
+    /// When set, the internally-created `BtDownloadCommand` is given this
+    /// limiter so the resolved torrent's piece writes share the global ceiling.
+    pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
+        self.global_limiter = Some(limiter);
     }
 
     /// Create a magnet download command that reuses an externally-managed
@@ -86,6 +98,7 @@ impl MagnetDownloadCommand {
             started: false,
             completed_bytes: 0,
             dht_engine: None,
+            global_limiter: None,
         })
     }
 
@@ -244,6 +257,9 @@ impl Command for MagnetDownloadCommand {
             self.group.recover().options(),
             self.output_path.parent().and_then(|p| p.to_str()),
         )?;
+        if let Some(gl) = self.global_limiter.clone() {
+            bt_cmd.set_global_limiter(gl);
+        }
 
         bt_cmd.execute().await?;
 

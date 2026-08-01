@@ -70,12 +70,13 @@ fn is_lws(c: u8) -> bool {
     c == b' ' || c == b'\t'
 }
 
-/// Whether a byte is in ISO/IEC 8859-1 printable range.
+/// Whether a byte is in the ISO/IEC 8859-1 character set.
 ///
-/// TODO: Should be used in `ValueChars` state when `ext_charset == Iso8859p1`
-/// to accept 0xA0-0xFF bytes per the C++ implementation. Currently the
-/// `ValueChars` state only accepts `is_rfc5987_attr_char` bytes.
-#[allow(dead_code)]
+/// Mirrors C++ `util::isIso8859p1()`. Note that the C++ `CD_VALUE_CHARS` state
+/// accepts *only* `inRFC5987AttrChar` bytes; this predicate is applied to
+/// **percent-decoded** bytes in `CD_VALUE_CHARS_PCT_ENCODED2` when the extended
+/// parameter declares `iso-8859-1` (see `attwithfn2231utf8-bad` in the C++
+/// test-suite, which rejects `%82` because it is a C1 control code).
 #[inline]
 fn is_iso8859p1(c: u8) -> bool {
     (0x20..=0x7e).contains(&c) || c >= 0xa0
@@ -105,11 +106,42 @@ enum ParseState {
     ValueCharsPctEncoded2,
 }
 
-/// Flags tracking which filename variants have been seen.
+/// Flags tracking which filename variants have been *completely* parsed.
+///
+/// Mirrors the C++ `CD_FILENAME_FOUND` / `CD_EXT_FILENAME_FOUND` bits. A flag is
+/// only raised once the parameter's value has been fully consumed (closing
+/// quote, or a `;`/LWS terminating a token / ext-value) — this is what makes
+/// duplicate detection work the same way it does in C++.
 #[derive(Debug, Clone, Copy, Default)]
 struct Flags {
     filename_found: bool,
     ext_filename_found: bool,
+}
+
+/// Which filename buffer the parser is currently writing into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileTarget {
+    None,
+    Filename,
+    ExtFilename,
+}
+
+/// Mark the current filename parameter's value as complete.
+///
+/// Mirrors the C++ `if (in_file_parm) { flags |= CD_*_FILENAME_FOUND; }` blocks.
+/// `in_file_parm` is deliberately separate from `target`: C++ keeps
+/// `in_file_parm == 0` for a `filename=` that appears *after* an already
+/// accepted `filename*=`, so such a value is neither stored nor marked found.
+#[inline]
+fn commit_value(flags: &mut Flags, in_file_parm: bool, target: FileTarget) {
+    if !in_file_parm {
+        return;
+    }
+    match target {
+        FileTarget::Filename => flags.filename_found = true,
+        FileTarget::ExtFilename => flags.ext_filename_found = true,
+        FileTarget::None => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,13 +193,18 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
     // Charset span for filename*
     let mut charset_start: usize = 0;
 
+    // Value bytes of the extended parameter currently being parsed, regardless
+    // of whether it is `filename*`. C++ runs its UTF-8 DFA over *every*
+    // ext-value (the `utf8dfa()` calls sit outside the `if (in_file_parm)`
+    // guards), so a bad UTF-8 sequence in e.g. `foo*=utf-8''...` must fail the
+    // whole header. Validating the accumulated buffer at the value boundary is
+    // equivalent to the incremental DFA: the DFA rejects exactly those byte
+    // sequences that are not well-formed UTF-8, and a non-`UTF8_ACCEPT` state
+    // at the boundary means a truncated sequence, which is also invalid UTF-8.
+    let mut ext_value_bytes: Vec<u8> = Vec::new();
+
     // Which filename buffer are we currently writing into?
-    // None means we are not inside a filename parameter.
-    enum FileTarget {
-        None,
-        Filename,
-        ExtFilename,
-    }
+    // `FileTarget::None` means we are not inside a filename parameter.
     let mut file_target = FileTarget::None;
 
     let mut i = 0;
@@ -240,14 +277,23 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                             trace!("parse_raw: duplicate filename parameter");
                             return None;
                         }
-                        // Always collect filename= bytes even when filename* was
-                        // already found, so that filename_ascii is available as a
-                        // fallback per RFC 6266.
-                        in_file_parm = true;
+                        // C++ only sets `in_file_parm` when no `filename*` has
+                        // been accepted yet; otherwise the value is ignored
+                        // entirely and CD_FILENAME_FOUND is never raised (so a
+                        // second `filename=` after a `filename*=` is *not* a
+                        // duplicate error).
+                        in_file_parm = !flags.ext_filename_found;
+                        // Rust-only extension: keep collecting the bytes so the
+                        // `filename_ascii` fallback field stays populated. This
+                        // is invisible to C++ parity because `filename*` still
+                        // wins for the primary `filename` field.
                         file_target = FileTarget::Filename;
                         filename_bytes.clear();
                         state = ParseState::BeforeValue;
-                    } else if parm_name.last() == Some(&b'*') {
+                    } else if parm_name.len() > 1 && parm_name.last() == Some(&b'*') {
+                        // C++: `mark_first != mark_last - 1 && *(mark_last - 1) == '*'`
+                        // — an ext-token must have at least one char before the
+                        // trailing `*`, so a bare `*=` is an ordinary parameter.
                         state = ParseState::BeforeExtValue;
                     } else {
                         state = ParseState::BeforeValue;
@@ -280,12 +326,9 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                 if c == b'\\' && !quoted_seen {
                     quoted_seen = true;
                 } else if c == b'"' && !quoted_seen {
-                    // End of quoted string
-                    match file_target {
-                        FileTarget::Filename => flags.filename_found = true,
-                        FileTarget::ExtFilename => flags.ext_filename_found = true,
-                        FileTarget::None => {}
-                    }
+                    // End of quoted string: the value is complete (possibly
+                    // empty — C++ explicitly allows `filename=""`).
+                    commit_value(&mut flags, in_file_parm, file_target);
                     state = ParseState::AfterValue;
                 } else {
                     quoted_seen = false;
@@ -306,18 +349,10 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                         FileTarget::None => {}
                     }
                 } else if c == b';' {
-                    match file_target {
-                        FileTarget::Filename => flags.filename_found = true,
-                        FileTarget::ExtFilename => flags.ext_filename_found = true,
-                        FileTarget::None => {}
-                    }
+                    commit_value(&mut flags, in_file_parm, file_target);
                     state = ParseState::BeforeParmName;
                 } else if is_lws(c) {
-                    match file_target {
-                        FileTarget::Filename => flags.filename_found = true,
-                        FileTarget::ExtFilename => flags.ext_filename_found = true,
-                        FileTarget::None => {}
-                    }
+                    commit_value(&mut flags, in_file_parm, file_target);
                     state = ParseState::AfterValue;
                 } else {
                     trace!("parse_raw: unexpected byte 0x{:02x} in Token", c);
@@ -365,9 +400,12 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
             ParseState::Language => {
                 if c == b'\'' {
                     // Reset the ext filename buffer for the value part
-                    if in_file_parm {
+                    // (C++: `if (in_file_parm) { dp = dest; dlen = destlen; }`).
+                    if in_file_parm && file_target == FileTarget::ExtFilename {
                         ext_filename_bytes.clear();
                     }
+                    // Mirrors the C++ DFA reset performed in CD_CHARSET.
+                    ext_value_bytes.clear();
                     state = ParseState::ValueChars;
                 } else if c != b'-' && !c.is_ascii_alphanumeric() {
                     trace!("parse_raw: invalid language byte 0x{:02x}", c);
@@ -376,6 +414,7 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
             }
             ParseState::ValueChars => {
                 if is_rfc5987_attr_char(c) {
+                    ext_value_bytes.push(c);
                     match file_target {
                         FileTarget::Filename => filename_bytes.push(c),
                         FileTarget::ExtFilename => ext_filename_bytes.push(c),
@@ -385,11 +424,15 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                     pctval = 0;
                     state = ParseState::ValueCharsPctEncoded1;
                 } else if c == b';' || is_lws(c) {
-                    match file_target {
-                        FileTarget::Filename => flags.filename_found = true,
-                        FileTarget::ExtFilename => flags.ext_filename_found = true,
-                        FileTarget::None => {}
+                    // C++ requires the UTF-8 DFA to be back in UTF8_ACCEPT when
+                    // the value ends (`attwithfn2231iso-bad` → -1).
+                    if ext_charset == Charset::Utf8
+                        && std::str::from_utf8(&ext_value_bytes).is_err()
+                    {
+                        trace!("parse_raw: invalid UTF-8 in utf-8 ext-value");
+                        return None;
                     }
+                    commit_value(&mut flags, in_file_parm, file_target);
                     if c == b';' {
                         state = ParseState::BeforeParmName;
                     } else {
@@ -418,6 +461,18 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
                 match digit {
                     Some(d) => {
                         let byte = pctval | d;
+                        // C++ validates the decoded octet against the declared
+                        // charset here; `iso-8859-1` rejects C0/C1 controls
+                        // (`attwithfn2231utf8-bad` → -1). UTF-8 is validated on
+                        // the accumulated buffer at the value boundary.
+                        if ext_charset == Charset::Iso8859p1 && !is_iso8859p1(byte) {
+                            trace!(
+                                "parse_raw: byte 0x{:02x} not valid in iso-8859-1 ext-value",
+                                byte
+                            );
+                            return None;
+                        }
+                        ext_value_bytes.push(byte);
                         match file_target {
                             FileTarget::Filename => filename_bytes.push(byte),
                             FileTarget::ExtFilename => ext_filename_bytes.push(byte),
@@ -435,15 +490,33 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
         i += 1;
     }
 
-    // Handle end-of-input terminal states
+    // Handle end-of-input terminal states.
+    //
+    // aria2_rust intentionally **accepts** a trailing `;` — i.e. ending in
+    // `ParseState::BeforeParmName`. RFC 6266 defines the parameter list as
+    // `*( ";" disposition-parm )`, so zero or more trailing empty parameters
+    // are legal. Upstream C++ aria2 rejects this: its terminal `switch(state)`
+    // does not accept `CD_BEFORE_DISPOSITION_PARM_NAME`
+    // (`attwithasciifilenamenqs`: `attachment; filename=foo.html ;` → -1). That
+    // is a long-standing bug (GitHub issue #1118, open 5+ years) that breaks
+    // downloads from S3 / CloudFront / nginx, which routinely emit a trailing
+    // `;`. We deliberately diverge from C++ here. Empty parameters in the
+    // *middle* of the header (`attachment; ;filename=foo`) are still rejected,
+    // but by the `BeforeParmName` state handler — a non-token byte such as `;`
+    // triggers `return None` — not by this terminal check.
     match state {
         ParseState::BeforeDispositionType
         | ParseState::AfterDispositionType
         | ParseState::DispositionType
         | ParseState::AfterValue
-        | ParseState::Token
-        | ParseState::ValueChars
-        | ParseState::BeforeParmName => {} // Trailing semicolons are valid
+        | ParseState::BeforeParmName
+        | ParseState::Token => {}
+        ParseState::ValueChars => {
+            if ext_charset == Charset::Utf8 && std::str::from_utf8(&ext_value_bytes).is_err() {
+                trace!("parse_raw: invalid UTF-8 in utf-8 ext-value at end of input");
+                return None;
+            }
+        }
         _ => {
             trace!("parse_raw: unexpected end state {:?}", state);
             return None;
