@@ -136,6 +136,40 @@ impl App {
                 }
             }
 
+            // ===================================================================
+            // CRITICAL ORDERING CONSTRAINT — daemonize must run BEFORE the tokio
+            // runtime's I/O driver (reactor) is initialized and before the engine
+            // binds any sockets. See `Daemonizer::daemonize` docs in daemon.rs.
+            //
+            // Current guarantees at this point:
+            //  * main.rs `#[tokio::main]` created the runtime object, but the
+            //    reactor is created LAZILY on the first socket/timer registration.
+            //    Up to here only synchronous `std::fs` reads and in-memory
+            //    RwLock/Mutex ops have run — no fd has been registered with the
+            //    runtime, so `close_file_descriptors_unix` closing fds 3..max_fd
+            //    will NOT destroy a live reactor fd (epoll/eventfd/socket).
+            //  * `initialize_engine()` (called later in this fn) binds RPC server
+            //    sockets and spawns engine tasks. daemonize MUST stay before it.
+            //
+            // Do NOT move this block after `initialize_engine()`, into a tokio
+            // task, or after the RPC server binds — the daemon child would then
+            // inherit-and-close the reactor's epoll/eventfd and crash on first I/O.
+            // ===================================================================
+            // Assertion-style guard: if the engine already exists we are too late.
+            // Its sockets/files are registered with the runtime, so fd-closing in
+            // the daemon child would corrupt the reactor. Fails loudly in debug
+            // builds, warns in release.
+            if self.engine.lock().await.is_some() {
+                warn!(
+                    "daemonize() called after engine initialization — \
+                     inherited-fd closing in daemon mode may corrupt the tokio runtime"
+                );
+                debug_assert!(
+                    false,
+                    "daemonize() must be called before initialize_engine()"
+                );
+            }
+
             // Perform daemonization
             // Note: Do NOT pass log_path to stdout_file/stderr_file.
             // File logging is handled by init_logging() below using rolling appender.
@@ -197,6 +231,16 @@ impl App {
         }
 
         self.print_banner();
+
+        // Apply engine-level options from config (CLI/file/env) BEFORE tasks
+        // are added. max-concurrent-downloads drives the engine's slot limit;
+        // the RequestGroupMan default is 5 (matching aria2).
+        if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await {
+            if max > 0 {
+                self.request_man.read().await.set_max_concurrent(max as u32);
+                info!("Max concurrent downloads set to {} (from config)", max);
+            }
+        }
 
         // Initialize engine (must be before session restore)
         self.initialize_engine().await;

@@ -61,7 +61,8 @@ impl SessionEntry {
     /// let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
     /// let text = entry.serialize();
     /// assert!(text.contains("http://example.com/file.zip"));
-    /// assert!(text.contains("GID=d270c8a2"));
+    /// // GID is zero-padded to 16 hex digits for C++ aria2 interop
+    /// assert!(text.contains("GID=00000000d270c8a2"));
     /// ```
     pub fn serialize(&self) -> String {
         let mut lines = String::new();
@@ -71,8 +72,12 @@ impl SessionEntry {
         lines.push_str(&escaped_uris.join("\t"));
         lines.push('\n');
 
-        // GID (always present, hex format)
-        lines.push_str(&format!(" GID={:x}\n", self.gid));
+        // GID (always present, zero-padded to 16 hex digits).
+        //
+        // C++ `GroupId::toNumericId` (GroupId.cc) requires exactly 16 hex
+        // digits (`i == sizeof(a2_gid_t) * 2`) and rejects the whole entry
+        // otherwise, so we must emit the full-width form even for small GIDs.
+        lines.push_str(&format!(" GID={:016x}\n", self.gid));
 
         // PAUSE flag (only if true)
         if self.paused {

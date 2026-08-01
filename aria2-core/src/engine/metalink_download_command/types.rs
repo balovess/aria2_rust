@@ -1,6 +1,6 @@
 use tracing::{info, warn};
 
-use aria2_protocol::metalink::parser::UrlEntry;
+use aria2_protocol::metalink::parser::{MetaUrlEntry, UrlEntry};
 
 /// Parsed file information used by per-file command instances
 /// created by `create_multi_file()`.
@@ -13,6 +13,9 @@ pub(crate) struct FileDownloadInfo {
     pub(crate) hash_entry: Option<aria2_protocol::metalink::parser::HashEntry>,
     /// Per-chunk piece hashes (`<pieces>`) for chunk-level verification.
     pub(crate) pieces: Option<aria2_protocol::metalink::parser::PieceInfo>,
+    /// Torrent metaurls (`mediatype="application/x-bittorrent"`), tried when
+    /// no HTTP/FTP mirror succeeds. Mirrors C++ `BtDependency`.
+    pub(crate) torrent_metaurls: Vec<MetaUrlEntry>,
 }
 
 // =========================================================================

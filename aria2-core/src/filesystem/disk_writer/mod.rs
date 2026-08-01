@@ -60,3 +60,34 @@ pub trait SeekableDiskWriter: Send + Sync {
         Ok(())
     }
 }
+#[async_trait]
+impl SeekableDiskWriter for Box<dyn SeekableDiskWriter> {
+    async fn open(&mut self) -> Result<()> {
+        self.as_mut().open().await
+    }
+    async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        self.as_mut().write_at(offset, data).await
+    }
+    async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
+        self.as_mut().write_bytes_at(offset, data).await
+    }
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        self.as_mut().read_at(offset, buf).await
+    }
+    async fn truncate(&mut self, length: u64) -> Result<()> {
+        self.as_mut().truncate(length).await
+    }
+    async fn flush(&mut self) -> Result<()> {
+        self.as_mut().flush().await
+    }
+    async fn len(&self) -> Result<u64> {
+        self.as_ref().len().await
+    }
+    fn path(&self) -> &std::path::Path {
+        self.as_ref().path()
+    }
+    async fn close(&mut self) -> Result<()> {
+        self.as_mut().close().await
+    }
+}
+

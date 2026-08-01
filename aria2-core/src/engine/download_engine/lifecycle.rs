@@ -44,6 +44,7 @@ impl DownloadEngine {
             // `FileAllocationMan` lives on the DownloadEngine singleton.
             file_alloc_man: super::super::super::filesystem::file_allocation_man::shared(),
             keep_alive: self.keep_alive,
+            global_limiter: self.global_limiter.clone(),
         };
 
         super::super::engine_loop::run_engine_loop(ctx, engine_cmd_rx, shutdown_rx, self.tick_interval)
@@ -107,7 +108,19 @@ impl DownloadEngine {
                     // 4. Reap finished / aborted tasks.
                     self.collect_completed(&mut running, &mut running_tasks).await?;
 
-                    // 5. Exit when nothing remains (unless keep-alive). Use the
+                    // 5. Periodic session auto-save (mirrors C++ AutoSaveCommand).
+                    //    While commands are running, progress changes every tick,
+                    //    so keep the session dirty; `save_if_dirty` then persists
+                    //    it at most once per `save-session-interval`.
+                    if !running.is_empty() {
+                        self.mark_session_dirty();
+                    }
+                    if let Some(ref auto_save) = self.auto_save {
+                        let mut save = auto_save.lock().await;
+                        save.save_if_dirty().await;
+                    }
+
+                    // 6. Exit when nothing remains (unless keep-alive). Use the
                     //    JoinSet's own emptiness as the source of truth: an
                     //    aborted-but-not-yet-reaped task still counts as running
                     //    until collect_completed joins it.

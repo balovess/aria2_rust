@@ -425,3 +425,43 @@ async fn test_concurrent_writes_no_mutex_contention() {
         );
     }
 }
+
+
+/// Regression: BT single-file downloads pick pieces out of order (RarestFirst
+/// etc.), so writes must land at the piece offset. A sequential writer would
+/// append piece 1's bytes right after piece 0's, silently corrupting the file.
+#[tokio::test]
+async fn test_cached_writer_out_of_order_writes_land_at_offsets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out_of_order.bin");
+
+    let mut writer = CachedDiskWriter::new(&path, Some(8), Some(16));
+    writer.open().await.unwrap();
+
+    // Write piece 1 first, then piece 0 (simulated out-of-order arrival).
+    writer.write_at(4, b"bbbb").await.unwrap();
+    writer.write_at(0, b"aaaa").await.unwrap();
+
+    // Flush the write-back cache to disk.
+    writer.flush().await.unwrap();
+    writer.close().await.unwrap();
+
+    let content = std::fs::read(&path).unwrap();
+    assert_eq!(content, b"aaaabbbb".to_vec(), "pieces must land at their offsets");
+}
+
+/// Sequential DefaultDiskWriter is the control: appending out of order
+/// corrupts the file — this documents why BT must not use it.
+#[tokio::test]
+async fn test_sequential_writer_appends_out_of_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("seq_ooo.bin");
+
+    let mut writer = DefaultDiskWriter::new(&path);
+    writer.write(b"bbbb").await.unwrap(); // piece 1 arrives first
+    writer.write(b"aaaa").await.unwrap(); // piece 0 arrives second
+    writer.finalize().await.unwrap();
+
+    let content = std::fs::read(&path).unwrap();
+    assert_eq!(content, b"bbbbaaaa".to_vec(), "sequential append ignores offsets");
+}

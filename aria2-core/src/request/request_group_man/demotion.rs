@@ -15,6 +15,7 @@ use crate::engine::download_event_hooks::{
 use crate::engine::post_download_handler::{
     build_handler_chain, extract_download_info, run_post_download_processing,
 };
+use crate::request::request_group::GroupId;
 use crate::request::request_group::DownloadStatus;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -97,11 +98,110 @@ impl super::RequestGroupMan {
         }
     }
 
+    /// Move groups that have no in-flight commands and are not in a terminal
+    /// state (Complete / Error / Removed) out of the active DashMap and back
+    /// into the reserved queue.
+    ///
+    /// This closes the pause loop: when `aria2.pause` / `aria2.forcePause`
+    /// is issued, the group is marked `Paused` and its download command
+    /// terminates. The group must then return to the reserved queue — not to
+    /// the stopped results — so it can be unpaused and re-promoted.
+    ///
+    /// Mirrors C++ `ProcessStoppedRequestGroup` which re-queues groups with
+    /// `isPauseRequested()`. Also recovers "orphan" groups whose commands all
+    /// ended without a terminal status transition (e.g. a pause that was
+    /// undone before the task fully exited), re-queuing them as `Waiting` so
+    /// promotion re-spawns them.
+    ///
+    /// Returns the number of groups re-queued.
+    pub fn requeue_non_terminal_groups(&self, event_hooks: Option<&DownloadEventHooks>) -> usize {
+        let mut to_move: Vec<(GroupId, Arc<std::sync::RwLock<RequestGroup>>)> = Vec::new();
+
+        for entry in self.active.iter() {
+            let g = entry.recover();
+            if g.num_commands() != 0 {
+                continue;
+            }
+            let status = g.status();
+            if matches!(
+                status,
+                DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
+            ) {
+                continue;
+            }
+            to_move.push((*entry.key(), entry.value().clone()));
+        }
+
+        let mut requeued = 0;
+        for (gid, group) in to_move {
+            let was_pause_requested = group.recover().is_pause_requested();
+            let was_restart_requested = group.recover().is_restart_requested();
+
+            if self.active.remove(&gid).is_none() {
+                continue;
+            }
+
+            // Release runtime resources (C++ `releaseRuntimeResource()`):
+            // drop the rate limiter handle and piece/segment storage so the
+            // download can be re-promoted cleanly. Unlike the terminal
+            // `demote_group` path, the `download_context` (file entries,
+            // piece hashes, BT info) is preserved because a paused download
+            // may resume and still needs that metadata.
+            {
+                let g = group.recover();
+                g.drop_piece_storage();
+                g.rate_limiter.recover_mut().take(); // Drop rate limiter
+            }
+
+            {
+                let mut g = group.recover_mut();
+                if matches!(g.status(), DownloadStatus::Paused) {
+                    if g.is_restart_requested() {
+                        // C++ `releaseRuntimeResource()` clears the pause
+                        // request for restart-requested groups (paused by
+                        // `reduceActiveDownloadsToLimit`) so they auto-resume
+                        // once a slot is available. `resume()` also clears the
+                        // restart flag.
+                        g.resume().ok();
+                    }
+                } else {
+                    // Orphan: no terminal status and no commands left.
+                    // Re-queue as Waiting so promotion re-spawns it.
+                    g.mark_waiting();
+                }
+            }
+
+            // Fire on-download-pause hook for groups that are actually
+            // pausing (not the reduce-to-limit auto-restart case).
+            if let (Some(hooks), true, false) =
+                (event_hooks, was_pause_requested, was_restart_requested)
+            {
+                hooks.fire_event(DownloadEvent::Pause, &*group.recover());
+            }
+
+            self.reserved.push_front(group);
+
+            requeued += 1;
+            debug!(
+                gid = gid.value(),
+                "Re-queued non-terminal group back to reserved queue"
+            );
+        }
+
+        if requeued > 0 {
+            info!(requeued, "Re-queued non-terminal groups to reserved");
+        }
+        requeued
+    }
+
     /// Process all stopped groups: find them, demote them, and return
     /// the list of demoted GIDs for event notification.
     ///
     /// This is the main entry point the engine should call each tick.
-    /// After demoting each group, if the group completed successfully:
+    /// Groups that are paused (or otherwise have no terminal status) are
+    /// first re-queued to the reserved queue; only genuinely terminal groups
+    /// are demoted to stopped results. After demoting each group, if the
+    /// group completed successfully:
     /// 1. Runs post-download processing (Metalink/BT child group creation)
     /// 2. Resolves any `CompletionDependency` waiting on that GID
     /// 3. Fires the appropriate download event hook (complete/error/pause/stop)
@@ -113,6 +213,10 @@ impl super::RequestGroupMan {
         &self,
         event_hooks: Option<&DownloadEventHooks>,
     ) -> Vec<crate::request::request_group::GroupId> {
+        // Re-queue paused / orphan groups before the stopped scan so the
+        // demotion below only sees genuinely terminal groups.
+        self.requeue_non_terminal_groups(event_hooks);
+
         let demoted = self.find_stopped_groups();
         let mut gids = Vec::with_capacity(demoted.len());
 

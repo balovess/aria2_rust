@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::selector::server_stat::{ServerStat, ServerStatSnapshot};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -44,6 +44,14 @@ pub struct ServerStatFile {
 /// When protocol is empty, the entry is treated as protocol-agnostic.
 type StatKey = (String, String);
 
+/// Process-level shared `ServerStatMan` singleton.
+///
+/// Initialized lazily on first access via [`ServerStatMan::shared`].
+/// All production download paths should use `ServerStatMan::shared()`
+/// instead of `ServerStatMan::new()` so that server speed statistics
+/// are shared across downloads.
+static SHARED_STAT_MAN: OnceLock<Arc<ServerStatMan>> = OnceLock::new();
+
 pub struct ServerStatMan {
     stats: RwLock<HashMap<StatKey, Arc<ServerStat>>>,
 }
@@ -53,6 +61,18 @@ impl ServerStatMan {
         Self {
             stats: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Process-level shared instance for cross-download server stats.
+    ///
+    /// Like `FileAllocationMan::shared()` — all downloads should use this
+    /// instance so that `AdaptiveUriSelector` sees speed statistics from
+    /// every download, not just the current one. Without a shared instance
+    /// each `DownloadCommand` creates its own `ServerStatMan`, causing
+    /// adaptive mirror selection to degrade because server speeds are
+    /// isolated per-download.
+    pub fn shared() -> &'static Arc<ServerStatMan> {
+        SHARED_STAT_MAN.get_or_init(|| Arc::new(ServerStatMan::new()))
     }
 
     /// Gets or creates a ServerStat for the given hostname (protocol-agnostic).

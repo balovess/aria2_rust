@@ -230,6 +230,18 @@ impl App {
                     )
                 }
             }),
+            bt_tracker: options.get("bt-tracker").and_then(|v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(
+                        v.split([',', '\n'])
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
+                }
+            }),
             enable_public_trackers: options
                 .get("enable-public-trackers")
                 .map(|v| v != "false")

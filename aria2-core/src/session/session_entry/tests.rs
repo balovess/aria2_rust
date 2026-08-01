@@ -13,7 +13,49 @@ fn test_serialize_single_entry() {
         text.contains("http://example.com/file.zip"),
         "Should contain URI"
     );
-    assert!(text.contains("GID=d270c8a2"), "Should contain GID");
+    // GID is zero-padded to 16 hex digits for C++ aria2 interop.
+    assert!(
+        text.contains("GID=00000000d270c8a2"),
+        "Should contain zero-padded GID"
+    );
+}
+
+/// C++ aria2 (`GroupId::toNumericId`) requires the session-file GID to be
+/// exactly 16 hex digits and rejects the whole entry otherwise. Regression:
+/// the serializer used to emit unpadded `{:x}` (e.g. `GID=1`), producing
+/// session files C++ cannot load. The GID must always be zero-padded.
+#[test]
+fn test_serialize_gid_always_16_hex_digits() {
+    let cases = [0u64, 1, 0xd270c8a2, u64::MAX];
+    for gid in cases {
+        let entry = SessionEntry::new(gid, vec!["http://example.com/f".to_string()]);
+        let text = entry.serialize();
+        let gid_line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("GID="))
+            .unwrap_or_else(|| panic!("GID line missing for gid={gid:#x}"));
+        let hex = gid_line.trim().trim_start_matches("GID=");
+        assert_eq!(
+            hex.len(),
+            16,
+            "GID must be exactly 16 hex digits (got {:?}) for gid={gid:#x}",
+            hex
+        );
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "GID must be lowercase hex (got {hex:?})"
+        );
+        assert_eq!(
+            u64::from_str_radix(hex, 16).unwrap(),
+            gid,
+            "GID must round-trip for gid={gid:#x}"
+        );
+    }
+
+    // Round-trip through the parser: a 16-digit GID must parse back.
+    let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/f".to_string()]);
+    let restored = SessionEntry::deserialize_line(&entry.serialize()).unwrap();
+    assert_eq!(restored.gid, 0xd270c8a2);
 }
 
 #[test]
@@ -382,6 +424,7 @@ fn test_download_options_to_map_all_fields() {
         mmap_threshold: Some(128 * 1024 * 1024),
         secure_falloc: true,
         check_integrity: false,
+        bt_tracker: None,
         // Checksum
         checksum: Some(("sha256".to_string(), "abc123".to_string())),
         // Cookies

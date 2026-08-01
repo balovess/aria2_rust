@@ -1,6 +1,6 @@
 //! Periodic maintenance, message queue operations, upload limiting, and cleanup.
 
-use crate::engine::bt_message_dispatcher::{BtMessageDispatcher, FloodingStat, SlotCheckResult};
+use crate::engine::bt_message_dispatcher::{BtMessageDispatcher, SlotCheckResult};
 use tracing::warn;
 
 use super::BtPeerMessageHandler;

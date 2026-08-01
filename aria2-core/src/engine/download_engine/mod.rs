@@ -172,6 +172,9 @@ impl DownloadEngine {
         &self,
         command: Box<dyn super::command::Command>,
     ) -> Result<()> {
+        // A newly-added download changes session state; mark it dirty so the
+        // periodic auto-save persists it.
+        self.mark_session_dirty();
         self.command_tx
             .send(command)
             .map_err(|e| Aria2Error::DownloadFailed(format!("Failed to add command: {}", e)))

@@ -14,6 +14,7 @@ impl BtDownloadCommand {
         connections: Vec<BtPeerConn>,
         piece_length: u32,
         num_pieces: u32,
+        info_hash: [u8; 20],
     ) -> Result<()> {
         if connections.is_empty() {
             info!("No active peers for seeding");
@@ -59,13 +60,46 @@ impl BtDownloadCommand {
                 })
                 .collect();
 
-        let mut manager = BtSeedManager::new_with_choking_algo(
+        // Tracker announcer for periodic re-announce while seeding
+        // (C++ SeedCheckCommand). Built from the torrent's announce list.
+        let (announce_list, announce_url) = {
+            use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
+            let ctx = self.group.recover().get_download_context();
+            if let Some(ref c) = ctx {
+                if let Some(attr) = c.get_attribute(ContextAttributeType::BitTorrent) {
+                    if let Some(ta) = attr.downcast_ref::<TorrentAttribute>() {
+                        let list = &ta.announce_list;
+                        (
+                            list.clone(),
+                            list.first().and_then(|tier| tier.first()).cloned(),
+                        )
+                    } else {
+                        (Vec::new(), None)
+                    }
+                } else {
+                    (Vec::new(), None)
+                }
+            } else {
+                (Vec::new(), None)
+            }
+        };
+        let announcer =
+            Some(crate::engine::bt_tracker_comm::TrackerAnnouncer::new(
+                &announce_list,
+                &announce_url,
+            ));
+        let peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+
+        let mut manager = BtSeedManager::new_with_announcer(
+            info_hash,
             plain_connections,
             file_provider,
             config,
             exit_cond,
             self.completed_bytes,
             self.choking_algo.take(),
+            announcer,
+            peer_id,
         );
         manager.run_seeding_loop().await?;
 

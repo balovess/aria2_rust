@@ -34,6 +34,7 @@ impl BtMessageHandler {
         piece_index: u32,
         block_offset: u32,
         block_length: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<BlockDownloadResult> {
         let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
             index: piece_index,
@@ -63,7 +64,12 @@ impl BtMessageHandler {
             // Wait for response with timeout
             match tokio::time::timeout(
                 std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
-                Self::wait_for_piece_block(conn, piece_index, block_offset),
+                Self::wait_for_piece_block(
+                    conn,
+                    piece_index,
+                    block_offset,
+                    dht_engine.clone(),
+                ),
             )
             .await
             {
@@ -115,6 +121,7 @@ impl BtMessageHandler {
         conn: &mut BtPeerConn,
         expected_index: u32,
         expected_begin: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<Vec<u8>> {
         for _ in 0..MAX_BLOCK_READ_MESSAGES {
             match conn.read_message().await {
@@ -135,6 +142,27 @@ impl BtMessageHandler {
                                 "[BT] Received unexpected PIECE (index={}, begin={}), waiting for ({}, {})",
                                 index, begin, expected_index, expected_begin
                             );
+                        }
+                        BtMessage::Port { port } => {
+                            // BEP 5: peer tells us its DHT port. Add
+                            // (peer_ip, port) as a DHT node candidate.
+                            // add_node pings synchronously, so spawn it.
+                            if port != 0 && !conn.ip_addr.is_empty() {
+                                let addr = format!("{}:{}", conn.ip_addr, port).parse();
+                                if let Ok(addr) = addr
+                                    && let Some(eng) = dht_engine.clone()
+                                {
+                                    trace!(
+                                        "[BT] DHT port message: adding node {}",
+                                        addr
+                                    );
+                                    tokio::spawn(async move {
+                                        eng.add_node(addr).await;
+                                    });
+                                }
+                            } else {
+                                debug!("[BT] Received Port(0) or unknown peer ip, ignoring");
+                            }
                         }
                         BtMessage::Extended {
                             ext_id,
@@ -297,6 +325,7 @@ impl BtMessageHandler {
         piece_index: u32,
         piece_length: u32,
         num_blocks: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times
         for _retry in 0..MAX_RETRIES {
@@ -329,7 +358,15 @@ impl BtMessageHandler {
                 );
 
                 // Try to get this block from any peer
-                match Self::request_block(connections, piece_index, offset, len).await {
+                match Self::request_block(
+                    connections,
+                    piece_index,
+                    offset,
+                    len,
+                    dht_engine.clone(),
+                )
+                .await
+                {
                     Ok(result) if result.success => {
                         if let Some(data) = result.data {
                             piece_data.extend_from_slice(&data);

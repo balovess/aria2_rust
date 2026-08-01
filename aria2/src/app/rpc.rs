@@ -107,6 +107,17 @@ impl App {
             .with_cmd_tx(cmd_tx)
             .with_global_opts(user_opts_json);
 
+        // Pass the configured --save-session path through so the RPC
+        // `aria2.saveSession` method can persist without an explicit path
+        // argument (mirrors C++ reading PREF_SAVE_SESSION).
+        let rpc_engine = if let Some(save_path) =
+            self.get_opt_str("save-session").await.map(std::path::PathBuf::from)
+        {
+            rpc_engine.with_save_session_path(save_path)
+        } else {
+            rpc_engine
+        };
+
         // Build server config
         let max_request_size = self
             .get_opt_usize("rpc-max-request-size")

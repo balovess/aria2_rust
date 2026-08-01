@@ -334,14 +334,16 @@ impl MirrorCoordinator {
         &self.stat_man
     }
 
-    /// Get the segment manager (crate-internal access for testing).
-    pub(crate) fn segment_manager(&self) -> &ConcurrentSegmentManager {
-        &self.segment_manager
-    }
-
     /// Get the configuration.
     pub fn config(&self) -> &MirrorConfig {
         &self.config
+    }
+
+    /// Get the segment manager (test-only access; cfg-gated so the
+    /// production build does not carry an unused method).
+    #[cfg(test)]
+    pub(crate) fn segment_manager(&self) -> &ConcurrentSegmentManager {
+        &self.segment_manager
     }
 
     /// Save server statistics to a file.

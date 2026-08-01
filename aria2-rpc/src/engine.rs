@@ -27,8 +27,14 @@ use aria2_core::request::request_group_man::RequestGroupMan;
 pub struct RpcEngine {
     /// Active download tasks keyed by GID
     pub(crate) tasks: Arc<RwLock<HashMap<String, TaskState>>>,
-    /// Global configuration options
+    /// Global configuration options (registry defaults + user changes,
+    /// surfaced by aria2.getGlobalOption)
     pub(crate) global_opts: GlobalOptions,
+    /// Options explicitly set by the user via `aria2.changeGlobalOption`.
+    /// These are merged into every subsequent download's options (task opts
+    /// win). Kept separate from `global_opts` so registry-default values
+    /// seeded at startup never override per-download defaults.
+    pub(crate) user_global_opts: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     /// Per-task configuration options
     pub(crate) task_opts: TaskOptions,
     /// Completed/stopped task results
@@ -56,6 +62,10 @@ pub struct RpcEngine {
     /// C++ aria2 generates sessionId_ once and returns it consistently;
     /// we match that by storing it here rather than creating a new one per request.
     pub(crate) session_info: SessionInfo,
+    /// Configured `--save-session` file path (if any). Used by
+    /// `aria2.saveSession` when the caller does not supply an explicit path,
+    /// mirroring C++ which reads the `PREF_SAVE_SESSION` option.
+    pub(crate) save_session_path: Option<std::path::PathBuf>,
 }
 
 /// Internal state for an active download task.
@@ -177,6 +187,7 @@ impl RpcEngine {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             global_opts: Arc::new(RwLock::new(defaults)),
+            user_global_opts: Arc::new(RwLock::new(HashMap::new())),
             task_opts: Arc::new(RwLock::new(HashMap::new())),
             stopped_tasks: Arc::new(RwLock::new(Vec::new())),
             event_publisher: Arc::new(EventPublisher::default()),
@@ -186,6 +197,7 @@ impl RpcEngine {
             engine_cmd_tx: None,
             num_stopped_total: AtomicUsize::new(0),
             session_info: SessionInfo::new(),
+            save_session_path: None,
         }
     }
 
@@ -232,6 +244,16 @@ impl RpcEngine {
         tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
     ) -> Self {
         self.engine_cmd_tx = Some(tx);
+        self
+    }
+
+    /// Chainable builder method to set the configured `--save-session` path.
+    ///
+    /// `aria2.saveSession` uses this when the RPC request does not include an
+    /// explicit filename, mirroring C++ `SaveSessionRpcMethod` which reads the
+    /// engine's `PREF_SAVE_SESSION` option.
+    pub fn with_save_session_path(mut self, path: std::path::PathBuf) -> Self {
+        self.save_session_path = Some(path);
         self
     }
 
@@ -724,6 +746,30 @@ mod tests {
         .with_id(2);
         let set_resp = engine.handle_request(&set_req).await;
         assert!(set_resp.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_change_global_option_max_concurrent_emits_command() {
+        use aria2_core::engine::engine_command::EngineCommand;
+
+        let engine = RpcEngine::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineCommand>();
+        let engine = engine.with_engine_cmd_tx(tx);
+
+        let set_req = JsonRpcRequest::new(
+            "aria2.changeGlobalOption",
+            serde_json::json!([{"max-concurrent-downloads": 3}]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&set_req).await;
+        assert!(resp.is_success());
+
+        // The engine must receive SetMaxConcurrent so the slot limit is
+        // applied live (previously the value was only stored for display).
+        match rx.try_recv() {
+            Ok(EngineCommand::SetMaxConcurrent { max }) => assert_eq!(max, 3),
+            other => panic!("expected SetMaxConcurrent command, got {:?}", other.is_ok()),
+        }
     }
 
     // =========================================================================

@@ -1,5 +1,4 @@
 use super::*;
-use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::request::request_group::{DownloadOptions, GroupId};
 
 fn build_multi_file_torrent() -> Vec<u8> {

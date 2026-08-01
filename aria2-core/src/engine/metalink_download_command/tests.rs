@@ -175,6 +175,34 @@ fn test_new_accepts_multi_file_metalink() {
     assert!(result.is_ok(), "new() should accept multi-file Metalink");
 }
 
+#[test]
+fn test_single_file_mode_accepts_torrent_metaurl_only() {
+    use aria2_protocol::metalink::parser::{MediaType, MetalinkDocument};
+
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="movie.mkv">
+    <size>1048576</size>
+    <metaurl mediatype="application/x-bittorrent" priority="1">http://mirror.example.com/movie.torrent</metaurl>
+  </file>
+</metalink>"#;
+    let options = DownloadOptions::default();
+    // A torrent metaurl is a valid download path (C++ BtDependency): the
+    // constructor must NOT reject the file just because it has no HTTP URL.
+    let cmd = MetalinkDownloadCommand::new(GroupId::new(1), xml.as_bytes(), &options, None)
+        .expect("metaurl-only single file accepted");
+
+    // execute() re-parses metalink_data; verify the raw data round-trips and
+    // carries the torrent metaurl so the BT dependency path can be taken.
+    assert!(!cmd.metalink_data.is_empty());
+    let doc = MetalinkDocument::parse(&cmd.metalink_data, None).unwrap();
+    let f = &doc.files[0];
+    assert_eq!(f.meta_urls.len(), 1);
+    assert_eq!(f.meta_urls[0].url, "http://mirror.example.com/movie.torrent");
+    assert_eq!(f.meta_urls[0].mediatype, MediaType::Torrent);
+    assert!(f.urls.is_empty(), "no HTTP mirrors in this file");
+}
+
 /// Compute a lowercase hex sha-256 digest (test helper).
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;

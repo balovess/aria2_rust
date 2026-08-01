@@ -31,7 +31,24 @@ impl BtDownloadCommand {
         // Initialize the unified TrackerAnnouncer from the torrent's announce list.
         // This replaces the separate HTTP-only + ad-hoc UDP approach with a single
         // state machine that properly routes HTTP vs UDP based on URL scheme.
-        let mut announcer = TrackerAnnouncer::new(&meta.announce_list, &Some(meta.announce.clone()));
+        // `--bt-tracker` overrides the torrent's own announce list
+        // (C++: option value replaces announce URLs).
+        let tracker_override: Option<Vec<String>> = {
+            let g = self.group.recover();
+            g.options().bt_tracker.clone()
+        };
+        let mut announcer = match tracker_override {
+            Some(list) if !list.is_empty() => {
+                info!(
+                    count = list.len(),
+                    "Using user-specified trackers from --bt-tracker"
+                );
+                let tiers: Vec<Vec<String>> =
+                    list.into_iter().map(|u| vec![u]).collect();
+                TrackerAnnouncer::new(&tiers, &None)
+            }
+            _ => TrackerAnnouncer::new(&meta.announce_list, &Some(meta.announce.clone())),
+        };
 
         // Set up UDP client for UDP tracker support
         if let Ok(udp) = UdpTrackerClient::new(0).await {

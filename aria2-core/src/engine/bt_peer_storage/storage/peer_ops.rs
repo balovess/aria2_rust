@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use tracing::{debug, warn};
 
 use super::DefaultPeerStorage;

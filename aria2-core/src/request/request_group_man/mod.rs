@@ -16,7 +16,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use reserved::ReservedQueue;
 use stopped::StoppedResults;
@@ -183,6 +183,13 @@ impl RequestGroupMan {
             let mut group = group_lock.recover_mut();
             group.remove()?;
             info!("Removing download task #{}", gid.value());
+
+            // Record a REMOVED DownloadResult in the stopped storage so
+            // `tellStopped` / `getDownloadResult` can surface it.
+            // Mirrors C++ `ProcessStoppedGroup` -> `addDownloadResult(REMOVED)`.
+            let result = group.create_download_result();
+            self.stopped.add(result);
+
             debug!(
                 "Remaining: active={}, reserved={}",
                 self.active.len(),
@@ -190,6 +197,32 @@ impl RequestGroupMan {
             );
         }
         Ok(())
+    }
+
+    /// Handle a promoted group whose download task failed to spawn.
+    ///
+    /// `fill_from_reserver()` inserts the group into the active DashMap, but
+    /// if no command can be created for it (e.g. an empty URI list or an
+    /// unsupported scheme) there is no running task to ever demote it. This
+    /// removes the group from active, records an error, and stores a stopped
+    /// result so the group does not stay in the active list forever.
+    ///
+    /// Mirrors C++ `createInitialCommand()` failure handling which stops the
+    /// group with an error.
+    pub fn fail_spawned_group(&self, gid: GroupId, message: &str) -> bool {
+        if let Some((_, group)) = self.active.remove(&gid) {
+            group.recover_mut().mark_error(message.to_string());
+            let result = group.recover().create_download_result();
+            self.stopped.add(result);
+            debug!(
+                gid = gid.value(),
+                "Removed failed-spawn group from active and recorded error"
+            );
+            true
+        } else {
+            warn!(gid = gid.value(), "Failed-spawn group not found in active");
+            false
+        }
     }
 
     // ── Pause/Unpause ───────────────────────────────────────────────────
@@ -600,5 +633,150 @@ mod tests {
         )
         .unwrap();
         assert!(!man.download_finished());
+    }
+
+    // ── Pause → reserved → unpause → re-promotion loop ─────────────────
+
+    /// A paused active group (no more in-flight commands) must be re-queued
+    /// to the reserved queue — not demoted to stopped results — and must be
+    /// able to resume via unpause → promotion. This is the core "pause then
+    /// unpause then resume" closed loop.
+    #[test]
+    fn test_paused_group_requeues_to_reserved_and_can_resume() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        // Promote to active.
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(man.active.len(), 1);
+        assert_eq!(man.reserved.len(), 0);
+
+        // aria2.pause: status → Paused (num_commands is 0 because no real
+        // task was spawned in this unit test).
+        man.pause_group(gid).unwrap();
+        let group = man.find_group(gid).unwrap();
+        assert!(group.recover().status().is_paused());
+
+        // The paused group returns to the reserved queue.
+        let requeued = man.requeue_non_terminal_groups(None);
+        assert_eq!(requeued, 1, "paused group should be re-queued");
+        assert_eq!(man.active.len(), 0);
+        assert_eq!(man.reserved.len(), 1);
+        assert!(man.find_group(gid).is_some(), "paused group must still exist");
+
+        // Unpause then promote → the download restarts.
+        man.unpause_group(gid).unwrap();
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1, "unpaused group must be re-promoted");
+        assert_eq!(man.active_count(), 1);
+        let status = man.find_group(gid).unwrap().recover().status();
+        assert_eq!(status, DownloadStatus::Active);
+    }
+
+    /// A group paused by `reduce_to_limit()` carries the restart flag; when
+    /// it is re-queued the flag must be consumed so the group auto-resumes
+    /// (C++ `releaseRuntimeResource()` clears the pause request).
+    #[test]
+    fn test_restart_requested_group_auto_resumes_on_requeue() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        man.fill_from_reserver();
+
+        // Simulate reduce_to_limit(): pause + restart request.
+        {
+            let group = man.find_group(gid).unwrap();
+            let mut g = group.recover_mut();
+            g.pause().unwrap();
+            g.request_restart();
+        }
+
+        let requeued = man.requeue_non_terminal_groups(None);
+        assert_eq!(requeued, 1);
+
+        // The restart flag was consumed and the group is Waiting again.
+        {
+            let group = man.find_group(gid).unwrap();
+            let g = group.recover();
+            assert_eq!(g.status(), DownloadStatus::Waiting);
+            assert!(!g.is_restart_requested(), "restart flag must be consumed");
+            assert!(
+                !g.is_pause_requested(),
+                "restart consumption must clear the pause request"
+            );
+        }
+
+        // Promotion picks it up immediately (slot permitting).
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(man.active_count(), 1);
+    }
+
+    // ── Remove writes a REMOVED stopped result ──────────────────────────
+
+    /// `aria2.remove` must record a REMOVED DownloadResult in the stopped
+    /// storage so `tellStopped` / `getDownloadResult` can surface it.
+    #[test]
+    fn test_remove_group_writes_stopped_removed_result() {
+        use crate::request::request_group::DownloadResultCode;
+
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        man.remove_group(gid).unwrap();
+
+        assert!(man.find_group(gid).is_none(), "group must be removed");
+        assert_eq!(man.stopped_count(), 1, "REMOVED result must be stored");
+        let result = man
+            .find_stopped_result(&gid.to_hex_string())
+            .expect("stopped result must be findable by GID");
+        assert_eq!(result.status, DownloadStatus::Removed);
+        assert_eq!(result.code, DownloadResultCode::Removed);
+    }
+
+    // ── Spawn failure must not leave a zombie in active ─────────────────
+
+    /// A group whose download task failed to spawn must be removed from the
+    /// active list and recorded as an error instead of staying there forever.
+    #[test]
+    fn test_fail_spawned_group_removes_from_active_and_records_error() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        man.fill_from_reserver();
+        assert_eq!(man.active.len(), 1);
+
+        let ok = man.fail_spawned_group(gid, "Failed to spawn download task");
+        assert!(ok, "failed-spawn group should be handled");
+        assert!(man.find_group(gid).is_none(), "group must leave the manager");
+        assert_eq!(man.active.len(), 0, "group must not stay in active");
+
+        let result = man
+            .find_stopped_result(&gid.to_hex_string())
+            .expect("failed-spawn group must have a stopped result");
+        assert!(
+            matches!(result.status, DownloadStatus::Error(_)),
+            "failed-spawn group must be recorded as an error, got {:?}",
+            result.status
+        );
     }
 }

@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
+use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
 use crate::engine::choking_algorithm::ChokingAlgorithm;
@@ -106,6 +107,11 @@ pub struct BtSeedManager {
     cancel_token: CancellationToken,
     /// Timestamp of the last choke round
     last_choke_time: Instant,
+    /// Tracker announcer for periodic re-announce while seeding
+    /// (mirrors C++ SeedCheckCommand keeping the swarm informed).
+    announcer: Option<TrackerAnnouncer>,
+    /// Our peer id, sent with tracker announces.
+    peer_id: [u8; 20],
 }
 
 impl BtSeedManager {
@@ -128,6 +134,8 @@ impl BtSeedManager {
             total_downloaded,
             None,
             CancellationToken::new(),
+            None,
+            [0u8; 20],
         )
     }
 
@@ -150,6 +158,8 @@ impl BtSeedManager {
             total_downloaded,
             None,
             CancellationToken::new(),
+            None,
+            [0u8; 20],
         )
     }
 
@@ -174,6 +184,37 @@ impl BtSeedManager {
             total_downloaded,
             choking_algo,
             CancellationToken::new(),
+            None,
+            [0u8; 20],
+        )
+    }
+
+    /// Create a seed manager with a tracker announcer for periodic
+    /// re-announce while seeding (C++ SeedCheckCommand keeps the swarm
+    /// informed of the seeder's continued presence).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_announcer(
+        info_hash: [u8; 20],
+        connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
+        piece_provider: Arc<dyn PieceDataProvider>,
+        config: BtSeedingConfig,
+        exit_condition: SeedExitCondition,
+        total_downloaded: u64,
+        choking_algo: Option<ChokingAlgorithm>,
+        announcer: Option<TrackerAnnouncer>,
+        peer_id: [u8; 20],
+    ) -> Self {
+        Self::build(
+            info_hash,
+            connections,
+            piece_provider,
+            config,
+            exit_condition,
+            total_downloaded,
+            choking_algo,
+            CancellationToken::new(),
+            announcer,
+            peer_id,
         )
     }
 
@@ -197,6 +238,8 @@ impl BtSeedManager {
             total_downloaded,
             None,
             cancel_token,
+            None,
+            [0u8; 20],
         )
     }
 
@@ -211,6 +254,8 @@ impl BtSeedManager {
         total_downloaded: u64,
         choking_algo: Option<ChokingAlgorithm>,
         cancel_token: CancellationToken,
+        announcer: Option<TrackerAnnouncer>,
+        peer_id: [u8; 20],
     ) -> Self {
         // Create upload sessions from peer connections
         let upload_sessions: Vec<BtUploadSession> = connections
@@ -251,6 +296,8 @@ impl BtSeedManager {
             choking_algo,
             cancel_token,
             last_choke_time: Instant::now(),
+            announcer,
+            peer_id,
         }
     }
 
@@ -298,6 +345,29 @@ impl BtSeedManager {
                     self.seeding_duration()
                 );
                 break;
+            }
+
+            // -- Tracker re-announce (mirrors C++ SeedCheckCommand keeping the
+            // swarm informed via BtAnnounce; the state machine throttles by
+            // the tracker-provided interval) ----------------------------------
+            if let Some(announcer) = self.announcer.as_mut()
+                && announcer.is_default_announce_ready()
+            {
+                if let Some(result) = announcer
+                    .announce(
+                        &self.info_hash,
+                        &self.peer_id,
+                        self.total_downloaded,
+                        0,
+                        self.total_uploaded,
+                    )
+                    .await
+                {
+                    debug!(
+                        "[Seed] Re-announced to {} ({} seeders, {} leechers)",
+                        result.tracker_url, result.seeders, result.leechers
+                    );
+                }
             }
 
             // -- Handle incoming messages from peers --------------------------

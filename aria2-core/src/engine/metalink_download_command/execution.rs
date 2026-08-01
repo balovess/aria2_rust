@@ -28,6 +28,7 @@ impl Command for MetalinkDownloadCommand {
         let expected_size: Option<u64>;
         let hash_entry_owned: Option<aria2_protocol::metalink::parser::HashEntry>;
         let pieces_owned: Option<aria2_protocol::metalink::parser::PieceInfo>;
+        let torrent_metaurls_owned: Vec<aria2_protocol::metalink::parser::MetaUrlEntry>;
 
         match &self.file_info {
             Some(info) => {
@@ -35,6 +36,7 @@ impl Command for MetalinkDownloadCommand {
                 expected_size = info.expected_size;
                 hash_entry_owned = info.hash_entry.clone();
                 pieces_owned = info.pieces.clone();
+                torrent_metaurls_owned = info.torrent_metaurls.clone();
             }
             None => {
                 let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(
@@ -60,8 +62,17 @@ impl Command for MetalinkDownloadCommand {
                 expected_size = file.size;
                 hash_entry_owned = file.hashes.first().cloned();
                 pieces_owned = file.pieces.clone();
+                torrent_metaurls_owned = file
+                    .meta_urls
+                    .iter()
+                    .filter(|m| {
+                        m.mediatype
+                            == aria2_protocol::metalink::parser::MediaType::Torrent
+                    })
+                    .cloned()
+                    .collect();
 
-                if sorted_urls_owned.is_empty() {
+                if sorted_urls_owned.is_empty() && torrent_metaurls_owned.is_empty() {
                     return Err(Aria2Error::Fatal(FatalError::Config(
                         "No download mirrors available".into(),
                     )));
@@ -70,6 +81,18 @@ impl Command for MetalinkDownloadCommand {
         }
 
         if sorted_urls_owned.is_empty() {
+            // No HTTP/FTP mirrors, but a torrent metaurl is present: fall
+            // straight through to the BitTorrent dependency path.
+            if torrent_metaurls_owned.is_empty() {
+                return Err(Aria2Error::Fatal(FatalError::Config(
+                    "No download mirrors available".into(),
+                )));
+            }
+            #[cfg(feature = "bittorrent")]
+            return self
+                .try_torrent_metaurl(&torrent_metaurls_owned)
+                .await;
+            #[cfg(not(feature = "bittorrent"))]
             return Err(Aria2Error::Fatal(FatalError::Config(
                 "No download mirrors available".into(),
             )));
@@ -186,6 +209,16 @@ impl Command for MetalinkDownloadCommand {
         }
 
         release_path(&resolved_output_path);
+
+        // All HTTP/FTP mirrors failed: fall back to the BitTorrent metaurl
+        // dependency (mirrors C++ BtDependency resolving a torrent metaurl
+        // when no direct resource can be downloaded).
+        #[cfg(feature = "bittorrent")]
+        if !torrent_metaurls_owned.is_empty() {
+            warn!("All HTTP mirrors failed, falling back to torrent metaurl");
+            return self.try_torrent_metaurl(&torrent_metaurls_owned).await;
+        }
+
         Err(last_error
             .unwrap_or_else(|| Aria2Error::Fatal(FatalError::Config("All mirrors failed".into()))))
     }
@@ -210,6 +243,58 @@ impl Command for MetalinkDownloadCommand {
 }
 
 impl MetalinkDownloadCommand {
+
+    /// Download a `.torrent` from the given metaurls (by priority) and run a
+    /// BitTorrent download for it. Mirrors C++ `BtDependency` which resolves
+    /// `metaurl mediatype="application/x-bittorrent"` entries.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) async fn try_torrent_metaurl(
+        &mut self,
+        meta_urls: &[aria2_protocol::metalink::parser::MetaUrlEntry],
+    ) -> Result<()> {
+        use aria2_protocol::metalink::parser::MediaType;
+
+        let mut last_err: Option<Aria2Error> = None;
+        for mu in meta_urls
+            .iter()
+            .filter(|m| m.mediatype == MediaType::Torrent)
+        {
+            info!(url = %mu.url, "Downloading torrent from Metalink metaurl");
+            match self.try_download_url(&mu.url, None).await {
+                Ok(torrent_bytes) => {
+                    // Grab owned options/gid before any await (the group
+                    // guard is not Send).
+                    let options = self.group.recover().options().clone();
+                    let gid = self.group.recover().gid();
+                    let dir = self.output_path.parent().and_then(|p| p.to_str());
+                    let mut bt_cmd =
+                        crate::engine::bt_download_command::BtDownloadCommand::new(
+                            gid,
+                            &torrent_bytes,
+                            &options,
+                            dir,
+                        )?;
+                    bt_cmd.execute().await?;
+                    self.completed_bytes = self.group.recover().total_length();
+                    self.completed = true;
+                    info!(
+                        "Metalink torrent metaurl download done: {}",
+                        self.output_path.display()
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(url = %mu.url, error = %e, "Torrent metaurl failed");
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            Aria2Error::Fatal(FatalError::Config("All torrent metaurls failed".into()))
+        }))
+    }
+
     pub(crate) async fn try_download_url(
         &mut self,
         url: &str,

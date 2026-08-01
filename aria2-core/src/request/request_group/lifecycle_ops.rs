@@ -66,6 +66,10 @@ impl super::RequestGroup {
         if matches!(*status, DownloadStatus::Paused) {
             *status = DownloadStatus::Waiting;
             self.control_flags.clear_pause();
+            // Also clear a pending restart intent so a group that was paused
+            // by `reduce_to_limit()` (which sets the restart flag alongside
+            // pause) does not carry a stale flag after a manual unpause.
+            self.control_flags.clear_restart();
             tracing::info!("Resuming download task #{}", self.gid.value());
         }
 
@@ -155,6 +159,31 @@ impl super::RequestGroup {
         *self.status.recover_mut() = DownloadStatus::Error(message);
         *self.end_time.recover_mut() = Some(std::time::Instant::now());
         tracing::info!(gid = self.gid.value(), "Marked download as errored");
+    }
+
+    /// Mark the download as paused using interior mutability (`&self`).
+    ///
+    /// Used by the engine loop when a running task terminates because a
+    /// pause was requested (`aria2.pause` / `aria2.forcePause`). The group
+    /// stays in `Paused` status so it can be unpaused and re-promoted,
+    /// instead of being recorded as an error. Mirrors C++ where
+    /// pause-requested groups return to the reserved queue.
+    pub fn mark_paused(&self) {
+        *self.status.recover_mut() = DownloadStatus::Paused;
+        *self.last_error_code.recover_mut() = super::result_code::DownloadResultCode::Paused;
+        *self.last_error_message.recover_mut() = "Download paused".to_string();
+        tracing::info!(gid = self.gid.value(), "Marked download as paused");
+    }
+
+    /// Transition the group back to `Waiting` status (interior mutability).
+    ///
+    /// Used when a group's commands all ended without a terminal transition
+    /// (e.g. a pause was requested and then undone before the task fully
+    /// exited). The group is re-queued so promotion can re-spawn it.
+    pub fn mark_waiting(&self) {
+        *self.status.recover_mut() = DownloadStatus::Waiting;
+        *self.end_time.recover_mut() = None;
+        tracing::debug!(gid = self.gid.value(), "Marked download as waiting");
     }
 
     // ── Status Queries ───────────────────────────────────────────────────

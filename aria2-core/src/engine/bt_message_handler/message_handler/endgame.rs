@@ -36,6 +36,7 @@ impl BtMessageHandler {
         piece_length: u32,
         num_blocks: u32,
         endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
         for _retry in 0..MAX_RETRIES {
@@ -75,6 +76,7 @@ impl BtMessageHandler {
                     offset,
                     len,
                     endgame_state,
+                    dht_engine.clone(),
                 )
                 .await
                 {
@@ -149,6 +151,7 @@ impl BtMessageHandler {
         block_offset: u32,
         block_length: u32,
         endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<BlockDownloadResult> {
         let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
             index: piece_index,
@@ -182,7 +185,12 @@ impl BtMessageHandler {
         // Now wait for the FIRST response from any peer (others will be cancelled later)
         match tokio::time::timeout(
             std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
-            Self::wait_for_any_piece_block(connections, piece_index, block_offset),
+            Self::wait_for_any_piece_block(
+                connections,
+                piece_index,
+                block_offset,
+                dht_engine.clone(),
+            ),
         )
         .await
         {
@@ -235,6 +243,7 @@ impl BtMessageHandler {
         connections: &mut [BtPeerConn],
         expected_index: u32,
         expected_begin: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<(Vec<u8>, usize)> {
         // Poll each connection in round-robin fashion
         for _ in 0..MAX_BLOCK_READ_MESSAGES {
@@ -261,6 +270,19 @@ impl BtMessageHandler {
                             BtMessage::AllowedFast { index } => {
                                 debug!("[BT] Received AllowedFast for piece {}", index);
                                 conn.add_allowed_fast(index);
+                            }
+                            BtMessage::Port { port } => {
+                                // BEP 5: add (peer_ip, port) as a DHT node.
+                                if port != 0 && !conn.ip_addr.is_empty() {
+                                    let addr = format!("{}:{}", conn.ip_addr, port).parse();
+                                    if let Ok(addr) = addr
+                                        && let Some(eng) = dht_engine.clone()
+                                    {
+                                        tokio::spawn(async move {
+                                            eng.add_node(addr).await;
+                                        });
+                                    }
+                                }
                             }
                             other => {
                                 debug!(

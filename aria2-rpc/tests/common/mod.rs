@@ -52,11 +52,19 @@ pub async fn start_test_server(token: Option<&str>) -> (String, TestServerHandle
         .with_port(port);
 
     // Wire auth onto the engine (ServerConfig.auth is decorative only;
-    // the actual check lives in RpcEngine::auth_middleware).
+    // the actual check lives in RpcEngine::auth_middleware). Also configure a
+    // temp --save-session path so `aria2.saveSession` (which falls back to the
+    // engine config when no explicit path is given) actually persists.
+    let save_session_path =
+        std::env::temp_dir().join(format!("aria2_rpc_e2e_{}.sess", std::process::id()));
     let engine = if let Some(t) = token {
-        Arc::new(RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(t)))
+        Arc::new(
+            RpcEngine::new()
+                .with_auth_middleware(RpcAuthMiddleware::new(t))
+                .with_save_session_path(save_session_path),
+        )
     } else {
-        Arc::new(RpcEngine::new())
+        Arc::new(RpcEngine::new().with_save_session_path(save_session_path))
     };
 
     let server = RpcServer::new_with_engine(config, engine).expect("Failed to create RpcServer");

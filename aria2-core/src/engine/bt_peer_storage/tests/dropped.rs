@@ -3,7 +3,6 @@
 use crate::engine::bt_peer_storage::constants::MAX_DROPPED_PEERS;
 use crate::engine::bt_peer_storage::peer_entry::PeerEntry;
 use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
-use super::basic::make_peer;
 
 #[test]
 fn test_return_peer_adds_to_dropped_on_graceful_disconnect() {

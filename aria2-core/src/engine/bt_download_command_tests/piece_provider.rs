@@ -1,4 +1,3 @@
-use super::*;
 use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_upload_session::PieceDataProvider;
 use crate::engine::multi_file_layout::MultiFileLayout;

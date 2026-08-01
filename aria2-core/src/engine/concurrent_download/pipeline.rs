@@ -52,7 +52,7 @@ pub async fn execute_with_coordinator(
 
     let selector = Box::new(
         crate::selector::adaptive_uri_selector::AdaptiveUriSelector::new_with_uris(
-            Arc::new(crate::selector::server_stat_man::ServerStatMan::new()),
+            crate::selector::server_stat_man::ServerStatMan::shared().clone(),
             uris.to_vec(),
         ),
     );
@@ -61,13 +61,13 @@ pub async fn execute_with_coordinator(
         total_length,
         uris.to_vec(),
         Some(segment_size),
-        Arc::new(crate::selector::server_stat_man::ServerStatMan::new()),
+        crate::selector::server_stat_man::ServerStatMan::shared().clone(),
         selector,
     );
 
     let mut coordinator =
         crate::engine::mirror_coordinator::MirrorCoordinator::with_segment_manager(
-            Arc::new(crate::selector::server_stat_man::ServerStatMan::new()),
+            crate::selector::server_stat_man::ServerStatMan::shared().clone(),
             Box::new(crate::selector::uri_selector::InorderUriSelector::new()),
             segment_manager,
             mirror_config,

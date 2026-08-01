@@ -3,7 +3,7 @@
 
 use super::super::BtPeerInteractive;
 use super::super::types::*;
-use super::{instant_past, make_test_conn};
+use super::instant_past;
 
 // ── Keep-alive timer tests ─────────────────────────────────────────
 

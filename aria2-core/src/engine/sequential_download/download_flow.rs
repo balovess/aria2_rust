@@ -301,7 +301,9 @@ impl SequentialDownloader {
         let rate_limit = { self.group.recover().options().max_download_limit };
 
         let raw_writer = DefaultDiskWriter::new(&self.output_path);
-        let mut writer: Box<dyn DiskWriter> = match rate_limit {
+
+        // Build per-download limiter (if max_download_limit is set).
+        let per_limiter = match rate_limit {
             Some(rate) if rate > 0 => {
                 let cfg = RateLimiterConfig::new(Some(rate), None);
                 let limiter = RateLimiter::new(&cfg);
@@ -310,9 +312,25 @@ impl SequentialDownloader {
                     let g = self.group.recover();
                     g.set_rate_limiter(limiter.clone());
                 }
-                Box::new(ThrottledWriter::new(raw_writer, limiter))
+                Some(limiter)
             }
-            _ => Box::new(raw_writer),
+            _ => None,
+        };
+
+        // Create ThrottledWriter when either per-download or global limit is active.
+        let global_limited = self
+            .global_limiter
+            .as_ref()
+            .is_some_and(|g| g.is_download_limited());
+        let mut writer: Box<dyn DiskWriter> = if per_limiter.is_some() || global_limited {
+            let limiter = per_limiter.unwrap_or_else(RateLimiter::unlimited);
+            let mut tw = ThrottledWriter::new(raw_writer, limiter);
+            if let Some(ref gl) = self.global_limiter {
+                tw = tw.with_global_limiter(gl.clone());
+            }
+            Box::new(tw)
+        } else {
+            Box::new(raw_writer)
         };
 
         let mut stream = response.bytes_stream();

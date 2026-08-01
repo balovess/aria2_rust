@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn test_tracker_announcer_udp_detection() {
         let urls = vec![vec!["udp://tracker.example.com:6969/announce".to_string()]];
-        let announcer = TrackerAnnouncer::new(&urls, &None);
+        let _announcer = TrackerAnnouncer::new(&urls, &None);
         // BtAnnounce should detect the UDP URL
         assert!(is_udp_tracker("udp://tracker.example.com:6969/announce"));
         assert!(!is_udp_tracker("http://tracker.example.com:6969/announce"));

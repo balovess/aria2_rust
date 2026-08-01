@@ -309,8 +309,13 @@ impl Command for BtDownloadCommand {
                 "Starting seeding phase with {} peers...",
                 active_connections.len()
             );
-            self.run_seeding_phase(active_connections, piece_length, num_pieces)
-                .await?;
+            self.run_seeding_phase(
+                active_connections,
+                piece_length,
+                num_pieces,
+                meta.info_hash.bytes,
+            )
+            .await?;
         } else {
             info!(
                 "Skipping seeding (enabled={}, connections={})",

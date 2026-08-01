@@ -39,7 +39,7 @@ impl AuthConfig {
     pub fn verify_token(&self, provided: &str) -> bool {
         match &self.token {
             None => true,
-            Some(t) => t == provided,
+            Some(t) => constant_time_eq(t, provided),
         }
     }
 
@@ -49,7 +49,9 @@ impl AuthConfig {
             let (user, pass) = decoded.split_at(colon_pos);
             let pass = &pass[1..];
             match (&self.username, &self.password) {
-                (Some(u), Some(p)) => u == user && p == pass,
+                // Password is a secret: compare in constant time. The username
+                // is not secret, so short-circuiting on it first is fine.
+                (Some(u), Some(p)) => u == user && constant_time_eq(p, pass),
                 _ => false,
             }
         } else {
@@ -63,6 +65,35 @@ fn base64_decode(s: &str) -> Result<String, Aria2Error> {
         .decode(s)
         .map_err(Aria2Error::from)?;
     String::from_utf8(bytes).map_err(Aria2Error::from)
+}
+
+/// Constant-time string equality check (mitigates timing side-channels).
+///
+/// Used to compare secret values such as the RPC token (`rpc-secret`) against
+/// user-supplied input. Unlike `a == b` — which short-circuits on the first
+/// differing byte and whose timing therefore reveals the match position — this
+/// always iterates over `max(a.len(), b.len())` bytes and accumulates the XOR
+/// of every byte pair, so the timing is independent of *where* the first
+/// mismatch occurs.
+///
+/// # Limitations
+///
+/// Length differences are still observable (a shorter/longer token completes
+/// the loop in fewer/more iterations). This is an accepted trade-off: the
+/// length of an `rpc-secret` is not high-value entropy, and an
+/// attacker-controlled length probe is mitigated by the constant per-byte
+/// cost. If length privacy is ever required, the secret must be hashed first.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    // 0 iff lengths are equal; stays 0 iff every byte pair XORs to 0.
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let ai = *a.get(i).unwrap_or(&0u8);
+        let bi = *b.get(i).unwrap_or(&0u8);
+        diff |= usize::from(ai ^ bi);
+    }
+    diff == 0
 }
 
 // =========================================================================
@@ -111,7 +142,7 @@ impl RpcAuthMiddleware {
             return Ok(());
         }
         match token {
-            Some(t) if t == self.secret => Ok(()),
+            Some(t) if constant_time_eq(t, &self.secret) => Ok(()),
             Some(_) => Err(JsonRpcError::Unauthorized("Invalid token".to_string())),
             None => Err(JsonRpcError::Unauthorized(
                 "Token required (set rpc-secret)".to_string(),
@@ -1050,6 +1081,43 @@ mod tests {
     }
 
     #[test]
+    fn test_constant_time_eq() {
+        // Equal strings → true
+        assert!(constant_time_eq("", ""));
+        assert!(constant_time_eq("my-secret", "my-secret"));
+        assert!(constant_time_eq("rpc-secret-token-123", "rpc-secret-token-123"));
+
+        // Same-length, different bytes → false
+        assert!(!constant_time_eq("secret", "secretX")); // no, lengths differ
+        assert!(!constant_time_eq("aaaaaa", "aaaaba")); // last byte differs
+        assert!(!constant_time_eq("baaaaa", "aaaaaa")); // first byte differs
+        assert!(!constant_time_eq("abcdef", "fedcba"));
+
+        // Different-length inputs → false (including prefix relations)
+        assert!(!constant_time_eq("abc", "abcd"));
+        assert!(!constant_time_eq("abcd", "abc"));
+        assert!(!constant_time_eq("", "x"));
+        assert!(!constant_time_eq("x", ""));
+        assert!(!constant_time_eq("my-secret", "my-secret-extra"));
+    }
+
+    #[test]
+    fn test_auth_config_token_constant_time() {
+        let auth = AuthConfig::default().with_token("s3cr3t-tok3n");
+        // Exact match → accept
+        assert!(auth.verify_token("s3cr3t-tok3n"));
+        // Same-length wrong token → reject
+        assert!(!auth.verify_token("s3cr3t-tok3m"));
+        assert!(!auth.verify_token("X3cr3t-tok3n"));
+        // Different-length token → reject
+        assert!(!auth.verify_token("s3cr3t"));
+        assert!(!auth.verify_token("s3cr3t-tok3n-extra"));
+        assert!(!auth.verify_token(""));
+        // Unrelated
+        assert!(!auth.verify_token("not-the-token"));
+    }
+
+    #[test]
     fn test_auth_config_basic() {
         let auth = AuthConfig::default().with_basic_auth("admin", "pass123");
         assert!(auth.has_basic());
@@ -1111,6 +1179,23 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code(), -32001);
         assert!(err.to_string().contains("Invalid token"));
+    }
+
+    #[test]
+    fn test_auth_token_constant_time_validate() {
+        let middleware = RpcAuthMiddleware::new("my-secret-token");
+        // Exact match → accept
+        assert!(middleware.validate(Some("my-secret-token")).is_ok());
+        // Same-length wrong token → reject
+        assert!(middleware.validate(Some("my-secret-tokem")).is_err());
+        assert!(middleware.validate(Some("nY-secret-token")).is_err());
+        // Different-length token → reject (shorter and longer)
+        assert!(middleware.validate(Some("my-secret")).is_err());
+        assert!(middleware.validate(Some("my-secret-token-extra")).is_err());
+        assert!(middleware.validate(Some("")).is_err());
+        // No token with a configured secret → reject with "Token required"
+        let err = middleware.validate(None).unwrap_err();
+        assert!(err.to_string().contains("Token required"));
     }
 
     #[test]

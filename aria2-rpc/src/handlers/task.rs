@@ -12,8 +12,12 @@ use crate::types::{DownloadStatus, FileInfo, StatusInfo, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::checksum::checksum::Checksum;
 use aria2_core::constants as core_constants;
+use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::session::save_session_command::SaveSessionCommand;
+use aria2_core::session::session_entry::SessionEntry;
+use aria2_core::session::session_serializer::save_to_file_with_entries;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use tokio_util::sync::CancellationToken;
 
@@ -572,16 +576,60 @@ impl RpcEngine {
     }
 
     /// Handle `aria2.saveSession` - Save current session state to disk.
+    ///
+    /// Mirrors C++ `SaveSessionRpcMethod`: writes the session file and returns
+    /// "OK" on success (or an error when no filename is configured).
+    ///
+    /// - Optional `param[0]`: session file path. When omitted or empty, the
+    ///   engine's configured `--save-session` path is used.
+    /// - When the engine is wired with a `RequestGroupMan`, the real
+    ///   `RequestGroup` state is serialized. Otherwise the RPC-side task map
+    ///   is serialized (kept for standalone / test engines).
     pub async fn handle_save_session(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let dir = req.get_param_or_default::<String>(0);
-        let _dir = if dir.is_empty() { ".".to_string() } else { dir };
+        // Resolve the target path: an explicit param wins; otherwise fall back
+        // to the engine's configured save-session path (C++ reads PREF_SAVE_SESSION).
+        let param_path = req.get_param_or_default::<String>(0);
+        let target = if param_path.is_empty() {
+            self.save_session_path.clone()
+        } else {
+            Some(std::path::PathBuf::from(param_path))
+        };
+        let path = target.ok_or_else(|| {
+            JsonRpcError::MethodNotFound(
+                "Filename is not given. Set --save-session or pass a path.".into(),
+            )
+        })?;
 
+        // Wired engine: serialize the real RequestGroupMan via SaveSessionCommand.
+        if let Some(group_man) = &self.group_man {
+            let mut cmd = SaveSessionCommand::new(path, group_man.clone());
+            cmd.execute().await.map_err(|e| {
+                JsonRpcError::InternalError(format!("Failed to save session: {}", e))
+            })?;
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                "OK".to_string(),
+            ));
+        }
+
+        // Fallback (no RequestGroupMan, e.g. unit-test engines): serialize the
+        // RPC-side task states into a C++-compatible session file.
         let tasks = self.tasks.read().await;
-        let count = tasks.len();
+        let entries: Vec<SessionEntry> = tasks
+            .values()
+            .filter_map(session_entry_from_task_state)
+            .collect();
+        let count = entries.len();
         drop(tasks);
+
+        save_to_file_with_entries(&path, &entries)
+            .await
+            .map_err(|e| {
+                JsonRpcError::InternalError(format!("Failed to save session: {}", e))
+            })?;
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -751,7 +799,18 @@ impl RpcEngine {
         let gid = GroupId::from_hex_string(&gid_str)
             .ok_or_else(|| JsonRpcError::InternalError("Invalid GID generated".into()))?;
 
-        let dl_options = rpc_options_to_download_options(&options);
+        // Merge user-set global options (aria2.changeGlobalOption) so they
+        // apply to this download; task-level options win. Registry-default
+        // values are NOT merged (they live in global_opts, kept separate).
+        let merged_options = {
+            let user = self.user_global_opts.read().await;
+            let mut m: HashMap<String, serde_json::Value> = user.clone();
+            for (k, v) in &options {
+                m.insert(k.clone(), v.clone());
+            }
+            m
+        };
+        let dl_options = rpc_options_to_download_options(&merged_options);
 
         // Validate checksum format at task creation time, before any download starts.
         if let Some((ref algo, ref val)) = dl_options.checksum {
@@ -980,6 +1039,27 @@ impl RpcEngine {
     }
 }
 
+/// Convert a placeholder RPC `TaskState` into a C++-compatible [`SessionEntry`].
+///
+/// Used by `aria2.saveSession` when the engine is NOT wired with a
+/// `RequestGroupMan` (e.g. standalone/test engines), so the RPC-side task map
+/// can still be persisted. The GID is stored as u64; serialization
+/// zero-pads it to 16 hex digits, matching C++ `SessionSerializer`.
+fn session_entry_from_task_state(state: &TaskState) -> Option<SessionEntry> {
+    let gid = u64::from_str_radix(state.status.gid.trim_start_matches("0x"), 16).ok()?;
+    let mut entry = SessionEntry::new(gid, state.uris.clone());
+    entry.paused = state.status.status == DownloadStatus::Paused;
+    entry.total_length = state.total_length;
+    entry.completed_length = state.completed_length;
+    entry.upload_length = state.upload_length;
+    entry.download_speed = state.download_speed;
+    entry.status = state.status.status.as_str().to_string();
+    if state.completed_length > 0 {
+        entry.resume_offset = Some(state.completed_length);
+    }
+    Some(entry)
+}
+
 /// Convert RPC option map (from `aria2.addUri` params) to `DownloadOptions`.
 ///
 /// Handles both array and newline-separated string forms of `header`.
@@ -1040,7 +1120,11 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         cookie_file: get_str("cookie-file"),
         cookies: get_str("cookies"),
         // BT
-        bt_force_encrypt: get_bool("bt-force-encrypt"),
+        bt_force_encrypt: opts
+            .get("bt-force-encryption")
+            .and_then(|v| v.as_bool())
+            .or_else(|| opts.get("bt-force-encrypt").and_then(|v| v.as_bool()))
+            .unwrap_or(false),
         bt_require_crypto: get_bool("bt-require-crypto"),
         enable_dht: opts
             .get("enable-dht")
@@ -1048,6 +1132,23 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
             .unwrap_or(true),
         dht_listen_port: get_u16("dht-listen-port"),
         dht_entry_point,
+        bt_tracker: opts.get("bt-tracker").and_then(|v| {
+            if let Some(arr) = v.as_array() {
+                Some(
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                )
+            } else {
+                v.as_str().map(|s| {
+                    s.split([',', '\n'])
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                })
+            }
+        }),
         enable_public_trackers: opts
             .get("enable-public-trackers")
             .and_then(|v| v.as_bool())
@@ -1061,7 +1162,9 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         enable_utp: get_bool("enable-utp"),
         utp_listen_port: get_u16("utp-listen-port"),
         // Retry
-        max_retries: get_u32("max-retries").unwrap_or(0),
+        max_retries: get_u32("max-tries")
+            .or_else(|| get_u32("max-retries"))
+            .unwrap_or(0),
         retry_wait: get_u64("retry-wait").unwrap_or(0),
         // DHT file
         dht_file_path: get_str("dht-file-path"),

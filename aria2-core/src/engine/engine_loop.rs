@@ -20,9 +20,11 @@ use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
 use super::engine_command::{EngineCommand, TaskResult};
 use super::task_spawner::spawn_download_task;
 use crate::dns::dns_cache::DnsCache;
+use crate::error::Aria2Error;
 use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::ftp::FtpConnectionPool;
-use crate::request::request_group::GroupId;
+use crate::rate_limiter::RateLimiter;
+use crate::request::request_group::{DownloadStatus, GroupId};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -64,6 +66,12 @@ pub struct EngineLoopContext {
     /// Whether the engine should stay alive even with no active downloads
     /// (used for RPC listen mode). Mirrors C++ `keepRunning_`.
     pub keep_alive: bool,
+
+    /// Process-wide rate limiter shared across all downloads.
+    /// When `Some`, passed to each spawned `DownloadCommand` so that
+    /// `ThrottledWriter` and segment download loops enforce a global
+    /// bandwidth ceiling in addition to per-download limits.
+    pub global_limiter: Option<RateLimiter>,
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.
@@ -74,6 +82,21 @@ struct RunningDownload {
     started: Instant,
     /// Per-command timeout. `None` means the task never times out.
     timeout: Option<Duration>,
+}
+
+/// Mark the auto-save session as dirty so the next periodic housekeeping tick
+/// (subject to `save-session-interval`) actually persists state.
+///
+/// C++ aria2's `AutoSaveCommand` unconditionally saves every interval; our
+/// `AutoSaveSession` adds a dirty gate to avoid redundant disk writes. Every
+/// caller that mutates download state (queue membership, status, options,
+/// progress) must flip this flag or `save_if_dirty()` never writes.
+fn mark_session_dirty(ctx: &EngineLoopContext) {
+    if let Some(ref auto_save) = ctx.auto_save {
+        if let Ok(save) = auto_save.try_lock() {
+            save.mark_dirty();
+        }
+    }
 }
 
 /// Run the main engine loop.
@@ -137,6 +160,7 @@ pub async fn run_engine_loop(
                 Arc::clone(group),
                 Arc::clone(&ctx.ftp_pool),
                 Arc::clone(&ctx.dns_cache),
+                ctx.global_limiter.clone(),
                 completion_tx.clone(),
             )
             .await
@@ -166,12 +190,21 @@ pub async fn run_engine_loop(
                         gid = gid.value(),
                         "Failed to spawn download task for promoted group"
                     );
+                    // The group was inserted into the active DashMap by
+                    // fill_from_reserver() but no command could be created
+                    // (e.g. empty URI list or unsupported scheme). Remove it
+                    // from active and record an error so it does not stay
+                    // in the active list forever.
+                    let man = ctx.group_man.read().await;
+                    man.fail_spawned_group(gid, "Failed to spawn download task");
                 }
             }
         }
 
         if !promoted.is_empty() {
             debug!("Promoted {} groups from reserved to active", promoted.len());
+            // Promotion moved groups between queues: persist the new layout.
+            mark_session_dirty(&ctx);
         }
 
         // ── 3. Collect completed task notifications ──────────────────────
@@ -187,6 +220,8 @@ pub async fn run_engine_loop(
 
         if !demoted_gids.is_empty() {
             debug!("Demoted {} groups to stopped", demoted_gids.len());
+            // Demotion moved groups to stopped results: persist the change.
+            mark_session_dirty(&ctx);
         }
 
         // ── 5. Periodic housekeeping ─────────────────────────────────────
@@ -256,6 +291,10 @@ async fn process_engine_commands(
     force_halt_requested: &mut bool,
 ) {
     while let Ok(cmd) = cmd_rx.try_recv() {
+        // Every EngineCommand mutates session state (queue membership,
+        // per-group status, or options), so mark the session dirty to make
+        // the periodic auto-save persist these changes.
+        mark_session_dirty(ctx);
         match cmd {
             EngineCommand::AddDownload { group } => {
                 let man = ctx.group_man.read().await;
@@ -293,15 +332,12 @@ async fn process_engine_commands(
                 if let Err(e) = man.force_pause_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to force-pause download");
                 }
-                // Abort the running task for this GID.
-                running_downloads.retain(|(id, rd)| {
-                    if *id == gid {
-                        rd._handle.abort();
-                        false
-                    } else {
-                        true
-                    }
-                });
+                // NOTE: the running task is intentionally NOT aborted here.
+                // force_pause_group() marks the group Paused; the download
+                // loop observes this via check_cancelled() and terminates by
+                // itself. Aborting the handle would skip the completion
+                // notification, leaving num_commands stuck above 0 so the
+                // paused group could never be re-queued to the reserved list.
             }
 
             EngineCommand::Unpause { gid } => {
@@ -333,10 +369,9 @@ async fn process_engine_commands(
             EngineCommand::ForcePauseAll => {
                 let man = ctx.group_man.read().await;
                 man.force_pause_all();
-                // Abort all running download tasks.
-                for (_, rd) in running_downloads.drain(..) {
-                    rd._handle.abort();
-                }
+                // Like ForcePause, tasks are left to terminate on their own
+                // via the Paused status so num_commands stays balanced and
+                // the groups can return to the reserved queue.
             }
 
             EngineCommand::UnpauseAll => {
@@ -397,6 +432,9 @@ async fn process_task_completions(
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
 ) {
     while let Ok((gid, result)) = completion_rx.try_recv() {
+        // A task finished: its status/progress changed, so persist it.
+        mark_session_dirty(ctx);
+
         // Remove from running_downloads list.
         running_downloads.retain(|(id, _)| *id != gid);
 
@@ -414,7 +452,40 @@ async fn process_task_completions(
                     group.recover_mut().mark_complete();
                 }
                 TaskResult::Failed(e) => {
-                    group.recover_mut().mark_error(e.to_string());
+                    // A pause-induced failure (`aria2.pause` / `aria2.forcePause`
+                    // marks the group Paused and the download loop aborts via
+                    // check_cancelled) must leave the group Paused — resumable —
+                    // rather than recording an Error that can never be unpaused.
+                    // Mirrors C++ where pause-requested groups return to the
+                    // reserved queue.
+                    let group_state = group.recover();
+                    let was_pause_requested = group_state.is_pause_requested()
+                        || group_state.is_paused_flag();
+                    let is_pause_error = matches!(
+                        &e,
+                        Aria2Error::DownloadFailed(msg) if msg == "Download paused"
+                    );
+                    drop(group_state);
+
+                    if was_pause_requested {
+                        group.recover_mut().mark_paused();
+                    } else if is_pause_error {
+                        // A pause was requested and then undone (`unpause`)
+                        // before the task fully exited. Leave the group
+                        // Waiting so the demotion layer re-queues it and
+                        // promotion re-spawns the download.
+                        let status = group.recover().status();
+                        if !matches!(
+                            status,
+                            DownloadStatus::Complete
+                                | DownloadStatus::Error(_)
+                                | DownloadStatus::Removed
+                        ) {
+                            group.recover().mark_waiting();
+                        }
+                    } else {
+                        group.recover_mut().mark_error(e.to_string());
+                    }
                 }
                 TaskResult::Cancelled => {
                     // Status is already set by the halt/pause handler.
@@ -457,6 +528,12 @@ async fn run_housekeeping(
     }
 
     // ── Session auto-save ────────────────────────────────────────────────
+    // While downloads are running, progress changes every tick; keep the
+    // session dirty so `save_if_dirty` (gated by `save-session-interval`)
+    // actually persists the latest progress.
+    if !running_downloads.is_empty() {
+        mark_session_dirty(ctx);
+    }
     if let Some(ref auto_save) = ctx.auto_save {
         let mut save = auto_save.lock().await;
         save.save_if_dirty().await;
@@ -514,7 +591,7 @@ async fn on_end_of_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::request_group::HaltReason;
+    use crate::request::request_group::{DownloadOptions, DownloadStatus, HaltReason};
 
     /// Build a context with no downloads queued. `keep_alive` mirrors
     /// `--enable-rpc`, which is where the halt semantics used to break.
@@ -527,6 +604,7 @@ mod tests {
             event_hooks: Arc::new(DownloadEventHooks::new()),
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive,
+            global_limiter: None,
         }
     }
 
@@ -608,5 +686,185 @@ mod tests {
         let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
         run_until_exit(test_ctx(false), rx, sd_rx, Duration::from_secs(5)).await;
+    }
+
+    /// Regression for the periodic auto-save being dead: `mark_session_dirty`
+    /// had no callers, so the dirty flag stayed `false` and `save_if_dirty`
+    /// never wrote the session file. This test drives a state-changing
+    /// `EngineCommand` through `process_engine_commands` and verifies the
+    /// session is marked dirty AND that `save_if_dirty` then writes the file.
+    #[tokio::test]
+    async fn state_changing_command_marks_dirty_and_persists() {
+        use crate::request::request_group::{GroupId, RequestGroup};
+        use crate::session::auto_save_session::AutoSaveSession;
+
+        let man = Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new()));
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_engine_autosave_{}.sess",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let auto_save = Arc::new(tokio::sync::Mutex::new(AutoSaveSession::new(
+            path.clone(),
+            Duration::from_millis(0),
+            man.clone(),
+        )));
+
+        // The auto-save must share the SAME group manager that the engine
+        // commands mutate, otherwise it serializes a stale/empty snapshot.
+        let ctx = EngineLoopContext {
+            group_man: man,
+            ftp_pool: Arc::new(FtpConnectionPool::new(1)),
+            dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+            auto_save: Some(auto_save.clone()),
+            event_hooks: Arc::new(DownloadEventHooks::new()),
+            file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
+            keep_alive: false,
+            global_limiter: None,
+        };
+
+        // Send an AddDownload command through the engine-command channel.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(42),
+            vec!["http://example.com/engine-autosave.bin".to_string()],
+            DownloadOptions::default(),
+        )));
+        tx.send(EngineCommand::AddDownload { group }).unwrap();
+
+        let mut running = Vec::new();
+        let mut halt_requested = false;
+        let mut force_halt_requested = false;
+        process_engine_commands(
+            &ctx,
+            &mut rx,
+            &mut running,
+            &mut halt_requested,
+            &mut force_halt_requested,
+        )
+        .await;
+
+        // The AddDownload command must have flipped the dirty flag.
+        assert!(
+            auto_save.lock().await.is_dirty(),
+            "AddDownload should mark the session dirty"
+        );
+
+        // With interval=0 and dirty=true, save_if_dirty() writes the file.
+        auto_save.lock().await.save_if_dirty().await;
+        assert!(path.exists(), "save_if_dirty should write the session file");
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            content.contains("http://example.com/engine-autosave.bin"),
+            "session file should contain the added URI"
+        );
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    // ── Pause semantics ─────────────────────────────────────────────────
+    // Regression: a paused download's command terminates with
+    // TaskResult::Failed("Download paused") (the download loop observes the
+    // Paused status via check_cancelled). Before the fix the engine recorded
+    // an Error, which is terminal and can never be unpaused.
+
+    #[tokio::test]
+    async fn paused_task_failure_keeps_group_paused() {
+        let ctx = test_ctx(false);
+
+        let gid = {
+            let man = ctx.group_man.read().await;
+            man.add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap()
+        };
+
+        // Promote to active (fill_from_reserver calls start() → Active).
+        {
+            let man = ctx.group_man.read().await;
+            let promoted = man.fill_from_reserver();
+            assert_eq!(promoted.len(), 1);
+            assert!(man.find_group(gid).is_some());
+        }
+
+        // aria2.pause marks the group Paused.
+        {
+            let man = ctx.group_man.read().await;
+            man.pause_group(gid).unwrap();
+            let g = man.find_group(gid).unwrap();
+            assert!(g.recover().status().is_paused());
+            // Simulate a spawned task that has not yet reported completion.
+            g.recover().inc_commands();
+        }
+
+        // The download command terminates because it observed the pause.
+        let (completion_tx, mut completion_rx) =
+            mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+        completion_tx
+            .send((
+                gid,
+                TaskResult::Failed(Aria2Error::DownloadFailed("Download paused".into())),
+            ))
+            .unwrap();
+
+        let mut running_downloads = Vec::new();
+        process_task_completions(&ctx, &mut completion_rx, &mut running_downloads).await;
+
+        let status = {
+            let man = ctx.group_man.read().await;
+            man.find_group(gid).unwrap().recover().status()
+        };
+        assert_eq!(
+            status,
+            DownloadStatus::Paused,
+            "a pause-induced task failure must keep the group Paused (resumable), not Error"
+        );
+    }
+
+    #[tokio::test]
+    async fn genuine_task_failure_still_marks_error() {
+        let ctx = test_ctx(false);
+
+        let gid = {
+            let man = ctx.group_man.read().await;
+            man.add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap()
+        };
+        {
+            let man = ctx.group_man.read().await;
+            let promoted = man.fill_from_reserver();
+            assert_eq!(promoted.len(), 1);
+            let g = man.find_group(gid).unwrap();
+            g.recover().inc_commands();
+        }
+
+        let (completion_tx, mut completion_rx) =
+            mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+        completion_tx
+            .send((
+                gid,
+                TaskResult::Failed(Aria2Error::Network("connection refused".into())),
+            ))
+            .unwrap();
+
+        let mut running_downloads = Vec::new();
+        process_task_completions(&ctx, &mut completion_rx, &mut running_downloads).await;
+
+        let status = {
+            let man = ctx.group_man.read().await;
+            man.find_group(gid).unwrap().recover().status()
+        };
+        assert!(
+            matches!(status, DownloadStatus::Error(_)),
+            "a genuine network failure must still record an Error, got {:?}",
+            status
+        );
     }
 }

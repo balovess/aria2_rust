@@ -1,5 +1,7 @@
 //! Tests for BtRequestFactory.
 
+#![allow(dead_code)] // test infrastructure reused across suites
+
 use super::*;
 use crate::segment::piece::Piece;
 use std::sync::Arc;

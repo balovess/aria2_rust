@@ -16,6 +16,7 @@ use crate::error::{Aria2Error, Result};
 use crate::http::cookie::Cookie;
 use crate::http::cookie_storage::CookieStorage;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
@@ -46,6 +47,10 @@ pub struct DownloadCommand {
     pub(super) cookie_file: Option<String>,
     pub(super) no_proxy_matcher: Option<NoProxyMatcher>,
     pub(super) stat_man: Arc<ServerStatMan>,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// When `Some`, passed down to `ThrottledWriter` / segment download loops
+    /// so that all concurrent downloads share a single bandwidth ceiling.
+    pub(super) global_limiter: Option<RateLimiter>,
     pub(super) perf_monitor: Option<Arc<PerformanceMonitor>>,
     pub(super) atomic_metrics: Arc<AtomicMetrics>,
     pub(super) headers: Vec<(String, String)>,
@@ -217,7 +222,8 @@ impl DownloadCommand {
                 .no_proxy
                 .as_ref()
                 .map(|np| NoProxyMatcher::from_env_value(np)),
-            stat_man: Arc::new(ServerStatMan::new()),
+            stat_man: ServerStatMan::shared().clone(),
+            global_limiter: None,
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
             headers,
@@ -346,7 +352,8 @@ impl DownloadCommand {
                 .no_proxy
                 .as_ref()
                 .map(|np| NoProxyMatcher::from_env_value(np)),
-            stat_man: Arc::new(ServerStatMan::new()),
+            stat_man: ServerStatMan::shared().clone(),
+            global_limiter: None,
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
             headers,
@@ -374,6 +381,15 @@ impl DownloadCommand {
         let mut cmd = Self::new(gid, uri, options, output_dir, output_name)?;
         cmd.stat_man = stat_man;
         Ok(cmd)
+    }
+
+    /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
+    ///
+    /// When set, the download paths (sequential and concurrent) will acquire
+    /// tokens from this limiter in addition to the per-download limiter,
+    /// enforcing a global bandwidth ceiling across all concurrent downloads.
+    pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
+        self.global_limiter = Some(limiter);
     }
 
     pub fn enable_perf_monitor(&mut self) {

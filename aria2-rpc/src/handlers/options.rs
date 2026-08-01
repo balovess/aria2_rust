@@ -169,9 +169,35 @@ impl RpcEngine {
         }
 
         let mut opts = self.global_opts.write().await;
-        for (k, v) in new_opts {
-            opts.insert(k, v);
+        for (k, v) in &new_opts {
+            opts.insert(k.clone(), v.clone());
         }
+        drop(opts);
+        // Track user-set options separately so addUri/addTorrent can apply
+        // them to subsequent downloads (registry defaults must not leak in).
+        {
+            let mut user = self.user_global_opts.write().await;
+            for (k, v) in &new_opts {
+                user.insert(k.clone(), v.clone());
+            }
+        }
+        // Apply engine-level options live.
+        // max-concurrent-downloads drives the engine's slot limit; the
+        // engine loop reduces excess active downloads immediately.
+        if let Some(max) = new_opts
+            .get("max-concurrent-downloads")
+            .and_then(|v| v.as_u64())
+        {
+            if let Some(tx) = &self.engine_cmd_tx {
+                use aria2_core::engine::engine_command::EngineCommand;
+                let _ = tx.send(EngineCommand::SetMaxConcurrent {
+                    max: max as u32,
+                });
+            }
+        }
+        // TODO(engine): max-overall-download-limit / max-overall-upload-limit
+        // need a global RateLimiter in the engine (per-download limits already
+        // work via max-download-limit / max-upload-limit).
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             "OK",

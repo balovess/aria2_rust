@@ -10,6 +10,7 @@ use crate::engine::download_progress::ProgressUpdater;
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 use crate::filesystem::resume_helper::ResumeState;
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
 
 pub use pipeline::execute_with_coordinator;
@@ -42,6 +43,10 @@ pub struct ConcurrentDownloader {
     pub(crate) progress: Arc<AtomicProgress>,
     pub(crate) mmap_threshold: u64,
     pub(crate) file_allocation: String,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// When `Some`, tokens are acquired after the per-download limiter
+    /// in `segment.rs` and `pipeline.rs`.
+    pub(crate) global_limiter: Option<RateLimiter>,
 }
 
 impl ConcurrentDownloader {
@@ -56,6 +61,7 @@ impl ConcurrentDownloader {
         progress: Arc<AtomicProgress>,
         mmap_threshold: u64,
         file_allocation: String,
+        global_limiter: Option<RateLimiter>,
     ) -> Self {
         Self {
             client,
@@ -67,6 +73,7 @@ impl ConcurrentDownloader {
             progress,
             mmap_threshold,
             file_allocation,
+            global_limiter,
         }
     }
 

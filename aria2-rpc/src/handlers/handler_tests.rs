@@ -4,6 +4,7 @@
 
 use base64::Engine;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
@@ -686,9 +687,17 @@ async fn test_save_session_handler_basic() {
         engine.handle_request(&req).await;
     }
 
+    // Use a temp-file path so the write is portable (C:\tmp\... would fail
+    // or leak on Windows).
+    let path = std::env::temp_dir().join(format!(
+        "test_save_session_rpc_{}.sess",
+        std::process::id()
+    ));
+    let _ = tokio::fs::remove_file(&path).await;
+
     let req = JsonRpcRequest::new(
         "aria2.saveSession",
-        serde_json::json!(["/tmp/session_backup"]),
+        serde_json::json!([path.to_str().unwrap()]),
     )
     .with_id(10);
     let resp = engine.handle_request(&req).await;
@@ -700,18 +709,128 @@ async fn test_save_session_handler_basic() {
         result.contains("3"),
         "Result should indicate 3 downloads saved"
     );
+
+    // The session file must actually be written with the task URIs.
+    assert!(path.exists(), "saveSession must write the session file");
+    let content = tokio::fs::read_to_string(&path).await.unwrap();
+    assert!(
+        content.contains("http://save-session.com/0"),
+        "session file should contain the saved task URI"
+    );
+
+    let _ = tokio::fs::remove_file(&path).await;
 }
 
+/// `aria2.saveSession` with no explicit path must fall back to the engine's
+/// configured `--save-session` path (mirrors C++ reading PREF_SAVE_SESSION).
 #[tokio::test]
-async fn test_save_session_empty_dir_defaults() {
-    let engine = RpcEngine::new();
+async fn test_save_session_uses_configured_path() {
+    let path = std::env::temp_dir().join(format!(
+        "test_save_session_cfg_{}.sess",
+        std::process::id()
+    ));
+    let _ = tokio::fs::remove_file(&path).await;
 
-    let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([""])).with_id(1);
+    let engine = RpcEngine::new().with_save_session_path(path.clone());
+    let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success(), "saveSession with configured path should succeed");
+    assert!(path.exists(), "session file should be written to configured path");
+    let _ = tokio::fs::remove_file(&path).await;
+}
+
+/// `aria2.saveSession` with neither a path param nor a configured
+/// save-session path must fail (C++ throws "Filename is not given.").
+#[tokio::test]
+async fn test_save_session_without_path_errors() {
+    let engine = RpcEngine::new();
+    let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([])).with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_error(), "saveSession without any path should error");
+}
+
+/// `aria2.saveSession` wired to a RequestGroupMan persists the real group
+/// state and returns "OK".
+#[tokio::test]
+async fn test_save_session_with_group_man() {
+    use aria2_core::request::request_group::DownloadOptions;
+    use aria2_core::request::request_group_man::RequestGroupMan;
+    use tokio::sync::RwLock;
+
+    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    man.write()
+        .await
+        .add_group(
+            vec!["http://example.com/rpc-session.bin".into()],
+            DownloadOptions {
+                split: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let path = std::env::temp_dir().join(format!(
+        "test_save_session_man_{}.sess",
+        std::process::id()
+    ));
+    let _ = tokio::fs::remove_file(&path).await;
+
+    let engine = RpcEngine::new().with_group_man(man).with_save_session_path(path.clone());
+    let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([])).with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success(), "saveSession with group_man should succeed");
+
+    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert!(result.contains("OK"), "Result should contain OK");
+
+    assert!(path.exists(), "session file should be written");
+    let content = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(
-        resp.is_success(),
-        "Empty dir should default to '.' and succeed"
+        content.contains("http://example.com/rpc-session.bin"),
+        "session file should contain the group URI"
     );
+    assert!(
+        content.contains("split=3"),
+        "session file should contain the group option"
+    );
+
+    let _ = tokio::fs::remove_file(&path).await;
+}
+
+/// `aria2.saveSession` with an explicit path overrides the configured path.
+#[tokio::test]
+async fn test_save_session_explicit_path_overrides_config() {
+    let cfg_path = std::env::temp_dir().join(format!(
+        "test_save_session_cfg_over_{}.sess",
+        std::process::id()
+    ));
+    let explicit_path = std::env::temp_dir().join(format!(
+        "test_save_session_expl_{}.sess",
+        std::process::id()
+    ));
+    let _ = tokio::fs::remove_file(&cfg_path).await;
+    let _ = tokio::fs::remove_file(&explicit_path).await;
+
+    let engine = RpcEngine::new().with_save_session_path(cfg_path.clone());
+    let req = JsonRpcRequest::new(
+        "aria2.saveSession",
+        serde_json::json!([explicit_path.to_str().unwrap()]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success());
+
+    assert!(
+        explicit_path.exists(),
+        "explicit path must be written to"
+    );
+    assert!(
+        !cfg_path.exists(),
+        "configured path must NOT be written when explicit path given"
+    );
+
+    let _ = tokio::fs::remove_file(&explicit_path).await;
+    let _ = tokio::fs::remove_file(&cfg_path).await;
 }
 
 #[tokio::test]

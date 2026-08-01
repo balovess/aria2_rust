@@ -87,7 +87,7 @@ impl super::RequestGroup {
                 }
                 true
             }
-            "max-retries" => {
+            "max-tries" | "max-retries" => {
                 if let Some(v) = value.as_u64() {
                     opts.max_retries = v as u32;
                 }
@@ -205,7 +205,7 @@ impl super::RequestGroup {
                 opts.cookies = value.as_str().map(|s| s.to_string());
                 true
             }
-            "bt-force-encrypt" => {
+            "bt-force-encryption" | "bt-force-encrypt" => {
                 opts.bt_force_encrypt = value.as_bool().unwrap_or(false);
                 true
             }

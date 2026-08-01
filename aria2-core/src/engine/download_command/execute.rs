@@ -267,6 +267,7 @@ impl Command for DownloadCommand {
                     progress_arc,
                     self.mmap_threshold,
                     self.file_allocation.clone(),
+                    self.global_limiter.clone(),
                 );
                 match concurrent_downloader.execute_with_retry(
                     &uri,
@@ -289,6 +290,7 @@ impl Command for DownloadCommand {
                             progress_updater,
                             Arc::clone(&self.group),
                             Arc::clone(&self.progress),
+                            self.global_limiter.clone(),
                         );
                         return sequential_downloader.execute_with_gaps_with_retry(
                             &uri,
@@ -310,6 +312,7 @@ impl Command for DownloadCommand {
                 progress_updater,
                 Arc::clone(&self.group),
                 Arc::clone(&self.progress),
+                self.global_limiter.clone(),
             );
             sequential_downloader.execute_with_retry(
                 &uri,

@@ -207,6 +207,10 @@ pub struct DownloadOptions {
     pub enable_dht: bool,
     pub dht_listen_port: Option<u16>,
     pub dht_entry_point: Option<Vec<String>>,
+    /// User-specified tracker URLs that override the torrent's own
+    /// announce list (C++ `--bt-tracker`). Multiple URLs are comma or
+    /// newline separated.
+    pub bt_tracker: Option<Vec<String>>,
     pub enable_public_trackers: bool,
     pub bt_piece_selection_strategy: String,
     pub bt_endgame_threshold: u32,
@@ -444,6 +448,7 @@ impl Default for DownloadOptions {
             enable_dht: true,
             dht_listen_port: None,
             dht_entry_point: None,
+            bt_tracker: None,
             enable_public_trackers: true,
             bt_piece_selection_strategy: String::new(),
             bt_endgame_threshold: 0,

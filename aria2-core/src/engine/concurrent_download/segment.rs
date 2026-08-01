@@ -266,6 +266,11 @@ pub async fn execute(
                 if let Some(ref lim) = limiter {
                     lim.acquire_download(data.len() as u64).await;
                 }
+                if let Some(ref gl) = dl.global_limiter {
+                    if gl.is_download_limited() {
+                        gl.acquire_download(data.len() as u64).await;
+                    }
+                }
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "Write failed: {}",
@@ -295,6 +300,11 @@ pub async fn execute(
             if let Some(ref lim) = limiter {
                 lim.acquire_download(data.len() as u64).await;
             }
+            if let Some(ref gl) = dl.global_limiter {
+                if gl.is_download_limited() {
+                    gl.acquire_download(data.len() as u64).await;
+                }
+            }
             writer.write_bytes_at(offset, data).await.map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                     "Write failed: {}",
@@ -313,6 +323,11 @@ pub async fn execute(
                 while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
                     if let Some(ref lim) = limiter {
                         lim.acquire_download(data.len() as u64).await;
+                    }
+                    if let Some(ref gl) = dl.global_limiter {
+                        if gl.is_download_limited() {
+                            gl.acquire_download(data.len() as u64).await;
+                        }
                     }
                     writer.write_bytes_at(offset, data).await.map_err(|e| {
                         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -421,6 +436,11 @@ pub async fn execute(
                 if let Some(ref lim) = limiter {
                     lim.acquire_download(data.len() as u64).await;
                 }
+                if let Some(ref gl) = dl.global_limiter {
+                    if gl.is_download_limited() {
+                        gl.acquire_download(data.len() as u64).await;
+                    }
+                }
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "Write failed: {}",
@@ -450,6 +470,11 @@ pub async fn execute(
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
         if let Some(ref lim) = limiter {
             lim.acquire_download(data.len() as u64).await;
+        }
+        if let Some(ref gl) = dl.global_limiter {
+            if gl.is_download_limited() {
+                gl.acquire_download(data.len() as u64).await;
+            }
         }
         writer.write_bytes_at(offset, data).await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(

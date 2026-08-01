@@ -14,6 +14,7 @@ use super::engine_command::TaskResult;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::Aria2Error;
 use crate::ftp::FtpConnectionPool;
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -35,6 +36,7 @@ pub async fn spawn_download_task(
     group: Arc<std::sync::RwLock<RequestGroup>>,
     _ftp_pool: Arc<FtpConnectionPool>,
     _dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+    global_limiter: Option<RateLimiter>,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, TaskResult)>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let gid = group.recover().gid();
@@ -55,7 +57,12 @@ pub async fn spawn_download_task(
     };
 
     // Create the appropriate command based on URI scheme.
-    let cmd_result = create_command_for_uri(&first_uri, Arc::clone(&group), &options);
+    let cmd_result = create_command_for_uri(
+        &first_uri,
+        Arc::clone(&group),
+        &options,
+        global_limiter,
+    );
 
     let mut cmd: Box<dyn Command> = match cmd_result {
         Ok(c) => c,
@@ -111,6 +118,7 @@ fn create_command_for_uri(
     uri: &str,
     group: Arc<std::sync::RwLock<RequestGroup>>,
     options: &DownloadOptions,
+    global_limiter: Option<RateLimiter>,
 ) -> crate::error::Result<Box<dyn Command>> {
     let uri_lower = uri.to_lowercase();
 
@@ -121,6 +129,8 @@ fn create_command_for_uri(
         let cmd = crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
             group, output_dir,
         )?;
+        // TODO: Wire global_limiter into BT download paths once they support
+        // per-download rate limiting via ThrottledWriter.
         return Ok(Box::new(cmd));
     }
 
@@ -133,18 +143,23 @@ fn create_command_for_uri(
             output_dir,
             output_name,
         )?;
+        // TODO: Wire global_limiter into FTP download paths once they support
+        // per-download rate limiting via ThrottledWriter.
         return Ok(Box::new(cmd));
     }
 
     // Default: HTTP/HTTPS download command.
     let output_dir = options.dir.as_deref();
     let output_name = options.out.as_deref();
-    let cmd = crate::engine::download_command::DownloadCommand::new_with_group(
+    let mut cmd = crate::engine::download_command::DownloadCommand::new_with_group(
         group,
         uri,
         options,
         output_dir,
         output_name,
     )?;
+    if let Some(limiter) = global_limiter {
+        cmd.set_global_limiter(limiter);
+    }
     Ok(Box::new(cmd))
 }

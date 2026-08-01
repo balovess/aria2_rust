@@ -12,7 +12,7 @@ use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
 use crate::error::{Aria2Error, FatalError, Result};
-use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
+use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -34,17 +34,38 @@ impl BtDownloadCommand {
         last_pex_send: &mut Instant,
         pex_send_interval_secs: u64,
     ) -> Result<()> {
-        let raw_writer = DefaultDiskWriter::new(&self.output_path);
+        // Single-file torrents are written with a positioned + cached writer:
+        // BT downloads pieces out of order (RarestFirst etc.), so writes must
+        // target the piece offset — the old sequential `write()` appended
+        // pieces in arrival order and silently corrupted the file whenever
+        // pieces did not arrive in index order. The write-back cache also
+        // coalesces adjacent pieces before flushing (C++ WrDiskCache usage).
+        // Multi-file torrents go through the coalesced per-file writer below.
+        let cache_mb: Option<usize> = Some(16);
+        let raw_writer: Box<dyn SeekableDiskWriter> = if self.multi_file_layout.is_none() {
+            Box::new(CachedDiskWriter::new(
+                &self.output_path,
+                Some(total_size),
+                cache_mb,
+            ))
+        } else {
+            Box::new(
+                crate::filesystem::positioned_disk_writer::PositionedDiskWriter::new(
+                    &self.output_path,
+                    Some(total_size),
+                ),
+            )
+        };
         let rate_limit = {
             let g = self.group.recover();
             g.options().max_download_limit
         };
-        let mut writer: Box<dyn DiskWriter> = match rate_limit {
+        let mut writer: Box<dyn SeekableDiskWriter> = match rate_limit {
             Some(rate) if rate > 0 => Box::new(ThrottledWriter::new(
                 raw_writer,
                 RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)),
             )),
-            _ => Box::new(raw_writer),
+            _ => raw_writer,
         };
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
@@ -267,6 +288,7 @@ impl BtDownloadCommand {
                     actual_piece_len,
                     num_blocks,
                     &mut endgame_state,
+                    self.dht_engine.clone(),
                 )
                 .await
             } else {
@@ -275,6 +297,7 @@ impl BtDownloadCommand {
                     next_piece_idx as u32,
                     actual_piece_len,
                     num_blocks,
+                    self.dht_engine.clone(),
                 )
                 .await
             };
@@ -307,7 +330,12 @@ impl BtDownloadCommand {
                             )
                             .await?;
                         } else {
-                            writer.write(&piece_data).await?;
+                            writer
+                                .write_at(
+                                    next_piece_idx as u64 * piece_length as u64,
+                                    &piece_data,
+                                )
+                                .await?;
                         }
 
                         // Sync bitfield to RequestGroup for session persistence
@@ -363,6 +391,7 @@ impl BtDownloadCommand {
                     &mut piece_manager,
                     &mut piece_picker,
                     &mut writer,
+                    piece_length,
                 )
                 .await?;
 
@@ -395,8 +424,9 @@ impl BtDownloadCommand {
         }
 
         tracing::info!("[BT] Finalizing writer...");
-        writer.finalize().await.ok();
-        tracing::info!("[BT] Writer finalized OK");
+        writer.flush().await.ok();
+        writer.close().await.ok();
+        tracing::info!("[BT] Writer flushed and closed OK");
         info!(
             "BT download done: {} ({} bytes)",
             self.output_path.display(),

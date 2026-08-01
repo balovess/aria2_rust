@@ -11,6 +11,7 @@ use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,10 @@ pub struct SequentialDownloader {
     pub(crate) group: Arc<std::sync::RwLock<RequestGroup>>,
     /// Direct access to progress counters — avoids `RwLock` on the hot path.
     pub(crate) progress: Arc<AtomicProgress>,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// When `Some`, tokens are acquired after the per-download limiter
+    /// in `download_flow.rs` and `gap_download.rs`.
+    pub(crate) global_limiter: Option<RateLimiter>,
 }
 
 impl SequentialDownloader {
@@ -42,6 +47,7 @@ impl SequentialDownloader {
         progress_updater: ProgressUpdater,
         group: Arc<std::sync::RwLock<RequestGroup>>,
         progress: Arc<AtomicProgress>,
+        global_limiter: Option<RateLimiter>,
     ) -> Self {
         Self {
             client,
@@ -51,6 +57,7 @@ impl SequentialDownloader {
             progress_updater,
             group,
             progress,
+            global_limiter,
         }
     }
 

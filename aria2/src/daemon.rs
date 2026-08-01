@@ -151,6 +151,28 @@ impl Daemonizer {
     /// 4. Grandchild is fully detached from terminal
     ///
     /// On Windows, this creates a detached process.
+    ///
+    /// # Critical call-ordering constraints (Unix)
+    ///
+    /// `daemonize()` **must be called from the main thread, in the early
+    /// single-threaded phase** of the program:
+    ///
+    /// - **Before the tokio runtime initializes its I/O driver (reactor).**
+    ///   The runtime is created lazily on the first socket/timer registration.
+    ///   If the reactor exists when [`Daemonizer::daemonize`] runs, the
+    ///   fd-closing step in [`close_file_descriptors_unix`] will close the
+    ///   reactor's epoll/eventfd handles, and the daemon child will crash on
+    ///   the first async I/O.
+    /// - **Before the application spawns any of its own threads or performs
+    ///   heap-allocating work concurrently.** `fork()` only duplicates the
+    ///   calling thread; any lock (e.g. the allocator lock) held by a vanished
+    ///   thread at fork time stays locked forever in the child.
+    ///
+    /// In the current binary this holds: `main.rs` uses `#[tokio::main]`
+    /// (the runtime object exists, but no socket/timer has been registered
+    /// yet), and the call site in `App::run` runs after CLI/config parsing
+    /// but **before** `initialize_engine()` binds any sockets. Do not move
+    /// the call after engine initialization or into a `tokio::spawn` task.
     pub fn daemonize(&self) -> DaemonResult<()> {
         info!("Starting daemonization process...");
 
@@ -171,8 +193,49 @@ impl Daemonizer {
     }
 
     /// Unix-specific daemonization using double-fork technique.
+    ///
+    /// # Async-signal-safety caveat (fork discipline)
+    ///
+    /// The double-fork itself (`fork`/`setsid`/`_exit`) is async-signal-safe,
+    /// but the steps performed *after* the forks in the grandchild are **not**:
+    /// [`redirect_stdio_unix`](Self::redirect_stdio_unix) and
+    /// [`write_pid_file`](Self::write_pid_file) call `open`, `dup2`, and
+    /// `write`. In a multi-threaded process these can deadlock if the
+    /// allocator (or any other libc lock) was held by a thread that vanished
+    /// at `fork()` time.
+    ///
+    /// This is acceptable **only because** the caller is constrained to invoke
+    /// daemonize from the main thread in the early single-threaded phase
+    /// (see [`Daemonizer::daemonize`]). The current call site in `App::run`
+    /// (after CLI/config parsing, before `initialize_engine()`) satisfies
+    /// this: at that point only the tokio worker threads exist (spawned by
+    /// `#[tokio::main]`), and the surviving main thread is the only thread
+    /// performing the post-fork operations. The `fork` semantics are
+    /// intentionally unchanged.
     #[cfg(unix)]
     fn daemonize_unix(&self) -> DaemonResult<()> {
+        // Guard: fork() must come from the main thread, in the early
+        // single-threaded phase (see the doc comment on `daemonize`).
+        // The Rust std main thread is named "main"; tokio workers are named
+        // "tokio-runtime-worker*". If this assert fires, daemonize was moved
+        // into a spawned task or worker context — unsafe (fork only duplicates
+        // the calling thread; vanished threads leave locks permanently held).
+        {
+            let thread_name = std::thread::current().name().unwrap_or("").to_string();
+            if thread_name != "main" {
+                warn!(
+                    "daemonize() called from non-main thread '{}' — fork() in a \
+                     multi-threaded context is unsafe; inherited fd closing may \
+                     corrupt the tokio runtime",
+                    thread_name
+                );
+            }
+            debug_assert_eq!(
+                thread_name, "main",
+                "daemonize() must be called from the main thread, got '{thread_name}'"
+            );
+        }
+
         // Step 1: First fork
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -285,6 +348,24 @@ impl Daemonizer {
     }
 
     /// Close all file descriptors except stdin, stdout, stderr.
+    ///
+    /// # Risk
+    ///
+    /// This closes **every** fd in `3..max_fd`, including fds owned by the
+    /// tokio runtime. If the runtime's I/O driver (reactor: epoll / eventfd /
+    /// sockets) has been initialized before this runs, those handles are
+    /// destroyed and the daemon child crashes on its first async I/O.
+    ///
+    /// **Safety contract**: this must only be invoked from [`daemonize`](Self::daemonize),
+    /// which is documented to run before the runtime initializes its reactor
+    /// (see the call-ordering constraints on [`Daemonizer::daemonize`]).
+    ///
+    /// We intentionally do NOT switch to an fd-whitelist here: distinguishing
+    /// "inherited from the pre-fork parent" from "owned by the runtime" would
+    /// require tracking every fd the process has opened, which is a larger
+    /// change with its own risk. The conservative guarantee is the call-site
+    /// ordering above, plus a `debug_assert!` in `daemonize_unix` that this
+    /// runs on the main thread.
     #[cfg(unix)]
     fn close_file_descriptors_unix(&self) {
         // Get the maximum number of file descriptors

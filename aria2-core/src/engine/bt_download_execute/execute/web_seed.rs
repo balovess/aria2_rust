@@ -3,7 +3,6 @@ use tracing::{info, warn};
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
 use crate::error::Result;
-use crate::filesystem::disk_writer::DiskWriter;
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Attempt to download a piece from web seeds when peer download fails (BEP 19).
@@ -17,7 +16,8 @@ pub(super) async fn try_web_seed_fallback(
     next_piece_idx: usize,
     piece_manager: &mut aria2_protocol::bittorrent::piece::manager::PieceManager,
     piece_picker: &mut aria2_protocol::bittorrent::piece::picker::PiecePicker,
-    writer: &mut Box<dyn DiskWriter>,
+    writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
+    piece_length: u32,
 ) -> Result<bool> {
     let ws_mgr = match web_seed_manager {
         Some(mgr) => mgr,
@@ -53,7 +53,13 @@ pub(super) async fn try_web_seed_fallback(
                     )
                     .await?;
                 } else {
-                    writer.write(&web_seed_data).await.ok();
+                    writer
+                        .write_at(
+                            next_piece_idx as u64 * piece_length as u64,
+                            &web_seed_data,
+                        )
+                        .await
+                        .ok();
                 }
 
                 // Sync bitfield to RequestGroup for session persistence (Task 4)
