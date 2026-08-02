@@ -6,7 +6,6 @@ use std::sync::Arc;
 use crate::download::DownloadContext;
 use crate::engine::bt_peer_storage::PeerStorage;
 use crate::engine::bt_progress_info_file::BtProgressManager;
-use crate::engine::bt_runtime::BtRuntime;
 use crate::engine::bt_tracker_comm::BtAnnounce;
 use crate::segment::piece_storage::PieceStorage;
 
@@ -27,7 +26,6 @@ use crate::segment::piece_storage::PieceStorage;
 /// | `piece_storage` | `shared_ptr<PieceStorage>` |
 /// | `peer_storage` | `shared_ptr<PeerStorage>` |
 /// | `bt_announce` | `shared_ptr<BtAnnounce>` |
-/// | `bt_runtime` | `shared_ptr<BtRuntime>` |
 /// | `bt_progress_manager` | `shared_ptr<BtProgressInfoFile>` |
 ///
 /// [`BtRegistry`]: super::BtRegistry
@@ -47,9 +45,6 @@ pub struct BtObject {
     /// C++ uses `shared_ptr<BtAnnounce>`.
     pub bt_announce: Option<Arc<BtAnnounce>>,
 
-    /// Shared BT runtime state for this download (connection pool, stats).
-    pub bt_runtime: Option<Arc<BtRuntime>>,
-
     /// Shared BT progress manager for this download.
     /// Equivalent to C++ `shared_ptr<BtProgressInfoFile>`.
     pub bt_progress_manager: Option<Arc<BtProgressManager>>,
@@ -63,7 +58,6 @@ impl BtObject {
             piece_storage: None,
             peer_storage: None,
             bt_announce: None,
-            bt_runtime: None,
             bt_progress_manager: None,
         }
     }
@@ -100,10 +94,6 @@ impl fmt::Debug for BtObject {
             .field(
                 "bt_announce",
                 &self.bt_announce.as_ref().map(|_| "<BtAnnounce>"),
-            )
-            .field(
-                "bt_runtime",
-                &self.bt_runtime.as_ref().map(|_| "<BtRuntime>"),
             )
             .field(
                 "bt_progress_manager",
@@ -143,7 +133,6 @@ pub struct BtObjectBuilder {
     piece_storage: Option<Arc<dyn PieceStorage>>,
     peer_storage: Option<Arc<dyn PeerStorage>>,
     bt_announce: Option<Arc<BtAnnounce>>,
-    bt_runtime: Option<Arc<BtRuntime>>,
     bt_progress_manager: Option<Arc<BtProgressManager>>,
 }
 
@@ -172,12 +161,6 @@ impl BtObjectBuilder {
         self
     }
 
-    /// Set the BT runtime.
-    pub fn bt_runtime(mut self, runtime: Arc<BtRuntime>) -> Self {
-        self.bt_runtime = Some(runtime);
-        self
-    }
-
     /// Set the BT progress manager.
     pub fn bt_progress_manager(mut self, mgr: Arc<BtProgressManager>) -> Self {
         self.bt_progress_manager = Some(mgr);
@@ -191,7 +174,6 @@ impl BtObjectBuilder {
             piece_storage: self.piece_storage,
             peer_storage: self.peer_storage,
             bt_announce: self.bt_announce,
-            bt_runtime: self.bt_runtime,
             bt_progress_manager: self.bt_progress_manager,
         }
     }

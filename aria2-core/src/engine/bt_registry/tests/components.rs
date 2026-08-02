@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::download::DownloadContext;
 use crate::engine::bt_peer_storage::PeerStorage;
-use crate::engine::bt_runtime::BtRuntime;
 use crate::engine::bt_tracker_comm::BtAnnounce;
 use crate::segment::piece_storage::PieceStorage;
 
@@ -77,17 +76,6 @@ fn test_get_peer_storage() {
 
     assert!(registry.get_peer_storage(1).is_some());
     assert!(registry.get_peer_storage(999).is_none());
-}
-
-#[test]
-fn test_get_bt_runtime() {
-    let mut registry = BtRegistry::new();
-    let mut obj = BtObject::new();
-    obj.bt_runtime = Some(Arc::new(BtRuntime::new()));
-    registry.put(1, obj);
-
-    assert!(registry.get_bt_runtime(1).is_some());
-    assert!(registry.get_bt_runtime(999).is_none());
 }
 
 #[test]

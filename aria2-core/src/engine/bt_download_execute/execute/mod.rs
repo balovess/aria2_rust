@@ -65,13 +65,11 @@ impl Command for BtDownloadCommand {
                 &announce_list,
                 &announce_url,
             ));
-            let bt_runtime = Arc::new(crate::engine::bt_runtime::BtRuntime::new());
             let bt_object = crate::engine::bt_registry::BtObject::builder()
                 .download_context(download_context.unwrap_or_else(|| {
                     Arc::new(crate::download::DownloadContext::new(0, 0, String::new()))
                 }))
                 .bt_announce(bt_announce)
-                .bt_runtime(bt_runtime)
                 .build();
             if let Ok(mut reg) = registry.write() {
                 reg.put(gid, bt_object);

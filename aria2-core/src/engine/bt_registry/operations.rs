@@ -9,7 +9,6 @@ use super::BtRegistry;
 use crate::download::DownloadContext;
 use crate::engine::bt_peer_storage::PeerStorage;
 use crate::engine::bt_progress_info_file::BtProgressManager;
-use crate::engine::bt_runtime::BtRuntime;
 use crate::engine::bt_tracker_comm::BtAnnounce;
 use crate::segment::piece_storage::PieceStorage;
 
@@ -186,13 +185,6 @@ impl BtRegistry {
     pub fn get_peer_storage_by_info_hash(&self, info_hash: &str) -> Option<Arc<dyn PeerStorage>> {
         let gid = self.info_hash_index.get(info_hash)?;
         self.pool.get(gid).and_then(|obj| obj.peer_storage.clone())
-    }
-
-    /// Get the `BtRuntime` for the given GID.
-    ///
-    /// Returns `None` if the GID is not registered or has no runtime.
-    pub fn get_bt_runtime(&self, gid: u64) -> Option<Arc<BtRuntime>> {
-        self.pool.get(&gid).and_then(|obj| obj.bt_runtime.clone())
     }
 
     /// Get the `BtAnnounce` for the given GID.

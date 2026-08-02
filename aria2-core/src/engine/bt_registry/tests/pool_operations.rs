@@ -239,7 +239,6 @@ fn test_bt_object_builder() {
     assert!(obj.peer_storage.is_some());
     assert!(obj.bt_announce.is_some());
     assert!(obj.bt_progress_manager.is_none());
-    assert!(obj.bt_runtime.is_none());
 }
 
 // -----------------------------------------------------------------------
@@ -253,7 +252,6 @@ fn test_default() {
     assert!(obj.piece_storage.is_none());
     assert!(obj.peer_storage.is_none());
     assert!(obj.bt_announce.is_none());
-    assert!(obj.bt_runtime.is_none());
     assert!(obj.bt_progress_manager.is_none());
 
     let registry = BtRegistry::default();
@@ -321,6 +319,5 @@ fn test_bt_object_new_all_none() {
     assert!(obj.piece_storage.is_none());
     assert!(obj.peer_storage.is_none());
     assert!(obj.bt_announce.is_none());
-    assert!(obj.bt_runtime.is_none());
     assert!(obj.bt_progress_manager.is_none());
 }

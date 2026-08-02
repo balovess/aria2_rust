@@ -2,7 +2,7 @@
 //!
 //! Maps GID (download ID) to [`BtObject`], which bundles all shared state
 //! for a single BitTorrent download: `DownloadContext`, `PieceStorage`,
-//! `PeerStorage`, `BtAnnounce`, `BtRuntime`, and `BtProgressManager`.
+//! `PeerStorage`, `BtAnnounce`, and `BtProgressManager`.
 //!
 //! # Architecture Reference
 //!
@@ -15,7 +15,6 @@
 //! |---|---|---|
 //! | `unique_ptr<BtObject>` in pool | `BtObject` owned directly in `HashMap` | No heap indirection; Rust ownership suffices |
 //! | `shared_ptr<DownloadContext>` | `Arc<DownloadContext>` | Same shared-ownership semantics |
-//! | `shared_ptr<BtRuntime>` | `Arc<BtRuntime>` | Same shared-ownership semantics |
 //! | `shared_ptr<PieceStorage>` | `Option<Arc<dyn PieceStorage>>` | Same shared-ownership semantics via trait object |
 //! | `shared_ptr<PeerStorage>` | `Option<Arc<dyn PeerStorage>>` | Same shared-ownership semantics via trait object |
 //! | `shared_ptr<BtAnnounce>` | `Option<Arc<BtAnnounce>>` | Same shared-ownership semantics |

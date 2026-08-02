@@ -62,7 +62,7 @@ pub struct DownloadEngine {
     /// When true, the engine stays alive even with no pending/running commands
     /// (used for RPC listen mode). The loop only exits on shutdown signal.
     pub(crate) keep_alive: bool,
-    /// BitTorrent registry -- maps GID to BtObject (DownloadContext, BtRuntime,
+    /// BitTorrent registry -- maps GID to BtObject (DownloadContext,
     /// etc.). In C++ aria2, this is a global singleton in DownloadEngine.
     /// Here it is owned by the engine and accessible via `bt_registry()`.
     /// Used for info-hash reverse lookup, peer blocklist, and BT component
