@@ -3,7 +3,7 @@
 use tracing::trace;
 
 use super::bitfield::BlockBitfield;
-use super::completion::{finalize_hash, HashState};
+use super::completion::{HashState, finalize_hash};
 
 /// Default block length: 16 KiB (16384 bytes), matching aria2 C++ BLOCK_LENGTH.
 pub const DEFAULT_BLOCK_LENGTH: u32 = 16 * 1024;

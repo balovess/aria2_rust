@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use tracing::debug;
 
-use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 use super::basic::make_peer;
+use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 
 /// Helper to create an Instant in the past without panicking.
 fn instant_past(secs: u64) -> Instant {

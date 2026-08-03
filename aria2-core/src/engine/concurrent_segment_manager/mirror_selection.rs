@@ -1,5 +1,5 @@
-use super::types::SegmentStatus;
 use super::ConcurrentSegmentManager;
+use super::types::SegmentStatus;
 
 impl ConcurrentSegmentManager {
     // ==================== Intelligent Mirror Selection Methods ====================

@@ -9,8 +9,8 @@ use crate::engine::extension_registry::ExtensionUpdate;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 use tracing::{debug, trace, warn};
 
-use crate::engine::bt_peer_interaction::types::*;
 use super::super::BtPeerInteractive;
+use crate::engine::bt_peer_interaction::types::*;
 
 impl BtPeerInteractive {
     // -- Message dispatch -----------------------------------------------------
@@ -85,9 +85,10 @@ impl BtPeerInteractive {
                 // If the peer was a seeder before and now has even more,
                 // or if the peer now has all pieces, mark as seeder
                 if let Some(ref res) = conn.session_resource
-                    && res.is_seeder() {
-                        conn.seeder = true;
-                    }
+                    && res.is_seeder()
+                {
+                    conn.seeder = true;
+                }
                 update.have_index = Some(piece_index);
                 trace!("Dispatched Have({}) message", piece_index);
             }

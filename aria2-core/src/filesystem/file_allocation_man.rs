@@ -46,7 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{RwLock, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, FatalError, Result};
@@ -293,10 +293,7 @@ impl FileAllocationMan {
         }
         let entry = self.queue.pop_front()?;
         self.active_count += 1;
-        debug!(
-            gid = entry.gid,
-            "File allocation entry picked by worker"
-        );
+        debug!(gid = entry.gid, "File allocation entry picked by worker");
         self.picked = Some(PickedMeta::from_entry(&entry));
         Some(entry)
     }
@@ -584,11 +581,7 @@ const ZERO_FILL_CHUNK: usize = 256 * 1024;
 /// tick. `Falloc` and `Trunc` are atomic system calls and need no chunking;
 /// the `secure` flag is honoured only for fallocate (zero-fill on platforms
 /// that don't, e.g. macOS `F_PREALLOCATE` / Windows `SetFileValidData`).
-async fn allocate_single_file(
-    path: &Path,
-    length: u64,
-    entry: &FileAllocationEntry,
-) -> Result<()> {
+async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEntry) -> Result<()> {
     let offset = current_size(path).await;
     if offset >= length {
         debug!(path = %path.display(), "Skipping allocation, file already large enough");
@@ -920,7 +913,11 @@ mod tests {
             .unwrap();
 
         let meta = tokio::fs::metadata(&path).await.unwrap();
-        assert_eq!(meta.len(), target, "file must be zero-filled to target length");
+        assert_eq!(
+            meta.len(),
+            target,
+            "file must be zero-filled to target length"
+        );
 
         // Second run: file already at target → skipped, still succeeds.
         enqueue_path(&man, &path, target, AllocationStrategy::Prealloc, false, 42)
@@ -1047,11 +1044,17 @@ mod tests {
         assert!(r1.is_ok(), "entry 1 allocation failed: {:?}", r1);
         assert!(r2.is_ok(), "entry 2 allocation failed: {:?}", r2);
         assert_eq!(
-            tokio::fs::metadata(dir.join("big.bin")).await.unwrap().len(),
+            tokio::fs::metadata(dir.join("big.bin"))
+                .await
+                .unwrap()
+                .len(),
             2 * 1024 * 1024
         );
         assert_eq!(
-            tokio::fs::metadata(dir.join("small.bin")).await.unwrap().len(),
+            tokio::fs::metadata(dir.join("small.bin"))
+                .await
+                .unwrap()
+                .len(),
             4096
         );
 
@@ -1062,6 +1065,9 @@ mod tests {
     async fn test_shared_instance_is_process_wide() {
         let a = shared();
         let b = shared();
-        assert!(Arc::ptr_eq(&a, &b), "shared() must return the same instance");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "shared() must return the same instance"
+        );
     }
 }

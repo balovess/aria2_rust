@@ -5,7 +5,7 @@ mod tests {
     use base64::Engine;
 
     use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
-    use crate::http::auth_challenge_handler::{handle_auth_challenge, AuthChallengeResult};
+    use crate::http::auth_challenge_handler::{AuthChallengeResult, handle_auth_challenge};
     use crate::http::request_response::HttpMethod;
     use crate::http::skip_response::{AuthScheme, HttpAuthChallenge};
 
@@ -70,7 +70,9 @@ mod tests {
                 assert!(authorization_header.starts_with("Basic "));
                 assert!(!is_proxy);
                 // Verify the Base64-decoded value is "testuser:testpass"
-                let encoded = authorization_header.strip_prefix("Basic ").expect("must have Basic prefix");
+                let encoded = authorization_header
+                    .strip_prefix("Basic ")
+                    .expect("must have Basic prefix");
                 let decoded = String::from_utf8(
                     base64::engine::general_purpose::STANDARD
                         .decode(encoded)
@@ -116,7 +118,9 @@ mod tests {
                 ..
             } => {
                 assert!(authorization_header.starts_with("Basic "));
-                let encoded = authorization_header.strip_prefix("Basic ").expect("must have Basic prefix");
+                let encoded = authorization_header
+                    .strip_prefix("Basic ")
+                    .expect("must have Basic prefix");
                 let decoded = String::from_utf8(
                     base64::engine::general_purpose::STANDARD
                         .decode(encoded)
@@ -221,7 +225,10 @@ mod tests {
             AuthChallengeResult::RetryWithAuth { is_proxy, .. } => {
                 assert!(is_proxy);
             }
-            _ => panic!("Expected RetryWithAuth with is_proxy=true, got {:?}", result),
+            _ => panic!(
+                "Expected RetryWithAuth with is_proxy=true, got {:?}",
+                result
+            ),
         }
     }
 
@@ -330,7 +337,10 @@ mod tests {
         );
 
         match result {
-            AuthChallengeResult::UnsupportedScheme { scheme, status_code } => {
+            AuthChallengeResult::UnsupportedScheme {
+                scheme,
+                status_code,
+            } => {
                 assert_eq!(scheme, "NTLM");
                 assert_eq!(status_code, 401);
             }

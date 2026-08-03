@@ -83,11 +83,10 @@ impl BtDownloadCommand {
                 (Vec::new(), None)
             }
         };
-        let announcer =
-            Some(crate::engine::bt_tracker_comm::TrackerAnnouncer::new(
-                &announce_list,
-                &announce_url,
-            ));
+        let announcer = Some(crate::engine::bt_tracker_comm::TrackerAnnouncer::new(
+            &announce_list,
+            &announce_url,
+        ));
         let peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
 
         let mut manager = BtSeedManager::new_with_announcer(

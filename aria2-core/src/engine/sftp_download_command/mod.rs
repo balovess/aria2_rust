@@ -20,9 +20,9 @@
 //! ```
 
 mod execution;
-mod types;
-mod uri;
 #[cfg(test)]
 mod tests;
+mod types;
+mod uri;
 
 pub use types::SftpDownloadCommand;

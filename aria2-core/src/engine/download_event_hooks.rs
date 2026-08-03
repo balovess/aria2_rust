@@ -293,10 +293,7 @@ impl DownloadEventHooks {
         };
 
         if event.is_once_per_download()
-            && !self
-                .one_shot
-                .recover_mut()
-                .claim((gid.to_string(), event))
+            && !self.one_shot.recover_mut().claim((gid.to_string(), event))
         {
             debug!(
                 event = event.name(),
@@ -327,7 +324,10 @@ impl DownloadEventHooks {
         } else {
             hooks.push((event, command));
         }
-        debug!(event = event.name(), "Registered global download event hook");
+        debug!(
+            event = event.name(),
+            "Registered global download event hook"
+        );
     }
 
     /// Remove a global hook for the given event.
@@ -489,14 +489,8 @@ impl DownloadEventHooks {
                     .unwrap_or_else(|_| "cmd.exe".to_string());
 
                 let mut cmd = tokio::process::Command::new(&cmd_exe);
-                cmd.args([
-                    "/c",
-                    command,
-                    gid_hex,
-                    &num_files_str,
-                    first_file_path,
-                ])
-                .creation_flags(0x08000000); // CREATE_NO_WINDOW
+                cmd.args(["/c", command, gid_hex, &num_files_str, first_file_path])
+                    .creation_flags(0x08000000); // CREATE_NO_WINDOW
                 cmd.spawn()
             } else {
                 tokio::process::Command::new(command)
@@ -515,11 +509,7 @@ impl DownloadEventHooks {
         match result {
             Ok(mut child) => {
                 if let Some(id) = child.id() {
-                    debug!(
-                        event = event.name(),
-                        pid = id,
-                        "Hook process spawned"
-                    );
+                    debug!(event = event.name(), pid = id, "Hook process spawned");
                 }
                 // Fire-and-forget: await the child in a detached task
                 // to reap zombies on Unix.
@@ -600,10 +590,7 @@ impl DownloadEventContext {
         let (num_files, first_file_path) =
             if let Some(dctx) = group.download_context.recover().as_ref() {
                 let num = dctx.count_requested_file_entry();
-                let path = dctx
-                    .first_file_path()
-                    .unwrap_or_default()
-                    .to_string();
+                let path = dctx.first_file_path().unwrap_or_default().to_string();
                 (num, path)
             } else {
                 (0, String::new())

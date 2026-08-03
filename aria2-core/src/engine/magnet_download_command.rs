@@ -287,7 +287,8 @@ impl Command for MagnetDownloadCommand {
 
     fn request_group(
         &self,
-    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
+    {
         Some(std::sync::Arc::clone(&self.group))
     }
 

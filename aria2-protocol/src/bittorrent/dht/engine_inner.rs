@@ -154,9 +154,10 @@ impl DhtEngine {
         for node in &entry_points {
             let msg = super::message::DhtMessageBuilder::ping(0, &self_id);
             if let Ok(encoded) = msg.encode()
-                && let Err(e) = self.socket.send_to(node.addr, &encoded).await {
-                    debug!(addr = %node.addr, "Bootstrap ping failed: {}", e);
-                }
+                && let Err(e) = self.socket.send_to(node.addr, &encoded).await
+            {
+                debug!(addr = %node.addr, "Bootstrap ping failed: {}", e);
+            }
         }
 
         // Wait briefly for responses, then do a find_node for our own ID
@@ -224,17 +225,17 @@ impl DhtEngine {
                 // Send response
                 if let Some(response) = response
                     && let Ok(encoded) = response.encode()
-                        && let Err(e) = self.socket.send_to(from, &encoded).await {
-                            debug!(to = %from, "Failed to send DHT response: {}", e);
-                        }
+                    && let Err(e) = self.socket.send_to(from, &encoded).await
+                {
+                    debug!(to = %from, "Failed to send DHT response: {}", e);
+                }
 
                 // Mark sender as good and add to routing table
-                if mark_good
-                    && let Some(sender_id) = sender_id {
-                        let mut inner = self.inner.write().await;
-                        inner.routing_table.mark_good(&sender_id);
-                        inner.routing_table.insert(DhtNode::new(sender_id, from));
-                    }
+                if mark_good && let Some(sender_id) = sender_id {
+                    let mut inner = self.inner.write().await;
+                    inner.routing_table.mark_good(&sender_id);
+                    inner.routing_table.insert(DhtNode::new(sender_id, from));
+                }
             }
         }
     }
@@ -293,9 +294,10 @@ impl DhtEngine {
         for addr in buckets {
             let msg = DhtMessageBuilder::ping(rand::random::<u32>(), &self_id);
             if let Ok(encoded) = msg.encode()
-                && self.socket.send_to(addr, &encoded).await.is_ok() {
-                    contacted += 1;
-                }
+                && self.socket.send_to(addr, &encoded).await.is_ok()
+            {
+                contacted += 1;
+            }
         }
 
         if contacted > 0 {

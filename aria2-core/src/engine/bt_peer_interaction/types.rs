@@ -211,8 +211,7 @@ pub enum CheckHaveResult {
 /// Collected during `receive_messages()` so the caller can apply
 /// side-effects (e.g., cancelling outstanding requests after choke)
 /// after the batch is processed.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DispatchUpdate {
     /// Request slots removed by a Choke message (caller should send Cancel).
     pub cancelled_slots: Vec<RequestSlot>,
@@ -227,7 +226,6 @@ pub struct DispatchUpdate {
     /// Extension protocol update (BEP 10/9/11), if any.
     pub extension_update: Option<ExtensionUpdate>,
 }
-
 
 // ======================================================================
 // PeerIdCheckResult — same-peer-ID duplicate detection

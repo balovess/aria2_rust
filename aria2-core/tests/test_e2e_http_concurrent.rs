@@ -117,7 +117,7 @@ async fn test_http_segment_downloader_zero_length() {
     let client = reqwest::Client::new();
     let dl = HttpSegmentDownloader::new(&client);
     let result = dl
-        .download_range("http://example.com", 0, 0, None, &[], None)
+        .download_range("http://example.com", 0, 0, None, &[], None, 0)
         .await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());

@@ -40,7 +40,9 @@ pub fn handle_basic_challenge(
     // If the host:port:path combination is invalid for URL construction,
     // fall back to a placeholder that will still allow credential resolution.
     let url_for_resolve = url::Url::parse(&format!("http://{}:{}{}", host, port, path))
-        .unwrap_or_else(|_| url::Url::parse("http://localhost/").expect("fallback URL must be valid"));
+        .unwrap_or_else(|_| {
+            url::Url::parse("http://localhost/").expect("fallback URL must be valid")
+        });
 
     // In challenge mode, resolve returns the activated BasicCred
     let mut opts_with_challenge = auth_opts.clone();
@@ -53,7 +55,10 @@ pub fn handle_basic_challenge(
             let auth_header = basic_auth(ac.user(), ac.password());
             info!(
                 "Resolved Basic auth for {}:{}{} (user={})",
-                host, port, path, ac.user()
+                host,
+                port,
+                path,
+                ac.user()
             );
 
             if is_proxy {

@@ -1,7 +1,7 @@
 //! Test Group 3: Metalink Save -> Restore Round-trip
 
 use super::super::ext_trait::ResumeDataExt;
-use super::super::types::{ResumeData, RestoreState};
+use super::super::types::{RestoreState, ResumeData};
 use super::create_metalink_resume_data;
 
 #[test]

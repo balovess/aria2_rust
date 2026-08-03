@@ -8,10 +8,10 @@ use std::sync::Arc;
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::error::Result;
-use crate::util::rwlock_ext::RwLockRecover;
 use crate::filesystem::resume_helper::ResumeState;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub use pipeline::execute_with_coordinator;
 pub use segment::execute;
@@ -22,9 +22,7 @@ pub enum ConcurrentDownloadResult {
     Complete,
     /// The server does not support Range requests well enough; fall back to
     /// sequential mode, preserving already-completed byte ranges.
-    Fallback {
-        completed_ranges: Vec<(u64, u64)>,
-    },
+    Fallback { completed_ranges: Vec<(u64, u64)> },
 }
 
 /// Orchestrates concurrent (multi-segment / multi-mirror) HTTP downloads.
@@ -136,7 +134,14 @@ impl ConcurrentDownloader {
             )
             .await
         } else {
-            segment::execute(self, uri, total_length, resume_state, max_retries_per_segment).await
+            segment::execute(
+                self,
+                uri,
+                total_length,
+                resume_state,
+                max_retries_per_segment,
+            )
+            .await
         }
     }
 }

@@ -63,21 +63,17 @@ impl From<String> for FileOpError {
                 && let Ok(code) = rest[..paren_end].parse::<u32>()
             {
                 // Extract operation name (text before " failed").
-                let operation = s
-                    .split(" failed")
-                    .next()
-                    .unwrap_or("Unknown")
-                    .to_string();
+                let operation = s.split(" failed").next().unwrap_or("Unknown").to_string();
                 // Extract message after "): ".
-                let message = s
-                    .split("): ")
-                    .nth(1)
-                    .unwrap_or(&s)
-                    .to_string();
+                let message = s.split("): ").nth(1).unwrap_or(&s).to_string();
 
                 return match code {
-                    2 => FileOpError::NotFound { path: String::new() },
-                    3 => FileOpError::PermissionDenied { path: String::new() },
+                    2 => FileOpError::NotFound {
+                        path: String::new(),
+                    },
+                    3 => FileOpError::PermissionDenied {
+                        path: String::new(),
+                    },
                     6 | 7 => FileOpError::Network { operation, message },
                     _ => FileOpError::Other { message: s.clone() },
                 };

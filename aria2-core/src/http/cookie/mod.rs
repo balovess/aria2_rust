@@ -323,12 +323,13 @@ impl Cookie {
                         "expires" => {
                             // Max-Age takes precedence over Expires per RFC 6265 Section 5.3
                             if !cookie.persistent
-                                && let Some(ep) = parse_http_date(v.trim()) {
-                                    cookie.expiry_time = ep;
-                                    cookie.persistent = true;
-                                }
-                                // If Expires is unparseable, C++ rejects the cookie.
-                                // We are more lenient: we just ignore the Expires attribute.
+                                && let Some(ep) = parse_http_date(v.trim())
+                            {
+                                cookie.expiry_time = ep;
+                                cookie.persistent = true;
+                            }
+                            // If Expires is unparseable, C++ rejects the cookie.
+                            // We are more lenient: we just ignore the Expires attribute.
                         }
                         "samesite" => {
                             // SameSite attribute per RFC 6265bis Section 5.4.7

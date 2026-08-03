@@ -3,8 +3,8 @@
 use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 
-use crate::engine::extension_registry::ExtensionUpdate;
 use crate::engine::bt_peer_interaction::BtPeerInteractive;
+use crate::engine::extension_registry::ExtensionUpdate;
 
 use super::make_test_conn;
 

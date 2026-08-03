@@ -12,9 +12,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use super::{
-    LpdManager, LpdPeer, is_private_address, parse_lpd_announcement,
-};
+use super::{LpdManager, LpdPeer, is_private_address, parse_lpd_announcement};
 
 // =========================================================================
 // Helper Functions
@@ -76,10 +74,7 @@ fn test_lpd_bep14_format() {
         msg.contains(&format!("Infohash: {}", info_hash)),
         "Should contain Infohash header"
     );
-    assert!(
-        msg.ends_with("\r\n\r\n\r\n"),
-        "Should end with double CRLF"
-    );
+    assert!(msg.ends_with("\r\n\r\n\r\n"), "Should end with double CRLF");
 }
 
 // =========================================================================
@@ -169,8 +164,7 @@ fn test_lpd_receive_parses_legacy_format() {
 
     // Old proprietary format (Hash:/Port:/Token:) should still parse
     let data =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: abcdef01\n"
-            .as_bytes();
+        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\nToken: abcdef01\n".as_bytes();
 
     let result = parse_lpd_announcement(data, sender_ip);
     assert!(
@@ -188,8 +182,7 @@ fn test_lpd_legacy_format_without_token_still_works() {
     let sender_ip = test_ip();
 
     // Legacy format without Token field should also parse
-    let data =
-        "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n".as_bytes();
+    let data = "Hash: 0123456789abcdef0123456789abcdef01234567\nPort: 6881\n".as_bytes();
 
     let result = parse_lpd_announcement(data, sender_ip);
     assert!(result.is_some(), "Legacy format without Token should parse");
@@ -213,7 +206,8 @@ fn test_lpd_receive_ignores_invalid() {
     );
 
     // Case 2: Missing Infohash field in BEP14 format
-    let no_infohash = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\n\r\n\r\n".as_bytes();
+    let no_infohash =
+        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\n\r\n\r\n".as_bytes();
     assert!(
         parse_lpd_announcement(no_infohash, sender_ip).is_none(),
         "Missing Infohash should return None"
@@ -432,41 +426,65 @@ fn test_lpd_peer_hash_equality_for_set_dedup() {
 fn test_is_private_address_ipv4() {
     // 10.0.0.0/8
     assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        10, 255, 255, 255
+    ))));
 
     // 172.16.0.0/12
-    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        172, 16, 0, 1
+    ))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        172, 31, 255, 255
+    ))));
 
     // 192.168.0.0/16
-    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
-    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(192, 168, 255, 255))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        192, 168, 0, 1
+    ))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        192, 168, 255, 255
+    ))));
 
     // 127.0.0.0/8 (loopback)
     assert!(is_private_address(&IpAddr::V4(Ipv4Addr::LOCALHOST)));
 
     // 169.254.0.0/16 (link-local)
-    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
-    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        169, 254, 0, 1
+    ))));
+    assert!(is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        169, 254, 255, 255
+    ))));
 
     // NOT private
     assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
     assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
-    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 15, 0, 1))));
-    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(172, 32, 0, 1))));
+    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        172, 15, 0, 1
+    ))));
+    assert!(!is_private_address(&IpAddr::V4(Ipv4Addr::new(
+        172, 32, 0, 1
+    ))));
 }
 
 #[test]
 fn test_is_private_address_ipv6() {
     // fc00::/7 (unique local)
-    assert!(is_private_address(&IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1))));
-    assert!(is_private_address(&IpAddr::V6(Ipv6Addr::new(0xfdff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff))));
+    assert!(is_private_address(&IpAddr::V6(Ipv6Addr::new(
+        0xfc00, 0, 0, 0, 0, 0, 0, 1
+    ))));
+    assert!(is_private_address(&IpAddr::V6(Ipv6Addr::new(
+        0xfdff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+    ))));
 
     // ::1 (loopback)
     assert!(is_private_address(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
 
     // NOT private
-    assert!(!is_private_address(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))));
+    assert!(!is_private_address(&IpAddr::V6(Ipv6Addr::new(
+        0x2001, 0xdb8, 0, 0, 0, 0, 0, 1
+    ))));
 }
 
 // =========================================================================
@@ -511,7 +529,10 @@ async fn test_lpd_manager_register_unregister() {
     let manager = LpdManager::default();
 
     // Register a torrent
-    manager.register_torrent(test_info_hash(), false).await.unwrap();
+    manager
+        .register_torrent(test_info_hash(), false)
+        .await
+        .unwrap();
 
     // Check active hashes
     let active = manager.active_hashes.read().await;
@@ -544,7 +565,10 @@ async fn test_lpd_manager_update_and_get_peers() {
     let manager = LpdManager::default();
 
     // Register first
-    manager.register_torrent(test_info_hash(), false).await.unwrap();
+    manager
+        .register_torrent(test_info_hash(), false)
+        .await
+        .unwrap();
 
     // Add some discovered peers
     let new_peers = vec![
@@ -575,8 +599,14 @@ async fn test_lpd_manager_update_and_get_peers() {
 async fn test_lpd_manager_multiple_torrents_independent() {
     let manager = LpdManager::default();
 
-    manager.register_torrent(test_info_hash(), false).await.unwrap();
-    manager.register_torrent(test_info_hash_2(), false).await.unwrap();
+    manager
+        .register_torrent(test_info_hash(), false)
+        .await
+        .unwrap();
+    manager
+        .register_torrent(test_info_hash_2(), false)
+        .await
+        .unwrap();
 
     // Add peers to first torrent
     manager
@@ -616,7 +646,10 @@ async fn test_lpd_manager_multiple_torrents_independent() {
 #[tokio::test]
 async fn test_lpd_manager_cleanup_expired_peers() {
     let manager = LpdManager::default();
-    manager.register_torrent(test_info_hash(), false).await.unwrap();
+    manager
+        .register_torrent(test_info_hash(), false)
+        .await
+        .unwrap();
 
     // Add a peer that's immediately "expired" (max_age = 0)
     let peer = LpdPeer::new(test_info_hash(), 6881, test_ip());
@@ -651,7 +684,10 @@ async fn test_lpd_private_torrent_rejected() {
     // Private torrent should be rejected
     let private_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let result = manager.register_torrent(private_hash, true).await;
-    assert!(result.is_err(), "Private torrent should be rejected from LPD");
+    assert!(
+        result.is_err(),
+        "Private torrent should be rejected from LPD"
+    );
     assert!(
         result.unwrap_err().contains("BEP 0027"),
         "Error should reference BEP 0027"

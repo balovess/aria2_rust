@@ -64,12 +64,7 @@ impl BtMessageHandler {
             // Wait for response with timeout
             match tokio::time::timeout(
                 std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
-                Self::wait_for_piece_block(
-                    conn,
-                    piece_index,
-                    block_offset,
-                    dht_engine.clone(),
-                ),
+                Self::wait_for_piece_block(conn, piece_index, block_offset, dht_engine.clone()),
             )
             .await
             {
@@ -152,10 +147,7 @@ impl BtMessageHandler {
                                 if let Ok(addr) = addr
                                     && let Some(eng) = dht_engine.clone()
                                 {
-                                    trace!(
-                                        "[BT] DHT port message: adding node {}",
-                                        addr
-                                    );
+                                    trace!("[BT] DHT port message: adding node {}", addr);
                                     tokio::spawn(async move {
                                         eng.add_node(addr).await;
                                     });
@@ -262,11 +254,7 @@ impl BtMessageHandler {
     /// for the download loop to drain and connect. On parse failure, the
     /// message is silently ignored (it might be ut_metadata or another
     /// extension we don't handle here).
-    pub(crate) fn try_process_pex_during_read(
-        conn: &mut BtPeerConn,
-        ext_id: u8,
-        payload: &[u8],
-    ) {
+    pub(crate) fn try_process_pex_during_read(conn: &mut BtPeerConn, ext_id: u8, payload: &[u8]) {
         use aria2_protocol::bittorrent::message::extension::UtPexMessage;
         use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
@@ -358,14 +346,8 @@ impl BtMessageHandler {
                 );
 
                 // Try to get this block from any peer
-                match Self::request_block(
-                    connections,
-                    piece_index,
-                    offset,
-                    len,
-                    dht_engine.clone(),
-                )
-                .await
+                match Self::request_block(connections, piece_index, offset, len, dht_engine.clone())
+                    .await
                 {
                     Ok(result) if result.success => {
                         if let Some(data) = result.data {

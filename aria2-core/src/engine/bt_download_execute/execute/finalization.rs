@@ -46,8 +46,7 @@ impl BtDownloadCommand {
         // observe `onBtDownloadComplete` and then `onDownloadComplete`.
         // `finalize_download` is async, so a Tokio runtime is guaranteed and
         // the shell-hook sink is safe to drive from here as well.
-        DownloadEventHooks::shared()
-            .fire_event(DownloadEvent::BtComplete, &self.group.recover());
+        DownloadEventHooks::shared().fire_event(DownloadEvent::BtComplete, &self.group.recover());
 
         {
             let mut g = self.group.recover_mut();
@@ -80,9 +79,10 @@ impl BtDownloadCommand {
         if let Some(ref registry) = self.bt_registry {
             let gid = self.group.recover().gid().value();
             if let Ok(mut reg) = registry.write()
-                && reg.remove(gid) {
-                    info!(gid, "Removed BT download from BtRegistry on finalization");
-                }
+                && reg.remove(gid)
+            {
+                info!(gid, "Removed BT download from BtRegistry on finalization");
+            }
         }
 
         // Send "stopped" event to trackers before shutdown.

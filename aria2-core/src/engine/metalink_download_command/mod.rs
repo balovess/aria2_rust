@@ -1,7 +1,7 @@
 mod execution;
-mod types;
 #[cfg(test)]
 mod tests;
+mod types;
 
 pub use types::{select_mirrors_by_priority, try_mirrors_with_failover};
 
@@ -85,9 +85,10 @@ impl MetalinkDownloadCommand {
         if file.urls.is_empty() {
             // A torrent metaurl is still a valid download path (C++
             // BtDependency); reject only when there is nothing at all.
-            let has_torrent_metaurl = file.meta_urls.iter().any(|m| {
-                m.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
-            });
+            let has_torrent_metaurl = file
+                .meta_urls
+                .iter()
+                .any(|m| m.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent);
             if !has_torrent_metaurl {
                 return Err(Aria2Error::Fatal(FatalError::Config(
                     "Metalink file has no download URL".into(),

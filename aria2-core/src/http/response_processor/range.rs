@@ -8,16 +8,13 @@ use crate::http::header_processor::HttpResponseHead;
 
 /// Validate that the server's Content-Range satisfies the requested range.
 ///
-/// Matches C++ `HttpRequest::isRangeSatisfied()` semantics:
+/// Matches the range portion of C++ `HttpRequest::isRangeSatisfied()`:
 /// - If `req_end == 0` (no explicit end requested), only checks that
-///   `resp_start == req_start` (start must match exactly).
-/// - If `req_end > 0`, requires `resp_start == req_start` AND the server's
-///   end byte must be >= requested end byte (server may return a superset
-///   range, which is acceptable per HTTP/1.1 §14.16).
+///   `resp_start == req_start`.
+/// - If `req_end > 0`, requires both the start and end bytes to match exactly.
 ///
-/// This is more lenient than strict equality: a server returning
-/// `Content-Range: bytes 0-999/5000` satisfies a request for `bytes 0-499`
-/// because the server's range covers what was requested.
+/// The C++ method also compares the entity length. The response validator
+/// performs that comparison because this helper does not receive it.
 ///
 /// # Arguments
 ///
@@ -48,10 +45,10 @@ pub fn validate_response_range(
         return Ok(());
     }
 
-    // Server's end must cover at least what we requested
-    if resp_end < req_end {
+    // C++ requires exact equality when an explicit end was requested.
+    if resp_end != req_end {
         return Err(format!(
-            "Range end insufficient: requested={}, server={}",
+            "Range end mismatch: requested={}, server={}",
             req_end, resp_end
         ));
     }
@@ -72,30 +69,18 @@ pub(crate) fn parse_content_range(response_head: &HttpResponseHead) -> Option<(u
 /// Format: `bytes start-end/total` or `bytes */total`.
 pub(crate) fn parse_content_range_value(value: &str) -> Option<(u64, u64, u64)> {
     let value = value.trim();
-
-    // Must start with "bytes "
-    let rest = value.strip_prefix("bytes ")?;
-
-    // Parse total (after /)
-    let slash_pos = rest.rfind('/')?;
-    let total_str = &rest[slash_pos + 1..];
-    let total: u64 = if total_str == "*" {
-        0 // Unknown total
-    } else {
-        total_str.parse().ok()?
-    };
-
-    // Parse start-end (before /)
-    let range_str = &rest[..slash_pos];
-    if range_str == "*" {
-        // "bytes */total" — unspecified range
-        return Some((0, 0, total));
+    let range = value
+        .strip_prefix("bytes")
+        .map(|rest| rest.trim_start_matches([' ', '\t', '=']))
+        .unwrap_or(value);
+    let (range, total) = range.split_once('/')?;
+    if range.trim() == "*" || total.trim() == "*" {
+        return None;
     }
-
-    let dash_pos = range_str.find('-')?;
-    let start: u64 = range_str[..dash_pos].parse().ok()?;
-    let end: u64 = range_str[dash_pos + 1..].parse().ok()?;
-
+    let (start, end) = range.trim().split_once('-')?;
+    let start = start.trim().parse().ok()?;
+    let end = end.trim().parse().ok()?;
+    let total = total.trim().parse().ok()?;
     Some((start, end, total))
 }
 
@@ -149,9 +134,14 @@ mod tests {
             parse_content_range_value("bytes 500-999/1000"),
             Some((500, 999, 1000))
         );
+        assert_eq!(parse_content_range_value("bytes */1000"), None);
         assert_eq!(
-            parse_content_range_value("bytes */1000"),
-            Some((0, 0, 1000))
+            parse_content_range_value("bytes=0-499/1000"),
+            Some((0, 499, 1000))
+        );
+        assert_eq!(
+            parse_content_range_value("0-499/1000"),
+            Some((0, 499, 1000))
         );
         assert_eq!(parse_content_range_value("bytes 0-0/1"), Some((0, 0, 1)));
     }
@@ -167,8 +157,8 @@ mod tests {
     fn test_validate_response_range_match() {
         assert!(validate_response_range(0, 499, 0, 499).is_ok());
         assert!(validate_response_range(500, 999, 500, 999).is_ok());
-        // Server returning superset range is acceptable (C++ isRangeSatisfied)
-        assert!(validate_response_range(0, 499, 0, 999).is_ok());
+        assert!(validate_response_range(0, 499, 0, 999).is_err());
+        assert!(validate_response_range(0, 499, 0, 499).is_ok());
         // No explicit end requested (req_end=0): only start must match
         assert!(validate_response_range(0, 0, 0, 999).is_ok());
     }
@@ -181,11 +171,12 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_response_range_end_insufficient() {
-        // Server returned fewer bytes than requested
+    fn test_validate_response_range_end_mismatch() {
         let result = validate_response_range(0, 999, 0, 499);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("insufficient"));
+        assert_eq!(
+            result.unwrap_err(),
+            "Range end mismatch: requested=999, server=499"
+        );
     }
 
     #[test]

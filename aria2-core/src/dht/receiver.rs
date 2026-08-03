@@ -86,42 +86,43 @@ impl DhtReceiver {
         // Step 1: Is this a response to a tracked query?
         // Peek at the transaction ID first without decoding the full message.
         if let Some(tid) = Self::extract_transaction_id(data)
-            && let Some(tracked) = dispatcher.take_tracked(&tid, remote_addr) {
-                // This is a response to one of our queries
-                let method = tracked.method.clone();
-                let target_node_id = tracked.target_node_id;
-                let elapsed = tracked.elapsed;
-                trace!(
-                    tid = ?tid,
-                    addr = %remote_addr,
-                    method = %method,
-                    "Received DHT response matching tracked query"
-                );
+            && let Some(tracked) = dispatcher.take_tracked(&tid, remote_addr)
+        {
+            // This is a response to one of our queries
+            let method = tracked.method.clone();
+            let target_node_id = tracked.target_node_id;
+            let elapsed = tracked.elapsed;
+            trace!(
+                tid = ?tid,
+                addr = %remote_addr,
+                method = %method,
+                "Received DHT response matching tracked query"
+            );
 
-                // Decode the response using the known method
-                match message_decode::decode_response_with_method(data, remote_addr, &method) {
-                    Ok(msg) => {
-                        self.handle_response(
-                            &msg,
-                            remote_addr,
-                            target_node_id,
-                            elapsed,
-                            routing_table,
-                            peer_announce_storage,
-                            &mut actions,
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            addr = %remote_addr,
-                            method = %method,
-                            error = %e,
-                            "Failed to decode DHT response"
-                        );
-                    }
+            // Decode the response using the known method
+            match message_decode::decode_response_with_method(data, remote_addr, &method) {
+                Ok(msg) => {
+                    self.handle_response(
+                        &msg,
+                        remote_addr,
+                        target_node_id,
+                        elapsed,
+                        routing_table,
+                        peer_announce_storage,
+                        &mut actions,
+                    );
                 }
-                return actions;
+                Err(e) => {
+                    warn!(
+                        addr = %remote_addr,
+                        method = %method,
+                        error = %e,
+                        "Failed to decode DHT response"
+                    );
+                }
             }
+            return actions;
+        }
 
         // Step 2: Try to decode as a new query or error
         match message_decode::decode(data, remote_addr) {
@@ -222,10 +223,7 @@ impl DhtReceiver {
 
         // Generate the appropriate response
         match msg {
-            DhtMessage::PingQuery {
-                transaction_id,
-                ..
-            } => {
+            DhtMessage::PingQuery { transaction_id, .. } => {
                 debug!(tid = ?transaction_id, addr = %remote_addr, "Received DHT ping query");
                 let reply = DhtMessage::PingResponse {
                     transaction_id: transaction_id.clone(),

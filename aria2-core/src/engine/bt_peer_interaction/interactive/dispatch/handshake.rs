@@ -9,8 +9,8 @@ use aria2_protocol::bittorrent::message::handshake::Handshake;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use tracing::{info, warn};
 
-use crate::engine::bt_peer_interaction::types::*;
 use super::super::BtPeerInteractive;
+use crate::engine::bt_peer_interaction::types::*;
 
 impl BtPeerInteractive {
     // -- Handshake reception --------------------------------------------------
@@ -53,11 +53,8 @@ impl BtPeerInteractive {
         our_peer_id: &[u8; 20],
         connected_peer_ids: impl IntoIterator<Item = &'a [u8; 20]>,
     ) -> Result<()> {
-        let result = Self::check_duplicate_peer_id(
-            &handshake.peer_id,
-            our_peer_id,
-            connected_peer_ids,
-        );
+        let result =
+            Self::check_duplicate_peer_id(&handshake.peer_id, our_peer_id, connected_peer_ids);
 
         match result {
             PeerIdCheckResult::SelfConnection => {

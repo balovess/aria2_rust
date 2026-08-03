@@ -1,4 +1,4 @@
-﻿//! CONNECT tunnel establishment and I/O helpers
+//! CONNECT tunnel establishment and I/O helpers
 
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::header_processor::HttpHeaderProcessor;
 use crate::http::request_response::basic_auth;
 
-use super::auth;
 use super::HttpProxyTunnelConfig;
+use super::auth;
 
 // ---------------------------------------------------------------------------
 // HttpProxyTunnel -- internal implementation

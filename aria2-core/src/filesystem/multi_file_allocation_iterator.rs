@@ -145,11 +145,12 @@ impl MultiFileAllocationIterator {
 
             // Create parent directories if needed.
             if let Some(parent) = entry.get_file_path().parent()
-                && !parent.exists() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                        crate::error::Aria2Error::Io(format!("create_dir_all {:?}: {}", parent, e))
-                    })?;
-                }
+                && !parent.exists()
+            {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    crate::error::Aria2Error::Io(format!("create_dir_all {:?}: {}", parent, e))
+                })?;
+            }
 
             // Open a dedicated DirectDiskAdaptor for this file (mirrors C++
             // creating a dedicated DiskWriter per file).

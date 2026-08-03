@@ -1,4 +1,4 @@
-﻿//! Pipelining and request queue management — target piece lifecycle.
+//! Pipelining and request queue management — target piece lifecycle.
 
 use tracing::debug;
 

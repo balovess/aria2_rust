@@ -2,7 +2,7 @@
 
 use super::encoding::{is_dir_traversal, iso8859p1_to_utf8};
 use super::parser::hex_digit;
-use super::{parse_content_disposition, extract_filename};
+use super::{extract_filename, parse_content_disposition};
 
 // -- Basic disposition type parsing --
 
@@ -131,8 +131,7 @@ fn test_ext_filename_with_language() {
 
 #[test]
 fn test_duplicate_filename_is_rejected() {
-    let result =
-        parse_content_disposition("attachment; filename=first.txt; filename=second.txt");
+    let result = parse_content_disposition("attachment; filename=first.txt; filename=second.txt");
     // Duplicate filename= should cause parse failure
     assert_eq!(result.disposition_type, "");
     assert!(result.filename.is_none());
@@ -414,8 +413,7 @@ fn test_only_plain_filename() {
 
 #[test]
 fn test_non_filename_params_ignored() {
-    let result =
-        parse_content_disposition("form-data; name=\"fieldName\"; filename=\"file.dat\"");
+    let result = parse_content_disposition("form-data; name=\"fieldName\"; filename=\"file.dat\"");
     assert_eq!(result.disposition_type, "form-data");
     assert_eq!(result.filename.as_deref(), Some("file.dat"));
 }
@@ -425,9 +423,8 @@ fn test_non_filename_params_ignored() {
 #[test]
 fn test_percent_encoded_cjk() {
     // 日本語 in UTF-8: e6 97 a5 e6 9c ac e8 aa 9e
-    let result = parse_content_disposition(
-        "attachment; filename*=UTF-8''%e6%97%a5%e6%9c%ac%e8%aa%9e.txt",
-    );
+    let result =
+        parse_content_disposition("attachment; filename*=UTF-8''%e6%97%a5%e6%9c%ac%e8%aa%9e.txt");
     assert_eq!(
         result.filename.as_deref(),
         Some("\u{65e5}\u{672c}\u{8a9e}.txt")
@@ -875,7 +872,8 @@ fn test_missing_delimiter_between_params_rejected() {
 fn test_rfc2047_token_rejected_but_quoted_accepted() {
     // C++ `attrfc2047token` -> -1, `attrfc2047quoted` -> literal value.
     assert_rejected("attachment; filename==?ISO-8859-1?Q?foo-=E4.html?=");
-    let result = parse_content_disposition("attachment; filename=\"=?ISO-8859-1?Q?foo-=E4.html?=\"");
+    let result =
+        parse_content_disposition("attachment; filename=\"=?ISO-8859-1?Q?foo-=E4.html?=\"");
     assert_eq!(
         result.filename.as_deref(),
         Some("=?ISO-8859-1?Q?foo-=E4.html?=")
@@ -891,10 +889,7 @@ fn test_non_filename_params_parse_without_filename() {
         "attachment",
     );
     assert_accepted_without_filename("foobar", "foobar");
-    assert_accepted_without_filename(
-        "attachment; example=\"filename=example.txt\"",
-        "attachment",
-    );
+    assert_accepted_without_filename("attachment; example=\"filename=example.txt\"", "attachment");
     assert_accepted_without_filename("attachment; name=\"foo-%41.html\"", "attachment");
 }
 

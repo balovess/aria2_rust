@@ -243,8 +243,10 @@ impl App {
         // Pass the configured --save-session path through so the RPC
         // `aria2.saveSession` method can persist without an explicit path
         // argument (mirrors C++ reading PREF_SAVE_SESSION).
-        let rpc_engine = if let Some(save_path) =
-            self.get_opt_str("save-session").await.map(std::path::PathBuf::from)
+        let rpc_engine = if let Some(save_path) = self
+            .get_opt_str("save-session")
+            .await
+            .map(std::path::PathBuf::from)
         {
             rpc_engine.with_save_session_path(save_path)
         } else {

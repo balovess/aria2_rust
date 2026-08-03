@@ -1,6 +1,6 @@
+use super::SocksConnector;
 use super::socks4::Socks4Connector;
 use super::socks5::Socks5Connector;
-use super::SocksConnector;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 

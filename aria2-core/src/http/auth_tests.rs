@@ -1,5 +1,5 @@
-use super::auth::*;
 use super::auth::netrc::NetrcError;
+use super::auth::*;
 use url::Url;
 
 #[test]
@@ -179,9 +179,9 @@ fn test_erase_confidential_proxy_auth() {
 #[test]
 fn test_netrc_to_auth_factory_http() {
     let mut factory = AuthConfigFactory::new();
-    factory.load_netrc_str(
-        "machine http.example.com\nlogin netrcuser\npassword netrcpass\n"
-    ).unwrap();
+    factory
+        .load_netrc_str("machine http.example.com\nlogin netrcuser\npassword netrcpass\n")
+        .unwrap();
 
     let url = Url::parse("http://http.example.com/file").unwrap();
     let opts = AuthResolveOptions::default();
@@ -193,9 +193,9 @@ fn test_netrc_to_auth_factory_http() {
 #[test]
 fn test_netrc_to_auth_factory_ftp() {
     let mut factory = AuthConfigFactory::new();
-    factory.load_netrc_str(
-        "machine ftp.example.com\nlogin ftpuser\npassword ftppass\n"
-    ).unwrap();
+    factory
+        .load_netrc_str("machine ftp.example.com\nlogin ftpuser\npassword ftppass\n")
+        .unwrap();
 
     let url = Url::parse("ftp://ftp.example.com/file").unwrap();
     let opts = AuthResolveOptions::default();
@@ -207,10 +207,12 @@ fn test_netrc_to_auth_factory_ftp() {
 #[test]
 fn test_netrc_default_fallback_for_http() {
     let mut factory = AuthConfigFactory::new();
-    factory.load_netrc_str(
-        "machine known.example.com\nlogin knownuser\npassword knownpass\n\
-         default\nlogin defaultuser\npassword defaultpass\n"
-    ).unwrap();
+    factory
+        .load_netrc_str(
+            "machine known.example.com\nlogin knownuser\npassword knownpass\n\
+         default\nlogin defaultuser\npassword defaultpass\n",
+        )
+        .unwrap();
 
     // Known host gets its specific entry
     let url = Url::parse("http://known.example.com/file").unwrap();
@@ -228,9 +230,9 @@ fn test_netrc_default_fallback_for_http() {
 #[test]
 fn test_netrc_default_fallback_for_ftp() {
     let mut factory = AuthConfigFactory::new();
-    factory.load_netrc_str(
-        "default\nlogin anonftp\npassword anonftp@\n"
-    ).unwrap();
+    factory
+        .load_netrc_str("default\nlogin anonftp\npassword anonftp@\n")
+        .unwrap();
 
     let url = Url::parse("ftp://any.host.com/file").unwrap();
     let opts = AuthResolveOptions::default();
@@ -241,9 +243,9 @@ fn test_netrc_default_fallback_for_ftp() {
 #[test]
 fn test_netrc_no_netrc_flag_skips_lookup() {
     let mut factory = AuthConfigFactory::new();
-    factory.load_netrc_str(
-        "machine example.com\nlogin netrcuser\npassword netrcpass\n"
-    ).unwrap();
+    factory
+        .load_netrc_str("machine example.com\nlogin netrcuser\npassword netrcpass\n")
+        .unwrap();
 
     let url = Url::parse("http://example.com/file").unwrap();
     let opts = AuthResolveOptions {
@@ -260,9 +262,9 @@ fn test_netrc_no_netrc_flag_skips_lookup() {
 #[test]
 fn test_netrc_url_creds_take_priority() {
     let mut factory = AuthConfigFactory::new();
-    factory.load_netrc_str(
-        "machine example.com\nlogin netrcuser\npassword netrcpass\n"
-    ).unwrap();
+    factory
+        .load_netrc_str("machine example.com\nlogin netrcuser\npassword netrcpass\n")
+        .unwrap();
 
     let url = Url::parse("http://urluser:urlpass@example.com/file").unwrap();
     let opts = AuthResolveOptions::default();

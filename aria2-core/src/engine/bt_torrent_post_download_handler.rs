@@ -173,12 +173,10 @@ impl BtTorrentPostDownloadHandler {
                 meta.info.pieces.len() as u32,
                 std::sync::atomic::Ordering::Relaxed,
             );
-            child_group.bt_piece_length.store(
-                meta.info.piece_length,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            *child_group.bt_info_hash_hex.recover_mut() =
-                Some(info_hash_hex);
+            child_group
+                .bt_piece_length
+                .store(meta.info.piece_length, std::sync::atomic::Ordering::Relaxed);
+            *child_group.bt_info_hash_hex.recover_mut() = Some(info_hash_hex);
         }
 
         // If pause requested (PREF_PAUSE_METADATA), mark the child group.
@@ -207,10 +205,7 @@ impl Default for BtTorrentPostDownloadHandler {
 
 impl PostDownloadHandler for BtTorrentPostDownloadHandler {
     fn can_handle(&self, info: &CompletedDownloadInfo) -> bool {
-        Self::can_handle_static(
-            info.content_type.as_deref(),
-            info.file_path.as_deref(),
-        )
+        Self::can_handle_static(info.content_type.as_deref(), info.file_path.as_deref())
     }
 
     fn create_child_groups(
@@ -226,10 +221,9 @@ impl PostDownloadHandler for BtTorrentPostDownloadHandler {
                 .clone()
         } else {
             // C++: `diskAdaptor->openExistingFile()` then `util::toString()`
-            let path = info
-                .file_path
-                .as_ref()
-                .ok_or_else(|| Aria2Error::Io("File-based torrent download has no file path".to_string()))?;
+            let path = info.file_path.as_ref().ok_or_else(|| {
+                Aria2Error::Io("File-based torrent download has no file path".to_string())
+            })?;
 
             std::fs::read(path).map_err(|e| {
                 Aria2Error::Io(format!("Failed to read torrent file '{}': {}", path, e))
@@ -240,11 +234,7 @@ impl PostDownloadHandler for BtTorrentPostDownloadHandler {
             return Err(Aria2Error::Parse("Torrent file is empty".to_string()));
         }
 
-        self.create_request_group_from_torrent(
-            &torrent_data,
-            info.gid,
-            &info.options,
-        )
+        self.create_request_group_from_torrent(&torrent_data, info.gid, &info.options)
     }
 
     fn name(&self) -> &'static str {

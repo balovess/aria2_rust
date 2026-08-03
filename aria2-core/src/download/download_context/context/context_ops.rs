@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use tracing::trace;
 
+use crate::download::download_context::DownloadContext;
 use crate::download::download_context::net_stat::NetStat;
 use crate::download::download_context::types::{ContextAttributeType, Signature, TorrentAttribute};
-use crate::download::download_context::DownloadContext;
 
 impl DownloadContext {
     // -----------------------------------------------------------------------

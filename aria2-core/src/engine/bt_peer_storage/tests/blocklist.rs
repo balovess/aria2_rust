@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use super::basic::make_peer;
 use crate::engine::bt_peer_blocklist::BtPeerBlocklist;
 use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
-use super::basic::make_peer;
 
 #[test]
 fn test_add_peer_rejected_by_blocklist() {

@@ -360,9 +360,7 @@ fn test_full_tail_reclaim_flow() {
 
     // After 30 seconds with no progress — stalled.
     let at_timeout = now + Duration::from_secs(30);
-    assert!(
-        tracker.check_stalled_at(Duration::from_secs(config.stall_timeout_secs), at_timeout)
-    );
+    assert!(tracker.check_stalled_at(Duration::from_secs(config.stall_timeout_secs), at_timeout));
 
     // Calculate tail: 1024 received, 0 in flight → remaining = 3072 > 1024.
     let result = config.calculate_tail(range_start, range_end, 1024, 0);

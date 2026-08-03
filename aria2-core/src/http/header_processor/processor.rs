@@ -142,9 +142,7 @@ impl HttpHeaderProcessor {
     /// Parse a complete header block into `HttpResponseHead`.
     fn parse_header_block(header_str: &str) -> Result<HttpResponseHead> {
         // Strip the trailing \r\n\r\n terminator
-        let header_str = header_str
-            .strip_suffix("\r\n\r\n")
-            .unwrap_or(header_str);
+        let header_str = header_str.strip_suffix("\r\n\r\n").unwrap_or(header_str);
 
         let mut lines = header_str.lines();
 

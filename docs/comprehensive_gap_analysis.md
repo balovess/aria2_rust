@@ -1,6 +1,6 @@
 # aria2_rust Comprehensive Gap Analysis
 # Deep-comparison audit against C++ aria2_original and aria2-next
-# Updated: 2026-08-01 (global rate limiter all paths + Content-Disposition RFC 6266 trailing `;` + SFTP FileOpError + DHT conflict resolved)
+# Updated: 2026-08-03 (HTTP range validation, strict segment lengths, and fallback gap safety)
 
 ## Executive Summary
 
@@ -26,6 +26,10 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 - **P0** (9 items): Protocol-breaking / Security-critical -- must fix before any production use
 - **P1** (28 items): Feature-breaking -- major functionality missing or wrong
 - **P2** (17 items): Minor / Cosmetic -- quality of life improvements
+
+**Key changes since previous audit (2026-08-01 deep-comparison refresh):**
+
+- **HTTP range/fallback safety:** Range responses now validate start/end/entity length; buffered and streaming segment downloads reject short or oversized bodies and invalid 200/206/416 combinations. Segment completion requires exact declared length and is idempotent. Fallback preserves only complete segments, so partial writes from failed requests are re-covered by full sequential gaps.
 
 **Key changes since previous audit (2026-07-30 deep-comparison refresh):**
 

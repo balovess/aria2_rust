@@ -11,8 +11,8 @@ pub mod types;
 mod tests;
 
 // Re-export all public types from sub-modules for backward compatibility
-pub use types::{DownloadStats, DownloadStatus, HookContext, PostDownloadHook};
 pub use builtin::{ExecHook, MoveHook, RenameHook, TouchHook};
+pub use types::{DownloadStats, DownloadStatus, HookContext, PostDownloadHook};
 
 use tracing::{debug, error, info};
 

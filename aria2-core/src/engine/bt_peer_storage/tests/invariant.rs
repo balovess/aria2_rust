@@ -1,7 +1,7 @@
 //! Tests for get_peer lookup and invariant verification.
 
-use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 use super::basic::make_peer;
+use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 
 // ------------------------------------------------------------------
 // get_peer (C++ DefaultPeerStorage::getPeer)

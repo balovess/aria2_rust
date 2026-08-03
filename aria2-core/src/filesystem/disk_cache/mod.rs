@@ -12,8 +12,8 @@ const DEFAULT_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
 // Sub-modules implementing write-path and read-path operations
 // ---------------------------------------------------------------------------
 
-pub(crate) mod write_path;
 pub(crate) mod read_path;
+pub(crate) mod write_path;
 
 #[cfg(test)]
 mod tests;

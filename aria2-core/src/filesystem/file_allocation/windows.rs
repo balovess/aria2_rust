@@ -103,7 +103,9 @@ pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
     let valid_data_succeeded: bool = if let Some(handle) = adaptor.windows_raw_handle() {
         // Validate length fits in i64 for SetFileValidData
         if length > i64::MAX as u64 {
-            return Err(Aria2Error::Io("SetFileValidData length exceeds i64 range".into()));
+            return Err(Aria2Error::Io(
+                "SetFileValidData length exceeds i64 range".into(),
+            ));
         }
         // Extend the valid data length up to `length`, forcing the
         // filesystem to allocate real blocks rather than a sparse hole.

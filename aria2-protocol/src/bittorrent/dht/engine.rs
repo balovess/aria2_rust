@@ -231,23 +231,24 @@ impl DhtEngine {
         // Load routing table from disk or start empty
         let mut routing_table = RoutingTable::new(self_id);
         if let Some(ref path) = config.dht_file_path
-            && path.exists() {
-                match super::persistence::DhtPersistence::load_from_file_sync(path) {
-                    Ok(data) => {
-                        info!(
-                            count = data.nodes.len(),
-                            "Loaded DHT routing table from disk"
-                        );
-                        for pnode in data.nodes {
-                            let node = DhtNode::new(pnode.id, pnode.addr);
-                            routing_table.insert(node);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to load DHT routing table: {}", e);
+            && path.exists()
+        {
+            match super::persistence::DhtPersistence::load_from_file_sync(path) {
+                Ok(data) => {
+                    info!(
+                        count = data.nodes.len(),
+                        "Loaded DHT routing table from disk"
+                    );
+                    for pnode in data.nodes {
+                        let node = DhtNode::new(pnode.id, pnode.addr);
+                        routing_table.insert(node);
                     }
                 }
+                Err(e) => {
+                    warn!("Failed to load DHT routing table: {}", e);
+                }
             }
+        }
 
         let inner = Arc::new(RwLock::new(DhtEngineInner {
             state: DhtEngineState::Bootstrapping,
@@ -301,7 +302,10 @@ impl DhtEngine {
         let engine = Arc::clone(self);
         let limit = self.config.bootstrap_timeout;
         tokio::spawn(async move {
-            if tokio::time::timeout(limit, engine.bootstrap()).await.is_err() {
+            if tokio::time::timeout(limit, engine.bootstrap())
+                .await
+                .is_err()
+            {
                 warn!(
                     timeout = ?limit,
                     "DHT bootstrap timed out; continuing without entry-point nodes"
@@ -428,20 +432,22 @@ impl DhtEngine {
             .recv_with_timeout(&mut buf, self.config.query_timeout)
             .await
             && len > 0
-                && let Ok(response) = DhtMessage::decode(&buf[..len])
-                    && response.is_response() {
-                        // Extract node ID from response
-                        if let Some(r) = &response.r
-                            && let Some(id_bytes) = r.dict_get(b"id").and_then(|v| v.as_bytes())
-                                && id_bytes.len() == 20 {
-                                    let mut node_id = [0u8; 20];
-                                    node_id.copy_from_slice(id_bytes);
-                                    let node = DhtNode::new(node_id, addr);
-                                    let mut inner = self.inner.write().await;
-                                    inner.routing_table.insert(node);
-                                    debug!(addr = %addr, id = %hex::encode(node_id), "Added DHT node via add_node");
-                                }
-                    }
+            && let Ok(response) = DhtMessage::decode(&buf[..len])
+            && response.is_response()
+        {
+            // Extract node ID from response
+            if let Some(r) = &response.r
+                && let Some(id_bytes) = r.dict_get(b"id").and_then(|v| v.as_bytes())
+                && id_bytes.len() == 20
+            {
+                let mut node_id = [0u8; 20];
+                node_id.copy_from_slice(id_bytes);
+                let node = DhtNode::new(node_id, addr);
+                let mut inner = self.inner.write().await;
+                inner.routing_table.insert(node);
+                debug!(addr = %addr, id = %hex::encode(node_id), "Added DHT node via add_node");
+            }
+        }
     }
 
     /// Start the periodic bucket-refresh maintenance loop.

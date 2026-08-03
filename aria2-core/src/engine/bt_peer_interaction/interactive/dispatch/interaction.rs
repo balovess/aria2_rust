@@ -10,9 +10,9 @@ use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::Result;
 use tracing::{debug, trace, warn};
 
+use super::super::BtPeerInteractive;
 use crate::engine::bt_peer_interaction::piece_provider::PieceProvider;
 use crate::engine::bt_peer_interaction::types::*;
-use super::super::BtPeerInteractive;
 
 impl BtPeerInteractive {
     // ── Main interaction loop ──────────────────────────────────────────
@@ -73,9 +73,10 @@ impl BtPeerInteractive {
         if self.metadata_get_mode {
             // Simplified metadata-get mode: just keep-alive + receive
             if self.should_send_keepalive()
-                && let Err(e) = conn.send_keepalive().await {
-                    warn!("Failed to send keepalive in metadata-get mode: {}", e);
-                }
+                && let Err(e) = conn.send_keepalive().await
+            {
+                warn!("Failed to send keepalive in metadata-get mode: {}", e);
+            }
             let (count, pex_update) = self
                 .receive_messages(conn, is_in_allowed_fast.clone())
                 .await?;

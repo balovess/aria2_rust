@@ -1,6 +1,6 @@
 //! Tests for FTP download command.
 
-use super::control::{parse_epsv_response, parse_pasv_response, urlencoding_decode, RawFtpControl};
+use super::control::{RawFtpControl, parse_epsv_response, parse_pasv_response, urlencoding_decode};
 use super::types::FtpDownloadCommand;
 
 #[test]

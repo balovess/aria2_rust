@@ -1,7 +1,7 @@
-﻿use tracing::{debug, warn};
+use tracing::{debug, warn};
 
-use super::protocol::UdpTrackerRequest;
 use super::UdpTrackerClient;
+use super::protocol::UdpTrackerRequest;
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
     UdpError, UdpEvent, UdpState, build_scrape_request,
 };
@@ -98,7 +98,9 @@ impl UdpTrackerClient {
     }
 
     /// Get all completed scrape results from pending requests
-    pub fn completed_scrape_results(&self) -> Vec<&Vec<aria2_protocol::bittorrent::tracker::udp_tracker_protocol::ScrapeResult>> {
+    pub fn completed_scrape_results(
+        &self,
+    ) -> Vec<&Vec<aria2_protocol::bittorrent::tracker::udp_tracker_protocol::ScrapeResult>> {
         self.pending
             .iter()
             .filter_map(|r| r.scrape_results.as_ref())

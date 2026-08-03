@@ -27,5 +27,5 @@ mod tests;
 
 // Re-export all public types so that external consumers can access them
 // at the same paths as before (e.g., `metalink_http::MetalinkHttpParser`).
-pub use types::{MetalinkHttpDigest, MetalinkHttpLink, MetalinkHttpResult, DEFAULT_PRI, MAX_PRI};
 pub use parser::MetalinkHttpParser;
+pub use types::{DEFAULT_PRI, MAX_PRI, MetalinkHttpDigest, MetalinkHttpLink, MetalinkHttpResult};

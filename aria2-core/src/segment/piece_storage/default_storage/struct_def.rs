@@ -6,7 +6,9 @@ use tracing::debug;
 
 use crate::segment::piece::Piece;
 use crate::segment::piece_storage::bitfield_man::BitfieldMan;
-use crate::segment::piece_storage::types::{END_GAME_PIECE_NUM, HaveEntry, StreamPieceSelectorKind};
+use crate::segment::piece_storage::types::{
+    END_GAME_PIECE_NUM, HaveEntry, StreamPieceSelectorKind,
+};
 
 #[cfg(feature = "bittorrent")]
 use crate::segment::piece_selector::{PieceSelectorKind, RarestPieceSelector};

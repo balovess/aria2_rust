@@ -105,7 +105,11 @@ fn test_get_piece_storage_by_info_hash() {
     registry.put(1, obj);
 
     assert!(registry.get_piece_storage_by_info_hash(hash1).is_some());
-    assert!(registry.get_piece_storage_by_info_hash("wrong_hash").is_none());
+    assert!(
+        registry
+            .get_piece_storage_by_info_hash("wrong_hash")
+            .is_none()
+    );
 }
 
 #[test]
@@ -120,7 +124,11 @@ fn test_get_peer_storage_by_info_hash() {
     registry.put(1, obj);
 
     assert!(registry.get_peer_storage_by_info_hash(hash1).is_some());
-    assert!(registry.get_peer_storage_by_info_hash("wrong_hash").is_none());
+    assert!(
+        registry
+            .get_peer_storage_by_info_hash("wrong_hash")
+            .is_none()
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -130,7 +138,10 @@ fn test_get_peer_storage_by_info_hash() {
 #[test]
 fn test_all_download_finished_empty_registry() {
     let registry = BtRegistry::new();
-    assert!(registry.all_download_finished(), "empty registry should return true");
+    assert!(
+        registry.all_download_finished(),
+        "empty registry should return true"
+    );
 }
 
 #[test]
@@ -179,7 +190,8 @@ fn test_finished_count() {
     registry.put(1, obj1);
 
     let mut obj2 = BtObject::new();
-    obj2.piece_storage = Some(Arc::new(DefaultPieceStorage::new(1024, 4096)) as Arc<dyn PieceStorage>);
+    obj2.piece_storage =
+        Some(Arc::new(DefaultPieceStorage::new(1024, 4096)) as Arc<dyn PieceStorage>);
     registry.put(2, obj2);
 
     registry.put(3, BtObject::new());
@@ -304,7 +316,10 @@ fn test_registry_has_empty_blocklist_by_default() {
 #[test]
 fn test_registry_blocklist_add_and_check() {
     let mut registry = BtRegistry::new();
-    registry.peer_blocklist_mut().add_rule("10.0.0.0/8").unwrap();
+    registry
+        .peer_blocklist_mut()
+        .add_rule("10.0.0.0/8")
+        .unwrap();
 
     assert!(registry.is_peer_blocked("10.0.0.1"));
     assert!(registry.is_peer_blocked("10.255.255.255"));
@@ -315,7 +330,10 @@ fn test_registry_blocklist_add_and_check() {
 #[test]
 fn test_registry_blocklist_accessors() {
     let mut registry = BtRegistry::new();
-    registry.peer_blocklist_mut().add_rule("192.168.0.0/16").unwrap();
+    registry
+        .peer_blocklist_mut()
+        .add_rule("192.168.0.0/16")
+        .unwrap();
 
     assert_eq!(registry.peer_blocklist().count(), 1);
     assert!(registry.peer_blocklist().contains("192.168.1.1"));

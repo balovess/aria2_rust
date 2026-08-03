@@ -47,7 +47,11 @@ fn test_get_download_context_by_info_hash_returns_none_without_attribute() {
     let obj = make_bt_object_with_ctx(1024, 4096, "/tmp/file.bin");
     registry.put(1, obj);
 
-    assert!(registry.get_download_context_by_info_hash("any_hash").is_none());
+    assert!(
+        registry
+            .get_download_context_by_info_hash("any_hash")
+            .is_none()
+    );
 }
 
 #[test]
@@ -61,7 +65,11 @@ fn test_get_download_context_by_info_hash_with_torrent_attribute() {
     let found = registry.get_download_context_by_info_hash(info_hash);
     assert!(found.is_some());
 
-    assert!(registry.get_download_context_by_info_hash("wrong_hash").is_none());
+    assert!(
+        registry
+            .get_download_context_by_info_hash("wrong_hash")
+            .is_none()
+    );
 
     assert_eq!(registry.info_hash_index_len(), 1);
 }

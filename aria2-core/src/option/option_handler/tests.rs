@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::{OptionHandler, built_in_defaults, detect_value_type};
     use super::super::apply::OptionHandlerApply;
+    use super::super::{OptionHandler, built_in_defaults, detect_value_type};
     use crate::config::option::OptionValue;
 
     #[test]
@@ -217,30 +217,12 @@ quiet=false
     #[allow(clippy::approx_constant)]
     fn test_detect_value_type_edge_cases() {
         // Test various auto-detection scenarios
-        assert_eq!(
-            detect_value_type("true"),
-            Some(OptionValue::Bool(true))
-        );
-        assert_eq!(
-            detect_value_type("false"),
-            Some(OptionValue::Bool(false))
-        );
-        assert_eq!(
-            detect_value_type("yes"),
-            Some(OptionValue::Bool(true))
-        );
-        assert_eq!(
-            detect_value_type("no"),
-            Some(OptionValue::Bool(false))
-        );
-        assert_eq!(
-            detect_value_type("42"),
-            Some(OptionValue::Usize(42))
-        );
-        assert_eq!(
-            detect_value_type("-10"),
-            Some(OptionValue::Int(-10))
-        );
+        assert_eq!(detect_value_type("true"), Some(OptionValue::Bool(true)));
+        assert_eq!(detect_value_type("false"), Some(OptionValue::Bool(false)));
+        assert_eq!(detect_value_type("yes"), Some(OptionValue::Bool(true)));
+        assert_eq!(detect_value_type("no"), Some(OptionValue::Bool(false)));
+        assert_eq!(detect_value_type("42"), Some(OptionValue::Usize(42)));
+        assert_eq!(detect_value_type("-10"), Some(OptionValue::Int(-10)));
         let detected = detect_value_type("3.14159")
             .unwrap()
             .as_f64()
@@ -254,10 +236,7 @@ quiet=false
             detect_value_type("['a','b','c']"),
             Some(OptionValue::List(vec!["a".into(), "b".into(), "c".into()]))
         );
-        assert_eq!(
-            detect_value_type(""),
-            Some(OptionValue::None)
-        );
+        assert_eq!(detect_value_type(""), Some(OptionValue::None));
         assert_eq!(
             detect_value_type("plain_text"),
             Some(OptionValue::Str("plain_text".into()))

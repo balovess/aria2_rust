@@ -74,12 +74,7 @@ impl BtDownloadCommand {
             let mut ctx = DownloadContext::new(piece_length, total_size, file_path_str);
 
             // Set piece hashes from torrent info dict (sha-1 hashes in hex format)
-            let piece_hashes_hex: Vec<String> = meta
-                .info
-                .pieces
-                .iter()
-                .map(hex::encode)
-                .collect();
+            let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
             ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
 
             // Build TorrentAttribute from torrent metadata (C++ TorrentAttribute fields)
@@ -244,7 +239,8 @@ impl BtDownloadCommand {
             web_seed_manager: None,
 
             // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
-            dht_periodic_lookup: super::super::bt_download_execute::execute::DhtPeriodicLookup::new(),
+            dht_periodic_lookup: super::super::bt_download_execute::execute::DhtPeriodicLookup::new(
+            ),
 
             // Download path lock (J6)
             download_path_lock,

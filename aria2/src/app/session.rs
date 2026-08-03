@@ -374,8 +374,12 @@ impl App {
                 .unwrap_or(false),
             pause: options.get("pause").map(|v| v == "true").unwrap_or(false),
             // Follow options
-            follow_torrent: options.get("follow-torrent").and_then(|v| v.parse::<bool>().ok()),
-            follow_metalink: options.get("follow-metalink").and_then(|v| v.parse::<bool>().ok()),
+            follow_torrent: options
+                .get("follow-torrent")
+                .and_then(|v| v.parse::<bool>().ok()),
+            follow_metalink: options
+                .get("follow-metalink")
+                .and_then(|v| v.parse::<bool>().ok()),
             // Event hooks
             on_download_start: options.get("on-download-start").cloned(),
             on_download_complete: options.get("on-download-complete").cloned(),

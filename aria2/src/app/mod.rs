@@ -207,10 +207,7 @@ impl App {
                 .await
                 .filter(|&v| v > 0)
                 .map(|v| v as u64);
-            let log_max_files = self
-                .get_opt_i64("log-max-files")
-                .await
-                .map(|v| v as usize);
+            let log_max_files = self.get_opt_i64("log-max-files").await.map(|v| v as usize);
             init_logging(
                 &log_level,
                 &console_log_level,
@@ -240,10 +237,7 @@ impl App {
                 .await
                 .filter(|&v| v > 0)
                 .map(|v| v as u64);
-            let log_max_files = self
-                .get_opt_i64("log-max-files")
-                .await
-                .map(|v| v as usize);
+            let log_max_files = self.get_opt_i64("log-max-files").await.map(|v| v as usize);
             init_logging(
                 &log_level,
                 &console_log_level,

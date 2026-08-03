@@ -28,10 +28,9 @@ pub use types::{
     CheckHaveResult, ChokingDecision, DEFAULT_ALLOWED_FAST_SET_SIZE,
     DEFAULT_KEEP_ALIVE_INTERVAL_SECS, DEFAULT_MAX_OUTSTANDING_REQUEST, DispatchUpdate,
     FLOODING_CHECK_INTERVAL_SECS, INACTIVITY_TIMEOUT_SECS, InteractionResult, InterestDecision,
-    MAX_UNCHOKE_WAIT_ATTEMPTS, MUTUAL_UNINTERESTED_TIMEOUT_SECS, PeerIdCheckResult,
-    PEER_CONNECTION_DELAY_MS, PEER_MESSAGE_TIMEOUT_SECS, PER_SEC_INTERVAL_SECS,
-    PEX_INTERVAL_SECS, PeerConnectionResult, PeerConnectionState, PostHandshakeActions,
-    UB_MAX_OUTSTANDING_REQUEST,
+    MAX_UNCHOKE_WAIT_ATTEMPTS, MUTUAL_UNINTERESTED_TIMEOUT_SECS, PEER_CONNECTION_DELAY_MS,
+    PEER_MESSAGE_TIMEOUT_SECS, PER_SEC_INTERVAL_SECS, PEX_INTERVAL_SECS, PeerConnectionResult,
+    PeerConnectionState, PeerIdCheckResult, PostHandshakeActions, UB_MAX_OUTSTANDING_REQUEST,
 };
 
 // ======================================================================

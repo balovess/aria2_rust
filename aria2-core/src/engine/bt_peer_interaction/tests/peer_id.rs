@@ -153,7 +153,10 @@ fn test_validate_handshake_peer_id_duplicate() {
 #[test]
 fn test_peer_id_check_result_enum_variants() {
     // Verify all variants exist and are distinct
-    assert_ne!(PeerIdCheckResult::SelfConnection, PeerIdCheckResult::DuplicatePeer);
+    assert_ne!(
+        PeerIdCheckResult::SelfConnection,
+        PeerIdCheckResult::DuplicatePeer
+    );
     assert_ne!(PeerIdCheckResult::DuplicatePeer, PeerIdCheckResult::Ok);
     assert_ne!(PeerIdCheckResult::SelfConnection, PeerIdCheckResult::Ok);
 }

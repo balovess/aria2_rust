@@ -22,8 +22,8 @@ mod tests;
 // Public re-exports — preserve the original `bt_tracker_comm::*` API surface.
 pub use announce_list::{AnnounceList, AnnounceTier};
 pub use bt_announce::{
-    BtAnnounce, announce_to_public_tracker, announce_to_public_tracker_with_event,
-    is_udp_tracker, perform_announce_with_event, perform_http_tracker_announce, urlencode_infohash,
+    BtAnnounce, announce_to_public_tracker, announce_to_public_tracker_with_event, is_udp_tracker,
+    perform_announce_with_event, perform_http_tracker_announce, urlencode_infohash,
 };
 pub use health_tracking::HealthTrackingAnnounceList;
 pub use tracker_announce::{AnnounceResult, TrackerAnnouncer};

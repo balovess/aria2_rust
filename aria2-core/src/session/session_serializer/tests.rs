@@ -1,7 +1,7 @@
 //! Unit tests for session serializer
 
-use super::*;
 use super::deserialization::deserialize;
+use super::*;
 use std::collections::HashMap;
 use std::path::Path;
 

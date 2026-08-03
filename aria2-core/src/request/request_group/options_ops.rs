@@ -192,9 +192,10 @@ impl super::RequestGroup {
             }
             "checksum" => {
                 if let Some(s) = value.as_str()
-                    && let Some((algo, hash)) = s.split_once('=') {
-                        opts.checksum = Some((algo.to_string(), hash.to_string()));
-                    }
+                    && let Some((algo, hash)) = s.split_once('=')
+                {
+                    opts.checksum = Some((algo.to_string(), hash.to_string()));
+                }
                 true
             }
             "cookie-file" => {

@@ -43,8 +43,7 @@ use crate::error::Result;
 ///
 /// Mirrors C++ `AbstractCommand::resolveProxyMethod()` which returns
 /// either `V_GET` or `V_TUNNEL`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProxyMethod {
     /// Send FTP URL as HTTP GET through proxy (default for FTP).
     ///
@@ -66,7 +65,6 @@ impl fmt::Display for ProxyMethod {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // FtpProxyConfig — shared proxy configuration

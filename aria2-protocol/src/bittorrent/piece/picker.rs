@@ -395,10 +395,7 @@ impl PiecePicker {
                 // P(k-th candidate) = 2^-(k+1): strong bias towards the head.
                 let r = self.next_rand();
                 let k = (r.trailing_zeros() as usize).min(candidates - 1);
-                (0..n)
-                    .filter(|&i| usable(self, i))
-                    .nth(k)
-                    .map(|i| i as u32)
+                (0..n).filter(|&i| usable(self, i)).nth(k).map(|i| i as u32)
             }
         }
     }

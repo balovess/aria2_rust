@@ -17,11 +17,11 @@
 //! - `crypto_provide` / `crypto_select` = 4-byte big-endian bitmask
 
 use super::mse_crypto::{
-    compute_vc, init_rc4, MseCryptoMethod, MseCryptoState, MseDerivedKeys, Rc4State,
+    MseCryptoMethod, MseCryptoState, MseDerivedKeys, Rc4State, compute_vc, init_rc4,
 };
 use super::mse_dh::{
-    CRYPTO_BITFIELD_LENGTH, INFO_HASH_LENGTH, KEY_LENGTH, MAX_PAD_LENGTH,
-    SHA1_LENGTH, VC_LENGTH, MseDhKeyExchange,
+    CRYPTO_BITFIELD_LENGTH, INFO_HASH_LENGTH, KEY_LENGTH, MAX_PAD_LENGTH, MseDhKeyExchange,
+    SHA1_LENGTH, VC_LENGTH,
 };
 use rand::Rng;
 
@@ -230,9 +230,8 @@ impl MseHandshake {
         let pad_c_length: u16 = rng.gen_range(0..=MAX_PAD_LENGTH as u16);
         let ia_length: u16 = 0; // No initial data currently
 
-        let mut encrypted = Vec::with_capacity(
-            VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + pad_c_length as usize + 2,
-        );
+        let mut encrypted =
+            Vec::with_capacity(VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + pad_c_length as usize + 2);
 
         // VC = 8 zero bytes (will be encrypted by the cipher)
         encrypted.extend_from_slice(&[0u8; VC_LENGTH]);
@@ -336,9 +335,7 @@ impl MseHandshake {
         if verified_info_hash != self.info_hash {
             self.info_hash = verified_info_hash;
             // Re-derive keys with the correct info_hash
-            let shared = self
-                .shared_secret
-                .ok_or("Shared secret not computed")?;
+            let shared = self.shared_secret.ok_or("Shared secret not computed")?;
             let new_keys = MseDerivedKeys::derive(&shared, &verified_info_hash);
             self.keys = Some(new_keys);
         }
@@ -413,7 +410,8 @@ impl MseHandshake {
         let mut rng = rand::thread_rng();
         let pad_d_length: u16 = rng.gen_range(0..=MAX_PAD_LENGTH as u16);
 
-        let mut encrypted = Vec::with_capacity(VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + pad_d_length as usize);
+        let mut encrypted =
+            Vec::with_capacity(VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + pad_d_length as usize);
 
         // VC = 8 zero bytes
         encrypted.extend_from_slice(&[0u8; VC_LENGTH]);
@@ -448,9 +446,7 @@ impl MseHandshake {
             return Err("Only initiator can process receiver step 4".to_string());
         }
 
-        let vc_marker = self
-            .initiator_vc_marker
-            .ok_or("VC marker not computed")?;
+        let vc_marker = self.initiator_vc_marker.ok_or("VC marker not computed")?;
 
         // Find the VC marker in the data
         let vc_pos = find_vc_marker(data, &vc_marker, INITIATOR_SYNC_LIMIT)?;
@@ -472,14 +468,13 @@ impl MseHandshake {
         }
 
         // Read crypto_select (4 bytes big-endian)
-        let crypto_select = u32::from_be_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]);
+        let crypto_select =
+            u32::from_be_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]);
 
         // Determine negotiated method
         if (crypto_select & MseCryptoMethod::Rc4.as_u32()) != 0 {
             self.negotiated_method = MseCryptoMethod::Rc4;
-        } else if (crypto_select & MseCryptoMethod::Plain.as_u32()) != 0
-            && !self.force_encryption
-        {
+        } else if (crypto_select & MseCryptoMethod::Plain.as_u32()) != 0 && !self.force_encryption {
             self.negotiated_method = MseCryptoMethod::Plain;
         } else {
             return Err(format!(
@@ -492,8 +487,7 @@ impl MseHandshake {
         if remaining.len() < CRYPTO_BITFIELD_LENGTH + 2 {
             return Err("Not enough data for PadD length".to_string());
         }
-        let _pad_d_length =
-            u16::from_be_bytes([remaining[4], remaining[5]]);
+        let _pad_d_length = u16::from_be_bytes([remaining[4], remaining[5]]);
         if _pad_d_length as usize > MAX_PAD_LENGTH {
             return Err(format!("PadD length too large: {}", _pad_d_length));
         }
@@ -653,8 +647,8 @@ mod tests {
 
     fn test_info_hash() -> [u8; INFO_HASH_LENGTH] {
         [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC,
-            0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, 0xAA, 0xBB, 0xCC, 0xDD,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54,
+            0x32, 0x10, 0xAA, 0xBB, 0xCC, 0xDD,
         ]
     }
 
@@ -702,8 +696,12 @@ mod tests {
         let i_step1 = initiator.build_step1();
         let r_step1 = responder.build_step1();
 
-        initiator.receive_step1(&r_step1).expect("I receive R step1");
-        responder.receive_step1(&i_step1).expect("R receive I step1");
+        initiator
+            .receive_step1(&r_step1)
+            .expect("I receive R step1");
+        responder
+            .receive_step1(&i_step1)
+            .expect("R receive I step1");
 
         // Verify both computed the same shared secret
         let i_secret = initiator.shared_secret.expect("I secret");
@@ -711,9 +709,7 @@ mod tests {
         assert_eq!(i_secret, r_secret, "Shared secrets must match");
 
         // Step 3: Initiator sends negotiation
-        let i_step3 = initiator
-            .build_initiator_step2()
-            .expect("I build step3");
+        let i_step3 = initiator.build_initiator_step2().expect("I build step3");
 
         // Receiver processes initiator's step 3
         let method_r = responder
@@ -722,9 +718,7 @@ mod tests {
         assert_eq!(method_r, MseCryptoMethod::Rc4);
 
         // Step 4: Receiver sends response
-        let r_step4 = responder
-            .build_receiver_step2()
-            .expect("R build step4");
+        let r_step4 = responder.build_receiver_step2().expect("R build step4");
 
         // Initiator processes receiver's step 4
         let method_i = initiator
@@ -749,12 +743,20 @@ mod tests {
         let mut responder2 = MseHandshake::new_responder(info_hash2);
         let i2_step1 = initiator2.build_step1();
         let r2_step1 = responder2.build_step1();
-        initiator2.receive_step1(&r2_step1).expect("I2 receive R2 step1");
-        responder2.receive_step1(&i2_step1).expect("R2 receive I2 step1");
+        initiator2
+            .receive_step1(&r2_step1)
+            .expect("I2 receive R2 step1");
+        responder2
+            .receive_step1(&i2_step1)
+            .expect("R2 receive I2 step1");
         let i2_step3 = initiator2.build_initiator_step2().expect("I2 build step3");
-        responder2.receive_initiator_step2(&i2_step3, &[test_info_hash()]).expect("R2 receive step3");
+        responder2
+            .receive_initiator_step2(&i2_step3, &[test_info_hash()])
+            .expect("R2 receive step3");
         let r2_step4 = responder2.build_receiver_step2().expect("R2 build step4");
-        initiator2.receive_receiver_step2(&r2_step4).expect("I2 receive step4");
+        initiator2
+            .receive_receiver_step2(&r2_step4)
+            .expect("I2 receive step4");
         let mut crypto_i2 = initiator2.finalize().expect("I2 finalize");
         let mut crypto_r2 = responder2.finalize().expect("R2 finalize");
 
@@ -811,7 +813,10 @@ mod tests {
         let pk1 = h1.dh.generate_public_key();
         let pk2 = h2.dh.generate_public_key();
 
-        assert_ne!(pk1, pk2, "Different instances should have different public keys");
+        assert_ne!(
+            pk1, pk2,
+            "Different instances should have different public keys"
+        );
     }
 
     #[test]
@@ -907,8 +912,12 @@ mod tests {
         // Exchange public keys
         let i_step1 = initiator.build_step1();
         let r_step1 = responder.build_step1();
-        initiator.receive_step1(&r_step1).expect("I receive R step1");
-        responder.receive_step1(&i_step1).expect("R receive I step1");
+        initiator
+            .receive_step1(&r_step1)
+            .expect("I receive R step1");
+        responder
+            .receive_step1(&i_step1)
+            .expect("R receive I step1");
 
         // Initiator sends step 3 with info_hash_2
         let i_step3 = initiator.build_initiator_step2().expect("I build step3");

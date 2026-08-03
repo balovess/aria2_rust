@@ -1,4 +1,4 @@
-﻿//! Buffered (cached) disk writer.
+//! Buffered (cached) disk writer.
 //!
 //! [`CachedDiskWriter`] layers a write-back cache over a positioned I/O
 //! strategy ([`PositionedDiskWriter`] or [`MmapDiskWriter`]), providing
@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
 
-use super::SeekableDiskWriter;
 use super::super::disk_cache::WrDiskCache;
 use super::super::mmap_disk_writer::MmapDiskWriter;
 use super::super::positioned_disk_writer::PositionedDiskWriter;
+use super::SeekableDiskWriter;
 
 /// Fixed threshold: writes >= 1MB bypass the cache and go directly to disk.
 const DIRECT_WRITE_THRESHOLD: usize = 1024 * 1024;

@@ -13,12 +13,12 @@ mod tests {
     use std::time::Duration;
     use tracing::info;
 
-    use crate::engine::hook_manager::{
-        DownloadStats as HookDownloadStats, DownloadStatus, HookContext, HookConfig, HookManager,
-        PostDownloadHook,
-    };
     use crate::engine::bt_progress_info_file::{
         BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, InFlightPiece,
+    };
+    use crate::engine::hook_manager::{
+        DownloadStats as HookDownloadStats, DownloadStatus, HookConfig, HookContext, HookManager,
+        PostDownloadHook,
     };
     use crate::engine::lpd_manager::{LpdManager, LpdPeer};
     use crate::request::request_group::{DownloadOptions, GroupId};
@@ -316,8 +316,7 @@ mod tests {
             }
         }
 
-        let mut manager =
-            HookManager::new(HookConfig::default());
+        let mut manager = HookManager::new(HookConfig::default());
         manager.add_hook(Box::new(TestHook));
 
         let ctx = HookContext {

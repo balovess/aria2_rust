@@ -171,7 +171,8 @@ fn test_new_accepts_multi_file_metalink() {
     let options = DownloadOptions::default();
     // Previously this would return "Metalink contains multiple files or no files"
     // Now it should succeed, picking the first file
-    let result = MetalinkDownloadCommand::new(GroupId::new(1), &make_multi_file_xml(), &options, None);
+    let result =
+        MetalinkDownloadCommand::new(GroupId::new(1), &make_multi_file_xml(), &options, None);
     assert!(result.is_ok(), "new() should accept multi-file Metalink");
 }
 
@@ -198,7 +199,10 @@ fn test_single_file_mode_accepts_torrent_metaurl_only() {
     let doc = MetalinkDocument::parse(&cmd.metalink_data, None).unwrap();
     let f = &doc.files[0];
     assert_eq!(f.meta_urls.len(), 1);
-    assert_eq!(f.meta_urls[0].url, "http://mirror.example.com/movie.torrent");
+    assert_eq!(
+        f.meta_urls[0].url,
+        "http://mirror.example.com/movie.torrent"
+    );
     assert_eq!(f.meta_urls[0].mediatype, MediaType::Torrent);
     assert!(f.urls.is_empty(), "no HTTP mirrors in this file");
 }

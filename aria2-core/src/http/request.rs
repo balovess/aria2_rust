@@ -416,13 +416,14 @@ impl HttpRequestBuilder {
 
         // Range header (mirrors C++ segment-based Range logic in createRequest())
         if let Some(start) = self.range_start
-            && !final_headers.contains_key("Range") {
-                let range_value = match self.range_end {
-                    Some(end) => format!("bytes={}-{}", start, end),
-                    None => format!("bytes={}-", start),
-                };
-                final_headers.insert("Range".to_string(), range_value);
-            }
+            && !final_headers.contains_key("Range")
+        {
+            let range_value = match self.range_end {
+                Some(end) => format!("bytes={}-{}", start, end),
+                None => format!("bytes={}-", start),
+            };
+            final_headers.insert("Range".to_string(), range_value);
+        }
 
         // Want-Digest header (mirrors C++ !noWantDigest_)
         // C++ format: "SHA-512;q=1, SHA-256;q=1, SHA;q=0.1"
@@ -435,39 +436,45 @@ impl HttpRequestBuilder {
 
         // If-Modified-Since header (mirrors C++ ifModSinceHeader_)
         if let Some(ref val) = self.if_modified_since
-            && !final_headers.contains_key("If-Modified-Since") {
-                final_headers.insert("If-Modified-Since".to_string(), val.clone());
-            }
+            && !final_headers.contains_key("If-Modified-Since")
+        {
+            final_headers.insert("If-Modified-Since".to_string(), val.clone());
+        }
 
         // If-None-Match header (ETag-based conditional GET)
         if let Some(ref val) = self.if_none_match
-            && !final_headers.contains_key("If-None-Match") {
-                final_headers.insert("If-None-Match".to_string(), val.clone());
-            }
+            && !final_headers.contains_key("If-None-Match")
+        {
+            final_headers.insert("If-None-Match".to_string(), val.clone());
+        }
 
         // Referer header (mirrors C++ request_->getReferer())
         if let Some(ref val) = self.referer
-            && !final_headers.contains_key("Referer") {
-                final_headers.insert("Referer".to_string(), val.clone());
-            }
+            && !final_headers.contains_key("Referer")
+        {
+            final_headers.insert("Referer".to_string(), val.clone());
+        }
 
         // Cookie header (mirrors C++ cookieStorage_->criteriaFind())
         if let Some(ref val) = self.cookie
-            && !final_headers.contains_key("Cookie") {
-                final_headers.insert("Cookie".to_string(), val.clone());
-            }
+            && !final_headers.contains_key("Cookie")
+        {
+            final_headers.insert("Cookie".to_string(), val.clone());
+        }
 
         // Authorization header (mirrors C++ authConfig_->getAuthText())
         if let Some(ref val) = self.authorization
-            && !final_headers.contains_key("Authorization") {
-                final_headers.insert("Authorization".to_string(), val.clone());
-            }
+            && !final_headers.contains_key("Authorization")
+        {
+            final_headers.insert("Authorization".to_string(), val.clone());
+        }
 
         // Proxy-Authorization header (mirrors C++ getProxyAuthString())
         if let Some(ref val) = self.proxy_authorization
-            && !final_headers.contains_key("Proxy-Authorization") {
-                final_headers.insert("Proxy-Authorization".to_string(), val.clone());
-            }
+            && !final_headers.contains_key("Proxy-Authorization")
+        {
+            final_headers.insert("Proxy-Authorization".to_string(), val.clone());
+        }
 
         // Content-Length header (if body is present)
         if let Some(body) = &self.body

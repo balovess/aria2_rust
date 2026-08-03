@@ -537,7 +537,10 @@ fn test_piece_validation_result_debug() {
 fn validator_with_hash_type(hash_type: &str) -> PieceHashValidator {
     let mut ctx = crate::download::DownloadContext::new(4, 8, "/tmp/hash_type.bin".to_string());
     if !hash_type.is_empty() {
-        ctx.set_piece_hashes(hash_type.to_string(), vec!["x".to_string(), "y".to_string()]);
+        ctx.set_piece_hashes(
+            hash_type.to_string(),
+            vec!["x".to_string(), "y".to_string()],
+        );
     }
     PieceHashValidator::new(Arc::new(ctx), make_ps(4, 8), 2, 8, 4)
 }

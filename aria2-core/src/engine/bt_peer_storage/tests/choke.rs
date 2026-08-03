@@ -1,7 +1,7 @@
 //! Tests for choking integration.
 
-use crate::engine::peer_stats::PeerStats;
 use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
+use crate::engine::peer_stats::PeerStats;
 
 #[test]
 fn test_choke_round_interval_elapsed_no_previous_round() {

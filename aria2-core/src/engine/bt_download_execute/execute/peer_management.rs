@@ -8,10 +8,10 @@ use crate::engine::bt_download_command::{
 use crate::engine::bt_handshake_validation::filter_duplicate_peer_connections;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
+use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::peer_stats::PeerStats;
 use crate::engine::udp_tracker_client::UdpTrackerClient;
-use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -43,8 +43,7 @@ impl BtDownloadCommand {
                     count = list.len(),
                     "Using user-specified trackers from --bt-tracker"
                 );
-                let tiers: Vec<Vec<String>> =
-                    list.into_iter().map(|u| vec![u]).collect();
+                let tiers: Vec<Vec<String>> = list.into_iter().map(|u| vec![u]).collect();
                 TrackerAnnouncer::new(&tiers, &None)
             }
             _ => TrackerAnnouncer::new(&meta.announce_list, &Some(meta.announce.clone())),
@@ -113,12 +112,13 @@ impl BtDownloadCommand {
         // Store the announcer for periodic re-announce during download
         self.tracker_announcer = Some(announcer);
 
-        let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = peer_addrs
-            .into_iter()
-            .map(|(ip, port)| {
-                aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
-            })
-            .collect();
+        let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
+            peer_addrs
+                .into_iter()
+                .map(|(ip, port)| {
+                    aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
+                })
+                .collect();
 
         if peer_addrs.is_empty() {
             tracing::error!("[BT] ERROR: No peers from tracker");
@@ -178,32 +178,33 @@ impl BtDownloadCommand {
         }
 
         if let Some(ref engine) = self.dht_engine
-            && let Ok(result) = engine.find_peers(info_hash_raw).await {
-                if !result.peers.is_empty() {
-                    let before = peer_addrs.len();
-                    for addr in &result.peers {
-                        let ip_str = addr.ip().to_string();
-                        let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                            &ip_str,
-                            addr.port(),
-                        );
-                        if !peer_addrs
-                            .iter()
-                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
-                        {
-                            peer_addrs.push(paddr);
-                        }
-                    }
-                    tracing::info!(
-                        "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
-                        peer_addrs.len() - before,
-                        peer_addrs.len(),
-                        result.nodes_contacted
+            && let Ok(result) = engine.find_peers(info_hash_raw).await
+        {
+            if !result.peers.is_empty() {
+                let before = peer_addrs.len();
+                for addr in &result.peers {
+                    let ip_str = addr.ip().to_string();
+                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                        &ip_str,
+                        addr.port(),
                     );
-                } else {
-                    debug!("[BT] DHT find_peers returned no peers");
+                    if !peer_addrs
+                        .iter()
+                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                    {
+                        peer_addrs.push(paddr);
+                    }
                 }
+                tracing::info!(
+                    "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
+                    peer_addrs.len() - before,
+                    peer_addrs.len(),
+                    result.nodes_contacted
+                );
+            } else {
+                debug!("[BT] DHT find_peers returned no peers");
             }
+        }
 
         // BEP 0027 (Private Torrent): public tracker announcement is forbidden
         // for private torrents because it would leak the info_hash to trackers
@@ -483,7 +484,10 @@ impl BtDownloadCommand {
 
         let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
 
-        match announcer.announce(info_hash, &my_peer_id, downloaded, left, uploaded).await {
+        match announcer
+            .announce(info_hash, &my_peer_id, downloaded, left, uploaded)
+            .await
+        {
             Some(result) => {
                 if result.peers.is_empty() {
                     debug!(

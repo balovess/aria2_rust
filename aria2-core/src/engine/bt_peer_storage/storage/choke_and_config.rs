@@ -2,12 +2,11 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-
+use super::DefaultPeerStorage;
 use crate::engine::bt_peer_blocklist::BtPeerBlocklist;
 use crate::engine::bt_peer_storage::constants::{CHOKE_ROUND_INTERVAL_SECS, MAX_DROPPED_PEERS};
 use crate::engine::bt_peer_storage::peer_entry::PeerEntry;
 use crate::engine::peer_stats::PeerStats;
-use super::DefaultPeerStorage;
 
 impl DefaultPeerStorage {
     // ==================================================================

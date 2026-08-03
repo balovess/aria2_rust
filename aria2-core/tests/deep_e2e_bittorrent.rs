@@ -20,12 +20,12 @@ use fixtures::mock_tracker::MockTrackerServer;
 use test_harness::{assert_file_contents, generate_test_data, setup_temp_dir};
 
 use aria2_core::engine::bt_mse_handshake::{CryptoMethod, MseCryptoContext, MseHandshakeManager};
+use aria2_core::engine::bt_progress_info_file::{
+    BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
+};
 use aria2_core::engine::hook_manager::{
     DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
     HookManager, MoveHook, PostDownloadHook, TouchHook,
-};
-use aria2_core::engine::bt_progress_info_file::{
-    BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
 };
 use aria2_core::engine::lpd_manager::{
     LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,

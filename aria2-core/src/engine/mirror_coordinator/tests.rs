@@ -5,8 +5,8 @@ mod tests {
     use std::sync::Arc;
 
     use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-    use crate::engine::mirror_coordinator::coordinator::MirrorCoordinator;
     use crate::engine::mirror_coordinator::config::MirrorConfig;
+    use crate::engine::mirror_coordinator::coordinator::MirrorCoordinator;
     use crate::engine::mirror_coordinator::helpers::extract_host;
     use crate::selector::adaptive_uri_selector::AdaptiveUriSelector;
     use crate::selector::server_stat_man::ServerStatMan;
@@ -60,7 +60,8 @@ mod tests {
         let result = coord.select_mirror_for_segment();
         assert!(result.is_some());
 
-        let (mirror_idx, url, (seg_idx, offset, len)) = result.expect("select_mirror_for_segment should return Some");
+        let (mirror_idx, url, (seg_idx, offset, len)) =
+            result.expect("select_mirror_for_segment should return Some");
         assert!(mirror_idx < 2);
         assert!(url.contains("mirror"));
         assert_eq!(seg_idx, 0);
@@ -228,8 +229,14 @@ mod tests {
         );
 
         // Before rebalance
-        assert_eq!(coord.segment_manager().get_mirror_max_connections(0), Some(2));
-        assert_eq!(coord.segment_manager().get_mirror_max_connections(1), Some(2));
+        assert_eq!(
+            coord.segment_manager().get_mirror_max_connections(0),
+            Some(2)
+        );
+        assert_eq!(
+            coord.segment_manager().get_mirror_max_connections(1),
+            Some(2)
+        );
 
         // Rebalance
         coord.rebalance_connections();

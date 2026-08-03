@@ -25,7 +25,9 @@ impl BtDownloadCommand {
     }
 
     /// Get a mutable reference to the web seed manager.
-    pub fn get_web_seed_manager_mut(&mut self) -> Option<&mut crate::engine::bt_web_seed::WebSeedManager> {
+    pub fn get_web_seed_manager_mut(
+        &mut self,
+    ) -> Option<&mut crate::engine::bt_web_seed::WebSeedManager> {
         self.web_seed_manager.as_mut()
     }
 

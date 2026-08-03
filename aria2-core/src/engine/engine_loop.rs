@@ -183,7 +183,8 @@ pub async fn run_engine_loop(
                     // Fire on-download-start hook.
                     // C++: `util::executeHookByOptName(groupToAdd, e->getOption(),
                     //            PREF_ON_DOWNLOAD_START)`
-                    ctx.event_hooks.fire_event(DownloadEvent::Start, &group.recover());
+                    ctx.event_hooks
+                        .fire_event(DownloadEvent::Start, &group.recover());
                 }
                 None => {
                     warn!(
@@ -459,8 +460,8 @@ async fn process_task_completions(
                     // Mirrors C++ where pause-requested groups return to the
                     // reserved queue.
                     let group_state = group.recover();
-                    let was_pause_requested = group_state.is_pause_requested()
-                        || group_state.is_paused_flag();
+                    let was_pause_requested =
+                        group_state.is_pause_requested() || group_state.is_paused_flag();
                     let is_pause_error = matches!(
                         &e,
                         Aria2Error::DownloadFailed(msg) if msg == "Download paused"
@@ -700,10 +701,7 @@ mod tests {
 
         let man = Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new()));
         let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "test_engine_autosave_{}.sess",
-            std::process::id()
-        ));
+        let path = dir.join(format!("test_engine_autosave_{}.sess", std::process::id()));
         let _ = tokio::fs::remove_file(&path).await;
 
         let auto_save = Arc::new(tokio::sync::Mutex::new(AutoSaveSession::new(
@@ -802,8 +800,7 @@ mod tests {
         }
 
         // The download command terminates because it observed the pause.
-        let (completion_tx, mut completion_rx) =
-            mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(GroupId, TaskResult)>();
         completion_tx
             .send((
                 gid,
@@ -845,8 +842,7 @@ mod tests {
             g.recover().inc_commands();
         }
 
-        let (completion_tx, mut completion_rx) =
-            mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(GroupId, TaskResult)>();
         completion_tx
             .send((
                 gid,

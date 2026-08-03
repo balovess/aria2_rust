@@ -7,11 +7,11 @@ use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
 
 // ── Sub-modules ─────────────────────────────────────────────────────────
-mod types;
-mod segment_lifecycle;
 mod mirror_selection;
+mod segment_lifecycle;
 #[cfg(test)]
 mod tests;
+mod types;
 
 // ── Public re-exports ───────────────────────────────────────────────────
 pub use types::{MirrorState, Segment, SegmentStatus};

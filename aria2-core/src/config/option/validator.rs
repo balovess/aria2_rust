@@ -388,8 +388,7 @@ pub struct RegexValidator {
 
 impl RegexValidator {
     pub fn new(pattern: &str) -> Self {
-        let compiled =
-            regex::Regex::new(pattern).expect("Invalid regex pattern in RegexValidator");
+        let compiled = regex::Regex::new(pattern).expect("Invalid regex pattern in RegexValidator");
         Self {
             pattern: pattern.to_string(),
             compiled,

@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{RwLock, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::checksum::message_digest::{HashType, MessageDigest};
@@ -574,19 +574,25 @@ mod tests {
         let path = dir.join("missing.bin");
 
         // Missing file → None.
-        assert!(file_task(&path, 4, 8, vec!["aa".to_string()], HashType::Sha1)
-            .unwrap()
-            .is_none());
+        assert!(
+            file_task(&path, 4, 8, vec!["aa".to_string()], HashType::Sha1)
+                .unwrap()
+                .is_none()
+        );
         // Empty digest list → None.
         let path2 = dir.join("exists.bin");
         std::fs::write(&path2, b"hello").unwrap();
-        assert!(file_task(&path2, 4, 5, Vec::new(), HashType::Sha1)
-            .unwrap()
-            .is_none());
+        assert!(
+            file_task(&path2, 4, 5, Vec::new(), HashType::Sha1)
+                .unwrap()
+                .is_none()
+        );
         // Zero length → None.
-        assert!(file_task(&path2, 4, 0, vec!["aa".to_string()], HashType::Sha1)
-            .unwrap()
-            .is_none());
+        assert!(
+            file_task(&path2, 4, 0, vec!["aa".to_string()], HashType::Sha1)
+                .unwrap()
+                .is_none()
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -600,14 +606,16 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         man.push_entry(CheckIntegrityEntry {
             gid: 1,
-            task: Box::new(FileChunkValidator::new(
-                PathBuf::from("/tmp/x"),
-                4,
-                8,
-                vec![sha1_hex(b"aaaa"), sha1_hex(b"bbbb")],
-                HashType::Sha1,
-            )
-            .unwrap()),
+            task: Box::new(
+                FileChunkValidator::new(
+                    PathBuf::from("/tmp/x"),
+                    4,
+                    8,
+                    vec![sha1_hex(b"aaaa"), sha1_hex(b"bbbb")],
+                    HashType::Sha1,
+                )
+                .unwrap(),
+            ),
             created_at: Instant::now(),
             cancelled: Arc::new(AtomicBool::new(false)),
             done_tx: Some(tx),
@@ -633,14 +641,16 @@ mod tests {
             let mut guard = man.blocking_write();
             guard.push_entry(CheckIntegrityEntry {
                 gid: 1,
-                task: Box::new(FileChunkValidator::new(
-                    PathBuf::from("/tmp/x"),
-                    4,
-                    8,
-                    vec!["aa".to_string()],
-                    HashType::Sha1,
-                )
-                .unwrap()),
+                task: Box::new(
+                    FileChunkValidator::new(
+                        PathBuf::from("/tmp/x"),
+                        4,
+                        8,
+                        vec!["aa".to_string()],
+                        HashType::Sha1,
+                    )
+                    .unwrap(),
+                ),
                 created_at: Instant::now(),
                 cancelled: Arc::new(AtomicBool::new(false)),
                 done_tx: Some(tx1),

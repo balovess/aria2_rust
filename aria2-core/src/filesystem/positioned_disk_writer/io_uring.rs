@@ -1,4 +1,4 @@
-﻿//! io_uring backend (Linux only, feature-gated)
+//! io_uring backend (Linux only, feature-gated)
 //!
 //! IMPORTANT: `tokio-uring` requires its own single-threaded runtime
 //! (`tokio_uring::start` / `tokio_uring::Runtime`). All async operations on
@@ -164,9 +164,7 @@ impl SeekableDiskWriter for IoUringDiskWriter {
             .read(true)
             .open(&self.path)
             .await
-            .map_err(|e| {
-                Aria2Error::Io(format!("io_uring reopen after truncate failed: {e}"))
-            })?;
+            .map_err(|e| Aria2Error::Io(format!("io_uring reopen after truncate failed: {e}")))?;
         self.file = Some(file);
         Ok(())
     }

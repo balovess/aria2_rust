@@ -1,8 +1,8 @@
 //! RPC authentication: token + basic-auth configuration and middleware.
 
-use base64::Engine;
-use aria2_core::error::Aria2Error;
 use crate::json_rpc::JsonRpcError;
+use aria2_core::error::Aria2Error;
+use base64::Engine;
 
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
@@ -184,7 +184,10 @@ mod tests {
         // Equal strings → true
         assert!(constant_time_eq("", ""));
         assert!(constant_time_eq("my-secret", "my-secret"));
-        assert!(constant_time_eq("rpc-secret-token-123", "rpc-secret-token-123"));
+        assert!(constant_time_eq(
+            "rpc-secret-token-123",
+            "rpc-secret-token-123"
+        ));
 
         // Same-length, different bytes → false
         assert!(!constant_time_eq("secret", "secretX")); // no, lengths differ

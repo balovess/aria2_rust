@@ -1,11 +1,11 @@
-﻿use std::net::SocketAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
 use super::protocol::UdpTrackerRequest;
-use super::{ConnectionState, UdpTrackerClient, MAX_RETRIES, REQUEST_TIMEOUT_SECS};
+use super::{ConnectionState, MAX_RETRIES, REQUEST_TIMEOUT_SECS, UdpTrackerClient};
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
     ConnectResponse, UdpAction, UdpError, UdpEvent, UdpState, build_announce_request,
     build_connect_request, parse_announce_response, parse_connect_response, parse_scrape_response,
@@ -51,7 +51,11 @@ impl UdpTrackerClient {
         }
     }
 
-    pub(crate) async fn send_announce(&mut self, req: &mut UdpTrackerRequest, conn_id: u64) -> bool {
+    pub(crate) async fn send_announce(
+        &mut self,
+        req: &mut UdpTrackerRequest,
+        conn_id: u64,
+    ) -> bool {
         let txn_id = self.next_txn();
         req.txn_id = txn_id;
         req.dispatched_at = Some(std::time::Instant::now());

@@ -6,7 +6,7 @@ use crate::engine::bt_peer_interaction::types::*;
 use crate::segment::piece::Piece;
 
 use super::super::BtPeerInteractive;
-use super::{make_test_conn, MockPieceProvider};
+use super::{MockPieceProvider, make_test_conn};
 
 // ── fill_piece tests ────────────────────────────────────────────────
 

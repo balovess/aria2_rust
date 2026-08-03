@@ -6,7 +6,7 @@ use aria2_protocol::bittorrent::message::extension::{
 use tracing::{trace, warn};
 
 use super::{
-    ExtensionRegistry, ExtensionUpdate, DEFAULT_LOCAL_UT_METADATA_ID, DEFAULT_LOCAL_UT_PEX_ID,
+    DEFAULT_LOCAL_UT_METADATA_ID, DEFAULT_LOCAL_UT_PEX_ID, ExtensionRegistry, ExtensionUpdate,
     UT_METADATA_NAME, UT_PEX_NAME,
 };
 

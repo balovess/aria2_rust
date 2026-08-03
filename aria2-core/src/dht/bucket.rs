@@ -224,10 +224,7 @@ impl DhtBucket {
     /// Find a node by ID with mutable access.
     ///
     /// Used for updating node state (RTT, timeout counter) in place.
-    pub fn get_node_mut(
-        &mut self,
-        node_id: &NodeId,
-    ) -> Option<&mut DhtNode> {
+    pub fn get_node_mut(&mut self, node_id: &NodeId) -> Option<&mut DhtNode> {
         self.nodes
             .iter_mut()
             .find(|n| n.id() == node_id)

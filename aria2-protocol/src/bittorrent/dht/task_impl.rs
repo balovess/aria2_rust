@@ -122,12 +122,13 @@ impl DhtTask for PingTask {
             {
                 Ok((len, _from)) if len > 0 => {
                     if let Ok(response) = super::message::DhtMessage::decode(&buf[..len])
-                        && response.is_response() {
-                            trace!("PingTask: node {} responded", hex::encode(node_id));
-                            let mut rt = self.ctx.routing_table.write().await;
-                            rt.mark_good(&node_id);
-                            return;
-                        }
+                        && response.is_response()
+                    {
+                        trace!("PingTask: node {} responded", hex::encode(node_id));
+                        let mut rt = self.ctx.routing_table.write().await;
+                        rt.mark_good(&node_id);
+                        return;
+                    }
                 }
                 _ => {
                     // Timeout or error — retry if attempts remain.

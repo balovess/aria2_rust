@@ -229,102 +229,107 @@ impl App {
         for (i, input) in self.detected_inputs.iter().enumerate() {
             let gid = GroupId::new(i as u64 + 1);
 
-        let cmd: Box<dyn Command> = match &input.input_type {
-            InputType::HttpUrl => {
-                let mut cmd = DownloadCommand::new(
-                    gid, &input.raw, &options, dir.as_deref(), out.as_deref(),
-                )
-                .map_err(|e| format!("HTTP download command failed: {}", e))?;
-                if let Some(gl) = engine.global_rate_limiter().cloned() {
-                    cmd.set_global_limiter(gl);
+            let cmd: Box<dyn Command> = match &input.input_type {
+                InputType::HttpUrl => {
+                    let mut cmd = DownloadCommand::new(
+                        gid,
+                        &input.raw,
+                        &options,
+                        dir.as_deref(),
+                        out.as_deref(),
+                    )
+                    .map_err(|e| format!("HTTP download command failed: {}", e))?;
+                    if let Some(gl) = engine.global_rate_limiter().cloned() {
+                        cmd.set_global_limiter(gl);
+                    }
+                    Box::new(cmd)
                 }
-                Box::new(cmd)
-            }
-            InputType::FtpUrl => {
-                let mut cmd = FtpDownloadCommand::new(
-                    gid,
-                    &input.raw,
-                    &options,
-                    dir.as_deref(),
-                    out.as_deref(),
-                )
-                .map_err(|e| format!("FTP download command failed: {}", e))?;
-                if let Some(gl) = engine.global_rate_limiter().cloned() {
-                    cmd.set_global_limiter(gl);
+                InputType::FtpUrl => {
+                    let mut cmd = FtpDownloadCommand::new(
+                        gid,
+                        &input.raw,
+                        &options,
+                        dir.as_deref(),
+                        out.as_deref(),
+                    )
+                    .map_err(|e| format!("FTP download command failed: {}", e))?;
+                    if let Some(gl) = engine.global_rate_limiter().cloned() {
+                        cmd.set_global_limiter(gl);
+                    }
+                    Box::new(cmd)
                 }
-                Box::new(cmd)
-            }
-            #[cfg(feature = "sftp")]
-            InputType::SftpUrl => {
-                let mut cmd = SftpDownloadCommand::new(
-                    gid,
-                    &input.raw,
-                    &options,
-                    dir.as_deref(),
-                    out.as_deref(),
-                )
-                .map_err(|e| format!("SFTP download command failed: {}", e))?;
-                if let Some(gl) = engine.global_rate_limiter().cloned() {
-                    cmd.set_global_limiter(gl);
+                #[cfg(feature = "sftp")]
+                InputType::SftpUrl => {
+                    let mut cmd = SftpDownloadCommand::new(
+                        gid,
+                        &input.raw,
+                        &options,
+                        dir.as_deref(),
+                        out.as_deref(),
+                    )
+                    .map_err(|e| format!("SFTP download command failed: {}", e))?;
+                    if let Some(gl) = engine.global_rate_limiter().cloned() {
+                        cmd.set_global_limiter(gl);
+                    }
+                    Box::new(cmd)
                 }
-                Box::new(cmd)
-            }
-            #[cfg(feature = "bittorrent")]
-            InputType::TorrentFile => {
-                let data = input
-                    .file_data
-                    .as_ref()
-                    .ok_or_else(|| "Torrent file data not available".to_string())?;
-                let mut cmd = BtDownloadCommand::new(gid, data, &options, dir.as_deref())
-                    .map_err(|e| format!("BT download command failed: {}", e))?;
-                if let Some(gl) = engine.global_rate_limiter().cloned() {
-                    cmd.set_global_limiter(gl);
+                #[cfg(feature = "bittorrent")]
+                InputType::TorrentFile => {
+                    let data = input
+                        .file_data
+                        .as_ref()
+                        .ok_or_else(|| "Torrent file data not available".to_string())?;
+                    let mut cmd = BtDownloadCommand::new(gid, data, &options, dir.as_deref())
+                        .map_err(|e| format!("BT download command failed: {}", e))?;
+                    if let Some(gl) = engine.global_rate_limiter().cloned() {
+                        cmd.set_global_limiter(gl);
+                    }
+                    Box::new(cmd)
                 }
-                Box::new(cmd)
-            }
-            #[cfg(feature = "metalink")]
-            InputType::MetalinkFile => {
-                let data = input
-                    .file_data
-                    .as_ref()
-                    .ok_or_else(|| "Metalink file data not available".to_string())?;
-                let mut cmd = MetalinkDownloadCommand::new(gid, data, &options, dir.as_deref())
-                    .map_err(|e| format!("Metalink download command failed: {}", e))?;
-                if let Some(gl) = engine.global_rate_limiter().cloned() {
-                    cmd.set_global_limiter(gl);
+                #[cfg(feature = "metalink")]
+                InputType::MetalinkFile => {
+                    let data = input
+                        .file_data
+                        .as_ref()
+                        .ok_or_else(|| "Metalink file data not available".to_string())?;
+                    let mut cmd = MetalinkDownloadCommand::new(gid, data, &options, dir.as_deref())
+                        .map_err(|e| format!("Metalink download command failed: {}", e))?;
+                    if let Some(gl) = engine.global_rate_limiter().cloned() {
+                        cmd.set_global_limiter(gl);
+                    }
+                    Box::new(cmd)
                 }
-                Box::new(cmd)
-            }
-            #[cfg(feature = "bittorrent")]
-            InputType::MagnetLink => {
-                let mut cmd = MagnetDownloadCommand::new(gid, &input.raw, &options, dir.as_deref())
-                    .map_err(|e| format!("Magnet download command failed: {}", e))?;
-                if let Some(gl) = engine.global_rate_limiter().cloned() {
-                    cmd.set_global_limiter(gl);
+                #[cfg(feature = "bittorrent")]
+                InputType::MagnetLink => {
+                    let mut cmd =
+                        MagnetDownloadCommand::new(gid, &input.raw, &options, dir.as_deref())
+                            .map_err(|e| format!("Magnet download command failed: {}", e))?;
+                    if let Some(gl) = engine.global_rate_limiter().cloned() {
+                        cmd.set_global_limiter(gl);
+                    }
+                    Box::new(cmd)
                 }
-                Box::new(cmd)
-            }
-            #[cfg(not(feature = "sftp"))]
-            InputType::SftpUrl => {
-                return Err(
-                    "SFTP support not enabled (compile with --features sftp)".to_string()
-                );
-            }
-            #[cfg(not(feature = "bittorrent"))]
-            InputType::TorrentFile | InputType::MagnetLink => {
-                return Err(
-                    "BitTorrent support not enabled (compile with --features bittorrent)"
-                        .to_string(),
-                );
-            }
-            #[cfg(not(feature = "metalink"))]
-            InputType::MetalinkFile => {
-                return Err(
-                    "Metalink support not enabled (compile with --features metalink)"
-                        .to_string(),
-                );
-            }
-        };
+                #[cfg(not(feature = "sftp"))]
+                InputType::SftpUrl => {
+                    return Err(
+                        "SFTP support not enabled (compile with --features sftp)".to_string()
+                    );
+                }
+                #[cfg(not(feature = "bittorrent"))]
+                InputType::TorrentFile | InputType::MagnetLink => {
+                    return Err(
+                        "BitTorrent support not enabled (compile with --features bittorrent)"
+                            .to_string(),
+                    );
+                }
+                #[cfg(not(feature = "metalink"))]
+                InputType::MetalinkFile => {
+                    return Err(
+                        "Metalink support not enabled (compile with --features metalink)"
+                            .to_string(),
+                    );
+                }
+            };
 
             engine
                 .add_command(cmd)
@@ -362,7 +367,11 @@ impl App {
 
         // C++ only checks `op->defined(PREF_STOP_WITH_PROCESS)`, so any PID
         // that was explicitly supplied arms the watcher.
-        if let Some(pid) = self.get_opt_i64("stop-with-process").await.filter(|v| *v > 0) {
+        if let Some(pid) = self
+            .get_opt_i64("stop-with-process")
+            .await
+            .filter(|v| *v > 0)
+        {
             info!("Engine will halt when process {} exits", pid);
             halt_watchers::spawn_process_watch(cmd_tx, pid as u32, false);
         }
@@ -401,12 +410,11 @@ impl App {
                     }
                     // Second Ctrl+C: force halt
                     if tokio::signal::ctrl_c().await.is_ok() {
-                        tracing::warn!(
-                            "Second Ctrl+C received, force halting all downloads!"
-                        );
+                        tracing::warn!("Second Ctrl+C received, force halting all downloads!");
                         let _ = cmd_tx.send(
                             aria2_core::engine::engine_command::EngineCommand::ForceHaltAll {
-                                reason: aria2_core::request::request_group::HaltReason::ShutdownSignal,
+                                reason:
+                                    aria2_core::request::request_group::HaltReason::ShutdownSignal,
                             },
                         );
                     }

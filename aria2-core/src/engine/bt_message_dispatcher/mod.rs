@@ -300,8 +300,7 @@ impl Default for ActiveInteractionChecker {
 /// already-acquired blocks.
 ///
 /// Returned by `BtMessageDispatcher::check_request_slots()`.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SlotCheckResult {
     /// Whether any request slot timed out (peer may be snubbing)
     pub timed_out: bool,
@@ -309,7 +308,6 @@ pub struct SlotCheckResult {
     /// Each tuple is (piece_index, begin, length).
     pub cancelled_blocks: Vec<(u32, u32, u32)>,
 }
-
 
 // ===========================================================================
 // PendingMessage — tagged outgoing message

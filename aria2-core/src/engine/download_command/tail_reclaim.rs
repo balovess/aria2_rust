@@ -15,9 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::engine::http_tail_reclaim::{
-    self, HttpTailReclaimState,
-};
+use crate::engine::http_tail_reclaim::{self, HttpTailReclaimState};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;

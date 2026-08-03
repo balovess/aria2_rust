@@ -256,8 +256,7 @@ fn test_deserialize_user_options() {
 
 #[test]
 fn test_bitfield_roundtrip() {
-    let mut entry =
-        SessionEntry::new(1, vec!["http://example.com/torrent.torrent".to_string()]);
+    let mut entry = SessionEntry::new(1, vec!["http://example.com/torrent.torrent".to_string()]);
 
     // Set bitfield: [0xFF, 0xF0, 0x0F] - indicates some pieces completed
     entry.bitfield = Some(vec![0xFF, 0xF0, 0x0F]);

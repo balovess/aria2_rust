@@ -53,7 +53,8 @@ impl DhtEngine {
 
                 // Feed discovered peers to the peer announce storage
                 for peer_addr in &result.peers {
-                    self.peer_announce_storage.add_peer_announce(&result.target, *peer_addr);
+                    self.peer_announce_storage
+                        .add_peer_announce(&result.target, *peer_addr);
                 }
 
                 // Send announce_peer messages to K closest nodes that provided tokens.

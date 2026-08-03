@@ -62,13 +62,10 @@ impl NetrcParser {
     /// Reads the file, then delegates to [`Self::parse`].
     pub fn parse_file(path: &Path) -> Result<Self, NetrcError> {
         if !path.exists() {
-            return Err(NetrcError::FileNotFound(
-                path.to_string_lossy().to_string(),
-            ));
+            return Err(NetrcError::FileNotFound(path.to_string_lossy().to_string()));
         }
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            NetrcError::IoError(format!("{}: {}", path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| NetrcError::IoError(format!("{}: {}", path.display(), e)))?;
         Self::parse(&content)
     }
 

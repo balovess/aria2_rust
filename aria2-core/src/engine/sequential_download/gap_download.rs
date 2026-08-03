@@ -4,9 +4,9 @@
 use futures::StreamExt;
 
 use crate::constants;
+use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
-use crate::error::{Aria2Error, RecoverableError};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::{GapDownloadResult, SequentialDownloader};

@@ -7,10 +7,8 @@
 
 use tracing::debug;
 
-use super::helpers::{
-    parse_single_digest, parse_single_link, split_link_entries, split_top_level,
-};
-use super::types::{MetalinkHttpDigest, MetalinkHttpLink, MetalinkHttpResult, DEFAULT_PRI};
+use super::helpers::{parse_single_digest, parse_single_link, split_link_entries, split_top_level};
+use super::types::{DEFAULT_PRI, MetalinkHttpDigest, MetalinkHttpLink, MetalinkHttpResult};
 use crate::http::header_processor::HttpResponseHead;
 
 // ---------------------------------------------------------------------------
@@ -83,8 +81,10 @@ impl MetalinkHttpParser {
         //   { r.pri -= 999999; }
         if !all_links.is_empty() && !preferred_locations.is_empty() {
             // Pre-lowercase preferred locations for comparison
-            let locs_lower: Vec<String> =
-                preferred_locations.iter().map(|l| l.to_lowercase()).collect();
+            let locs_lower: Vec<String> = preferred_locations
+                .iter()
+                .map(|l| l.to_lowercase())
+                .collect();
             for link in &mut all_links {
                 if let Some(ref geo) = link.geo
                     && locs_lower.iter().any(|l| l == geo)
@@ -163,12 +163,9 @@ pub(crate) fn deduplicate_digests(digests: Vec<MetalinkHttpDigest>) -> Vec<Metal
         if consistent {
             // Keep only one entry per algorithm (the first).
             // entries is non-empty since we checked is_empty above.
-            result.push(
-                entries
-                    .into_iter()
-                    .next()
-                    .expect("entries is non-empty: is_empty check above guarantees at least one element"),
-            );
+            result.push(entries.into_iter().next().expect(
+                "entries is non-empty: is_empty check above guarantees at least one element",
+            ));
         }
         // If inconsistent, discard all entries for this algorithm
         // (matches C++ behavior: conflicting digests are removed entirely)

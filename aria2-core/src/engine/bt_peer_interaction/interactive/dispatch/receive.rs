@@ -10,8 +10,8 @@ use crate::engine::extension_registry::ExtensionUpdate;
 use crate::error::Result;
 use tracing::{trace, warn};
 
-use crate::engine::bt_peer_interaction::types::*;
 use super::super::BtPeerInteractive;
+use crate::engine::bt_peer_interaction::types::*;
 
 impl BtPeerInteractive {
     /// Receive messages from the peer connection and dispatch each one.
@@ -67,9 +67,10 @@ impl BtPeerInteractive {
 
                     // Collect inbound PEX updates for the caller.
                     if let Some(ext) = &update.extension_update
-                        && matches!(ext, ExtensionUpdate::PeerExchange { .. }) {
-                            last_pex_update = Some(ext.clone());
-                        }
+                        && matches!(ext, ExtensionUpdate::PeerExchange { .. })
+                    {
+                        last_pex_update = Some(ext.clone());
+                    }
 
                     // Reset inactive timer on any received message
                     self.inactive_timer = Instant::now();

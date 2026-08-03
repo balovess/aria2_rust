@@ -143,10 +143,7 @@ impl Command for SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 4: Open Remote File for Reading
         // -----------------------------------------------------------------
-        let mut remote_file = match ops
-            .open(&self.remote_path, OpenFlags::readonly(), 0)
-            .await
-        {
+        let mut remote_file = match ops.open(&self.remote_path, OpenFlags::readonly(), 0).await {
             Ok(f) => f,
             Err(e) => {
                 let _ = conn.disconnect().await;
@@ -325,7 +322,8 @@ impl Command for SftpDownloadCommand {
 
     fn request_group(
         &self,
-    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
+    {
         Some(std::sync::Arc::clone(&self.group))
     }
 

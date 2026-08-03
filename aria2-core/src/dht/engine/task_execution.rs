@@ -44,11 +44,8 @@ impl DhtEngine {
         }
 
         // Clean up completed ping tasks
-        let bootstrap_done = self
-            .active_pings
-            .iter()
-            .all(|p| p.finished())
-            && !self.active_pings.is_empty();
+        let bootstrap_done =
+            self.active_pings.iter().all(|p| p.finished()) && !self.active_pings.is_empty();
         if bootstrap_done {
             // All bootstrap pings completed (success or failure).
             // C++: After all entry point pings succeed, the bootstrap
@@ -58,7 +55,9 @@ impl DhtEngine {
                 debug!("All bootstrap entry point pings succeeded, starting initial node lookup");
                 self.lookup_nodes(self.local_id);
             } else {
-                debug!("Some bootstrap entry point pings failed, proceeding with partial routing table");
+                debug!(
+                    "Some bootstrap entry point pings failed, proceeding with partial routing table"
+                );
                 // Still try a node lookup even if some pings failed
                 self.lookup_nodes(self.local_id);
             }

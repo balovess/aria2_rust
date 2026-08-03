@@ -16,4 +16,4 @@ mod piece_impl;
 mod tests;
 mod traits;
 
-pub use piece_impl::{Piece, DEFAULT_BLOCK_LENGTH};
+pub use piece_impl::{DEFAULT_BLOCK_LENGTH, Piece};

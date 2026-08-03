@@ -42,7 +42,9 @@ pub fn handle_digest_challenge(
     // If the host:port:path combination is invalid for URL construction,
     // fall back to a placeholder that will still allow credential resolution.
     let mut url_for_resolve = url::Url::parse(&format!("http://{}:{}{}", host, port, path))
-        .unwrap_or_else(|_| url::Url::parse("http://localhost/").expect("fallback URL must be valid"));
+        .unwrap_or_else(|_| {
+            url::Url::parse("http://localhost/").expect("fallback URL must be valid")
+        });
 
     // Copy username/password from original URL if present
     if !url.username().is_empty() {
@@ -106,7 +108,11 @@ pub fn handle_digest_challenge(
     let auth_header = response.to_header_value();
     info!(
         "Computed Digest auth for {}:{}{} (user={}, nc={})",
-        host, port, path, ac.user(), nc
+        host,
+        port,
+        path,
+        ac.user(),
+        nc
     );
 
     AuthChallengeResult::RetryWithAuth {

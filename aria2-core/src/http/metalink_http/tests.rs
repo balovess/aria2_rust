@@ -1,7 +1,7 @@
 //! Tests for Metalink/HTTP parsing.
 
 use super::helpers::{split_link_entries, unquote};
-use super::parser::{deduplicate_digests, MetalinkHttpParser};
+use super::parser::{MetalinkHttpParser, deduplicate_digests};
 use super::types::MetalinkHttpDigest;
 
 // ---- Link header parsing ----
@@ -135,27 +135,24 @@ fn test_unquoted_rel() {
 
 #[test]
 fn test_pri_out_of_range() {
-    let links = MetalinkHttpParser::parse_link_header(
-        r#"<http://example.com>; rel="duplicate"; pri="0""#,
-    );
+    let links =
+        MetalinkHttpParser::parse_link_header(r#"<http://example.com>; rel="duplicate"; pri="0""#);
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].pri, None); // 0 is out of [1, 999999]
 }
 
 #[test]
 fn test_rel_space_separated() {
-    let links = MetalinkHttpParser::parse_link_header(
-        r#"<http://example.com>; rel="duplicate mirror""#,
-    );
+    let links =
+        MetalinkHttpParser::parse_link_header(r#"<http://example.com>; rel="duplicate mirror""#);
     assert_eq!(links[0].rel, vec!["duplicate", "mirror"]);
     assert!(links[0].is_relevant());
 }
 
 #[test]
 fn test_geo_lowercased() {
-    let links = MetalinkHttpParser::parse_link_header(
-        r#"<http://example.com>; rel="duplicate"; geo="US""#,
-    );
+    let links =
+        MetalinkHttpParser::parse_link_header(r#"<http://example.com>; rel="duplicate"; geo="US""#);
     assert_eq!(links[0].geo.as_deref(), Some("us"));
 }
 
@@ -338,7 +335,11 @@ fn test_parse_response_multiple_digest_headers() {
     let result = MetalinkHttpParser::parse_response(&head, &[]);
     assert_eq!(result.digests.len(), 2);
     // Order from HashMap is not guaranteed, so check by content
-    let algorithms: Vec<&str> = result.digests.iter().map(|d| d.algorithm.as_str()).collect();
+    let algorithms: Vec<&str> = result
+        .digests
+        .iter()
+        .map(|d| d.algorithm.as_str())
+        .collect();
     assert!(algorithms.contains(&"sha-256"));
     assert!(algorithms.contains(&"md5"));
 }

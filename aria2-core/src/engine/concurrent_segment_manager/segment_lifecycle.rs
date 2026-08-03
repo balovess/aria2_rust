@@ -1,12 +1,15 @@
-use super::types::SegmentStatus;
 use super::ConcurrentSegmentManager;
+use super::types::SegmentStatus;
 
 impl ConcurrentSegmentManager {
     /// Mark a segment as successfully downloaded.
     ///
     /// Returns `true` if the segment existed, `false` otherwise.
-    pub fn complete_segment(&mut self, index: u32, _len: usize) -> bool {
+    pub fn complete_segment(&mut self, index: u32, len: usize) -> bool {
         if let Some(seg) = self.segments.get_mut(index as usize) {
+            if seg.status == SegmentStatus::Done || len as u64 != seg.length {
+                return false;
+            }
             seg.status = SegmentStatus::Done;
 
             if let Some(mi) = seg.assigned_mirror

@@ -58,10 +58,7 @@ pub(super) fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
         ("remote-time", OptionValue::Bool(true)),
         ("reuse-uri", OptionValue::Bool(true)),
         ("allow-overwrite", OptionValue::Bool(true)),
-        (
-            "file-allocation",
-            OptionValue::Str(String::from("trunc")),
-        ),
+        ("file-allocation", OptionValue::Str(String::from("trunc"))),
         (
             "mmap-threshold",
             OptionValue::Usize(256 * 1024 * 1024), // 256 MiB
@@ -75,19 +72,13 @@ pub(super) fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
         ("rpc-listen-port", OptionValue::Usize(6800)),
         ("rpc-secret", OptionValue::Str(String::new())),
         ("quiet", OptionValue::Bool(false)),
-        (
-            "console-log-level",
-            OptionValue::Str(String::from("info")),
-        ),
+        ("console-log-level", OptionValue::Str(String::from("info"))),
         // HTTP authentication defaults (C++ PREF_* compatible)
         ("http-auth-challenge", OptionValue::Bool(false)),
         ("http-user", OptionValue::Str(String::new())),
         ("http-passwd", OptionValue::Str(String::new())),
         ("ftp-user", OptionValue::Str(String::from("anonymous"))),
-        (
-            "ftp-passwd",
-            OptionValue::Str(String::from("anonymous@")),
-        ),
+        ("ftp-passwd", OptionValue::Str(String::from("anonymous@"))),
         ("no-netrc", OptionValue::Bool(false)),
         ("netrc-path", OptionValue::Str(String::new())),
         ("conditional-get", OptionValue::Bool(false)),

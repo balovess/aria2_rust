@@ -4,13 +4,13 @@
 use futures::StreamExt;
 
 use crate::constants;
+use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::filesystem::resume_helper::{ResumeHelper, ResumeState};
 use crate::http::conditional_get::SimpleDateTime;
 use crate::http::skip_response::{MAX_REDIRECT_COUNT, RedirectType};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
@@ -67,13 +67,13 @@ impl SequentialDownloader {
 
         loop {
             let url_parsed = reqwest::Url::parse(&current_uri).ok();
-            let mut request = if let Some(range_header) = ResumeHelper::build_range_header(resume_state)
-            {
-                tracing::debug!("Resume download: {}", range_header);
-                self.client.get(&current_uri).header("Range", range_header)
-            } else {
-                self.client.get(&current_uri)
-            };
+            let mut request =
+                if let Some(range_header) = ResumeHelper::build_range_header(resume_state) {
+                    tracing::debug!("Resume download: {}", range_header);
+                    self.client.get(&current_uri).header("Range", range_header)
+                } else {
+                    self.client.get(&current_uri)
+                };
 
             if let Some(ref url) = url_parsed {
                 let cookie_hdr = self.cookie_helper.build_cookie_header_from_url(url);
@@ -124,7 +124,8 @@ impl SequentialDownloader {
                 })
             })?;
 
-            self.cookie_helper.extract_and_store_cookies(&current_uri, &response);
+            self.cookie_helper
+                .extract_and_store_cookies(&current_uri, &response);
 
             let status = response.status();
             let status_code = status.as_u16();
@@ -142,17 +143,16 @@ impl SequentialDownloader {
                 }
 
                 // Extract Location header
-                let location = response.headers().get("location")
+                let location = response
+                    .headers()
+                    .get("location")
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
 
                 let location = match location {
                     Some(loc) => loc,
                     None => {
-                        tracing::warn!(
-                            status_code,
-                            "Redirect response without Location header"
-                        );
+                        tracing::warn!(status_code, "Redirect response without Location header");
                         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                             format!("HTTP {} redirect without Location header", status_code),
                         )));
@@ -210,14 +210,17 @@ impl SequentialDownloader {
             // If http_auth_challenge is enabled and we haven't already tried auth,
             // attempt to resolve credentials and retry.
             if status_code == 401 || status_code == 407 {
-                if let Some(auth_response) = self.try_auth_retry(
-                    &response,
-                    &current_uri,
-                    &url_parsed,
-                    status_code,
-                    false, // authentication_used = false (first attempt)
-                    resume_state,
-                ).await {
+                if let Some(auth_response) = self
+                    .try_auth_retry(
+                        &response,
+                        &current_uri,
+                        &url_parsed,
+                        status_code,
+                        false, // authentication_used = false (first attempt)
+                        resume_state,
+                    )
+                    .await
+                {
                     return auth_response;
                 }
                 // If try_auth_retry returned None, fall through to error handling
@@ -227,13 +230,13 @@ impl SequentialDownloader {
             // When the server returns 304, the file is unchanged since last download.
             // Mark all pieces as done and complete without transferring data.
             if status_code == 304 {
-                tracing::info!(
-                    "HTTP 304 Not Modified — file unchanged, marking download complete"
-                );
+                tracing::info!("HTTP 304 Not Modified — file unchanged, marking download complete");
                 {
                     let g = self.group.recover();
                     // If we know the total length, set it; otherwise use existing
-                    if let Some(cl) = response.headers().get("content-length")
+                    if let Some(cl) = response
+                        .headers()
+                        .get("content-length")
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.parse::<u64>().ok())
                     {
@@ -256,7 +259,9 @@ impl SequentialDownloader {
             }
 
             // Proceed with the response body download
-            return self.download_response_body(response, &current_uri, resume_state).await;
+            return self
+                .download_response_body(response, &current_uri, resume_state)
+                .await;
         }
     }
 
@@ -270,7 +275,6 @@ impl SequentialDownloader {
         _uri: &str,
         resume_state: &ResumeState,
     ) -> Result<()> {
-
         let resp_length = response.content_length().unwrap_or(0) as u64;
         let actual_total = if resume_state.should_resume {
             resume_state.start_offset + resp_length
@@ -286,7 +290,9 @@ impl SequentialDownloader {
         // C++ `updateLastModifiedTime()`: when the `remote-time` option is
         // enabled, the file's mtime is set to the server's Last-Modified time
         // after download completion.
-        let last_modified = response.headers().get("last-modified")
+        let last_modified = response
+            .headers()
+            .get("last-modified")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
@@ -468,15 +474,14 @@ impl SequentialDownloader {
                     // for cross-platform support. If filetime is not available,
                     // we can use platform-specific calls.
                     // For now, use std::fs which supports setting modification time.
-                    if let Err(e) = std::fs::File::open(&self.output_path)
-                        .and_then(|f| {
-                            f.set_modified(mtime_file)
-                                .map_err(|e2| std::io::Error::new(e2.kind(), e2.to_string()))
-                        })
-                    {
+                    if let Err(e) = std::fs::File::open(&self.output_path).and_then(|f| {
+                        f.set_modified(mtime_file)
+                            .map_err(|e2| std::io::Error::new(e2.kind(), e2.to_string()))
+                    }) {
                         tracing::warn!(
                             "Failed to set file mtime from Last-Modified '{}': {}",
-                            lm_str, e
+                            lm_str,
+                            e
                         );
                     } else {
                         tracing::debug!("Set file mtime from Last-Modified: {}", lm_str);
@@ -488,9 +493,10 @@ impl SequentialDownloader {
         // ADR-0001: Delete control file on successful completion.
         drop(ctrl_file);
         if ctrl_path.exists()
-            && let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
-                tracing::debug!("Failed to delete control file on completion: {}", e);
-            }
+            && let Err(e) = tokio::fs::remove_file(&ctrl_path).await
+        {
+            tracing::debug!("Failed to delete control file on completion: {}", e);
+        }
         self.cookie_helper.save_cookies_if_configured();
         Ok(())
     }

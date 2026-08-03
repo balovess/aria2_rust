@@ -263,8 +263,7 @@ mod tests {
         let remote_peer_id = [0x22; 20];
         let active_ids = [[0x22; 20]]; // Same as remote
 
-        let result =
-            validate_received_peer_id(&remote_peer_id, &local_peer_id, &active_ids);
+        let result = validate_received_peer_id(&remote_peer_id, &local_peer_id, &active_ids);
         assert_eq!(
             result,
             Err(HandshakeValidationError::DuplicatePeerId {
@@ -282,8 +281,7 @@ mod tests {
         let remote_peer_id = [0x99; 20];
         let active_ids = [[0x22; 20], [0x33; 20]];
 
-        let result =
-            validate_received_peer_id(&remote_peer_id, &local_peer_id, &active_ids);
+        let result = validate_received_peer_id(&remote_peer_id, &local_peer_id, &active_ids);
         assert_eq!(result, Ok(()));
     }
 
@@ -309,8 +307,7 @@ mod tests {
         let active_ids = [[0x11; 20]]; // Also in active list
 
         // Self-connection check comes first, so SelfConnection is returned
-        let result =
-            validate_received_peer_id(&remote_peer_id, &local_peer_id, &active_ids);
+        let result = validate_received_peer_id(&remote_peer_id, &local_peer_id, &active_ids);
         assert_eq!(
             result,
             Err(HandshakeValidationError::SelfConnection {
@@ -324,7 +321,9 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_error_display_self_connection() {
-        let error = HandshakeValidationError::SelfConnection { peer_id: [0xAB; 20] };
+        let error = HandshakeValidationError::SelfConnection {
+            peer_id: [0xAB; 20],
+        };
         let msg = format!("{}", error);
         assert!(msg.contains("Drop connection from the same Peer ID"));
         assert!(msg.contains("abab"));
@@ -332,7 +331,9 @@ mod tests {
 
     #[test]
     fn test_error_display_duplicate() {
-        let error = HandshakeValidationError::DuplicatePeerId { peer_id: [0xCD; 20] };
+        let error = HandshakeValidationError::DuplicatePeerId {
+            peer_id: [0xCD; 20],
+        };
         let msg = format!("{}", error);
         assert!(msg.contains("Same Peer ID has been already seen"));
         assert!(msg.contains("cdcd"));
@@ -458,8 +459,7 @@ mod tests {
         assert_eq!(connections.len(), 2); // 2 valid connections remain
 
         // Verify the remaining connections have distinct, non-local peer IDs
-        let remaining_ids: Vec<[u8; 20]> =
-            connections.iter().filter_map(|c| c.peer_id).collect();
+        let remaining_ids: Vec<[u8; 20]> = connections.iter().filter_map(|c| c.peer_id).collect();
         assert_eq!(remaining_ids, [[0x22; 20], [0x33; 20]]);
     }
 }

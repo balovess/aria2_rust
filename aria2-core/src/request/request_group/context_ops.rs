@@ -185,13 +185,13 @@ impl super::RequestGroup {
         let mut guard = self.download_context.recover_mut();
         if let Some(ref mut ctx) = *guard
             && let Some(ctx_inner) = Arc::get_mut(ctx)
-                && let Some(fe) = ctx_inner
-                    .get_file_entries_mut()
-                    .iter_mut()
-                    .find(|fe| fe.is_requested())
-                {
-                    fe.add_uri_result(uri, result_code);
-                }
+            && let Some(fe) = ctx_inner
+                .get_file_entries_mut()
+                .iter_mut()
+                .find(|fe| fe.is_requested())
+        {
+            fe.add_uri_result(uri, result_code);
+        }
         // If no DownloadContext yet, the result is lost. This is acceptable
         // because URI results are only meaningful after a download attempt.
     }
@@ -205,13 +205,13 @@ impl super::RequestGroup {
         let mut guard = self.download_context.recover_mut();
         if let Some(ref mut ctx) = *guard
             && let Some(ctx_inner) = Arc::get_mut(ctx)
-                && let Some(fe) = ctx_inner
-                    .get_file_entries_mut()
-                    .iter_mut()
-                    .find(|fe| fe.is_requested())
-                {
-                    fe.reuse_uri(ignore_hosts);
-                }
+            && let Some(fe) = ctx_inner
+                .get_file_entries_mut()
+                .iter_mut()
+                .find(|fe| fe.is_requested())
+        {
+            fe.reuse_uri(ignore_hosts);
+        }
     }
 
     /// Check whether any requested file entry has remaining URIs.
@@ -261,11 +261,17 @@ impl super::RequestGroup {
             // download attempt via reuse_uri().
             drop(guard);
             self.uris.push(uri.to_string());
-            trace!("Added redirect URI to initial URI list (shared Arc): {}", uri);
+            trace!(
+                "Added redirect URI to initial URI list (shared Arc): {}",
+                uri
+            );
         } else {
             drop(guard);
             self.uris.push(uri.to_string());
-            trace!("Added redirect URI to initial URI list (no context): {}", uri);
+            trace!(
+                "Added redirect URI to initial URI list (no context): {}",
+                uri
+            );
         }
     }
 }

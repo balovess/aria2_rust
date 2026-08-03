@@ -90,7 +90,9 @@ impl BtDownloadCommand {
     }
 
     /// Get a mutable reference to the seed manager.
-    pub fn get_seed_manager_mut(&mut self) -> Option<&mut super::super::bt_seed_manager::BtSeedManager> {
+    pub fn get_seed_manager_mut(
+        &mut self,
+    ) -> Option<&mut super::super::bt_seed_manager::BtSeedManager> {
         self.seed_manager.as_mut()
     }
 

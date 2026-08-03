@@ -31,6 +31,9 @@ pub struct ValidateRequestContext {
     pub conditional_request: bool,
     /// The (start, end) range requested, if any.
     pub requested_range: Option<(u64, u64)>,
+    /// Expected entity length from the request's file entry. Zero disables total-length
+    /// validation.
+    pub expected_entity_length: u64,
 }
 
 /// Validate an HTTP response against protocol rules.
@@ -82,22 +85,28 @@ pub fn validate_response(
 /// Per C++ `validateResponse()`:
 /// - If `Transfer-Encoding` is **not** present, compare the received range
 ///   against the requested range via `isRangeSatisfied()`.
-/// - If `Transfer-Encoding` **is** present and status is 206 but there is
-///   no `Content-Range` header, throw `CANNOT_RESUME`.
+/// - If `Transfer-Encoding` is present, the header processor owns body
+///   framing and range metadata is not available to this layer.
 fn validate_200_206(
     response_head: &HttpResponseHead,
     ctx: &ValidateRequestContext,
-    status: u16,
+    _status: u16,
 ) -> Result<(), Aria2Error> {
     let has_transfer_encoding = response_head.has_transfer_encoding();
 
     if !has_transfer_encoding {
         // No Transfer-Encoding: validate Content-Range against requested range.
-        if let Some((req_start, req_end)) = ctx.requested_range
-            && let Some((resp_start, resp_end, _resp_total)) = parse_content_range(response_head)
-                && let Err(_e) = validate_response_range(req_start, req_end, resp_start, resp_end) {
-                    return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
-                }
+        if let Some((req_start, req_end)) = ctx.requested_range {
+            let parsed_content_range = parse_content_range(response_head);
+            let Some((resp_start, resp_end, resp_total)) = parsed_content_range else {
+                return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+            };
+            if validate_response_range(req_start, req_end, resp_start, resp_end).is_err()
+                || (ctx.expected_entity_length != 0 && resp_total != ctx.expected_entity_length)
+            {
+                return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+            }
+        }
     }
     // When Transfer-Encoding is present, Content-Range is stripped by the
     // header processor per RFC 7230 §3.3.2 (Transfer-Encoding takes precedence
@@ -107,9 +116,6 @@ fn validate_200_206(
     // always strips Content-Range when TE is present, rejecting would be too
     // strict (real servers do send 206+chunked+Content-Range). Accept the
     // response and rely on downstream range validation during body reception.
-
-    // Suppress unused variable warning when status is not 206.
-    let _ = status;
 
     Ok(())
 }
@@ -166,6 +172,7 @@ mod tests {
         ValidateRequestContext {
             conditional_request: false,
             requested_range: None,
+            expected_entity_length: 0,
         }
     }
 
@@ -173,6 +180,7 @@ mod tests {
         ValidateRequestContext {
             conditional_request: true,
             requested_range: None,
+            expected_entity_length: 0,
         }
     }
 
@@ -180,6 +188,15 @@ mod tests {
         ValidateRequestContext {
             conditional_request: false,
             requested_range: Some((start, end)),
+            expected_entity_length: 0,
+        }
+    }
+
+    fn range_ctx_with_length(start: u64, end: u64, length: u64) -> ValidateRequestContext {
+        ValidateRequestContext {
+            conditional_request: false,
+            requested_range: Some((start, end)),
+            expected_entity_length: length,
         }
     }
 
@@ -210,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_206_range_mismatch_cannot_resume() {
+    fn test_206_range_end_mismatch_cannot_resume() {
         let head = parse_head(
             b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 200-299/1000\r\nContent-Length: 100\r\n\r\n",
         );
@@ -220,6 +237,18 @@ mod tests {
             Aria2Error::Recoverable(RecoverableError::CannotResume) => {}
             other => panic!("Expected CannotResume, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_206_entity_length_mismatch_cannot_resume() {
+        let head = parse_head(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 100-199/2000\r\nContent-Length: 100\r\n\r\n",
+        );
+        let result = validate_response(&head, &range_ctx_with_length(100, 199, 1000));
+        assert!(matches!(
+            result,
+            Err(Aria2Error::Recoverable(RecoverableError::CannotResume))
+        ));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-﻿//! PieceStorage trait implementation: piece query, checkout, and management.
+//! PieceStorage trait implementation: piece query, checkout, and management.
 
 use crate::segment::piece::Piece;
 use crate::segment::piece_storage::trait_def::PieceStorage;
@@ -529,7 +529,9 @@ impl PieceStorage for DefaultPieceStorage {
         // This is important for resumed downloads where the first missing
         // piece may not be at the beginning.
         self.on_bitfield_init();
-        tracing::trace!("on_download_incomplete: download detected as incomplete, reset piece selector offset");
+        tracing::trace!(
+            "on_download_incomplete: download detected as incomplete, reset piece selector offset"
+        );
     }
 
     // -- Selective downloading -----------------------------------------------

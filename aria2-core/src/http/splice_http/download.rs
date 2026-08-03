@@ -111,9 +111,7 @@ pub async fn try_splice_download(
             )
         })?
         .next()
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::AddrNotAvailable, "no addresses resolved")
-        })?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "no addresses resolved"))?;
 
     debug!(host, port, %addr, "splice_download: connecting");
 

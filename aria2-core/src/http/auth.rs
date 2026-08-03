@@ -300,8 +300,7 @@ impl From<netrc::NetrcParser> for NetrcStore {
 ///
 /// These correspond to C++ `Option` prefs like `PREF_HTTP_USER`,
 /// `PREF_HTTP_PASSWD`, `PREF_NO_NETRC`, and `PREF_HTTP_AUTH_CHALLENGE`.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AuthResolveOptions {
     /// Whether HTTP auth-challenge mode is enabled (C++ `PREF_HTTP_AUTH_CHALLENGE`).
     /// When true, 401 responses trigger BasicCred activation.
@@ -320,7 +319,6 @@ pub struct AuthResolveOptions {
     /// CLI-specified FTP password (C++ `PREF_FTP_PASSWD`).
     pub ftp_passwd: Option<String>,
 }
-
 
 impl AuthConfigFactory {
     /// Create a new factory with no cached credentials or Netrc.
@@ -422,19 +420,21 @@ impl AuthConfigFactory {
         // Netrc lookup with default fallback (unless disabled)
         if !opts.no_netrc
             && let Some(ref netrc) = self.netrc
-                && let Some(entry) = netrc.find_with_fallback(host) {
-                    debug!(
-                        "Resolved HTTP auth for {} from Netrc (user={})",
-                        host, entry.login
-                    );
-                    return AuthConfig::new(entry.login.clone(), entry.password.clone());
-                }
+            && let Some(entry) = netrc.find_with_fallback(host)
+        {
+            debug!(
+                "Resolved HTTP auth for {} from Netrc (user={})",
+                host, entry.login
+            );
+            return AuthConfig::new(entry.login.clone(), entry.password.clone());
+        }
         // CLI fallback
         if let Some(ref user) = opts.http_user
-            && !user.is_empty() {
-                debug!("Resolved HTTP auth for {} from CLI options", host);
-                return AuthConfig::new(user.clone(), opts.http_passwd.clone().unwrap_or_default());
-            }
+            && !user.is_empty()
+        {
+            debug!("Resolved HTTP auth for {} from CLI options", host);
+            return AuthConfig::new(user.clone(), opts.http_passwd.clone().unwrap_or_default());
+        }
         None
     }
 
@@ -457,10 +457,11 @@ impl AuthConfigFactory {
             // URL has username but no password — try Netrc first
             if !opts.no_netrc
                 && let Some(ref netrc) = self.netrc
-                    && let Some(entry) = netrc.find(host)
-                        && entry.login == username {
-                            return AuthConfig::new(entry.login.clone(), entry.password.clone());
-                        }
+                && let Some(entry) = netrc.find(host)
+                && entry.login == username
+            {
+                return AuthConfig::new(entry.login.clone(), entry.password.clone());
+            }
             // Fall back to CLI FTP password
             let ftp_passwd = opts.ftp_passwd.clone().unwrap_or_default();
             return AuthConfig::new(username.to_string(), ftp_passwd);
@@ -475,19 +476,21 @@ impl AuthConfigFactory {
         // Netrc lookup with default fallback
         if !opts.no_netrc
             && let Some(ref netrc) = self.netrc
-                && let Some(entry) = netrc.find_with_fallback(host) {
-                    debug!(
-                        "Resolved FTP auth for {} from Netrc (user={})",
-                        host, entry.login
-                    );
-                    return AuthConfig::new(entry.login.clone(), entry.password.clone());
-                }
+            && let Some(entry) = netrc.find_with_fallback(host)
+        {
+            debug!(
+                "Resolved FTP auth for {} from Netrc (user={})",
+                host, entry.login
+            );
+            return AuthConfig::new(entry.login.clone(), entry.password.clone());
+        }
         // CLI fallback
         if let Some(ref user) = opts.ftp_user
-            && !user.is_empty() {
-                let passwd = opts.ftp_passwd.clone().unwrap_or_default();
-                return AuthConfig::new(user.clone(), passwd);
-            }
+            && !user.is_empty()
+        {
+            let passwd = opts.ftp_passwd.clone().unwrap_or_default();
+            return AuthConfig::new(user.clone(), passwd);
+        }
         // FTP anonymous default
         debug!("Resolved FTP auth for {} as anonymous (default)", host);
         AuthConfig::new(FTP_DEFAULT_USER.to_string(), FTP_DEFAULT_PASSWD.to_string())

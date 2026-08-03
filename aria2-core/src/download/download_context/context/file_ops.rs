@@ -101,10 +101,9 @@ impl DownloadContext {
         if self.file_entries.is_empty() {
             return None;
         }
-        let last_entry = self
-            .file_entries
-            .last()
-            .expect("find_file_entry_by_offset: file_entries is non-empty but last() returned None");
+        let last_entry = self.file_entries.last().expect(
+            "find_file_entry_by_offset: file_entries is non-empty but last() returned None",
+        );
         let last_offset = last_entry.last_offset();
         if offset > 0 && last_offset <= offset {
             return None;

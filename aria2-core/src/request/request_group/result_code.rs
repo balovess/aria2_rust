@@ -117,7 +117,6 @@ impl fmt::Display for DownloadResultCode {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

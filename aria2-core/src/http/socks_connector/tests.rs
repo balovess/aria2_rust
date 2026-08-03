@@ -135,7 +135,8 @@ fn test_socks4_empty_user_id() {
 #[test]
 fn test_socks5_no_auth_happy_path() {
     let connector = Socks5Connector::no_auth();
-    let target: std::net::SocketAddr = SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443).into();
+    let target: std::net::SocketAddr =
+        SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443).into();
 
     let mock_response: Vec<u8> = vec![
         0x05, 0x00, 0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x90,
@@ -168,9 +169,9 @@ fn test_socks5_no_auth_happy_path() {
 
 #[test]
 fn test_socks5_username_password_auth_happy_path() {
-    let connector =
-        Socks5Connector::new(Some("myuser".to_string()), Some("mypass".to_string()));
-    let target: std::net::SocketAddr = SocketAddrV4::new(Ipv4Addr::new(10, 20, 30, 40), 8080).into();
+    let connector = Socks5Connector::new(Some("myuser".to_string()), Some("mypass".to_string()));
+    let target: std::net::SocketAddr =
+        SocketAddrV4::new(Ipv4Addr::new(10, 20, 30, 40), 8080).into();
 
     let mock_response: Vec<u8> = vec![
         0x05, 0x02, 0x01, 0x00, 0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x90,
@@ -306,7 +307,8 @@ fn e7_test_socks4_connect_success() {
 #[test]
 fn e7_test_socks4_connect_fail_rejected() {
     let connector = Socks4Connector::new("test");
-    let target: std::net::SocketAddr = SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 80).into();
+    let target: std::net::SocketAddr =
+        SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 80).into();
 
     let mock_response: Vec<u8> = vec![0x00, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     let mock_stream = MockTcpStream::new(mock_response);
@@ -342,8 +344,7 @@ fn e7_test_socks5_no_auth_connect() {
 // Test 4: SOCKS5 password auth (Greeting 0x02 + Auth success + Connect success)
 #[test]
 fn e7_test_socks5_password_auth_connect() {
-    let connector =
-        Socks5Connector::new(Some("admin".to_string()), Some("secret123".to_string()));
+    let connector = Socks5Connector::new(Some("admin".to_string()), Some("secret123".to_string()));
     let target: std::net::SocketAddr = SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 9090).into();
 
     let mock_response: Vec<u8> = vec![
@@ -440,7 +441,8 @@ fn e7_test_no_proxy_ip_matching() {
         "exact IP 192.168.1.1 should bypass"
     );
 
-    let addr_v4_10: std::net::SocketAddr = std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 5, 3, 1)), 8080);
+    let addr_v4_10: std::net::SocketAddr =
+        std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 5, 3, 1)), 8080);
     assert!(
         matcher.should_bypass(&addr_v4_10),
         "10.5.3.1 should be within 10.0.0.0/8"

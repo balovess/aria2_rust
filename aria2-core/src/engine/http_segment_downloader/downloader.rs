@@ -8,11 +8,13 @@ use bytes::BytesMut;
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::http::client_pool::ensure_rustls_provider;
+use crate::http::response_processor::range::parse_content_range_value;
 
 /// A chunk of data to be written to disk at a specific offset.
 pub struct WriteChunk {
@@ -24,9 +26,37 @@ pub struct HttpSegmentDownloader {
     pub client: reqwest::Client,
 }
 
+/// Validates that a partial response covers exactly the requested byte range.
+fn validate_content_range(
+    response: &reqwest::Response,
+    offset: u64,
+    length: u64,
+    expected_entity_length: u64,
+) -> Result<()> {
+    let Some(value) = response.headers().get(reqwest::header::CONTENT_RANGE) else {
+        return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| Aria2Error::Recoverable(RecoverableError::CannotResume))?;
+    let Some((start, end, total)) = parse_content_range_value(value) else {
+        return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+    };
+    if expected_entity_length != 0 && total != expected_entity_length {
+        return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+    }
+    let expected_end = offset.saturating_add(length.saturating_sub(1));
+    if start != offset || end != expected_end || end < start {
+        return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
+    }
+    Ok(())
+}
+
 impl HttpSegmentDownloader {
     /// Create a new `HttpSegmentDownloader`.
+    #[must_use]
     pub fn new(client: &reqwest::Client) -> Self {
+        ensure_rustls_provider();
         Self {
             client: client.clone(),
         }
@@ -81,6 +111,7 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
         progress_tx: Option<&mpsc::UnboundedSender<ProgressUpdate>>,
+        expected_entity_length: u64,
     ) -> Result<bytes::Bytes> {
         if length == 0 {
             return Ok(bytes::Bytes::new());
@@ -110,21 +141,16 @@ impl HttpSegmentDownloader {
 
         let status = response.status();
         match status.as_u16() {
-            206 => {}
+            206 => {
+                validate_content_range(&response, offset, length, expected_entity_length)?;
+            }
             200 => {
-                warn!(
-                    "Server returned 200 instead of 206 for Range request (offset={}, len={}), reading full body",
-                    offset, length
-                );
+                return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
             }
             416 => {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!(
-                            "Range not satisfiable: bytes={}-{}",
-                            offset,
-                            offset + length.saturating_sub(1)
-                        ),
+                    RecoverableError::RangeNotSatisfiable {
+                        range: format!("bytes={}-{}", offset, offset + length.saturating_sub(1)),
                     },
                 ));
             }
@@ -152,21 +178,31 @@ impl HttpSegmentDownloader {
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(bytes) => {
+                    if data.len() as u64 + bytes.len() as u64 > length {
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: format!(
+                                    "Response exceeded requested range length: expected {}, received more",
+                                    length
+                                ),
+                            },
+                        ));
+                    }
                     data.extend_from_slice(&bytes);
                     // Report per-chunk progress if a progress channel is provided
                     let downloaded = data.len() as u64;
                     if let Some(tx) = progress_tx
                         && downloaded - last_reported_progress
                             >= constants::PROGRESS_UPDATE_BYTES as u64
-                        {
-                            let update = ProgressUpdate {
-                                completed_bytes: offset + downloaded,
-                                download_speed: 0,
-                                upload_speed: 0,
-                            };
-                            let _ = tx.send(update);
-                            last_reported_progress = downloaded;
-                        }
+                    {
+                        let update = ProgressUpdate {
+                            completed_bytes: offset + downloaded,
+                            download_speed: 0,
+                            upload_speed: 0,
+                        };
+                        let _ = tx.send(update);
+                        last_reported_progress = downloaded;
+                    }
                 }
                 Err(e) => {
                     return Err(Aria2Error::Recoverable(
@@ -178,14 +214,16 @@ impl HttpSegmentDownloader {
             }
         }
 
-        if data.is_empty() && length > 0 {
+        if data.len() as u64 != length {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {
                     message: format!(
-                        "Empty response for range {}-{} from {}",
+                        "Incomplete response for range {}-{} from {}: expected {} bytes, received {}",
                         offset,
                         offset + length.saturating_sub(1),
-                        url
+                        url,
+                        length,
+                        data.len()
                     ),
                 },
             ));
@@ -212,6 +250,7 @@ impl HttpSegmentDownloader {
         headers: &[(String, String)],
         progress_tx: Option<&mpsc::UnboundedSender<ProgressUpdate>>,
         write_tx: &mpsc::UnboundedSender<WriteChunk>,
+        expected_entity_length: u64,
     ) -> Result<u64> {
         if length == 0 {
             return Ok(0);
@@ -241,12 +280,11 @@ impl HttpSegmentDownloader {
 
         let status = response.status();
         match status.as_u16() {
-            206 => {}
+            206 => {
+                validate_content_range(&response, offset, length, expected_entity_length)?;
+            }
             200 => {
-                warn!(
-                    "Server returned 200 instead of 206 for Range request (offset={}, len={}), reading full body",
-                    offset, length
-                );
+                return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
             }
             416 => {
                 return Err(Aria2Error::Recoverable(
@@ -280,6 +318,17 @@ impl HttpSegmentDownloader {
                 })
             })?;
             let chunk_len = bytes.len() as u64;
+            if total_written.saturating_add(chunk_len) > length {
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: format!(
+                            "Response exceeded requested range length: expected {}, received at least {}",
+                            length,
+                            total_written.saturating_add(chunk_len)
+                        ),
+                    },
+                ));
+            }
 
             // Send chunk to writer immediately — no accumulation
             let _ = write_tx.send(WriteChunk {
@@ -293,25 +342,27 @@ impl HttpSegmentDownloader {
             // Report per-chunk progress if a progress channel is provided
             if let Some(tx) = progress_tx
                 && total_written - last_reported_progress >= constants::PROGRESS_UPDATE_BYTES as u64
-                {
-                    let update = ProgressUpdate {
-                        completed_bytes: offset + total_written,
-                        download_speed: 0,
-                        upload_speed: 0,
-                    };
-                    let _ = tx.send(update);
-                    last_reported_progress = total_written;
-                }
+            {
+                let update = ProgressUpdate {
+                    completed_bytes: offset + total_written,
+                    download_speed: 0,
+                    upload_speed: 0,
+                };
+                let _ = tx.send(update);
+                last_reported_progress = total_written;
+            }
         }
 
-        if total_written == 0 && length > 0 {
+        if total_written != length {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {
                     message: format!(
-                        "Empty response for range {}-{} from {}",
+                        "Incomplete response for range {}-{} from {}: expected {} bytes, received {}",
                         offset,
                         offset + length.saturating_sub(1),
-                        url
+                        url,
+                        length,
+                        total_written
                     ),
                 },
             ));
@@ -327,6 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_supports_range_no_server() {
+        ensure_rustls_provider();
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(100))
             .build()
@@ -340,10 +392,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range_zero_length() {
+        ensure_rustls_provider();
         let client = reqwest::Client::new();
         let dl = HttpSegmentDownloader::new(&client);
         let result = dl
-            .download_range("http://example.com", 0, 0, None, &[], None)
+            .download_range("http://example.com", 0, 0, None, &[], None, 0)
             .await;
         assert!(result.is_ok(), "zero-length range should return empty vec");
         assert!(result.expect("already checked ok").is_empty());
@@ -351,6 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_downloader_creation() {
+        ensure_rustls_provider();
         let client = reqwest::Client::new();
         let dl = HttpSegmentDownloader::new(&client);
         let _dl2 = HttpSegmentDownloader::new(&dl.client);
@@ -376,6 +430,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let url = format!("http://{}", addr);
+        ensure_rustls_provider();
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
@@ -383,7 +438,9 @@ mod tests {
             .expect("client build should succeed");
         let dl = HttpSegmentDownloader::new(&client);
 
-        let result = dl.download_range(&url, 99999, 100, None, &[], None).await;
+        let result = dl
+            .download_range(&url, 99999, 100, None, &[], None, 0)
+            .await;
         assert!(result.is_err(), "416 should be an error");
 
         // Wait for server with timeout
@@ -392,6 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_supports_range_header_parsing() {
+        ensure_rustls_provider();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
@@ -419,13 +477,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_range_status_code_handling() {
-        let client = reqwest::Client::new();
-        let dl = HttpSegmentDownloader::new(&client);
+    async fn test_download_range_short_body_is_rejected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let result_404 = dl
-            .download_range("http://httpbin.org/status/404", 0, 100, None, &[], None)
-            .await;
-        assert!(result_404.is_err(), "404 should be fatal error");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).await.expect("read should succeed");
+            stream
+                .write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/20\r\nContent-Length: 10\r\nConnection: close\r\n\r\n01234")
+                .await
+                .expect("write should succeed");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let dl = HttpSegmentDownloader::new(&client);
+        let url = format!("http://{}", addr);
+
+        let result = dl.download_range(&url, 0, 10, None, &[], None, 20).await;
+        assert!(result.is_err(), "short 206 body should be rejected");
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_download_range_status_code_handling() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).await.expect("read should succeed");
+            stream
+                .write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/20\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789")
+                .await
+                .expect("write should succeed");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let dl = HttpSegmentDownloader::new(&client);
+        let url = format!("http://{}", addr);
+
+        let result = dl
+            .download_range(&url, 0, 10, None, &[], None, 20)
+            .await
+            .expect("matching 206 should succeed");
+        assert_eq!(result.as_ref(), b"0123456789");
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
     }
 }

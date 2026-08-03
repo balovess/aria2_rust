@@ -1,4 +1,4 @@
-﻿//! Optimistic unchoke logic (round-robin rotation)
+//! Optimistic unchoke logic (round-robin rotation)
 
 use super::ChokingAlgorithm;
 
@@ -60,7 +60,10 @@ pub(super) fn optimistically_unchoke(algo: &mut ChokingAlgorithm) -> Option<usiz
 ///
 /// # Panics
 /// Panics if eligible_peers is empty.
-pub(super) fn rotate_optimistic_unchoked(algo: &mut ChokingAlgorithm, eligible_peers: &[usize]) -> usize {
+pub(super) fn rotate_optimistic_unchoked(
+    algo: &mut ChokingAlgorithm,
+    eligible_peers: &[usize],
+) -> usize {
     if eligible_peers.is_empty() {
         panic!("rotate_optimistic_unchoked called with empty eligible list");
     }

@@ -57,12 +57,8 @@ pub async fn spawn_download_task(
     };
 
     // Create the appropriate command based on URI scheme.
-    let cmd_result = create_command_for_uri(
-        &first_uri,
-        Arc::clone(&group),
-        &options,
-        global_limiter,
-    );
+    let cmd_result =
+        create_command_for_uri(&first_uri, Arc::clone(&group), &options, global_limiter);
 
     let mut cmd: Box<dyn Command> = match cmd_result {
         Ok(c) => c,
@@ -126,9 +122,10 @@ fn create_command_for_uri(
     #[cfg(feature = "bittorrent")]
     if uri_lower.starts_with("magnet:") {
         let output_dir = options.dir.as_deref();
-        let mut cmd = crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
-            group, output_dir,
-        )?;
+        let mut cmd =
+            crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
+                group, output_dir,
+            )?;
         if let Some(limiter) = global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }

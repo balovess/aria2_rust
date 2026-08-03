@@ -3,11 +3,10 @@ use std::time::{Duration, Instant};
 use rand::Rng;
 use tracing::debug;
 
-use crate::engine::bt_peer_storage::constants::{
-    TEMP_PEER_CLEANUP_INTERVAL_SECS, TEMP_REJECT_TIMEOUT_MIN_SECS,
-    TEMP_REJECT_TIMEOUT_RANGE_SECS,
-};
 use super::DefaultPeerStorage;
+use crate::engine::bt_peer_storage::constants::{
+    TEMP_PEER_CLEANUP_INTERVAL_SECS, TEMP_REJECT_TIMEOUT_MIN_SECS, TEMP_REJECT_TIMEOUT_RANGE_SECS,
+};
 
 impl DefaultPeerStorage {
     // ==================================================================

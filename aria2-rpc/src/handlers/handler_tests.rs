@@ -689,10 +689,8 @@ async fn test_save_session_handler_basic() {
 
     // Use a temp-file path so the write is portable (C:\tmp\... would fail
     // or leak on Windows).
-    let path = std::env::temp_dir().join(format!(
-        "test_save_session_rpc_{}.sess",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("test_save_session_rpc_{}.sess", std::process::id()));
     let _ = tokio::fs::remove_file(&path).await;
 
     let req = JsonRpcRequest::new(
@@ -725,17 +723,21 @@ async fn test_save_session_handler_basic() {
 /// configured `--save-session` path (mirrors C++ reading PREF_SAVE_SESSION).
 #[tokio::test]
 async fn test_save_session_uses_configured_path() {
-    let path = std::env::temp_dir().join(format!(
-        "test_save_session_cfg_{}.sess",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("test_save_session_cfg_{}.sess", std::process::id()));
     let _ = tokio::fs::remove_file(&path).await;
 
     let engine = RpcEngine::new().with_save_session_path(path.clone());
     let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success(), "saveSession with configured path should succeed");
-    assert!(path.exists(), "session file should be written to configured path");
+    assert!(
+        resp.is_success(),
+        "saveSession with configured path should succeed"
+    );
+    assert!(
+        path.exists(),
+        "session file should be written to configured path"
+    );
     let _ = tokio::fs::remove_file(&path).await;
 }
 
@@ -769,16 +771,19 @@ async fn test_save_session_with_group_man() {
         )
         .unwrap();
 
-    let path = std::env::temp_dir().join(format!(
-        "test_save_session_man_{}.sess",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("test_save_session_man_{}.sess", std::process::id()));
     let _ = tokio::fs::remove_file(&path).await;
 
-    let engine = RpcEngine::new().with_group_man(man).with_save_session_path(path.clone());
+    let engine = RpcEngine::new()
+        .with_group_man(man)
+        .with_save_session_path(path.clone());
     let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success(), "saveSession with group_man should succeed");
+    assert!(
+        resp.is_success(),
+        "saveSession with group_man should succeed"
+    );
 
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert!(result.contains("OK"), "Result should contain OK");
@@ -820,10 +825,7 @@ async fn test_save_session_explicit_path_overrides_config() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
 
-    assert!(
-        explicit_path.exists(),
-        "explicit path must be written to"
-    );
+    assert!(explicit_path.exists(), "explicit path must be written to");
     assert!(
         !cfg_path.exists(),
         "configured path must NOT be written when explicit path given"
@@ -1001,11 +1003,7 @@ async fn test_get_uris_unknown_gid_returns_error() {
         JsonRpcRequest::new("aria2.getUris", serde_json::json!(["nonexistent-gid"])).with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_error(), "getUris should fail for unknown GID");
-    assert_eq!(
-        resp.error.unwrap().code,
-        1,
-        "Should be RpcExecution error"
-    );
+    assert_eq!(resp.error.unwrap().code, 1, "Should be RpcExecution error");
 }
 
 #[tokio::test]
@@ -1380,11 +1378,7 @@ async fn test_purge_download_result_gid_not_found() {
         resp.is_error(),
         "purgeDownloadResult with unknown GID should fail"
     );
-    assert_eq!(
-        resp.error.unwrap().code,
-        1,
-        "Should be RpcExecution error"
-    );
+    assert_eq!(resp.error.unwrap().code, 1, "Should be RpcExecution error");
 }
 
 #[tokio::test]

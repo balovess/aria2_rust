@@ -7,8 +7,8 @@ use aria2_protocol::bittorrent::message::extension::{
 use std::collections::BTreeMap;
 
 use super::{
-    dispatch_extension_message, ExtensionRegistry, ExtensionUpdate, DEFAULT_REQQ,
-    UT_METADATA_NAME, UT_PEX_NAME,
+    DEFAULT_REQQ, ExtensionRegistry, ExtensionUpdate, UT_METADATA_NAME, UT_PEX_NAME,
+    dispatch_extension_message,
 };
 
 // ====================== ExtensionRegistry tests ======================

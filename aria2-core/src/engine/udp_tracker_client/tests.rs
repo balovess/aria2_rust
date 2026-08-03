@@ -1,4 +1,4 @@
-﻿use std::net::SocketAddr;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpAction;
@@ -169,8 +169,7 @@ async fn test_timeout_cleaning() {
     assert_eq!(client.inflight.len(), 1, "Not yet timed out");
 
     for req in &mut client.inflight {
-        req.dispatched_at =
-            Some(Instant::now() - Duration::from_secs(REQUEST_TIMEOUT_SECS + 1));
+        req.dispatched_at = Some(Instant::now() - Duration::from_secs(REQUEST_TIMEOUT_SECS + 1));
     }
     client.handle_timeouts().await;
     assert!(
@@ -228,8 +227,7 @@ async fn test_handle_scrape_response_single_hash() {
 
     // Manually set up an in-flight scrape request
     let txn_id = client.next_txn();
-    let mut req =
-        UdpTrackerRequest::new(addr, hashes[0], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+    let mut req = UdpTrackerRequest::new(addr, hashes[0], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
     req.txn_id = txn_id;
     req.dispatched_at = Some(Instant::now());
     req.scrape_info_hashes = hashes.to_vec();
@@ -261,8 +259,7 @@ async fn test_handle_scrape_response_multi_hash() {
     let hashes = [[0x22u8; 20], [0x33u8; 20]];
 
     let txn_id = client.next_txn();
-    let mut req =
-        UdpTrackerRequest::new(addr, hashes[0], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+    let mut req = UdpTrackerRequest::new(addr, hashes[0], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
     req.txn_id = txn_id;
     req.dispatched_at = Some(Instant::now());
     req.scrape_info_hashes = hashes.to_vec();

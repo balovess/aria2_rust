@@ -1,7 +1,7 @@
 //! Tests for peer checkout/return lifecycle and add_and_checkout_peer.
 
-use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 use super::basic::make_peer;
+use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 
 // ------------------------------------------------------------------
 // checkout_peer / return_peer lifecycle

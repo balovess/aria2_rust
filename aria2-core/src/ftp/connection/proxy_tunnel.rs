@@ -437,14 +437,13 @@ impl FtpProxyTunnel {
             md5_hex(&format!("{}:{}:{}", username, realm, password))
         };
 
-        let (ha2, qop_value) =
-            if qop == Some("auth") || qop == Some("auth-int") {
-                let ha2 = md5_hex(&format!("CONNECT:{}", uri));
-                (ha2, "auth")
-            } else {
-                let ha2 = md5_hex(&format!("CONNECT:{}", uri));
-                (ha2, "")
-            };
+        let (ha2, qop_value) = if qop == Some("auth") || qop == Some("auth-int") {
+            let ha2 = md5_hex(&format!("CONNECT:{}", uri));
+            (ha2, "auth")
+        } else {
+            let ha2 = md5_hex(&format!("CONNECT:{}", uri));
+            (ha2, "")
+        };
 
         let response = if qop_value.is_empty() {
             md5_hex(&format!("{}:{}:{}", ha1, nonce, ha2))
@@ -512,10 +511,10 @@ fn extract_digest_param<'a>(challenge: &'a str, param: &str) -> Option<&'a str> 
     for part in params_section.split(',') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&search) {
-                // Handle quoted values
-                if let Some(stripped) = rest.strip_prefix('"') {
-                    if let Some(end) = stripped.find('"') {
-                        return Some(&stripped[..end]);
+            // Handle quoted values
+            if let Some(stripped) = rest.strip_prefix('"') {
+                if let Some(end) = stripped.find('"') {
+                    return Some(&stripped[..end]);
                 }
             } else {
                 // Unquoted value - take until comma or end

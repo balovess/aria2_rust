@@ -179,10 +179,7 @@ impl UTMetadataRequestTracker {
 
         self.tracked.retain(|e| {
             if e.is_timed_out(self.timeout) {
-                tracing::debug!(
-                    index = e.index,
-                    "ut_metadata request timed out"
-                );
+                tracing::debug!(index = e.index, "ut_metadata request timed out");
                 timed_out.push(e.index);
                 false
             } else {

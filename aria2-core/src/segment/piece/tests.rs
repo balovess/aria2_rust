@@ -1,6 +1,6 @@
 //! Tests for the piece module.
 
-use super::piece_impl::{Piece, DEFAULT_BLOCK_LENGTH};
+use super::piece_impl::{DEFAULT_BLOCK_LENGTH, Piece};
 
 // ── Construction ────────────────────────────────────────────────────
 

@@ -39,8 +39,7 @@ pub async fn execute_with_coordinator(
         .unwrap()
         .options()
         .max_connection_per_server
-        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        as usize;
+        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16) as usize;
 
     let mirror_config = crate::engine::mirror_coordinator::MirrorConfig {
         max_connections_per_mirror: max_conn.min(split as usize),
@@ -140,6 +139,7 @@ pub async fn execute_with_coordinator(
                     &dl.headers,
                     Some(&seg_progress_tx),
                     &write_tx,
+                    total_length,
                 )
                 .await;
 
@@ -178,12 +178,19 @@ pub async fn execute_with_coordinator(
                         speed
                     );
 
-                    coordinator.on_segment_complete(
-                        mirror_idx,
-                        seg_idx,
-                        bytes_downloaded as usize,
-                        speed,
-                    );
+                    let completed_len = usize::try_from(bytes_downloaded).map_err(|_| {
+                        Aria2Error::Fatal(crate::error::FatalError::Config(
+                            "Completed segment length exceeds platform limits".into(),
+                        ))
+                    })?;
+                    if !coordinator.on_segment_complete(mirror_idx, seg_idx, completed_len, speed) {
+                        return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                            format!(
+                                "Segment {} completed with invalid length {}",
+                                seg_idx, bytes_downloaded
+                            ),
+                        )));
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(

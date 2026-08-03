@@ -286,7 +286,8 @@ mod tests {
     fn test_is_encrypted_flag() {
         let secret = [0x42u8; 96];
         let info_hash = [0xABu8; 20];
-        let keys = crate::bittorrent::extension::mse_crypto::MseDerivedKeys::derive(&secret, &info_hash);
+        let keys =
+            crate::bittorrent::extension::mse_crypto::MseDerivedKeys::derive(&secret, &info_hash);
         let enc = MseCryptoState::new_encrypted(&keys, true);
         assert!(enc.is_encrypted());
 

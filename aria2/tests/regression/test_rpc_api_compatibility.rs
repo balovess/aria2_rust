@@ -1324,10 +1324,7 @@ async fn regression_multicall_subcall_token_is_stripped_not_leaked() {
     // Add a download using the same per-call token convention.
     let add = make_request(
         "aria2.addUri",
-        serde_json::json!([
-            format!("token:{secret}"),
-            ["http://example.com/auth.bin"]
-        ]),
+        serde_json::json!([format!("token:{secret}"), ["http://example.com/auth.bin"]]),
     );
     let add_resp = engine.handle_request(&add).await;
     assert_success(&add_resp);

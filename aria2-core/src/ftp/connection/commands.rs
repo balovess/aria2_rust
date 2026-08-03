@@ -474,8 +474,7 @@ fn parse_mdtm_timestamp(s: &str) -> Option<std::time::SystemTime> {
     // Convert to Unix epoch using chrono-free approach
     // Days from year 1970 to start of `year`
     let days_since_epoch = days_from_civil(year, month, day)?;
-    let secs =
-        days_since_epoch * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
+    let secs = days_since_epoch * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
     Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }
 

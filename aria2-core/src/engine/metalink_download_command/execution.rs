@@ -65,10 +65,7 @@ impl Command for MetalinkDownloadCommand {
                 torrent_metaurls_owned = file
                     .meta_urls
                     .iter()
-                    .filter(|m| {
-                        m.mediatype
-                            == aria2_protocol::metalink::parser::MediaType::Torrent
-                    })
+                    .filter(|m| m.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent)
                     .cloned()
                     .collect();
 
@@ -89,9 +86,7 @@ impl Command for MetalinkDownloadCommand {
                 )));
             }
             #[cfg(feature = "bittorrent")]
-            return self
-                .try_torrent_metaurl(&torrent_metaurls_owned)
-                .await;
+            return self.try_torrent_metaurl(&torrent_metaurls_owned).await;
             #[cfg(not(feature = "bittorrent"))]
             return Err(Aria2Error::Fatal(FatalError::Config(
                 "No download mirrors available".into(),
@@ -154,9 +149,7 @@ impl Command for MetalinkDownloadCommand {
                     if let Some(ref pieces) = pieces_owned
                         && !self.verify_pieces(&data, pieces)?
                     {
-                        warn!(
-                            "Chunk hash verification failed: trying next mirror"
-                        );
+                        warn!("Chunk hash verification failed: trying next mirror");
                         last_error = Some(Aria2Error::Recoverable(
                             RecoverableError::TemporaryNetworkFailure {
                                 message: "Chunk hash verification failed".to_string(),
@@ -176,22 +169,20 @@ impl Command for MetalinkDownloadCommand {
                         .global_limiter
                         .as_ref()
                         .is_some_and(|g| g.is_download_limited());
-                    let mut writer: Box<dyn DiskWriter> =
-                        if rate_limit.is_some() || global_limited {
-                            let per_rate = rate_limit.filter(|&r| r > 0);
-                            let limiter = per_rate
-                                .map(|rate| {
-                                    RateLimiter::new(&RateLimiterConfig::new(Some(rate), None))
-                                })
-                                .unwrap_or_else(RateLimiter::unlimited);
-                            let mut tw = ThrottledWriter::new(raw_writer, limiter);
-                            if let Some(ref gl) = self.global_limiter {
-                                tw = tw.with_global_limiter(gl.clone());
-                            }
-                            Box::new(tw)
-                        } else {
-                            Box::new(raw_writer)
-                        };
+                    let mut writer: Box<dyn DiskWriter> = if rate_limit.is_some() || global_limited
+                    {
+                        let per_rate = rate_limit.filter(|&r| r > 0);
+                        let limiter = per_rate
+                            .map(|rate| RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)))
+                            .unwrap_or_else(RateLimiter::unlimited);
+                        let mut tw = ThrottledWriter::new(raw_writer, limiter);
+                        if let Some(ref gl) = self.global_limiter {
+                            tw = tw.with_global_limiter(gl.clone());
+                        }
+                        Box::new(tw)
+                    } else {
+                        Box::new(raw_writer)
+                    };
                     writer.write(&data).await?;
                     writer.finalize().await.ok();
 
@@ -254,7 +245,8 @@ impl Command for MetalinkDownloadCommand {
 
     fn request_group(
         &self,
-    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
+    {
         Some(std::sync::Arc::clone(&self.group))
     }
 
@@ -264,7 +256,6 @@ impl Command for MetalinkDownloadCommand {
 }
 
 impl MetalinkDownloadCommand {
-
     /// Download a `.torrent` from the given metaurls (by priority) and run a
     /// BitTorrent download for it. Mirrors C++ `BtDependency` which resolves
     /// `metaurl mediatype="application/x-bittorrent"` entries.
@@ -288,13 +279,12 @@ impl MetalinkDownloadCommand {
                     let options = self.group.recover().options().clone();
                     let gid = self.group.recover().gid();
                     let dir = self.output_path.parent().and_then(|p| p.to_str());
-                    let mut bt_cmd =
-                        crate::engine::bt_download_command::BtDownloadCommand::new(
-                            gid,
-                            &torrent_bytes,
-                            &options,
-                            dir,
-                        )?;
+                    let mut bt_cmd = crate::engine::bt_download_command::BtDownloadCommand::new(
+                        gid,
+                        &torrent_bytes,
+                        &options,
+                        dir,
+                    )?;
                     if let Some(gl) = self.global_limiter.clone() {
                         bt_cmd.set_global_limiter(gl);
                     }

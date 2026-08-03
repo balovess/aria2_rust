@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use super::ConcurrentSegmentManager;
 use super::mirror_selection::extract_host_from_url;
 use super::types::SegmentStatus;
-use super::ConcurrentSegmentManager;
 
 #[test]
 fn test_manager_creation_small_file() {
@@ -55,8 +55,7 @@ fn test_allocate_segments_round_robin() {
 
 #[test]
 fn test_complete_and_assemble() {
-    let mut mgr =
-        ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
+    let mut mgr = ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
 
     mgr.allocate_segments();
     assert_eq!(mgr.progress(), 0.0);
@@ -70,8 +69,30 @@ fn test_complete_and_assemble() {
     assert!((mgr.progress() - 100.0).abs() < 0.01);
 
     assert_eq!(mgr.completed_bytes(), 200);
+
+    assert!(!mgr.complete_segment(0, 100));
+    assert_eq!(mgr.completed_bytes(), 200);
+    assert!(!mgr.complete_segment(0, 99));
+    assert_eq!(mgr.completed_bytes(), 200);
 }
 
+#[test]
+fn test_completed_ranges_exclude_partial_or_failed_segments() {
+    let mut mgr = ConcurrentSegmentManager::new(300, vec!["http://x.com/f".to_string()], Some(100));
+    mgr.allocate_segments();
+
+    assert!(mgr.complete_segment(0, 100));
+    mgr.fail_segment(1);
+
+    assert_eq!(mgr.completed_ranges(), vec![(0, 100)]);
+    assert_eq!(
+        crate::engine::sequential_download::SequentialDownloader::find_all_gaps(
+            &mgr.completed_ranges(),
+            300,
+        ),
+        vec![(100, 200)]
+    );
+}
 #[test]
 fn test_fail_and_reassign() {
     let mut mgr = ConcurrentSegmentManager::new(
@@ -93,8 +114,7 @@ fn test_fail_and_reassign() {
 
 #[test]
 fn test_max_retries_exhausted() {
-    let mut mgr =
-        ConcurrentSegmentManager::new(100, vec!["http://a.com/f".to_string()], Some(100));
+    let mut mgr = ConcurrentSegmentManager::new(100, vec!["http://a.com/f".to_string()], Some(100));
     mgr.set_max_retries(2);
 
     mgr.fail_segment(0);
@@ -316,8 +336,7 @@ fn test_get_mirror_url() {
 
 #[test]
 fn test_mirror_active_segments() {
-    let mut mgr =
-        ConcurrentSegmentManager::new(300, vec!["http://a.com/f".to_string()], Some(100));
+    let mut mgr = ConcurrentSegmentManager::new(300, vec!["http://a.com/f".to_string()], Some(100));
 
     assert_eq!(mgr.mirror_active_segments(0), 0);
     assert_eq!(mgr.num_segments(), 3);
@@ -413,8 +432,7 @@ async fn test_segment_allocation_is_lock_free() {
 /// to 0 by `reset_allocation_index`.
 #[test]
 fn test_allocation_hint_advances_and_resets() {
-    let mut mgr =
-        ConcurrentSegmentManager::new(500, vec!["http://a.com/f".to_string()], Some(100));
+    let mut mgr = ConcurrentSegmentManager::new(500, vec!["http://a.com/f".to_string()], Some(100));
     // 5 segments; let the single mirror accept all of them.
     mgr.set_max_connections_per_mirror(10);
     assert_eq!(mgr.num_segments(), 5);

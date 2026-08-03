@@ -56,7 +56,9 @@ fn test_parse_machine_and_default() {
     assert_eq!(entry.login.as_deref(), Some("myuser"));
 
     // Fallback to default
-    let fallback = parser.find_with_fallback("unknown.host.com").expect("fallback should exist");
+    let fallback = parser
+        .find_with_fallback("unknown.host.com")
+        .expect("fallback should exist");
     assert!(fallback.is_default());
     assert_eq!(fallback.login.as_deref(), Some("anon"));
 }
@@ -73,8 +75,22 @@ fn test_parse_multiple_machines() {
         password pass2\n";
     let parser = NetrcParser::parse(content).expect("parse should succeed");
     assert_eq!(parser.entries().len(), 2);
-    assert_eq!(parser.find("ftp.example.com").expect("ftp entry").login.as_deref(), Some("user1"));
-    assert_eq!(parser.find("ssh.example.com").expect("ssh entry").login.as_deref(), Some("user2"));
+    assert_eq!(
+        parser
+            .find("ftp.example.com")
+            .expect("ftp entry")
+            .login
+            .as_deref(),
+        Some("user1")
+    );
+    assert_eq!(
+        parser
+            .find("ssh.example.com")
+            .expect("ssh entry")
+            .login
+            .as_deref(),
+        Some("user2")
+    );
 }
 
 #[test]
@@ -140,8 +156,22 @@ fn test_macdef_skipped() {
         password otherpass\n";
     let parser = NetrcParser::parse(content).expect("parse should succeed");
     assert_eq!(parser.entries().len(), 2);
-    assert_eq!(parser.find("example.com").expect("example entry").login.as_deref(), Some("user"));
-    assert_eq!(parser.find("other.com").expect("other entry").login.as_deref(), Some("otheruser"));
+    assert_eq!(
+        parser
+            .find("example.com")
+            .expect("example entry")
+            .login
+            .as_deref(),
+        Some("user")
+    );
+    assert_eq!(
+        parser
+            .find("other.com")
+            .expect("other entry")
+            .login
+            .as_deref(),
+        Some("otheruser")
+    );
 }
 
 #[test]
@@ -248,7 +278,9 @@ fn test_convert_to_netrc_store() {
     let store: super::super::NetrcStore = parser.into();
 
     // Machine entry
-    let entry = store.find("ftp.example.com").expect("store entry should exist");
+    let entry = store
+        .find("ftp.example.com")
+        .expect("store entry should exist");
     assert_eq!(entry.login, "myuser");
     assert_eq!(entry.password, "mypass");
 
@@ -258,7 +290,9 @@ fn test_convert_to_netrc_store() {
     assert_eq!(default.unwrap().login, "anon");
 
     // Fallback lookup
-    let fallback = store.find_with_fallback("unknown.host.com").expect("fallback should exist");
+    let fallback = store
+        .find_with_fallback("unknown.host.com")
+        .expect("fallback should exist");
     assert_eq!(fallback.login, "anon");
 }
 

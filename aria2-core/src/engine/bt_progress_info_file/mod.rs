@@ -138,10 +138,11 @@ impl BtProgressManager {
         let digest = digest::compute_sha1_digest(&data);
 
         if let Some(ref last) = self.last_digest
-            && last == &digest {
-                debug!("Progress unchanged, skipping write (dedup)");
-                return Ok(false);
-            }
+            && last == &digest
+        {
+            debug!("Progress unchanged, skipping write (dedup)");
+            return Ok(false);
+        }
 
         self.save_progress(info_hash, progress)?;
         self.last_digest = Some(digest);
@@ -206,14 +207,16 @@ impl BtProgressManager {
         if let Ok(entries) = std::fs::read_dir(&self.save_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str()
-                    && let Some(hex_hash) = name.strip_suffix(".aria2") {
-                        // Try to parse the hex-encoded info hash from the filename
-                        // strip ".aria2"
-                        if hex_hash.len() == 40
-                            && let Ok(hash) = hex_to_info_hash(hex_hash) {
-                                result.push(hash);
-                            }
+                    && let Some(hex_hash) = name.strip_suffix(".aria2")
+                {
+                    // Try to parse the hex-encoded info hash from the filename
+                    // strip ".aria2"
+                    if hex_hash.len() == 40
+                        && let Ok(hash) = hex_to_info_hash(hex_hash)
+                    {
+                        result.push(hash);
                     }
+                }
             }
         }
         result

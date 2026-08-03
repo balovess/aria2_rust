@@ -42,8 +42,7 @@ pub const MOZ_QUERY: &str = "SELECT host, path, isSecure, expiry, name, value, l
 /// epoch). 11644473600 is the number of seconds between that epoch and the UNIX
 /// epoch, so the arithmetic below normalises both time columns to UNIX seconds.
 /// Done in SQL rather than in Rust to keep [`row_to_cookie`] schema-agnostic.
-pub const CHROMIUM_QUERY: &str =
-    "SELECT host_key, path, secure, expires_utc / 1000000 - 11644473600 as expires_utc, \
+pub const CHROMIUM_QUERY: &str = "SELECT host_key, path, secure, expires_utc / 1000000 - 11644473600 as expires_utc, \
      name, value, last_access_utc / 1000000 - 11644473600 as last_access_utc \
      FROM cookies";
 
@@ -235,7 +234,9 @@ mod tests {
 
     /// Build a Firefox-shaped database and return its path (the `TempDir` must
     /// outlive it, hence returning both).
-    fn make_moz_db(rows: &[(&str, &str, i64, i64, &str, Option<&str>, i64)]) -> (TempDir, std::path::PathBuf) {
+    fn make_moz_db(
+        rows: &[(&str, &str, i64, i64, &str, Option<&str>, i64)],
+    ) -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("cookies.sqlite");
         let conn = Connection::open(&path).unwrap();
@@ -257,7 +258,9 @@ mod tests {
         (dir, path)
     }
 
-    fn make_chromium_db(rows: &[(&str, &str, i64, i64, &str, &str, i64)]) -> (TempDir, std::path::PathBuf) {
+    fn make_chromium_db(
+        rows: &[(&str, &str, i64, i64, &str, &str, i64)],
+    ) -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("Cookies");
         let conn = Connection::open(&path).unwrap();
@@ -341,7 +344,15 @@ mod tests {
     fn invalid_rows_are_skipped_without_failing_the_import() {
         let (_dir, path) = make_moz_db(&[
             ("", "/", 0, 100, "empty-host", Some("v"), 50),
-            (".example.org", "relative", 0, 100, "bad-path", Some("v"), 50),
+            (
+                ".example.org",
+                "relative",
+                0,
+                100,
+                "bad-path",
+                Some("v"),
+                50,
+            ),
             (".example.org", "/", 0, 100, "", Some("v"), 50),
             (".example.org", "/", 0, 100, "good", Some("v"), 50),
         ]);
@@ -404,7 +415,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("random.db");
         let conn = Connection::open(&path).unwrap();
-        conn.execute("CREATE TABLE unrelated (a INTEGER)", []).unwrap();
+        conn.execute("CREATE TABLE unrelated (a INTEGER)", [])
+            .unwrap();
         drop(conn);
 
         let err = Sqlite3CookieParser::parse_auto(&path).unwrap_err();

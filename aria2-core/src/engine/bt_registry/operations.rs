@@ -49,19 +49,21 @@ impl BtRegistry {
         // Try the secondary index first (O(1))
         if let Some(&gid) = self.info_hash_index.get(info_hash)
             && let Some(obj) = self.pool.get(&gid)
-                && let Some(ref ctx) = obj.download_context {
-                    // Verify the index is still consistent
-                    if ctx.get_bt_info_hash_hex().as_deref() == Some(info_hash) {
-                        return Some(Arc::clone(ctx));
-                    }
-                }
+            && let Some(ref ctx) = obj.download_context
+        {
+            // Verify the index is still consistent
+            if ctx.get_bt_info_hash_hex().as_deref() == Some(info_hash) {
+                return Some(Arc::clone(ctx));
+            }
+        }
 
         // Fallback: linear scan for entries whose index was never populated
         for obj in self.pool.values() {
             if let Some(ref ctx) = obj.download_context
-                && ctx.get_bt_info_hash_hex().as_deref() == Some(info_hash) {
-                    return Some(Arc::clone(ctx));
-                }
+                && ctx.get_bt_info_hash_hex().as_deref() == Some(info_hash)
+            {
+                return Some(Arc::clone(ctx));
+            }
         }
         None
     }
@@ -81,10 +83,11 @@ impl BtRegistry {
 
         // Update secondary index if the new object has an info hash
         if let Some(ref ctx) = obj.download_context
-            && let Some(hash) = ctx.get_bt_info_hash_hex() {
-                trace!(gid, info_hash = %hash, "BtRegistry::put: updating info_hash index");
-                self.info_hash_index.insert(hash, gid);
-            }
+            && let Some(hash) = ctx.get_bt_info_hash_hex()
+        {
+            trace!(gid, info_hash = %hash, "BtRegistry::put: updating info_hash index");
+            self.info_hash_index.insert(hash, gid);
+        }
 
         // If replacing an existing entry, clean up its stale info_hash index
         if let Some(old) = self.pool.insert(gid, obj) {
@@ -407,13 +410,14 @@ impl BtRegistry {
     /// replaced or removed.
     fn cleanup_info_hash_index(&mut self, gid: u64, old_obj: &BtObject) {
         if let Some(ref ctx) = old_obj.download_context
-            && let Some(hash) = ctx.get_bt_info_hash_hex() {
-                // Only remove if the index still maps to this GID;
-                // a newer put() may have already updated the mapping.
-                if self.info_hash_index.get(&hash) == Some(&gid) {
-                    self.info_hash_index.remove(&hash);
-                }
+            && let Some(hash) = ctx.get_bt_info_hash_hex()
+        {
+            // Only remove if the index still maps to this GID;
+            // a newer put() may have already updated the mapping.
+            if self.info_hash_index.get(&hash) == Some(&gid) {
+                self.info_hash_index.remove(&hash);
             }
+        }
     }
 
     /// Rebuild the info_hash secondary index from scratch by scanning all
@@ -422,9 +426,10 @@ impl BtRegistry {
         self.info_hash_index.clear();
         for (&gid, obj) in &self.pool {
             if let Some(ref ctx) = obj.download_context
-                && let Some(hash) = ctx.get_bt_info_hash_hex() {
-                    self.info_hash_index.insert(hash, gid);
-                }
+                && let Some(hash) = ctx.get_bt_info_hash_hex()
+            {
+                self.info_hash_index.insert(hash, gid);
+            }
         }
         trace!(
             index_len = self.info_hash_index.len(),

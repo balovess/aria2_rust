@@ -3,7 +3,7 @@
 //! Contains low-level string splitting, link parameter parsing,
 //! digest entry parsing, and quote/escape handling utilities.
 
-use super::types::{MetalinkHttpDigest, MetalinkHttpLink, MAX_PRI};
+use super::types::{MAX_PRI, MetalinkHttpDigest, MetalinkHttpLink};
 
 // ---------------------------------------------------------------------------
 // Link header splitting (handles commas inside quotes/angle brackets)
@@ -98,9 +98,10 @@ fn parse_link_param(param: &str, link: &mut MetalinkHttpLink) {
         }
         "pri" => {
             if let Ok(p) = value.parse::<u64>()
-                && (1..=MAX_PRI).contains(&p) {
-                    link.pri = Some(p);
-                }
+                && (1..=MAX_PRI).contains(&p)
+            {
+                link.pri = Some(p);
+            }
         }
         "pref" => {
             link.pref = true;

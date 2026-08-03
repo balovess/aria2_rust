@@ -182,10 +182,7 @@ impl DownloadEngine {
         self.save_session_path.as_ref()
     }
 
-    pub fn add_command(
-        &self,
-        command: Box<dyn super::command::Command>,
-    ) -> Result<()> {
+    pub fn add_command(&self, command: Box<dyn super::command::Command>) -> Result<()> {
         // A newly-added download changes session state; mark it dirty so the
         // periodic auto-save persists it.
         self.mark_session_dirty();

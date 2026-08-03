@@ -22,10 +22,7 @@ fn test_parse_url_list_single() {
     let mut info = BTreeMap::new();
     info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test".to_vec()));
     info.insert(b"length".to_vec(), BencodeValue::Int(1024));
-    info.insert(
-        b"piece length".to_vec(),
-        BencodeValue::Int(512),
-    );
+    info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
     info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 40]));
     root.insert(b"info".to_vec(), BencodeValue::Dict(info));
 
@@ -55,10 +52,7 @@ fn test_parse_url_list_multiple() {
     let mut info = BTreeMap::new();
     info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test".to_vec()));
     info.insert(b"length".to_vec(), BencodeValue::Int(2048));
-    info.insert(
-        b"piece length".to_vec(),
-        BencodeValue::Int(512),
-    );
+    info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
     info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 80]));
     root.insert(b"info".to_vec(), BencodeValue::Dict(info));
 
@@ -83,10 +77,7 @@ fn test_parse_url_list_missing() {
     let mut info = BTreeMap::new();
     info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test".to_vec()));
     info.insert(b"length".to_vec(), BencodeValue::Int(512));
-    info.insert(
-        b"piece length".to_vec(),
-        BencodeValue::Int(256),
-    );
+    info.insert(b"piece length".to_vec(), BencodeValue::Int(256));
     info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 20]));
     root.insert(b"info".to_vec(), BencodeValue::Dict(info));
 

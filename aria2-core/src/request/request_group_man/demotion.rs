@@ -10,13 +10,13 @@ use tracing::{debug, info, warn};
 
 use super::RequestGroup;
 use crate::engine::download_event_hooks::{
-    determine_stop_event, DownloadEvent, DownloadEventContext, DownloadEventHooks,
+    DownloadEvent, DownloadEventContext, DownloadEventHooks, determine_stop_event,
 };
 use crate::engine::post_download_handler::{
     build_handler_chain, extract_download_info, run_post_download_processing,
 };
-use crate::request::request_group::GroupId;
 use crate::request::request_group::DownloadStatus;
+use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Result of a demotion check: groups that should be removed from active.
@@ -228,7 +228,8 @@ impl super::RequestGroupMan {
             // ── Extract event context BEFORE demoting ──────────────────
             // Must extract while download context is still available.
             // C++ fires hooks while the group is still alive.
-            let event_ctx = event_hooks.map(|_| DownloadEventContext::from_group(&*dg.group.recover()));
+            let event_ctx =
+                event_hooks.map(|_| DownloadEventContext::from_group(&*dg.group.recover()));
 
             // ── Post-download processing (BEFORE demoting) ──────────────
             // C++: `group->postDownloadProcessing(nextGroups)` is called
@@ -271,11 +272,8 @@ impl super::RequestGroupMan {
                 let is_complete = matches!(status, DownloadStatus::Complete);
                 let is_error = matches!(status, DownloadStatus::Error(_));
 
-                if let Some(event) = determine_stop_event(
-                    is_complete,
-                    is_error,
-                    is_pause_requested,
-                ) {
+                if let Some(event) = determine_stop_event(is_complete, is_error, is_pause_requested)
+                {
                     // Resolve the hook command from per-group options
                     // (already extracted in event_ctx) or global hooks.
                     let command = match event {
@@ -370,14 +368,15 @@ impl super::RequestGroupMan {
                 if let Some(completion_dep) =
                     dep.as_any()
                         .downcast_ref::<crate::request::request_group::CompletionDependency>()
-                    && completion_dep.depends_on_gid == completed_gid {
-                        completion_dep.mark_resolved();
-                        debug!(
-                            gid = g.gid().value(),
-                            depends_on = completed_gid.value(),
-                            "Resolved completion dependency"
-                        );
-                    }
+                    && completion_dep.depends_on_gid == completed_gid
+                {
+                    completion_dep.mark_resolved();
+                    debug!(
+                        gid = g.gid().value(),
+                        depends_on = completed_gid.value(),
+                        "Resolved completion dependency"
+                    );
+                }
             }
         }
     }

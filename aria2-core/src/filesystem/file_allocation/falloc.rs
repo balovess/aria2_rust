@@ -39,7 +39,9 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
         if let Some(fd) = adaptor.unix_raw_fd() {
             // Validate length fits in off_t (i64 on 64-bit, i32 on 32-bit).
             if length > i64::MAX as u64 {
-                return Err(Aria2Error::Io("fallocate length exceeds off_t range".into()));
+                return Err(Aria2Error::Io(
+                    "fallocate length exceeds off_t range".into(),
+                ));
             }
             // Use raw fallocate(2) to detect EOPNOTSUPP explicitly.
             // posix_fallocate64 would silently fall back to a blocking
@@ -55,14 +57,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
             // default allocate-and-zero-fill behavior. length is cast to
             // off_t which is i64 on 64-bit Linux; u64 fits in i64 for
             // practical file sizes (< 2^63 bytes).
-            let ret = unsafe {
-                libc::fallocate(
-                    fd,
-                    0 as libc::c_int,
-                    0,
-                    length as libc::off_t,
-                )
-            };
+            let ret = unsafe { libc::fallocate(fd, 0 as libc::c_int, 0, length as libc::off_t) };
             if ret == 0 {
                 // Success: kernel allocates zeroed blocks; secure is a no-op.
                 return Ok(());
@@ -102,7 +97,9 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                 Some(fd) => {
                     // Validate length fits in off_t
                     if length > i64::MAX as u64 {
-                        return Err(Aria2Error::Io("F_PREALLOCATE length exceeds off_t range".into()));
+                        return Err(Aria2Error::Io(
+                            "F_PREALLOCATE length exceeds off_t range".into(),
+                        ));
                     }
                     // F_PREALLOCATE does not change the file size; size it first
                     // via ftruncate so the file is correct even if preallocation

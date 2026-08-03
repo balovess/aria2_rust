@@ -60,12 +60,16 @@ pub fn select_mirrors_by_priority<'a>(
             let a_matches = a
                 .location
                 .as_ref()
-                .map(|l| l.contains(location_preference) || location_preference.contains(l.as_str()))
+                .map(|l| {
+                    l.contains(location_preference) || location_preference.contains(l.as_str())
+                })
                 .unwrap_or(false);
             let b_matches = b
                 .location
                 .as_ref()
-                .map(|l| l.contains(location_preference) || location_preference.contains(l.as_str()))
+                .map(|l| {
+                    l.contains(location_preference) || location_preference.contains(l.as_str())
+                })
                 .unwrap_or(false);
 
             // Prefer matching location when priorities are equal

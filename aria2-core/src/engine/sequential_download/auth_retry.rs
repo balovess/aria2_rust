@@ -3,11 +3,11 @@
 // Mirrors the C++ `HttpSkipResponseCommand::processResponse()` flow
 // for 401/407 responses: resolve credentials, retry with Authorization.
 
-use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
-use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
-use crate::http::skip_response::AuthScheme;
-use crate::filesystem::resume_helper::ResumeState;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::resume_helper::ResumeState;
+use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
+use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
+use crate::http::skip_response::AuthScheme;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
@@ -32,10 +32,16 @@ impl SequentialDownloader {
         resume_state: &ResumeState,
     ) -> Option<Result<()>> {
         let is_proxy = status_code == 407;
-        let header_name = if is_proxy { "proxy-authenticate" } else { "www-authenticate" };
+        let header_name = if is_proxy {
+            "proxy-authenticate"
+        } else {
+            "www-authenticate"
+        };
 
         // Extract the auth challenge header
-        let auth_header = response.headers().get(header_name)
+        let auth_header = response
+            .headers()
+            .get(header_name)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
@@ -67,12 +73,14 @@ impl SequentialDownloader {
         // Build HttpAuthChallenge from the response
         let challenge = crate::http::skip_response::HttpAuthChallenge {
             scheme: scheme.clone(),
-            realm: auth_header.as_deref()
+            realm: auth_header
+                .as_deref()
                 .map(|h| crate::http::skip_response::HttpSkipResponseHandler::extract_realm(h))
                 .unwrap_or_default(),
             is_proxy,
             digest_challenge: if scheme == AuthScheme::Digest {
-                auth_header.as_deref()
+                auth_header
+                    .as_deref()
                     .and_then(|h| crate::http::digest_auth::DigestAuthChallenge::parse(h).ok())
             } else {
                 None
@@ -138,7 +146,9 @@ impl SequentialDownloader {
             } => {
                 // Build the retry request with Authorization header
                 // Re-apply the same Range header if we had a resume
-                let mut retry_request = if let Some(range_header) = crate::filesystem::resume_helper::ResumeHelper::build_range_header(resume_state) {
+                let mut retry_request = if let Some(range_header) =
+                    crate::filesystem::resume_helper::ResumeHelper::build_range_header(resume_state)
+                {
                     tracing::debug!("Auth retry: re-applying Range header: {}", range_header);
                     self.client.get(uri).header("Range", range_header)
                 } else {
@@ -181,17 +191,17 @@ impl SequentialDownloader {
                     }
                 };
 
-                self.cookie_helper.extract_and_store_cookies(uri, &retry_response);
+                self.cookie_helper
+                    .extract_and_store_cookies(uri, &retry_response);
 
                 let retry_status = retry_response.status();
                 if retry_status.is_success() || retry_status.as_u16() == 206 {
                     // Auth retry succeeded — proceed with the download using
                     // the retry response
-                    return Some(self.download_response_body(
-                        retry_response,
-                        uri,
-                        resume_state,
-                    ).await);
+                    return Some(
+                        self.download_response_body(retry_response, uri, resume_state)
+                            .await,
+                    );
                 }
 
                 // Auth retry still failed
@@ -200,16 +210,19 @@ impl SequentialDownloader {
                         status_code = retry_status.as_u16(),
                         "Auth retry still failed — credentials may be incorrect"
                     );
-                    return Some(Err(Aria2Error::Fatal(
-                        crate::error::FatalError::Config("Authentication failed".to_string()),
-                    )));
+                    return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                        "Authentication failed".to_string(),
+                    ))));
                 }
 
                 Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                     format!("HTTP error after auth retry: {}", retry_status),
                 ))))
             }
-            AuthChallengeResult::NoCredentials { status_code, message } => {
+            AuthChallengeResult::NoCredentials {
+                status_code,
+                message,
+            } => {
                 tracing::warn!(
                     status_code,
                     "Auth challenge but no credentials: {}",
@@ -217,12 +230,11 @@ impl SequentialDownloader {
                 );
                 None // Fall through to normal error handling
             }
-            AuthChallengeResult::UnsupportedScheme { scheme, status_code } => {
-                tracing::warn!(
-                    status_code,
-                    scheme,
-                    "Unsupported authentication scheme"
-                );
+            AuthChallengeResult::UnsupportedScheme {
+                scheme,
+                status_code,
+            } => {
+                tracing::warn!(status_code, scheme, "Unsupported authentication scheme");
                 None // Fall through to normal error handling
             }
         }

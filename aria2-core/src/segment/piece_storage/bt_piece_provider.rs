@@ -8,8 +8,6 @@
 use super::default_storage::DefaultPieceStorage;
 
 #[cfg(feature = "bittorrent")]
-use std::collections::HashSet;
-#[cfg(feature = "bittorrent")]
 use super::super::piece::Piece;
 #[cfg(feature = "bittorrent")]
 use super::trait_def::PieceStorage;
@@ -17,6 +15,8 @@ use super::trait_def::PieceStorage;
 use crate::engine::bt_peer_connection::BtPeerConn;
 #[cfg(feature = "bittorrent")]
 use crate::engine::bt_peer_interaction::PieceProvider;
+#[cfg(feature = "bittorrent")]
+use std::collections::HashSet;
 #[cfg(feature = "bittorrent")]
 use tracing::trace;
 
@@ -58,7 +58,14 @@ impl PieceProvider for DefaultPieceStorage {
             None => return Vec::new(),
         };
 
-        self.get_missing_pieces_inner(count, peer_bitfield, target_piece_indexes, cuid, false, None)
+        self.get_missing_pieces_inner(
+            count,
+            peer_bitfield,
+            target_piece_indexes,
+            cuid,
+            false,
+            None,
+        )
     }
 
     fn get_missing_fast_pieces(
@@ -200,11 +207,7 @@ impl DefaultPieceStorage {
             if let Some(allowed) = allowed_fast_set {
                 for i in 0..num_pieces {
                     if !allowed.contains(&(i as u32)) {
-                        super::super::bitfield_util::clear_bit(
-                            &mut mis_bitfield,
-                            num_pieces,
-                            i,
-                        );
+                        super::super::bitfield_util::clear_bit(&mut mis_bitfield, num_pieces, i);
                     }
                 }
             }
@@ -309,10 +312,11 @@ impl DefaultPieceStorage {
         // In endgame, the piece might already be in used_pieces
         // C++ handles this by adding another user to the existing piece
         if self.end_game
-            && let Some(existing) = self.used_pieces.get_mut(&index) {
-                existing.add_user(cuid);
-                return Some(existing.clone());
-            }
+            && let Some(existing) = self.used_pieces.get_mut(&index)
+        {
+            existing.add_user(cuid);
+            return Some(existing.clone());
+        }
 
         self.used_pieces.insert(index, piece.clone());
         Some(piece)

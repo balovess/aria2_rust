@@ -1,4 +1,4 @@
-﻿//! MSE DH Key Exchange using the 768-bit prime from the MSE specification.
+//! MSE DH Key Exchange using the 768-bit prime from the MSE specification.
 //!
 //! Matches C++ aria2 `InternalDHKeyExchange.cc` which uses:
 //! - PRIME_BITS = 768, KEY_LENGTH = 96 bytes
@@ -108,8 +108,7 @@ pub struct DhKeyPair {
 impl DhKeyPair {
     /// Get the 768-bit MSE prime as a BigUint.
     pub fn get_prime() -> BigUint {
-        BigUint::from_str_radix(DH_P_768_HEX, 16)
-            .expect("DH prime constant is valid hex")
+        BigUint::from_str_radix(DH_P_768_HEX, 16).expect("DH prime constant is valid hex")
     }
 
     /// Generate a new DH key pair.
@@ -199,7 +198,11 @@ mod tests {
     fn test_mse_dh_generate_public_key_size() {
         let exchange = MseDhKeyExchange::new();
         let public = exchange.generate_public_key();
-        assert_eq!(public.len(), KEY_LENGTH, "Public key must be exactly 96 bytes");
+        assert_eq!(
+            public.len(),
+            KEY_LENGTH,
+            "Public key must be exactly 96 bytes"
+        );
         // Generate again should return the same key
         let public2 = exchange.generate_public_key();
         assert_eq!(public, public2);
@@ -287,11 +290,7 @@ mod tests {
     fn test_prime_constant_bit_length() {
         let p = DhKeyPair::get_prime();
         let bits = p.bits();
-        assert_eq!(
-            bits, 768,
-            "DH prime must be exactly 768 bits, got {}",
-            bits
-        );
+        assert_eq!(bits, 768, "DH prime must be exactly 768 bits, got {}", bits);
     }
 
     #[test]

@@ -295,7 +295,8 @@ impl Command for ConcurrentDownloadCommand {
 
     fn request_group(
         &self,
-    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
+    {
         Some(std::sync::Arc::clone(&self.group))
     }
 
@@ -370,7 +371,13 @@ impl ConcurrentDownloadCommand {
                             .write_at(offset, &data)
                             .await
                             .map_err(|e| format!("Disk write error seg{}: {}", seg_idx, e))?;
-                        manager.complete_segment(seg_idx, data.len());
+                        if !manager.complete_segment(seg_idx, data.len()) {
+                            return Err(format!(
+                                "Invalid completed segment {} length {}",
+                                seg_idx,
+                                data.len()
+                            ));
+                        }
                         ctrl_file.mark_piece_done(seg_idx as usize);
                         ctrl_file.save().await.ok();
                     }
@@ -426,8 +433,12 @@ impl ConcurrentDownloadCommand {
             }
         }
 
-        if data.is_empty() && length > 0 {
-            return Err("Empty segment data".to_string());
+        if data.len() as u64 != length {
+            return Err(format!(
+                "Incomplete segment response: expected {} bytes, received {}",
+                length,
+                data.len()
+            ));
         }
 
         // Freeze to immutable Bytes (zero-cost)
@@ -505,7 +516,21 @@ impl ConcurrentDownloadCommand {
                             }
                         }
 
-                        manager.complete_segment(0, 0);
+                        if offset != manager.total_size() {
+                            return Err(format!(
+                                "Incomplete single-segment response: expected {} bytes, received {}",
+                                manager.total_size(),
+                                offset
+                            ));
+                        }
+                        if !manager.complete_segment(
+                            0,
+                            usize::try_from(offset).map_err(|_| {
+                                "Downloaded segment size exceeds platform limits".to_string()
+                            })?,
+                        ) {
+                            return Err("Invalid completed single segment".to_string());
+                        }
                         return Ok(());
                     }
                 }

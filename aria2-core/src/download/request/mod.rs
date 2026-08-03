@@ -33,7 +33,9 @@ mod tests;
 // ---------------------------------------------------------------------------
 
 pub use peer_stat::PeerStat;
-pub use request_impl::{is_absolute_uri, remove_fragment, METHOD_GET, METHOD_HEAD, MAX_REDIRECT, DEFAULT_FILE};
+pub use request_impl::{
+    DEFAULT_FILE, MAX_REDIRECT, METHOD_GET, METHOD_HEAD, is_absolute_uri, remove_fragment,
+};
 
 // ---------------------------------------------------------------------------
 // Request — per-connection request state (struct definition only)

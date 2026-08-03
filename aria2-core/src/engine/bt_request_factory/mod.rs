@@ -1,4 +1,4 @@
-﻿//! BT Request Factory — generates Request messages for missing blocks
+//! BT Request Factory — generates Request messages for missing blocks
 //!
 //! This module implements the C++ `DefaultBtRequestFactory` architecture,
 //! managing a per-peer target piece list and generating Request messages
@@ -28,7 +28,6 @@ mod pipeline;
 mod tests;
 
 // Sub-modules define `impl BtRequestFactory` blocks; no new public items to re-export.
-
 
 use std::collections::VecDeque;
 

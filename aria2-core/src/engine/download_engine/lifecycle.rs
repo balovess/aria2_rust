@@ -50,8 +50,13 @@ impl DownloadEngine {
             global_limiter: self.global_limiter.clone(),
         };
 
-        super::super::engine_loop::run_engine_loop(ctx, engine_cmd_rx, shutdown_rx, self.tick_interval)
-            .await;
+        super::super::engine_loop::run_engine_loop(
+            ctx,
+            engine_cmd_rx,
+            shutdown_rx,
+            self.tick_interval,
+        )
+        .await;
 
         Ok(())
     }

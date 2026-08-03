@@ -21,11 +21,11 @@ mod tests;
 
 // Re-exports — preserve the original public API surface.
 pub use announce_logic::{
-    announce_to_public_tracker, announce_to_public_tracker_with_event,
-    perform_announce_with_event, perform_http_tracker_announce,
+    announce_to_public_tracker, announce_to_public_tracker_with_event, perform_announce_with_event,
+    perform_http_tracker_announce,
 };
-pub use tracker_url::{is_udp_tracker, urlencode_infohash};
 pub(crate) use tracker_url::urlencode_bytes;
+pub use tracker_url::{is_udp_tracker, urlencode_infohash};
 
 use super::announce_list::AnnounceList;
 use super::types::AnnounceEvent;
@@ -342,10 +342,11 @@ impl BtAnnounce {
         // Store tracker_id from response for subsequent announces
         // (matching C++ BtAnnounce::processAnnounceResponse)
         if let Some(ref tid) = response.tracker_id
-            && !tid.is_empty() {
-                debug!("[BT] Tracker ID: {}", tid);
-                self.tracker_id = tid.clone();
-            }
+            && !tid.is_empty()
+        {
+            debug!("[BT] Tracker ID: {}", tid);
+            self.tracker_id = tid.clone();
+        }
 
         // Update interval
         let interval_secs = response.interval;
@@ -384,12 +385,7 @@ impl BtAnnounce {
             .map(|p| (p.ip.clone(), p.port))
             .collect();
 
-        peers.extend(
-            response
-                .peers6
-                .iter()
-                .map(|p| (p.ip.clone(), p.port)),
-        );
+        peers.extend(response.peers6.iter().map(|p| (p.ip.clone(), p.port)));
 
         Ok(peers)
     }
@@ -488,14 +484,18 @@ impl BtAnnounce {
     ///
     /// C++ `UdpTrackerRequest` uses the same event values:
     /// - 0 = none, 1 = completed, 2 = started, 3 = stopped
-    pub fn current_udp_event(&self) -> aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent {
+    pub fn current_udp_event(
+        &self,
+    ) -> aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent {
         use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
         match self.announce_list.get_event() {
             AnnounceEvent::Started | AnnounceEvent::StartedAfterCompletion => UdpEvent::Started,
             AnnounceEvent::Completed => UdpEvent::Completed,
             AnnounceEvent::Stopped => UdpEvent::Stopped,
             // Downloading, Seeding, Halted are periodic announces with no event
-            AnnounceEvent::Downloading | AnnounceEvent::Seeding | AnnounceEvent::Halted => UdpEvent::None,
+            AnnounceEvent::Downloading | AnnounceEvent::Seeding | AnnounceEvent::Halted => {
+                UdpEvent::None
+            }
         }
     }
 

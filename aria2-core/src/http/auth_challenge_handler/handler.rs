@@ -78,30 +78,31 @@ pub fn handle_auth_challenge(
     }
 
     let host = url.host_str().unwrap_or("");
-    let port = url.port_or_known_default().unwrap_or(if url.scheme() == "https" {
-        443
-    } else {
-        80
-    });
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
     let path = url.path();
 
     match challenge.scheme {
-        AuthScheme::Basic => {
-            handle_basic_challenge(auth_factory, host, port, path, auth_opts, challenge.is_proxy)
-        }
-        AuthScheme::Digest => {
-            handle_digest_challenge(
-                auth_factory,
-                host,
-                port,
-                path,
-                auth_opts,
-                url,
-                method,
-                challenge,
-                nc,
-            )
-        }
+        AuthScheme::Basic => handle_basic_challenge(
+            auth_factory,
+            host,
+            port,
+            path,
+            auth_opts,
+            challenge.is_proxy,
+        ),
+        AuthScheme::Digest => handle_digest_challenge(
+            auth_factory,
+            host,
+            port,
+            path,
+            auth_opts,
+            url,
+            method,
+            challenge,
+            nc,
+        ),
         AuthScheme::Ntlm => {
             warn!("NTLM authentication is not supported");
             AuthChallengeResult::UnsupportedScheme {

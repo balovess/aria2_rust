@@ -254,10 +254,7 @@ impl BtDownloadCommand {
                         )
                         .await;
                     if connected > 0 {
-                        info!(
-                            "[BT] Connected to {} tracker-discovered peers",
-                            connected
-                        );
+                        info!("[BT] Connected to {} tracker-discovered peers", connected);
                     }
                 }
             }
@@ -344,10 +341,7 @@ impl BtDownloadCommand {
                             .await?;
                         } else {
                             writer
-                                .write_at(
-                                    next_piece_idx as u64 * piece_length as u64,
-                                    &piece_data,
-                                )
+                                .write_at(next_piece_idx as u64 * piece_length as u64, &piece_data)
                                 .await?;
                         }
 

@@ -256,10 +256,11 @@ impl FeedbackUriSelector {
 
             // Check server stat — skip if ERROR
             if let Some(stat) = self.stat_man.find_stat_by_protocol(&host, &protocol)
-                && !stat.is_ok() {
-                    trace!(uri = %uri, "Error not considered (rarer)");
-                    continue;
-                }
+                && !stat.is_ok()
+            {
+                trace!(uri = %uri, "Error not considered (rarer)");
+                continue;
+            }
 
             cands.push((host, idx));
         }

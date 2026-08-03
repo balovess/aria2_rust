@@ -4,12 +4,12 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use super::registry::OptionRegistry;
 use super::types::{OptionCategory, OptionDef, OptionType, OptionValue};
 use super::validator::{
     ChoiceValidator, DependencyChecker, OptionDefinition, OptionError, OptionValidator,
     RangeValidator, RegexValidator, UrlValidator,
 };
-use super::registry::OptionRegistry;
 
 // ==================== Type Tests ====================
 

@@ -1,8 +1,8 @@
-﻿use std::sync::atomic::Ordering;
+use std::sync::atomic::Ordering;
 use tracing::debug;
 
-use crate::error::Result;
 use super::{CacheEntry, WrDiskCache};
+use crate::error::Result;
 
 /// Eviction target ratio: when over limit, evict down to this fraction of max size
 const EVICTION_TARGET_RATIO: f64 = 0.5;

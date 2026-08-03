@@ -223,15 +223,16 @@ impl DhtTask for ReplaceNodeTask {
             {
                 Ok((len, _from)) if len > 0 => {
                     if let Ok(response) = super::message::DhtMessage::decode(&buf[..len])
-                        && response.is_response() {
-                            info!(
-                                "ReplaceNodeTask: ping reply received from {} — node is alive",
-                                hex::encode(q_id)
-                            );
-                            let mut rt = self.ctx.routing_table.write().await;
-                            rt.mark_good(&q_id);
-                            return;
-                        }
+                        && response.is_response()
+                    {
+                        info!(
+                            "ReplaceNodeTask: ping reply received from {} — node is alive",
+                            hex::encode(q_id)
+                        );
+                        let mut rt = self.ctx.routing_table.write().await;
+                        rt.mark_good(&q_id);
+                        return;
+                    }
                 }
                 _ => {
                     if attempt < 1 {

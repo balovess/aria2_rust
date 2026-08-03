@@ -310,8 +310,7 @@ fn test_empty_nonce_handling() {
         stale: false,
     };
 
-    let result =
-        provider.build_authorization_header_with_method(&challenge, "GET", "/path", None);
+    let result = provider.build_authorization_header_with_method(&challenge, "GET", "/path", None);
 
     // Should fail with missing nonce error
     assert!(result.is_err());
@@ -339,12 +338,8 @@ fn test_digest_full_authorization_header() {
         stale: false,
     };
 
-    let result = provider.build_authorization_header_with_method(
-        &challenge,
-        "GET",
-        "/dir/index.html",
-        None,
-    );
+    let result =
+        provider.build_authorization_header_with_method(&challenge, "GET", "/dir/index.html", None);
 
     assert!(result.is_ok());
     let header = result.unwrap();

@@ -6,7 +6,7 @@ use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
 use tracing::{debug, trace, warn};
 
 use super::{
-    ExtensionRegistry, DEFAULT_LOCAL_UT_METADATA_ID, DEFAULT_LOCAL_UT_PEX_ID, DEFAULT_REQQ,
+    DEFAULT_LOCAL_UT_METADATA_ID, DEFAULT_LOCAL_UT_PEX_ID, DEFAULT_REQQ, ExtensionRegistry,
     UT_METADATA_NAME, UT_PEX_NAME,
 };
 

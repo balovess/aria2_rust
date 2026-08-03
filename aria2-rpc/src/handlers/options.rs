@@ -190,9 +190,7 @@ impl RpcEngine {
         {
             if let Some(tx) = &self.engine_cmd_tx {
                 use aria2_core::engine::engine_command::EngineCommand;
-                let _ = tx.send(EngineCommand::SetMaxConcurrent {
-                    max: max as u32,
-                });
+                let _ = tx.send(EngineCommand::SetMaxConcurrent { max: max as u32 });
             }
         }
         // TODO(engine): max-overall-download-limit / max-overall-upload-limit
@@ -247,10 +245,7 @@ impl RpcEngine {
         }
 
         // Step 3: task does not exist anywhere.
-        Err(JsonRpcError::RpcExecution(format!(
-            "GID {} not found",
-            gid
-        )))
+        Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid)))
     }
 
     /// Handle `aria2.changeOption` - Modify per-task options.
@@ -302,18 +297,19 @@ impl RpcEngine {
 
         // Apply immediate options to the running RequestGroup.
         if !immediate.is_empty()
-            && let Some(ref group_man) = self.group_man {
-                let gm = group_man.read().await;
-                if let Err(e) = gm.update_group_options(&gid, immediate.clone()) {
-                    if !e.contains("not found") {
-                        return Err(JsonRpcError::InvalidParams(e));
-                    }
-                    tracing::debug!(
-                        "changeOption for GID {} not applied to a running group (not registered yet); storing in task_opts only",
-                        gid
-                    );
+            && let Some(ref group_man) = self.group_man
+        {
+            let gm = group_man.read().await;
+            if let Err(e) = gm.update_group_options(&gid, immediate.clone()) {
+                if !e.contains("not found") {
+                    return Err(JsonRpcError::InvalidParams(e));
                 }
+                tracing::debug!(
+                    "changeOption for GID {} not applied to a running group (not registered yet); storing in task_opts only",
+                    gid
+                );
             }
+        }
 
         // Store pending options (to be applied on next pause/restart).
         // In C++ aria2, these trigger a pause + restart cycle.

@@ -1,7 +1,7 @@
 //! Trait implementations for Piece.
 
 use super::bitfield::BlockBitfield;
-use super::piece_impl::{Piece, DEFAULT_BLOCK_LENGTH};
+use super::piece_impl::{DEFAULT_BLOCK_LENGTH, Piece};
 
 impl Clone for Piece {
     fn clone(&self) -> Self {

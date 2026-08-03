@@ -32,8 +32,8 @@ use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, trace, warn};
 
 use super::constants::{
-    BUCKET_REFRESH_CHECK_INTERVAL_SECS, DHT_MAX_MESSAGE_SIZE,
-    PEER_ANNOUNCE_CHECK_INTERVAL_SECS, TOKEN_UPDATE_INTERVAL_SECS,
+    BUCKET_REFRESH_CHECK_INTERVAL_SECS, DHT_MAX_MESSAGE_SIZE, PEER_ANNOUNCE_CHECK_INTERVAL_SECS,
+    TOKEN_UPDATE_INTERVAL_SECS,
 };
 use super::dispatcher::DhtDispatcher;
 use super::node_id::NodeId;

@@ -189,8 +189,7 @@ async fn test_cached_writer_with_rate_limiter() {
     let cfg = RateLimiterConfig::new(Some(10), None).with_burst(Some(20), None);
     let rl = Arc::new(RateLimiter::new(&cfg));
 
-    let mut writer =
-        CachedDiskWriter::new(&path, Some(4096), None).with_rate_limiter(rl.clone());
+    let mut writer = CachedDiskWriter::new(&path, Some(4096), None).with_rate_limiter(rl.clone());
     writer.open().await.unwrap();
 
     // Write data - should succeed (try_acquire may fail but we still write)
@@ -426,7 +425,6 @@ async fn test_concurrent_writes_no_mutex_contention() {
     }
 }
 
-
 /// Regression: BT single-file downloads pick pieces out of order (RarestFirst
 /// etc.), so writes must land at the piece offset. A sequential writer would
 /// append piece 1's bytes right after piece 0's, silently corrupting the file.
@@ -447,7 +445,11 @@ async fn test_cached_writer_out_of_order_writes_land_at_offsets() {
     writer.close().await.unwrap();
 
     let content = std::fs::read(&path).unwrap();
-    assert_eq!(content, b"aaaabbbb".to_vec(), "pieces must land at their offsets");
+    assert_eq!(
+        content,
+        b"aaaabbbb".to_vec(),
+        "pieces must land at their offsets"
+    );
 }
 
 /// Sequential DefaultDiskWriter is the control: appending out of order
@@ -463,5 +465,9 @@ async fn test_sequential_writer_appends_out_of_order() {
     writer.finalize().await.unwrap();
 
     let content = std::fs::read(&path).unwrap();
-    assert_eq!(content, b"bbbbaaaa".to_vec(), "sequential append ignores offsets");
+    assert_eq!(
+        content,
+        b"bbbbaaaa".to_vec(),
+        "sequential append ignores offsets"
+    );
 }

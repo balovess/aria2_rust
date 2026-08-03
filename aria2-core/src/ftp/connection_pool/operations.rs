@@ -1,4 +1,3 @@
-﻿
 use tracing::{debug, info};
 
 use crate::error::Result;
@@ -311,4 +310,3 @@ impl FtpConnectionPool {
             .any(|k| k.host == host && k.port == port && k.username == username)
     }
 }
-

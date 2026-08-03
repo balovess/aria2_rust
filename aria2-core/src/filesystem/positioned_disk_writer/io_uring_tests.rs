@@ -1,4 +1,4 @@
-﻿//! io_uring tests (Linux + feature only)
+//! io_uring tests (Linux + feature only)
 //!
 //! These tests are excluded on Windows/macOS and when the `io_uring` feature is
 //! off. They use `tokio_uring::start` to drive the io_uring runtime.

@@ -92,14 +92,15 @@ pub async fn replace_node(
             Ok((len, _from)) if len > 0 => {
                 // Got a response — the questionable node is alive.
                 if let Ok(response) = super::message::DhtMessage::decode(&buf[..len])
-                    && response.is_response() {
-                        info!(
-                            "ReplaceNode: ping reply received from {} — node is alive",
-                            hex::encode(q_id)
-                        );
-                        bucket.mark_good(&q_id);
-                        return ReplaceNodeResult::NodeAlive;
-                    }
+                    && response.is_response()
+                {
+                    info!(
+                        "ReplaceNode: ping reply received from {} — node is alive",
+                        hex::encode(q_id)
+                    );
+                    bucket.mark_good(&q_id);
+                    return ReplaceNodeResult::NodeAlive;
+                }
                 // Response was not a valid ping reply; treat as timeout.
             }
             _ => {

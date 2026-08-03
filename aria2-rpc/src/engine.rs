@@ -553,11 +553,7 @@ impl RpcEngine {
                 -32600,
                 "Nested system.multicall is not supported".to_string(),
             ),
-            _ => JsonRpcResponse::error(
-                id,
-                1,
-                format!("No such method: {}", dispatch_req.method),
-            ),
+            _ => JsonRpcResponse::error(id, 1, format!("No such method: {}", dispatch_req.method)),
         }
     }
 }

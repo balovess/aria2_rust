@@ -59,10 +59,7 @@ pub struct TrackerAnnouncer {
 
 impl TrackerAnnouncer {
     /// Create a new tracker announcer from an announce list and optional single URL.
-    pub fn new(
-        announce_list: &[Vec<String>],
-        announce: &Option<String>,
-    ) -> Self {
+    pub fn new(announce_list: &[Vec<String>], announce: &Option<String>) -> Self {
         Self {
             announce: BtAnnounce::new(announce_list, announce),
             udp_manager: None,
@@ -71,10 +68,7 @@ impl TrackerAnnouncer {
     }
 
     /// Create from an existing `BtAnnounce` and optional shared UDP client.
-    pub fn with_udp_client(
-        announce: BtAnnounce,
-        udp_client: Option<SharedUdpClient>,
-    ) -> Self {
+    pub fn with_udp_client(announce: BtAnnounce, udp_client: Option<SharedUdpClient>) -> Self {
         Self {
             announce,
             udp_manager: None,
@@ -133,12 +127,28 @@ impl TrackerAnnouncer {
 
         // Determine if this is a UDP or HTTP tracker
         if is_udp {
-            self.announce_udp(info_hash, peer_id, downloaded, left, uploaded, event, &tracker_url)
-                .await
+            self.announce_udp(
+                info_hash,
+                peer_id,
+                downloaded,
+                left,
+                uploaded,
+                event,
+                &tracker_url,
+            )
+            .await
         } else {
             // HTTP announce — build URL and dispatch
-            self.announce_http(info_hash, peer_id, downloaded, left, uploaded, event, &tracker_url)
-                .await
+            self.announce_http(
+                info_hash,
+                peer_id,
+                downloaded,
+                left,
+                uploaded,
+                event,
+                &tracker_url,
+            )
+            .await
         }
     }
 
@@ -258,14 +268,9 @@ impl TrackerAnnouncer {
         tracker_url: &str,
     ) -> Option<AnnounceResult> {
         // Build the announce URL through BtAnnounce state machine
-        let url = self.announce.get_announce_url(
-            info_hash,
-            peer_id,
-            uploaded,
-            downloaded,
-            left,
-            None,
-        )?;
+        let url = self
+            .announce
+            .get_announce_url(info_hash, peer_id, uploaded, downloaded, left, None)?;
 
         // Signal announce start
         self.announce.announce_start();
@@ -338,20 +343,14 @@ impl TrackerAnnouncer {
                                 }
                             }
                             Err(e) => {
-                                warn!(
-                                    "[BT] HTTP tracker {} body read failed: {}",
-                                    tracker_url, e
-                                );
+                                warn!("[BT] HTTP tracker {} body read failed: {}", tracker_url, e);
                                 self.announce.announce_failure();
                                 None
                             }
                         }
                     }
                     Err(e) => {
-                        warn!(
-                            "[BT] HTTP tracker {} request failed: {}",
-                            tracker_url, e
-                        );
+                        warn!("[BT] HTTP tracker {} request failed: {}", tracker_url, e);
                         self.announce.announce_failure();
                         None
                     }

@@ -54,10 +54,7 @@ pub(super) async fn try_web_seed_fallback(
                     .await?;
                 } else {
                     writer
-                        .write_at(
-                            next_piece_idx as u64 * piece_length as u64,
-                            &web_seed_data,
-                        )
+                        .write_at(next_piece_idx as u64 * piece_length as u64, &web_seed_data)
                         .await
                         .ok();
                 }

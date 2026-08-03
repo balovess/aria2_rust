@@ -1,9 +1,9 @@
 //! Tests for `bt_message_receiver` — moved from the main module to
 //! keep the source file under 600 lines.
 
+use crate::engine::bt_message_receiver::{BtMessageReceiver, HandshakeResult};
 use aria2_protocol::bittorrent::message::handshake::Handshake;
 use aria2_protocol::bittorrent::message::types::HANDSHAKE_LENGTH;
-use crate::engine::bt_message_receiver::{BtMessageReceiver, HandshakeResult};
 
 /// Helper: create a valid handshake byte buffer with the given info_hash and peer_id.
 fn make_handshake_bytes(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> [u8; HANDSHAKE_LENGTH] {

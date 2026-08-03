@@ -190,24 +190,25 @@ pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
 
     for token in &tokens {
         // Try to parse as time (HH:MM:SS)
-        if !found_time
-            && let Some((h, m, s)) = parse_time_token(token) {
-                hour = h;
-                minute = m;
-                second = s;
-                found_time = true;
-                continue;
-            }
+        if !found_time && let Some((h, m, s)) = parse_time_token(token) {
+            hour = h;
+            minute = m;
+            second = s;
+            found_time = true;
+            continue;
+        }
 
         // Try to parse as day-of-month (1-2 digit number)
         if !found_day {
             let digits = leading_digits(token);
-            if (1..=2).contains(&digits) && digits == token.len()
-                && let Ok(d) = token.parse::<u32>() {
-                    day_of_month = d;
-                    found_day = true;
-                    continue;
-                }
+            if (1..=2).contains(&digits)
+                && digits == token.len()
+                && let Ok(d) = token.parse::<u32>()
+            {
+                day_of_month = d;
+                found_day = true;
+                continue;
+            }
         }
 
         // Try to parse as month name (case-insensitive, at least 3 chars)
@@ -228,12 +229,14 @@ pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
         // Try to parse as year (1-4 digit number)
         if !found_year {
             let digits = leading_digits(token);
-            if (1..=4).contains(&digits) && digits == token.len()
-                && let Ok(y) = token.parse::<u32>() {
-                    year = y;
-                    found_year = true;
-                    continue;
-                }
+            if (1..=4).contains(&digits)
+                && digits == token.len()
+                && let Ok(y) = token.parse::<u32>()
+            {
+                year = y;
+                found_year = true;
+                continue;
+            }
         }
     }
 
@@ -255,7 +258,8 @@ pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
     let max_day = match month {
         4 | 6 | 9 | 11 => 30,
         2 => {
-            let is_leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+            let is_leap =
+                (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
             if is_leap { 29 } else { 28 }
         }
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,

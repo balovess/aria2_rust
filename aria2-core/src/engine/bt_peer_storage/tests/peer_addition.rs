@@ -1,7 +1,7 @@
 //! Tests for peer addition and duplicate/max-size rejection.
 
-use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 use super::basic::make_peer;
+use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 
 // ------------------------------------------------------------------
 // add_peer / add_peers

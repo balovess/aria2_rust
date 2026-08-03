@@ -229,7 +229,10 @@ pub async fn check_periodic_dht_lookup(
                     &ip_str,
                     addr.port(),
                 );
-                if !new_peers.iter().any(|p| p.ip == paddr.ip && p.port == paddr.port) {
+                if !new_peers
+                    .iter()
+                    .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                {
                     new_peers.push(paddr);
                 }
             }

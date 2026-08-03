@@ -166,16 +166,17 @@ impl MetalinkPostDownloadHandler {
     /// Read the Metalink data from the completed download.
     ///
     /// C++: `diskAdaptor->openExistingFile()` then `util::toString(diskAdaptor)`.
-    fn read_metalink_data(info: &CompletedDownloadInfo) -> std::result::Result<Vec<u8>, Aria2Error> {
+    fn read_metalink_data(
+        info: &CompletedDownloadInfo,
+    ) -> std::result::Result<Vec<u8>, Aria2Error> {
         if info.in_memory_download {
             info.in_memory_data
                 .clone()
                 .ok_or_else(|| Aria2Error::Parse("In-memory download has no data".to_string()))
         } else {
-            let path = info
-                .file_path
-                .as_ref()
-                .ok_or_else(|| Aria2Error::Io("File-based Metalink download has no file path".to_string()))?;
+            let path = info.file_path.as_ref().ok_or_else(|| {
+                Aria2Error::Io("File-based Metalink download has no file path".to_string())
+            })?;
 
             std::fs::read(path).map_err(|e| {
                 Aria2Error::Io(format!("Failed to read Metalink file '{}': {}", path, e))
@@ -202,10 +203,7 @@ impl Default for MetalinkPostDownloadHandler {
 
 impl PostDownloadHandler for MetalinkPostDownloadHandler {
     fn can_handle(&self, info: &CompletedDownloadInfo) -> bool {
-        Self::can_handle_static(
-            info.content_type.as_deref(),
-            info.file_path.as_deref(),
-        )
+        Self::can_handle_static(info.content_type.as_deref(), info.file_path.as_deref())
     }
 
     fn create_child_groups(
@@ -226,12 +224,8 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
         // the Metalink handler. C++: dctx->setAcceptMetalink(false)
         child_options.follow_metalink = Some(false);
 
-        let commands = self
-            .get_next_request_groups(
-                &metalink_data,
-                info.base_uri.as_deref(),
-                &child_options,
-            )?;
+        let commands =
+            self.get_next_request_groups(&metalink_data, info.base_uri.as_deref(), &child_options)?;
 
         // Extract RequestGroup from each MetalinkDownloadCommand.
         // C++: `groups.insert(groups.end(), newRgs.begin(), newRgs.end())`

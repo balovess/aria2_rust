@@ -258,4 +258,3 @@ impl BtMessageReceiver {
         }
     }
 }
-

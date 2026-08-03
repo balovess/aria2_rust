@@ -22,8 +22,7 @@ pub enum ContextAttributeType {
 /// BitTorrent file mode — single vs multi-file torrent.
 ///
 /// Mirrors C++ `BtFileMode` enum. Used in `TorrentAttribute::mode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BtFileMode {
     /// Single-file torrent (one file in the info dict).
     #[default]
@@ -31,7 +30,6 @@ pub enum BtFileMode {
     /// Multi-file torrent (directory with multiple files in the info dict).
     Multi,
 }
-
 
 /// BitTorrent-specific attributes stored on `DownloadContext`.
 ///

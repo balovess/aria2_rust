@@ -1,4 +1,4 @@
-﻿//! Platform-specific positioned I/O helpers.
+//! Platform-specific positioned I/O helpers.
 //!
 //! Provides `write_all_at` and `read_exact_at` functions that wrap the
 //! OS-native positioned I/O syscalls, handling partial writes/reads.

@@ -109,16 +109,10 @@ impl RequestGroupMan {
     /// Mirrors C++ `RequestGroupMan::insertReservedGroup(0, nextGroups)`:
     /// child groups from `postDownloadProcessing()` are inserted at
     /// position 0 so they are promoted before other waiting downloads.
-    pub fn insert_reserved_at_front(
-        &self,
-        groups: Vec<Arc<std::sync::RwLock<RequestGroup>>>,
-    ) {
+    pub fn insert_reserved_at_front(&self, groups: Vec<Arc<std::sync::RwLock<RequestGroup>>>) {
         let count = groups.len();
         self.reserved.insert_front_batch(groups);
-        debug!(
-            "Inserted {} groups at front of reserved queue",
-            count
-        );
+        debug!("Inserted {} groups at front of reserved queue", count);
     }
 
     /// Insert a download group under a caller-chosen GID (used by RPC).
@@ -668,7 +662,10 @@ mod tests {
         assert_eq!(requeued, 1, "paused group should be re-queued");
         assert_eq!(man.active.len(), 0);
         assert_eq!(man.reserved.len(), 1);
-        assert!(man.find_group(gid).is_some(), "paused group must still exist");
+        assert!(
+            man.find_group(gid).is_some(),
+            "paused group must still exist"
+        );
 
         // Unpause then promote → the download restarts.
         man.unpause_group(gid).unwrap();
@@ -767,7 +764,10 @@ mod tests {
 
         let ok = man.fail_spawned_group(gid, "Failed to spawn download task");
         assert!(ok, "failed-spawn group should be handled");
-        assert!(man.find_group(gid).is_none(), "group must leave the manager");
+        assert!(
+            man.find_group(gid).is_none(),
+            "group must leave the manager"
+        );
         assert_eq!(man.active.len(), 0, "group must not stay in active");
 
         let result = man

@@ -11,8 +11,7 @@
 mod linux_tests {
     use super::super::download::try_splice_download;
     use super::super::helpers::{
-        find_header_end, is_chunked, parse_content_length, parse_status_code,
-        write_all_at_offset,
+        find_header_end, is_chunked, parse_content_length, parse_status_code, write_all_at_offset,
     };
     use std::io;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,9 +25,7 @@ mod linux_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock server");
-        let addr = listener
-            .local_addr()
-            .expect("get mock server local addr");
+        let addr = listener.local_addr().expect("get mock server local addr");
 
         tokio::spawn(async move {
             let (mut sock, _) = listener
@@ -38,7 +35,10 @@ mod linux_tests {
 
             // Read the request (until \r\n\r\n).
             let mut req_buf = [0u8; 4096];
-            let _n = sock.read(&mut req_buf).await.expect("mock server read request");
+            let _n = sock
+                .read(&mut req_buf)
+                .await
+                .expect("mock server read request");
 
             // Parse the Range header from the request to determine what to send.
             let req_str = std::str::from_utf8(&req_buf).unwrap_or("");
@@ -62,9 +62,7 @@ mod linux_tests {
             sock.write_all(response.as_bytes())
                 .await
                 .expect("mock server write headers");
-            sock.write_all(chunk)
-                .await
-                .expect("mock server write body");
+            sock.write_all(chunk).await.expect("mock server write body");
         });
 
         addr
@@ -223,9 +221,7 @@ mod linux_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
-        let addr = listener
-            .local_addr()
-            .expect("get test server local addr");
+        let addr = listener.local_addr().expect("get test server local addr");
 
         tokio::spawn(async move {
             let (mut sock, _) = listener

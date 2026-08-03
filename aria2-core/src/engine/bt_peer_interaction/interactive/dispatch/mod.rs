@@ -8,7 +8,7 @@
 //! - [receive] - Message reception loop (`receive_messages`)
 //! - [handshake] - Handshake peer-ID validation (`validate_handshake_peer_id`)
 
-pub mod interaction;
 pub mod dispatch_message;
-pub mod receive;
 pub mod handshake;
+pub mod interaction;
+pub mod receive;

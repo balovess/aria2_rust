@@ -128,10 +128,8 @@ pub fn run_post_download_processing(
 
                     // Link parent-child relationships.
                     // C++: `requestGroup->followedBy(newRgs)` and `rg->following(gid)`.
-                    let child_gids: Vec<GroupId> = groups
-                        .iter()
-                        .map(|g| g.recover().gid())
-                        .collect();
+                    let child_gids: Vec<GroupId> =
+                        groups.iter().map(|g| g.recover().gid()).collect();
 
                     for child in &groups {
                         child.recover().set_following_gid(info.gid);
@@ -164,10 +162,7 @@ pub fn run_post_download_processing(
         }
     }
 
-    debug!(
-        gid = info.gid.value(),
-        "No post-download handler matched"
-    );
+    debug!(gid = info.gid.value(), "No post-download handler matched");
     Vec::new()
 }
 
@@ -179,9 +174,7 @@ pub fn run_post_download_processing(
 ///
 /// # Arguments
 /// * `options` - Download options that control which handlers are enabled
-pub fn build_handler_chain(
-    options: &DownloadOptions,
-) -> Vec<Box<dyn PostDownloadHandler>> {
+pub fn build_handler_chain(options: &DownloadOptions) -> Vec<Box<dyn PostDownloadHandler>> {
     #[allow(unused_mut)]
     let mut handlers: Vec<Box<dyn PostDownloadHandler>> = Vec::new();
 
@@ -235,8 +228,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
             // and the base_path is empty (magnet metadata download).
             // C++: `requestGroup->inMemoryDownload()` checks a flag set
             // during metadata exchange.
-            let in_mem = dctx.first_file_path().is_none()
-                || dctx.get_base_path().is_empty();
+            let in_mem = dctx.first_file_path().is_none() || dctx.get_base_path().is_empty();
 
             let data = None; // In-memory data extraction is deferred to the handler
 
@@ -345,7 +337,8 @@ mod tests {
             fn create_child_groups(
                 &self,
                 _info: &CompletedDownloadInfo,
-            ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
+            ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error>
+            {
                 Err(Aria2Error::Parse("parse error".to_string()))
             }
             fn name(&self) -> &'static str {

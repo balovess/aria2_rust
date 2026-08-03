@@ -5,9 +5,9 @@
 //! Instead of creating new command objects, it returns `ResponseProcessResult`
 //! values that the caller interprets.
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::error::{Aria2Error, Result};
 use crate::http::header_processor::HttpResponseHead;
 use crate::http::metalink_http::MetalinkHttpParser;
 use crate::http::request_response::HttpMethod;
@@ -16,7 +16,7 @@ use crate::http::skip_response::{HttpSkipResponseHandler, MAX_REDIRECT_COUNT, Sk
 use super::connection::{should_inflate_content_encoding, supports_persistent_connection};
 use super::conversion;
 use super::filename::determine_filename;
-use super::range::{self, validate_response_range};
+use super::range;
 use super::types::{ResponseProcessResult, ResponseProcessorConfig};
 use super::validate::{ValidateRequestContext, validate_response};
 
@@ -91,6 +91,7 @@ impl HttpResponseProcessor {
         let validate_ctx = ValidateRequestContext {
             conditional_request,
             requested_range,
+            expected_entity_length: self.config.expected_entity_length,
         };
         validate_response(response_head, &validate_ctx)?;
 
@@ -110,18 +111,17 @@ impl HttpResponseProcessor {
 
         if !piece_storage_initialized {
             // Metalink/HTTP Link headers
-            if accept_metalink
-                && response_head.header("link").is_some() {
-                    let metalink_result = MetalinkHttpParser::parse_response(
-                        response_head,
-                        &self.config.metalink_location,
-                    );
-                    for link in &metalink_result.links {
-                        metalink_uris.push(link.uri.clone());
-                        debug!(uri = %link.uri, "Adding Metalink/HTTP URI");
-                    }
-                    digests = metalink_result.digests;
+            if accept_metalink && response_head.header("link").is_some() {
+                let metalink_result = MetalinkHttpParser::parse_response(
+                    response_head,
+                    &self.config.metalink_location,
+                );
+                for link in &metalink_result.links {
+                    metalink_uris.push(link.uri.clone());
+                    debug!(uri = %link.uri, "Adding Metalink/HTTP URI");
                 }
+                digests = metalink_result.digests;
+            }
 
             // Digest header (standalone, not from Link)
             if response_head.header("digest").is_some() && digests.is_empty() {
@@ -166,14 +166,6 @@ impl HttpResponseProcessor {
         let chunked = range::is_chunked_transfer_encoding(response_head);
         let inflate_required =
             should_inflate_content_encoding(response_head, self.config.accept_gzip);
-
-        // --- Range validation ---
-        if let Some((req_start, req_end)) = requested_range
-            && let Some((resp_start, resp_end, _resp_total)) = content_range
-                && let Err(e) = validate_response_range(req_start, req_end, resp_start, resp_end) {
-                    warn!("Range validation failed: {}", e);
-                    return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
-                }
 
         // --- HEAD -> GET switch detection ---
         let switch_head_to_get = request_method == HttpMethod::Head;

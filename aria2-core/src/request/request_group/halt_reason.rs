@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Reason why a download was halted.
 ///
 /// Mirrors C++ `RequestGroup::HaltReason`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum HaltReason {
     /// No halt has been requested.
     #[default]
@@ -26,7 +25,6 @@ pub enum HaltReason {
     /// The user explicitly requested the halt (RPC `aria2.remove`, etc.).
     UserRequest,
 }
-
 
 /// Atomic control flags for download lifecycle transitions.
 ///

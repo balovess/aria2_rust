@@ -360,9 +360,10 @@ impl MetalinkFile {
     pub fn set_location_priority(&mut self, locations: &[&str], priority_to_add: i32) {
         for url in &mut self.urls {
             if let Some(ref loc) = url.location
-                && locations.iter().any(|l| l.eq_ignore_ascii_case(loc)) {
-                    url.priority += priority_to_add;
-                }
+                && locations.iter().any(|l| l.eq_ignore_ascii_case(loc))
+            {
+                url.priority += priority_to_add;
+            }
         }
     }
 
@@ -432,9 +433,10 @@ pub fn resolve_url(base_uri: Option<&str>, url: &str) -> String {
 
     // Try to resolve relative URL against base
     if let Ok(base_url) = url::Url::parse(base)
-        && let Ok(resolved) = base_url.join(url) {
-            return resolved.to_string();
-        }
+        && let Ok(resolved) = base_url.join(url)
+    {
+        return resolved.to_string();
+    }
 
     // Fallback: return original URL
     url.to_string()
@@ -688,10 +690,11 @@ impl MetalinkDocument {
                         }
                         "size" => {
                             if let Some(ref mut f) = current_file
-                                && let Ok(size) = text_buf.trim().parse::<u64>() {
-                                    f.size = Some(size);
-                                    f.size_known = true;
-                                }
+                                && let Ok(size) = text_buf.trim().parse::<u64>()
+                            {
+                                f.size = Some(size);
+                                f.size_known = true;
+                            }
                         }
                         "identity" => {
                             if let Some(ref mut f) = current_file {
@@ -734,9 +737,10 @@ impl MetalinkDocument {
                             if let Some(ref mut f) = current_file {
                                 let mc = find_attr(&pending_attrs, "maxconnections");
                                 if let Ok(n) = mc.parse::<i32>()
-                                    && n > 0 {
-                                        f.max_connections = Some(n);
-                                    }
+                                    && n > 0
+                                {
+                                    f.max_connections = Some(n);
+                                }
                             }
                         }
                         "url" => {
@@ -810,9 +814,7 @@ impl MetalinkDocument {
                             }
                         }
                         "pieces" => {
-                            if !pieces_sub_element
-                                && let Some((length, algo)) = pending_pieces
-                            {
+                            if !pieces_sub_element && let Some((length, algo)) = pending_pieces {
                                 // V3-style: concatenated digests in the element
                                 // text, chunked by the algorithm's hex length.
                                 let hashes = split_piece_hashes(&text_buf, algo.hash_len());
@@ -1119,7 +1121,11 @@ mod tests {
         );
         let doc = MetalinkDocument::parse(xml.as_bytes(), None).unwrap();
         let p = doc.files[0].pieces.as_ref().unwrap();
-        assert_eq!(p.piece_count(), 2, "contiguous digests must be chunked by hex length");
+        assert_eq!(
+            p.piece_count(),
+            2,
+            "contiguous digests must be chunked by hex length"
+        );
         assert_eq!(p.hashes[0], h1);
         assert_eq!(p.hashes[1], h2);
         assert_eq!(p.num_pieces(524288), 2);
@@ -1144,7 +1150,11 @@ mod tests {
         );
         let doc = MetalinkDocument::parse(xml.as_bytes(), None).unwrap();
         let p = doc.files[0].pieces.as_ref().unwrap();
-        assert_eq!(p.piece_count(), 2, "v4 <hash> children must be collected per piece");
+        assert_eq!(
+            p.piece_count(),
+            2,
+            "v4 <hash> children must be collected per piece"
+        );
         assert_eq!(p.hashes[0], h1);
         assert_eq!(p.hashes[1], h2);
         assert_eq!(p.length, 262144);

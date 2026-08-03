@@ -158,10 +158,7 @@ pub(crate) fn create_safe_path(name: &str) -> String {
 /// `res.find_first_of("/\\") == std::string::npos`.
 ///
 /// Returns `None` if no valid filename is found or the filename is rejected.
-fn parse_content_disposition_filename(
-    cd_value: &str,
-    _default_utf8: bool,
-) -> Option<String> {
+fn parse_content_disposition_filename(cd_value: &str, _default_utf8: bool) -> Option<String> {
     let result = parse_content_disposition(cd_value);
 
     // If parsing failed (disposition_type is empty), no valid filename
@@ -226,8 +223,7 @@ mod tests {
     #[test]
     fn test_filename_from_url_percent_encoded() {
         let head = parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
-        let filename =
-            determine_filename(&head, "http://example.com/path/my%20file.txt", false);
+        let filename = determine_filename(&head, "http://example.com/path/my%20file.txt", false);
         assert_eq!(filename, "my file.txt");
     }
 
@@ -369,9 +365,8 @@ mod tests {
 
     #[test]
     fn test_empty_content_disposition_uses_url() {
-        let head = parse_head(
-            b"HTTP/1.1 200 OK\r\nContent-Disposition: \r\nContent-Length: 100\r\n\r\n",
-        );
+        let head =
+            parse_head(b"HTTP/1.1 200 OK\r\nContent-Disposition: \r\nContent-Length: 100\r\n\r\n");
         let filename = determine_filename(&head, "http://example.com/data.csv", false);
         assert_eq!(filename, "data.csv");
     }

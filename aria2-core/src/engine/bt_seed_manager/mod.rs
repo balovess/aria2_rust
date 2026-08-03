@@ -43,8 +43,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
-use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
+use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
 use crate::engine::choking_algorithm::ChokingAlgorithm;
 use crate::engine::peer_stats::PeerStats;
@@ -565,15 +565,17 @@ impl BtSeedManager {
                 self.total_uploaded,
                 self.total_downloaded,
                 ratio,
-            ) {
-                return true;
-            }
+            )
+        {
+            return true;
+        }
 
         // Check seed time
         if let Some(time) = self.exit_condition.seed_time
-            && SeedExitCondition::check_seed_time(self.seeding_start_time, time.as_secs(), true) {
-                return true;
-            }
+            && SeedExitCondition::check_seed_time(self.seeding_start_time, time.as_secs(), true)
+        {
+            return true;
+        }
 
         false
     }

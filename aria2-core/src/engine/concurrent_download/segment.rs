@@ -51,8 +51,7 @@ pub async fn execute(
     let split = options.split.unwrap_or(constants::DEFAULT_SPLIT) as usize;
     let max_conn = options
         .max_connection_per_server
-        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        as usize;
+        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16) as usize;
     let seg_size = total_length / split as u64;
 
     tracing::info!(
@@ -195,9 +194,8 @@ pub async fn execute(
                     let seg_reported_arc = Arc::new(AtomicU64::new(0));
 
                     let seg_reported_clone = Arc::clone(&seg_reported_arc);
-                    let speed_interval = std::time::Duration::from_millis(
-                        constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
-                    );
+                    let speed_interval =
+                        std::time::Duration::from_millis(constants::HTTP_SPEED_UPDATE_INTERVAL_MS);
                     let ph = tokio::spawn(async move {
                         let mut last_reported = 0u64;
                         let mut speed_sample_start = std::time::Instant::now();
@@ -219,9 +217,8 @@ pub async fn execute(
                                 speed_sample_bytes += delta;
                                 let elapsed = speed_sample_start.elapsed();
                                 if elapsed >= speed_interval && elapsed.as_secs_f64() > 0.0 {
-                                    let speed = (speed_sample_bytes as f64
-                                        / elapsed.as_secs_f64())
-                                        as u64;
+                                    let speed =
+                                        (speed_sample_bytes as f64 / elapsed.as_secs_f64()) as u64;
                                     progress_for_listener.set_download_speed(speed);
                                     speed_sample_start = std::time::Instant::now();
                                     speed_sample_bytes = 0;
@@ -242,6 +239,7 @@ pub async fn execute(
                                 &headers,
                                 Some(&seg_progress_tx),
                                 &seg_write_tx,
+                                total_length,
                             )
                             .await;
                         // Drop sender to signal progress listener to stop
@@ -492,6 +490,9 @@ pub async fn execute(
     })?;
 
     if should_fallback {
+        // Only fully completed segments are reusable. Any bytes already
+        // written for an active/failed segment remain outside this list
+        // and are deliberately covered by the subsequent full gap.
         let completed_ranges = manager.completed_ranges();
         // ADR-0001: Save control file on fallback so progress is preserved.
         if let Some(ref mut cf) = ctrl_file {
@@ -511,9 +512,7 @@ pub async fn execute(
         let g = dl.group.recover();
         let elapsed = g.elapsed_time();
         match elapsed {
-            Some(d) if d.as_secs_f64() > 0.0 => {
-                (completed_bytes as f64 / d.as_secs_f64()) as u64
-            }
+            Some(d) if d.as_secs_f64() > 0.0 => (completed_bytes as f64 / d.as_secs_f64()) as u64,
             _ => 0,
         }
     };
@@ -534,9 +533,10 @@ pub async fn execute(
     // The download is done; the .aria2 file is no longer needed.
     drop(ctrl_file);
     if ctrl_path.exists()
-        && let Err(e) = tokio::fs::remove_file(&ctrl_path).await {
-            tracing::debug!("Failed to delete control file on completion: {}", e);
-        }
+        && let Err(e) = tokio::fs::remove_file(&ctrl_path).await
+    {
+        tracing::debug!("Failed to delete control file on completion: {}", e);
+    }
     dl.cookie_helper.save_cookies_if_configured();
     Ok(ConcurrentDownloadResult::Complete)
 }

@@ -208,12 +208,13 @@ impl SegmentMan {
 
         // Complete the piece in storage
         if let Some(piece) = segment.piece()
-            && let Some(ref mut ps) = self.piece_storage {
-                ps.complete_piece(piece);
-                // Advertise the completed piece so other commands send Have messages
-                // to their peers. C++: pieceStorage_->advertisePiece(cuid, index, wallclock)
-                ps.advertise_piece(cuid, piece_index);
-            }
+            && let Some(ref mut ps) = self.piece_storage
+        {
+            ps.complete_piece(piece);
+            // Advertise the completed piece so other commands send Have messages
+            // to their peers. C++: pieceStorage_->advertisePiece(cuid, index, wallclock)
+            ps.advertise_piece(cuid, piece_index);
+        }
 
         // Remove the tracking entry
         let idx = self
@@ -300,22 +301,23 @@ impl SegmentMan {
 
         // Check written length memo for resume support (C++ behavior)
         if segment.length() > 0
-            && let Some(&memo_written) = self.segment_written_length_memo.get(&segment.index()) {
-                let current_written = segment.written_length();
-                trace!(
-                    index = segment.index(),
-                    memo_written, current_written, "SegmentMan: checking written length memo"
-                );
-                // If the memo has more written length than current, and the
-                // difference is less than one block, assume those bytes are
-                // already downloaded (matching C++ behavior)
-                if current_written < memo_written {
-                    let block_length = segment.piece().map_or(0, |p| p.block_length() as u64);
-                    if block_length > 0 && memo_written - current_written < block_length {
-                        segment.update_written_length(memo_written - current_written);
-                    }
+            && let Some(&memo_written) = self.segment_written_length_memo.get(&segment.index())
+        {
+            let current_written = segment.written_length();
+            trace!(
+                index = segment.index(),
+                memo_written, current_written, "SegmentMan: checking written length memo"
+            );
+            // If the memo has more written length than current, and the
+            // difference is less than one block, assume those bytes are
+            // already downloaded (matching C++ behavior)
+            if current_written < memo_written {
+                let block_length = segment.piece().map_or(0, |p| p.block_length() as u64);
+                if block_length > 0 && memo_written - current_written < block_length {
+                    segment.update_written_length(memo_written - current_written);
                 }
             }
+        }
 
         // Record the tracking entry
         self.used_segment_entries.push(TrackingEntry {

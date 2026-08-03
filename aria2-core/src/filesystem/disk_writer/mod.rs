@@ -90,4 +90,3 @@ impl SeekableDiskWriter for Box<dyn SeekableDiskWriter> {
         self.as_mut().close().await
     }
 }
-

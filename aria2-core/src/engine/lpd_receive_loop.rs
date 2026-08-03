@@ -1,4 +1,4 @@
-﻿//! LPD Receive Loop — background task for continuous Local Peer Discovery
+//! LPD Receive Loop — background task for continuous Local Peer Discovery
 //!
 //! This module implements the background receive loop for Local Peer
 //! Discovery (LPD, BEP 14). The loop continuously reads LPD multicast
@@ -437,9 +437,10 @@ async fn update_peer_registry(
         // Limit total peers per hash (same as LpdManager::MAX_PEERS_PER_HASH).
         // If at capacity, remove the oldest peer to make room.
         if entry.len() >= crate::engine::lpd_manager::MAX_PEERS_PER_HASH
-            && let Some(oldest) = entry.iter().max_by_key(|p| p.last_seen.elapsed()).cloned() {
-                entry.remove(&oldest);
-            }
+            && let Some(oldest) = entry.iter().max_by_key(|p| p.last_seen.elapsed()).cloned()
+        {
+            entry.remove(&oldest);
+        }
 
         if entry.insert(peer.clone()) {
             debug!(

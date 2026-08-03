@@ -195,7 +195,12 @@ pub async fn perform_http_tracker_announce(
             })
         })?;
 
-    info!("[BT] Tracker response: {} peers ({} v4 + {} v6)", tracker_resp.peer_count(), tracker_resp.peers.len(), tracker_resp.peers6.len());
+    info!(
+        "[BT] Tracker response: {} peers ({} v4 + {} v6)",
+        tracker_resp.peer_count(),
+        tracker_resp.peers.len(),
+        tracker_resp.peers6.len()
+    );
     for peer in &tracker_resp.peers {
         debug!("[BT]   Peer (v4): {}:{}", peer.ip, peer.port);
     }

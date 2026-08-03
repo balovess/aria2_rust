@@ -1,7 +1,7 @@
 //! Test Group 1: HTTP Save -> Restore Round-trip
 
 use super::super::types::{ResumeData, UriState};
-use super::{create_sample_resume_data};
+use super::create_sample_resume_data;
 
 #[test]
 fn test_http_serialize_deserialize_roundtrip() {

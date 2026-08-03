@@ -11,8 +11,8 @@ use tracing::{debug, warn};
 
 use crate::constants;
 
-use super::discovery::parse_lpd_announcement;
 use super::LpdPeer;
+use super::discovery::parse_lpd_announcement;
 
 // =========================================================================
 // LpdAnnouncer - UDP Multicast Sender/Receiver
@@ -240,11 +240,11 @@ impl LpdAnnouncer {
                         let key = (peer.info_hash.clone(), peer.addr);
                         if seen.insert(key) {
                             debug!(
-                                info_hash = %peer.info_hash[..8.min(peer.info_hash.len())],
-                                addr = %src_addr.ip(),
-                port = peer.port,
-                                "Discovered peer via LPD"
-                            );
+                                            info_hash = %peer.info_hash[..8.min(peer.info_hash.len())],
+                                            addr = %src_addr.ip(),
+                            port = peer.port,
+                                            "Discovered peer via LPD"
+                                        );
                             peers.push(peer);
                         }
                     }

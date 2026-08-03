@@ -1,4 +1,4 @@
-﻿//! BitTorrent choking algorithm implementation (tit-for-tat strategy)
+//! BitTorrent choking algorithm implementation (tit-for-tat strategy)
 //!
 //! Module structure:
 //! - [ChokingAlgorithm] - Main struct and public API
@@ -6,8 +6,8 @@
 //! - [optimistic] - Optimistic unchoke logic (round-robin)
 //! - [tests] - Comprehensive test suite
 
-mod selection;
 mod optimistic;
+mod selection;
 
 use std::collections::HashSet;
 

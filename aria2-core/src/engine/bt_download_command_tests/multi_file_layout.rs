@@ -85,9 +85,8 @@ fn test_is_multi_file_accessor() {
     let multi_bytes = build_multi_file_torrent();
     let options = DownloadOptions::default();
     let gid = GroupId::new(101);
-    let multi_cmd =
-        BtDownloadCommand::new(gid, &multi_bytes, &options, Some("d:/tmp/test_acc"))
-            .expect("Failed to create multi-file command");
+    let multi_cmd = BtDownloadCommand::new(gid, &multi_bytes, &options, Some("d:/tmp/test_acc"))
+        .expect("Failed to create multi-file command");
     assert!(
         multi_cmd.is_multi_file(),
         "Multi-file torrent should return true"

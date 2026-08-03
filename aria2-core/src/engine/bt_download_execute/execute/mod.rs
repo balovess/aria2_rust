@@ -100,7 +100,10 @@ impl Command for BtDownloadCommand {
                 piece_hashes_hex,
                 HashType::Sha1,
             )? {
-                info!(gid, "Checking integrity of existing data against piece hashes");
+                info!(
+                    gid,
+                    "Checking integrity of existing data against piece hashes"
+                );
                 let ok = ci_man::enqueue(&ci_man::shared(), gid, task).await?;
                 if !ok {
                     return Err(Aria2Error::Fatal(FatalError::Config(
@@ -344,7 +347,8 @@ impl Command for BtDownloadCommand {
 
     fn request_group(
         &self,
-    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
+    {
         Some(std::sync::Arc::clone(&self.group))
     }
 

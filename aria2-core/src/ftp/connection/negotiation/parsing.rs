@@ -164,8 +164,7 @@ pub(super) fn parse_mdtm_timestamp(s: &str) -> Option<SystemTime> {
     }
 
     let days_since_epoch = days_from_civil(year, month, day)?;
-    let secs =
-        days_since_epoch * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
+    let secs = days_since_epoch * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
     Some(UNIX_EPOCH + Duration::from_secs(secs))
 }
 

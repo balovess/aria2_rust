@@ -1,4 +1,4 @@
-﻿//! Piece selection logic for generating BT Request messages.
+//! Piece selection logic for generating BT Request messages.
 
 use rand::seq::SliceRandom;
 use tracing::trace;

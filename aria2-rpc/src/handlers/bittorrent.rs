@@ -46,10 +46,7 @@ impl RpcEngine {
                     JsonRpcError::InternalError(format!("Serialization failed: {}", e))
                 })?,
             )),
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -123,10 +120,7 @@ impl RpcEngine {
                     })?,
                 ))
             }
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -177,10 +171,7 @@ impl RpcEngine {
                     })?,
                 ))
             }
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -208,10 +199,7 @@ impl RpcEngine {
                     })?,
                 ))
             }
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 

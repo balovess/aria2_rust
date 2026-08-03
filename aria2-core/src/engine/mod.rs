@@ -8,6 +8,7 @@ pub mod concurrent_segment_manager;
 pub mod download_command;
 pub mod download_cookie;
 pub mod download_engine;
+pub mod download_event_hooks;
 pub mod download_progress;
 pub mod engine_command;
 pub mod engine_loop;
@@ -21,14 +22,13 @@ pub mod multi_file_layout;
 pub mod peer_stats;
 #[cfg(test)]
 pub mod peer_stats_tests;
+pub mod post_download_handler;
 pub mod range_prober;
 pub mod resume_data;
 pub mod retry_policy;
 pub mod sequential_download;
 pub mod task_spawner;
 pub mod timer;
-pub mod post_download_handler;
-pub mod download_event_hooks;
 
 // ── BitTorrent feature-gated modules ──────────────────────────────────
 #[cfg(feature = "bittorrent")]
@@ -48,13 +48,13 @@ pub mod bt_download_execute;
 #[cfg(feature = "bittorrent")]
 pub mod bt_download_seeding;
 #[cfg(feature = "bittorrent")]
+pub mod bt_handshake_validation;
+#[cfg(feature = "bittorrent")]
 pub mod bt_message_dispatcher;
 #[cfg(feature = "bittorrent")]
 pub mod bt_message_handler;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_message_handler_tests;
-#[cfg(feature = "bittorrent")]
-pub mod bt_handshake_validation;
 #[cfg(feature = "bittorrent")]
 pub mod bt_message_receiver;
 #[cfg(all(test, feature = "bittorrent"))]
@@ -76,10 +76,6 @@ pub mod bt_piece_downloader;
 #[cfg(feature = "bittorrent")]
 pub mod bt_piece_selector;
 #[cfg(feature = "bittorrent")]
-pub mod hook_manager;
-#[cfg(feature = "bittorrent")]
-pub mod bt_torrent_post_download_handler;
-#[cfg(feature = "bittorrent")]
 pub mod bt_progress_info_file;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_progress_info_file_tests;
@@ -91,6 +87,8 @@ pub mod bt_request_factory;
 pub mod bt_seed_manager;
 pub mod bt_setup;
 #[cfg(feature = "bittorrent")]
+pub mod bt_torrent_post_download_handler;
+#[cfg(feature = "bittorrent")]
 pub mod bt_tracker_comm;
 #[cfg(feature = "bittorrent")]
 pub mod bt_upload_session;
@@ -98,6 +96,8 @@ pub mod bt_upload_session;
 pub mod bt_web_seed;
 #[cfg(feature = "bittorrent")]
 pub mod extension_registry;
+#[cfg(feature = "bittorrent")]
+pub mod hook_manager;
 #[cfg(feature = "bittorrent")]
 pub mod lpd_manager;
 #[cfg(feature = "bittorrent")]

@@ -68,7 +68,6 @@ pub struct DownloadCommand {
     // updated on every data chunk via updateTailReclaimProgress().  In Rust
     // they are updated via update_tail_reclaim_progress() which reads from
     // the lock-free AtomicProgress counter.
-
     /// Completed length at the last time progress was detected.
     /// Mirrors C++ `lastTailReclaimSessionDownloadLength_`.
     pub(super) last_tail_reclaim_session_download_length: u64,
@@ -233,9 +232,7 @@ impl DownloadCommand {
             // Tail reclaim fields — mirrors C++ DownloadCommand constructor.
             last_tail_reclaim_session_download_length: 0,
             tail_reclaim_last_progress: Instant::now(),
-            startup_idle_time: Duration::from_secs(
-                options.startup_idle_time.unwrap_or(10),
-            ),
+            startup_idle_time: Duration::from_secs(options.startup_idle_time.unwrap_or(10)),
             lowest_speed_limit: options.lowest_speed_limit.unwrap_or(0),
         })
     }
@@ -363,9 +360,7 @@ impl DownloadCommand {
             // Tail reclaim fields — mirrors C++ DownloadCommand constructor.
             last_tail_reclaim_session_download_length: 0,
             tail_reclaim_last_progress: Instant::now(),
-            startup_idle_time: Duration::from_secs(
-                options.startup_idle_time.unwrap_or(10),
-            ),
+            startup_idle_time: Duration::from_secs(options.startup_idle_time.unwrap_or(10)),
             lowest_speed_limit: options.lowest_speed_limit.unwrap_or(0),
         })
     }

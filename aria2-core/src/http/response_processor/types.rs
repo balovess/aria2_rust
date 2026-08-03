@@ -104,6 +104,9 @@ pub struct ResponseProcessorConfig {
     /// Matches C++ `PREF_METALINK_LOCATION`: comma-separated location strings
     /// that boost the priority of matching mirrors.
     pub metalink_location: Vec<String>,
+    /// Expected entity length from the request's file entry. Zero disables total-length validation,
+    /// matching C++ `FileEntry::getLength() == 0` wildcard behavior.
+    pub expected_entity_length: u64,
 }
 
 impl Default for ResponseProcessorConfig {
@@ -116,6 +119,7 @@ impl Default for ResponseProcessorConfig {
             dry_run: false,
             max_pipelined_request: 1,
             metalink_location: Vec::new(),
+            expected_entity_length: 0,
         }
     }
 }

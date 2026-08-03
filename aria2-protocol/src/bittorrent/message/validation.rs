@@ -331,17 +331,18 @@ impl BtMessageValidator {
         // unused high bits that must be zero.
         let remainder = (self.num_pieces as usize) % 8;
         if remainder != 0
-            && let Some(&last_byte) = data.last() {
-                // The valid bits in the last byte are the low `remainder` bits.
-                // All higher bits must be zero.
-                let mask: u8 = !((1 << remainder) - 1);
-                if last_byte & mask != 0 {
-                    return Err(BtMessageValidationError::BitfieldLengthMismatch {
-                        bitfield_len: data.len(),
-                        expected_pieces: self.num_pieces,
-                    });
-                }
+            && let Some(&last_byte) = data.last()
+        {
+            // The valid bits in the last byte are the low `remainder` bits.
+            // All higher bits must be zero.
+            let mask: u8 = !((1 << remainder) - 1);
+            if last_byte & mask != 0 {
+                return Err(BtMessageValidationError::BitfieldLengthMismatch {
+                    bitfield_len: data.len(),
+                    expected_pieces: self.num_pieces,
+                });
             }
+        }
         Ok(())
     }
 
@@ -353,9 +354,10 @@ impl BtMessageValidator {
         received_hash: &[u8; 20],
     ) -> Result<(), BtMessageValidationError> {
         if let Some(expected) = self.expected_info_hash
-            && received_hash != &expected {
-                return Err(BtMessageValidationError::InfoHashMismatch);
-            }
+            && received_hash != &expected
+        {
+            return Err(BtMessageValidationError::InfoHashMismatch);
+        }
         Ok(())
     }
 }

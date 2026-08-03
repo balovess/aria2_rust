@@ -268,10 +268,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -311,10 +308,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -352,10 +346,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -396,32 +387,33 @@ impl RpcEngine {
                 if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
                     let man = group_man.read().await;
                     if let Some(gid_parsed) = GroupId::from_hex_string(&gid)
-                        && let Some(group) = man.group_by_id(gid_parsed) {
-                            let group_guard = group.recover();
-                            let options = group_guard.options_arc();
-                            let uris = group_guard.uris().to_vec();
-                            let first_uri = uris.first().map(|s| s.as_str()).unwrap_or("");
-                            drop(group_guard);
+                        && let Some(group) = man.group_by_id(gid_parsed)
+                    {
+                        let group_guard = group.recover();
+                        let options = group_guard.options_arc();
+                        let uris = group_guard.uris().to_vec();
+                        let first_uri = uris.first().map(|s| s.as_str()).unwrap_or("");
+                        drop(group_guard);
 
-                            if !first_uri.is_empty() {
-                                match DownloadCommand::new_with_group(
-                                    group,
-                                    first_uri,
-                                    &options,
-                                    options.dir.as_deref(),
-                                    options.out.as_deref(),
-                                ) {
-                                    Ok(cmd) => {
-                                        if let Err(e) = cmd_tx.send(Box::new(cmd)) {
-                                            tracing::warn!("Failed to send resume command: {}", e);
-                                        }
+                        if !first_uri.is_empty() {
+                            match DownloadCommand::new_with_group(
+                                group,
+                                first_uri,
+                                &options,
+                                options.dir.as_deref(),
+                                options.out.as_deref(),
+                            ) {
+                                Ok(cmd) => {
+                                    if let Err(e) = cmd_tx.send(Box::new(cmd)) {
+                                        tracing::warn!("Failed to send resume command: {}", e);
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to create resume command: {}", e);
-                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to create resume command: {}", e);
                                 }
                             }
                         }
+                    }
                 }
 
                 // C++ aria2 fires onDownloadStart (not a separate onDownloadResume)
@@ -435,10 +427,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -455,10 +444,7 @@ impl RpcEngine {
                     JsonRpcError::InternalError(format!("Serialization failed: {}", e))
                 })?,
             )),
-            None => Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found",
-                gid
-            ))),
+            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
     }
 
@@ -627,9 +613,7 @@ impl RpcEngine {
 
         save_to_file_with_entries(&path, &entries)
             .await
-            .map_err(|e| {
-                JsonRpcError::InternalError(format!("Failed to save session: {}", e))
-            })?;
+            .map_err(|e| JsonRpcError::InternalError(format!("Failed to save session: {}", e)))?;
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),

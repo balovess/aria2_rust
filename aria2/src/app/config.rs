@@ -84,9 +84,7 @@ impl App {
         macro_rules! set_bool_false {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf
-                        .set_global_option($name, OptionValue::Bool(!v))
-                        .await;
+                    let _ = conf.set_global_option($name, OptionValue::Bool(!v)).await;
                 }
             };
         }

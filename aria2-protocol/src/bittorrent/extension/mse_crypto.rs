@@ -306,7 +306,11 @@ impl MseCryptoState {
     /// This allows the handshake code to pass the exact keys used
     /// during negotiation (which may differ from the derived keys
     /// if a different crypto method was selected).
-    pub fn from_raw_keys(send_key: &[u8; SHA1_LENGTH], recv_key: &[u8; SHA1_LENGTH], method: MseCryptoMethod) -> Self {
+    pub fn from_raw_keys(
+        send_key: &[u8; SHA1_LENGTH],
+        recv_key: &[u8; SHA1_LENGTH],
+        method: MseCryptoMethod,
+    ) -> Self {
         match method {
             MseCryptoMethod::Rc4 => MseCryptoState {
                 send_cipher: Some(init_rc4(send_key)),
@@ -374,7 +378,11 @@ mod tests {
         assert_ne!(encrypted, original.to_vec(), "encrypted should differ");
 
         cipher2.decrypt(&mut encrypted);
-        assert_eq!(encrypted, original.to_vec(), "decrypted should match original");
+        assert_eq!(
+            encrypted,
+            original.to_vec(),
+            "decrypted should match original"
+        );
     }
 
     #[test]
@@ -519,7 +527,10 @@ mod tests {
         let vc = compute_vc(&mut cipher);
 
         // VC should not be all zeros (RC4 of zeros is not zeros)
-        assert_ne!(vc, [0u8; VC_LENGTH], "VC should not be all zeros after RC4 encryption");
+        assert_ne!(
+            vc, [0u8; VC_LENGTH],
+            "VC should not be all zeros after RC4 encryption"
+        );
 
         // Verify VC is deterministic for same key
         let mut cipher2 = init_rc4(&key);
