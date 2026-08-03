@@ -82,28 +82,28 @@ fn regression_short_option_log() {
 #[test]
 fn regression_short_option_quiet() {
     let cli = parse(&["-q"]);
-    assert!(cli.general.quiet);
+    assert_eq!(cli.general.quiet, Some(true));
 }
 
 /// Test: -D maps to "daemon" boolean option.
 #[test]
 fn regression_short_option_daemon() {
     let cli = parse(&["-D"]);
-    assert!(cli.general.daemon);
+    assert_eq!(cli.general.daemon, Some(true));
 }
 
 /// Test: -c maps to "continue" boolean option.
 #[test]
 fn regression_short_option_continue() {
     let cli = parse(&["-c"]);
-    assert!(cli.http_ftp.continue_dl);
+    assert_eq!(cli.http_ftp.continue_dl, Some(true));
 }
 
 /// Test: -e maps to "enable-rpc" boolean option.
 #[test]
 fn regression_short_option_enable_rpc() {
     let cli = parse(&["-e"]);
-    assert!(cli.rpc.enable_rpc);
+    assert_eq!(cli.rpc.enable_rpc, Some(true));
 }
 
 /// Test: -r maps to "rpc-listen-port" option.
@@ -190,31 +190,31 @@ fn regression_long_option_space_format() {
 #[test]
 fn regression_long_option_boolean_flag() {
     let cli = parse(&["--quiet"]);
-    assert!(cli.general.quiet);
+    assert_eq!(cli.general.quiet, Some(true));
 }
 
 /// Test: --no-check-certificate negation flag.
 #[test]
 fn regression_long_option_negation() {
     let cli = parse(&["--no-check-certificate"]);
-    assert!(cli.http_ftp.no_check_certificate);
+    assert_eq!(cli.http_ftp.no_check_certificate, Some(true));
     // The positive flag should not be set
-    assert!(!cli.http_ftp.check_certificate);
+    assert_eq!(cli.http_ftp.check_certificate, None);
 }
 
 /// Test: --no-continue negation flag.
 #[test]
 fn regression_long_option_negation_continue() {
     let cli = parse(&["--no-continue"]);
-    assert!(cli.http_ftp.no_continue);
-    assert!(!cli.http_ftp.continue_dl);
+    assert_eq!(cli.http_ftp.no_continue, Some(true));
+    assert_eq!(cli.http_ftp.continue_dl, None);
 }
 
 /// Test: --check-certificate flag (positive).
 #[test]
 fn regression_long_option_check_certificate_positive() {
     let cli = parse(&["--check-certificate"]);
-    assert!(cli.http_ftp.check_certificate);
+    assert_eq!(cli.http_ftp.check_certificate, Some(true));
 }
 
 /// Test: --split with integer value.
@@ -294,29 +294,29 @@ fn regression_long_option_rpc_listen_port() {
 #[test]
 fn regression_long_option_bt_enable_lpd() {
     let cli = parse(&["--bt-enable-lpd"]);
-    assert!(cli.bittorrent.bt_enable_lpd);
+    assert_eq!(cli.bittorrent.bt_enable_lpd, Some(true));
 }
 
 /// Test: --enable-dht boolean flag.
 #[test]
 fn regression_long_option_enable_dht() {
     let cli = parse(&["--enable-dht"]);
-    assert!(cli.bittorrent.enable_dht);
+    assert_eq!(cli.bittorrent.enable_dht, Some(true));
 }
 
 /// Test: --no-enable-dht negation flag.
 #[test]
 fn regression_long_option_no_enable_dht() {
     let cli = parse(&["--no-enable-dht"]);
-    assert!(cli.bittorrent.no_enable_dht);
-    assert!(!cli.bittorrent.enable_dht);
+    assert_eq!(cli.bittorrent.no_enable_dht, Some(true));
+    assert_eq!(cli.bittorrent.enable_dht, None);
 }
 
 /// Test: --bt-force-encryption boolean flag.
 #[test]
 fn regression_long_option_bt_force_encryption() {
     let cli = parse(&["--bt-force-encryption"]);
-    assert!(cli.bittorrent.bt_force_encryption);
+    assert_eq!(cli.bittorrent.bt_force_encryption, Some(true));
 }
 
 /// Test: --follow-torrent with enum value.
@@ -458,7 +458,7 @@ fn regression_long_option_no_proxy() {
 #[test]
 fn regression_long_option_dry_run() {
     let cli = parse(&["--dry-run"]);
-    assert!(cli.general.dry_run);
+    assert_eq!(cli.general.dry_run, Some(true));
 }
 
 /// Test: --summary-interval with integer value.
@@ -524,21 +524,21 @@ fn regression_h_does_not_set_listen_port() {
 #[test]
 fn regression_no_color_flag() {
     let cli = parse(&["--no-color"]);
-    assert!(cli.no_color);
+    assert_eq!(cli.no_color, Some(true));
 }
 
 /// Test: --no-color defaults to false when not specified.
 #[test]
 fn regression_no_color_default_false() {
     let cli = parse(&[]);
-    assert!(!cli.no_color);
+    assert_eq!(cli.no_color, None);
 }
 
 /// Test: -v maps to verbose (not version).
 #[test]
 fn regression_v_maps_to_verbose() {
     let cli = parse(&["-v"]);
-    assert!(cli.verbose);
+    assert_eq!(cli.verbose, Some(true));
 }
 
 /// Test: -V maps to version (clap exits with version, not listen-port).
@@ -597,8 +597,8 @@ fn regression_multiple_options_parsed() {
     assert_eq!(cli.general.dir, Some(PathBuf::from("/downloads")));
     assert_eq!(cli.http_ftp.split, Some(8));
     assert_eq!(cli.http_ftp.timeout, Some(120));
-    assert!(cli.general.quiet);
-    assert!(cli.rpc.enable_rpc);
+    assert_eq!(cli.general.quiet, Some(true));
+    assert_eq!(cli.rpc.enable_rpc, Some(true));
     assert_eq!(cli.rpc.rpc_listen_port, Some(6801));
 }
 
@@ -617,8 +617,8 @@ fn regression_mixed_short_long_options() {
 
     assert_eq!(cli.general.dir, Some(PathBuf::from("/downloads")));
     assert_eq!(cli.http_ftp.split, Some(8));
-    assert!(cli.general.quiet);
-    assert!(cli.rpc.enable_rpc);
+    assert_eq!(cli.general.quiet, Some(true));
+    assert_eq!(cli.rpc.enable_rpc, Some(true));
     assert_eq!(cli.rpc.rpc_listen_port, Some(6801));
 }
 
@@ -627,12 +627,12 @@ fn regression_mixed_short_long_options() {
 fn regression_options_with_negation() {
     let cli = parse(&["--no-check-certificate", "--no-continue", "--no-enable-dht"]);
 
-    assert!(cli.http_ftp.no_check_certificate);
-    assert!(!cli.http_ftp.check_certificate);
-    assert!(cli.http_ftp.no_continue);
-    assert!(!cli.http_ftp.continue_dl);
-    assert!(cli.bittorrent.no_enable_dht);
-    assert!(!cli.bittorrent.enable_dht);
+    assert_eq!(cli.http_ftp.no_check_certificate, Some(true));
+    assert_eq!(cli.http_ftp.check_certificate, None);
+    assert_eq!(cli.http_ftp.no_continue, Some(true));
+    assert_eq!(cli.http_ftp.continue_dl, None);
+    assert_eq!(cli.bittorrent.no_enable_dht, Some(true));
+    assert_eq!(cli.bittorrent.enable_dht, None);
 }
 
 /// Test: Positional URIs are collected.
@@ -1060,7 +1060,7 @@ fn regression_option_value_none() {
 fn regression_empty_args() {
     let cli = parse(&[]);
     assert!(cli.uris.is_empty());
-    assert!(!cli.verbose);
-    assert!(!cli.no_color);
+    assert_eq!(cli.verbose, None);
+    assert_eq!(cli.no_color, None);
     assert!(cli.command.is_none());
 }

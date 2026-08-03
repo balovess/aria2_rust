@@ -118,12 +118,24 @@ mod integration_tests_j2_j5;
 /// Initialize the logging subsystem with optional file output.
 ///
 /// Sets up `tracing-subscriber` with console output (colorized) and optionally
-/// writes to a log file. The log level controls verbosity (DEBUG/INFO/WARN/ERROR).
+/// writes to a log file. When `log_max_size` is `Some`, size-based rotation is
+/// used (keeping `log_max_files` rotated copies); otherwise daily time-based
+/// rotation is used (controlled by `log_backup_count`).
+#[allow(clippy::too_many_arguments)]
 pub fn init_logging(
     log_level: &str,
     console_log_level: &str,
     log_file: Option<&str>,
     log_backup_count: usize,
+    log_max_size: Option<u64>,
+    log_max_files: Option<usize>,
 ) {
-    log::init_logging(log_level, console_log_level, log_file, log_backup_count);
+    log::init_logging(
+        log_level,
+        console_log_level,
+        log_file,
+        log_backup_count,
+        log_max_size,
+        log_max_files,
+    );
 }

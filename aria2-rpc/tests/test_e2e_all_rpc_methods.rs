@@ -162,7 +162,7 @@ async fn e2e_remove_nonexistent_gid_errors() {
     let client = Client::new();
 
     let resp = rpc_call(&client, &base, "aria2.remove", json![["deadbeefdeadbeef"]]).await;
-    assert_error_code(&resp, -32601); // MethodNotFound for unknown GID
+    assert_error_code(&resp, 1); // RpcExecution for unknown GID
 }
 
 #[tokio::test]
@@ -289,7 +289,7 @@ async fn e2e_tell_status_nonexistent_gid_errors() {
         json![["nonexistentgid1234"]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -571,7 +571,7 @@ async fn e2e_get_peers_nonexistent_gid_errors() {
         json![["deadbeefdeadbeef"]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -599,7 +599,7 @@ async fn e2e_get_uris_nonexistent_gid_errors() {
     let client = Client::new();
 
     let resp = rpc_call(&client, &base, "aria2.getUris", json![["deadbeefdeadbeef"]]).await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -635,7 +635,7 @@ async fn e2e_get_files_nonexistent_gid_errors() {
         json![["deadbeefdeadbeef"]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -666,7 +666,7 @@ async fn e2e_get_servers_nonexistent_gid_errors() {
         json![["deadbeefdeadbeef"]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 // =========================================================================
@@ -1104,7 +1104,7 @@ async fn e2e_unknown_method_returns_method_not_found() {
 
     let resp = rpc_call(&client, &base, "aria2.nonexistentMethod", json!([])).await;
     assert_jsonrpc_format(&resp, "aria2-nonexistentMethod");
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -1130,7 +1130,7 @@ async fn e2e_pause_nonexistent_gid_errors() {
     let client = Client::new();
 
     let resp = rpc_call(&client, &base, "aria2.pause", json![["deadbeefdeadbeef"]]).await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -1145,7 +1145,7 @@ async fn e2e_get_option_nonexistent_gid_errors() {
         json![["deadbeefdeadbeef"]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -1160,7 +1160,7 @@ async fn e2e_change_position_nonexistent_gid_errors() {
         json![["deadbeefdeadbeef", 0, "POS_SET"]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -1175,7 +1175,7 @@ async fn e2e_change_uri_nonexistent_gid_errors() {
         json![["deadbeefdeadbeef", 1, [], ["http://x.com"]]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -1190,5 +1190,5 @@ async fn e2e_remove_download_result_nonexistent_gid_errors() {
         json![["deadbeefdeadbeef"]],
     )
     .await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }

@@ -19,7 +19,7 @@ impl crate::config::OptionRegistry {
             name: "log-level".into(),
             opt_type: OptionType::Enum,
             short_name: Some('L'),
-            default_value: OptionValue::Str("trace".into()),
+            default_value: OptionValue::Str("debug".into()),
             description: "Log level (trace/debug/info/warn/error)".into(),
             category: OptionCategory::General,
             ..Default::default()

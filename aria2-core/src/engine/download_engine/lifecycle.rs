@@ -38,7 +38,10 @@ impl DownloadEngine {
             ftp_pool: Arc::clone(&self.ftp_pool),
             dns_cache: Arc::clone(&self.dns_cache),
             auto_save: self.auto_save.take(),
-            event_hooks: Arc::new(super::super::download_event_hooks::DownloadEventHooks::new()),
+            // Share the engine's bus (the process-wide instance by default) so
+            // listeners registered before `run_v2()` are actually reached.
+            // A freshly-created bus here would silently drop every observer.
+            event_hooks: Arc::clone(&self.event_hooks),
             // Process-wide shared manager: download commands enqueue through
             // the same instance the engine owns, mirroring C++ where
             // `FileAllocationMan` lives on the DownloadEngine singleton.

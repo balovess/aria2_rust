@@ -42,7 +42,9 @@ pub mod cli;
 use cli::CliArgs;
 mod config;
 mod engine;
-mod rpc;
+// Public so integration tests can exercise the core → RPC notification bridge
+// (`rpc::CoreEventBridge`) without spinning up a real RPC server.
+pub mod rpc;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -87,7 +89,7 @@ impl App {
     pub async fn run(&mut self, cli: CliArgs) -> i32 {
         // Apply --no-color flag + TTY detection: disable colored output when
         // the user requests it OR when stdout is not a terminal (e.g. piped).
-        if cli.no_color || !std::io::stdout().is_terminal() {
+        if cli.no_color.unwrap_or(false) || !std::io::stdout().is_terminal() {
             colored::control::set_override(false);
         }
 
@@ -97,7 +99,7 @@ impl App {
         // - --no-conf: skip config file loading entirely
         // - --conf-path: use explicit path (error if not found)
         // - neither: use default ~/.aria2/aria2.conf
-        let conf_path = if cli.general.no_conf {
+        let conf_path = if cli.general.no_conf.unwrap_or(false) {
             eprintln!("[*] --no-conf set, skipping config file loading");
             None
         } else {
@@ -200,11 +202,22 @@ impl App {
                 .unwrap_or_else(|| "notice".to_string());
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
+            let log_max_size = self
+                .get_opt_i64("log-max-size")
+                .await
+                .filter(|&v| v > 0)
+                .map(|v| v as u64);
+            let log_max_files = self
+                .get_opt_i64("log-max-files")
+                .await
+                .map(|v| v as usize);
             init_logging(
                 &log_level,
                 &console_log_level,
                 log_path.as_deref(),
                 log_backup_count,
+                log_max_size,
+                log_max_files,
             );
 
             info!("Daemon started successfully");
@@ -222,11 +235,22 @@ impl App {
                 .unwrap_or_else(|| "notice".to_string());
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
+            let log_max_size = self
+                .get_opt_i64("log-max-size")
+                .await
+                .filter(|&v| v > 0)
+                .map(|v| v as u64);
+            let log_max_files = self
+                .get_opt_i64("log-max-files")
+                .await
+                .map(|v| v as usize);
             init_logging(
                 &log_level,
                 &console_log_level,
                 log_path.as_deref(),
                 log_backup_count,
+                log_max_size,
+                log_max_files,
             );
         }
 

@@ -127,6 +127,66 @@ pub fn to_aria2_wire_format(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Split the aria2 RPC authorization token off a JSON-RPC parameter list.
+///
+/// Mirrors C++ aria2's `rpc::RpcMethod::authorize()` (`src/RpcMethod.cc`):
+/// the first *positional* parameter is always treated as the secret token
+/// when it is a string starting with `"token:"`, and it is popped from the
+/// list so method handlers never see it and their positional argument
+/// indices stay correct.
+///
+/// Object-style params (`{"token": "..."}`) are also recognised for
+/// backward compatibility. Nothing is stripped in that case because
+/// named-parameter handlers look their arguments up by name, so a stray
+/// `token` key cannot shift any index.
+///
+/// # Returns
+/// `(token, stripped_params)` where
+/// * `token` — the secret with the `"token:"` prefix removed, if one was found.
+/// * `stripped_params` — `Some(params)` only when the input actually had to be
+///   rewritten. `None` means the caller can keep using the original params
+///   without cloning them.
+///
+/// # Examples
+/// ```
+/// use aria2_rpc::rpc_helpers::split_auth_token;
+///
+/// let (token, stripped) = split_auth_token(&serde_json::json!(["token:s3cr3t", "gid1"]));
+/// assert_eq!(token.as_deref(), Some("s3cr3t"));
+/// assert_eq!(stripped, Some(serde_json::json!(["gid1"])));
+///
+/// // No token → nothing to rewrite.
+/// let (token, stripped) = split_auth_token(&serde_json::json!(["gid1"]));
+/// assert_eq!(token, None);
+/// assert_eq!(stripped, None);
+/// ```
+pub fn split_auth_token(params: &serde_json::Value) -> (Option<String>, Option<serde_json::Value>) {
+    match params {
+        serde_json::Value::Array(arr) => {
+            let token = arr
+                .first()
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.strip_prefix("token:"))
+                .map(str::to_string);
+            match token {
+                Some(t) => {
+                    let mut rest = arr.clone();
+                    rest.remove(0);
+                    (Some(t), Some(serde_json::Value::Array(rest)))
+                }
+                None => (None, None),
+            }
+        }
+        other => (
+            other
+                .get("token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            None,
+        ),
+    }
+}
+
 /// Format session summary for logging/display
 ///
 /// Creates a human-readable summary of the current session state.

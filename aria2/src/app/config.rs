@@ -76,16 +76,16 @@ impl App {
         }
         macro_rules! set_bool_true {
             ($name:expr, $value:expr) => {
-                if $value {
-                    let _ = conf.set_global_option($name, OptionValue::Bool(true)).await;
+                if let Some(v) = $value {
+                    let _ = conf.set_global_option($name, OptionValue::Bool(v)).await;
                 }
             };
         }
         macro_rules! set_bool_false {
             ($name:expr, $value:expr) => {
-                if $value {
+                if let Some(v) = $value {
                     let _ = conf
-                        .set_global_option($name, OptionValue::Bool(false))
+                        .set_global_option($name, OptionValue::Bool(!v))
                         .await;
                 }
             };
@@ -179,16 +179,16 @@ impl App {
         set_str!("min-split-size", h.min_split_size);
         set_u64!("max-connection-per-server", h.max_connection_per_server);
         // Negation: --no-check-certificate takes precedence over --check-certificate
-        if h.no_check_certificate {
-            set_bool_false!("check-certificate", true);
+        if h.no_check_certificate.unwrap_or(false) {
+            set_bool_false!("check-certificate", Some(true));
         } else {
             set_bool_true!("check-certificate", h.check_certificate);
         }
         set_path!("ca-certificate", h.ca_certificate);
         set_bool_true!("allow-overwrite", h.allow_overwrite);
         set_bool_true!("auto-file-renaming", h.auto_file_renaming);
-        if h.no_continue {
-            set_bool_false!("continue", true);
+        if h.no_continue.unwrap_or(false) {
+            set_bool_false!("continue", Some(true));
         } else {
             set_bool_true!("continue", h.continue_dl);
         }
@@ -226,8 +226,8 @@ impl App {
         set_bool_true!("enable-lpd", b.enable_lpd);
         set_u64!("lpd-listen-port", b.lpd_listen_port);
         set_bool_true!("bt-enable-web-seed", b.bt_enable_web_seed);
-        if b.no_enable_dht {
-            set_bool_false!("enable-dht", true);
+        if b.no_enable_dht.unwrap_or(false) {
+            set_bool_false!("enable-dht", Some(true));
         } else {
             set_bool_true!("enable-dht", b.enable_dht);
         }

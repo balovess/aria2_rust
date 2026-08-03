@@ -2,6 +2,7 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::download_event_hooks::{DownloadEvent, DownloadEventHooks};
 use crate::engine::hook_manager::{DownloadStatus, HookContext};
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -29,6 +30,26 @@ impl BtDownloadCommand {
             self.group
                 .recover()
                 .set_uploaded_length(self.total_uploaded);
+        }
+
+        // ── on-bt-download-complete ───────────────────────────────────────
+        // C++ fires this from `DefaultPieceStorage::downloadFinished()`:
+        //
+        //   util::executeHookByOptName(group, option_, PREF_ON_BT_DOWNLOAD_COMPLETE);
+        //   SingletonHolder<Notifier>::instance()->notifyDownloadEvent(
+        //       EVENT_ON_BT_DOWNLOAD_COMPLETE, group);
+        //   group->enableSeedOnly();
+        //
+        // i.e. the moment the torrent payload is fully on disk — *before* the
+        // group reaches its terminal state (it may keep seeding). Emitting it
+        // ahead of `complete()` reproduces the C++ ordering, so subscribers
+        // observe `onBtDownloadComplete` and then `onDownloadComplete`.
+        // `finalize_download` is async, so a Tokio runtime is guaranteed and
+        // the shell-hook sink is safe to drive from here as well.
+        DownloadEventHooks::shared()
+            .fire_event(DownloadEvent::BtComplete, &self.group.recover());
+
+        {
             let mut g = self.group.recover_mut();
             g.complete()?;
         }

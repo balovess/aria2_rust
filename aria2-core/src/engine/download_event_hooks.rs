@@ -22,8 +22,11 @@
 //!
 //! # Architecture
 //!
+//! The bus has **two independent sinks**. A single `fire_*` call feeds both;
+//! neither sink may gate the other.
+//!
 //! ```text
-//! Engine loop / demotion path
+//! Group state transition / engine loop / demotion path
 //!   │
 //!   ├─ on promotion  → fire DownloadEvent::Start
 //!   ├─ on demotion   → fire DownloadEvent::Complete / Error / Pause / Stop
@@ -31,12 +34,32 @@
 //!         │
 //!         ▼
 //!   DownloadEventHooks::fire_event()
-//!     ├─ resolve hook command from DownloadOptions
-//!     ├─ spawn tokio::process::Command with (gid, numFiles, firstFilePath)
-//!     └─ log result (fire-and-forget, non-blocking)
+//!     ├─ sink 1: shell hook (OPTIONAL — only when --on-download-* is set)
+//!     │    ├─ resolve hook command from DownloadOptions / global hooks
+//!     │    ├─ spawn tokio::process::Command with (gid, numFiles, firstFilePath)
+//!     │    └─ log result (fire-and-forget, non-blocking)
+//!     │
+//!     └─ sink 2: observers (ALWAYS — never gated on sink 1)
+//!          └─ DownloadEventListener::on_download_event(event, gid)
 //! ```
+//!
+//! # Observers (`DownloadEventListener`)
+//!
+//! Sink 2 mirrors C++ `Notifier::addDownloadEventListener()` /
+//! `Notifier::notifyDownloadEvent()`. It exists so layers *above* `aria2-core`
+//! (notably the JSON-RPC WebSocket notifier, which emits
+//! `aria2.onDownloadComplete` / `aria2.onDownloadError` /
+//! `aria2.onBtDownloadComplete`) can observe download lifecycle transitions
+//! **without `aria2-core` ever depending on `aria2-rpc`**. The binary crate
+//! `aria2` owns both crates and installs the adapter, keeping the dependency
+//! direction `aria2 → {aria2-core, aria2-rpc}` intact.
+//!
+//! Observer notification is deliberately synchronous and cheap: implementors
+//! must not block (the recommended pattern is an `mpsc` send consumed by a
+//! dedicated task).
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
 use tracing::{debug, info, warn};
 
@@ -51,7 +74,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 ///
 /// Each variant maps to a C++ `PREF_ON_DOWNLOAD_*` preference and is fired
 /// at a specific point in the download lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DownloadEvent {
     /// Fired when a download is promoted from reserved to active.
     /// C++: `PREF_ON_DOWNLOAD_START`
@@ -86,11 +109,85 @@ impl DownloadEvent {
             Self::BtComplete => "on-bt-download-complete",
         }
     }
+
+    /// Whether this event can legitimately fire at most **once** for a given
+    /// download.
+    ///
+    /// `Complete`, `Error` and `BtComplete` are terminal one-shot transitions:
+    /// a download completes once, fails once, and finishes its BT payload
+    /// once. They are emitted from more than one place (the group state
+    /// transition itself *and* the engine-loop demotion path), so observer
+    /// notification is de-duplicated on `(gid, event)` for these variants.
+    ///
+    /// `Start` and `Pause` may repeat across pause/unpause cycles and `Stop`
+    /// is re-emitted by the RPC layer on explicit removal, so those are never
+    /// de-duplicated.
+    pub fn is_once_per_download(&self) -> bool {
+        matches!(self, Self::Complete | Self::Error | Self::BtComplete)
+    }
+}
+
+// ============================================================================
+// DownloadEventListener — observer interface for out-of-crate subscribers
+// ============================================================================
+
+/// Observer notified of every download lifecycle transition.
+///
+/// Mirrors C++ `aria2::DownloadEventListener` (see `src/Notifier.h`), whose
+/// `onEvent(DownloadEvent, const RequestGroup*)` is invoked by
+/// `Notifier::notifyDownloadEvent()`.
+///
+/// # Contract
+///
+/// * Implementations **must not block**. Notification happens inline on the
+///   thread that performed the state transition, which may be holding
+///   unrelated locks. Forward the event to a channel and do the real work on
+///   a dedicated task.
+/// * Implementations **must not panic**. A panicking listener would unwind
+///   through the download engine.
+/// * `gid` is the canonical 16-digit lowercase hex GID (`GroupId::to_hex_string`),
+///   i.e. exactly the identifier the JSON-RPC layer exposes to clients.
+pub trait DownloadEventListener: Send + Sync {
+    /// Called for every fired download event.
+    fn on_download_event(&self, event: DownloadEvent, gid: &str);
 }
 
 // ============================================================================
 // DownloadEventHooks — manages hook registration and execution
 // ============================================================================
+
+/// Maximum number of `(gid, event)` pairs retained for one-shot event
+/// de-duplication before the bookkeeping is rotated.
+///
+/// A long-running daemon must not accumulate one entry per download forever,
+/// so the set is kept in two generations: once `current` reaches this cap it
+/// is demoted to `previous` and a fresh `current` is started. Lookups consult
+/// both generations, so recently-seen events are never forgotten prematurely.
+const DEDUP_GENERATION_CAPACITY: usize = 4096;
+
+/// Two-generation bounded de-duplication ledger for one-shot events.
+#[derive(Default)]
+struct OneShotLedger {
+    current: HashSet<(String, DownloadEvent)>,
+    previous: HashSet<(String, DownloadEvent)>,
+}
+
+impl OneShotLedger {
+    /// Record `key` and report whether this is the first time it was seen.
+    ///
+    /// Returns `true` when the caller should proceed with the notification,
+    /// `false` when the event was already delivered.
+    fn claim(&mut self, key: (String, DownloadEvent)) -> bool {
+        if self.current.contains(&key) || self.previous.contains(&key) {
+            return false;
+        }
+        if self.current.len() >= DEDUP_GENERATION_CAPACITY {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.insert(key);
+        true
+    }
+}
 
 /// Manages download event hooks and provides fire-and-forget execution.
 ///
@@ -111,16 +208,111 @@ pub struct DownloadEventHooks {
     /// Global hooks applied to all downloads unless overridden per-group.
     /// Maps event type → shell command string.
     global_hooks: Arc<std::sync::RwLock<GlobalHookMap>>,
+    /// Registered observers (sink 2). Notified for **every** fired event,
+    /// regardless of whether a shell hook command is configured.
+    listeners: std::sync::RwLock<Vec<Arc<dyn DownloadEventListener>>>,
+    /// De-duplication ledger for one-shot events
+    /// ([`DownloadEvent::is_once_per_download`]).
+    one_shot: std::sync::RwLock<OneShotLedger>,
 }
 
 /// Type alias for the global hook map.
 type GlobalHookMap = Vec<(DownloadEvent, String)>;
 
+/// Process-wide hook bus, lazily created on first use.
+static SHARED_HOOKS: OnceLock<Arc<DownloadEventHooks>> = OnceLock::new();
+
 impl DownloadEventHooks {
-    /// Create a new hook manager with no global hooks.
+    /// Create a new hook manager with no global hooks and no listeners.
     pub fn new() -> Self {
         Self {
             global_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            listeners: std::sync::RwLock::new(Vec::new()),
+            one_shot: std::sync::RwLock::new(OneShotLedger::default()),
+        }
+    }
+
+    /// Return the process-wide hook bus.
+    ///
+    /// Download lifecycle transitions happen deep inside individual
+    /// `Command` implementations that have no reference to the engine, and the
+    /// engine itself exists in two flavours (the v1 `run()` command-dispatch
+    /// loop that production uses today and the v2 `run_v2()` group-management
+    /// loop). A process-wide bus is what lets a single listener registration
+    /// observe *all* of them, and mirrors C++ where `Notifier` is a
+    /// `SingletonHolder`. The same pattern is already used in this crate for
+    /// `filesystem::file_allocation_man::shared()` and
+    /// `checksum::check_integrity::man::shared()`.
+    pub fn shared() -> &'static Arc<DownloadEventHooks> {
+        SHARED_HOOKS.get_or_init(|| Arc::new(DownloadEventHooks::new()))
+    }
+
+    /// Register an observer that is notified of every fired download event.
+    ///
+    /// Mirrors C++ `Notifier::addDownloadEventListener()`. Registration is
+    /// additive and there is no removal API, matching C++ where listeners
+    /// live for the lifetime of the process.
+    pub fn add_listener(&self, listener: Arc<dyn DownloadEventListener>) {
+        let mut listeners = self.listeners.recover_mut();
+        listeners.push(listener);
+        debug!(
+            count = listeners.len(),
+            "Registered download event listener"
+        );
+    }
+
+    /// Number of currently registered observers (primarily for tests).
+    pub fn listener_count(&self) -> usize {
+        self.listeners.recover().len()
+    }
+
+    /// Notify every registered observer of `event` for `gid`.
+    ///
+    /// `gid` must be the canonical 16-digit hex GID
+    /// ([`GroupId::to_hex_string`](crate::request::request_group::GroupId::to_hex_string)).
+    ///
+    /// This is the *unconditional* sink: it is deliberately independent of
+    /// whether the user configured an `--on-download-*` shell command, because
+    /// RPC clients (AriaNg, webui-aria2, ...) rely on the corresponding
+    /// WebSocket notifications to ever mark a download as finished.
+    ///
+    /// One-shot events are de-duplicated so that a transition observed both at
+    /// the `RequestGroup` state change and again at engine-loop demotion is
+    /// only delivered once.
+    pub fn notify_listeners(&self, event: DownloadEvent, gid: &str) {
+        // Snapshot under a short read lock so a listener callback can never
+        // deadlock against `add_listener`.
+        let listeners: Vec<Arc<dyn DownloadEventListener>> = {
+            let guard = self.listeners.recover();
+            if guard.is_empty() {
+                // Nothing to do — and importantly, do not pollute the
+                // de-duplication ledger when no one is listening.
+                return;
+            }
+            guard.clone()
+        };
+
+        if event.is_once_per_download()
+            && !self
+                .one_shot
+                .recover_mut()
+                .claim((gid.to_string(), event))
+        {
+            debug!(
+                event = event.name(),
+                gid, "Suppressed duplicate one-shot download event"
+            );
+            return;
+        }
+
+        debug!(
+            event = event.name(),
+            gid,
+            listeners = listeners.len(),
+            "Notifying download event listeners"
+        );
+        for listener in listeners {
+            listener.on_download_event(event, gid);
         }
     }
 
@@ -156,46 +348,47 @@ impl DownloadEventHooks {
     /// This is fire-and-forget — the caller is not blocked.
     /// Errors are logged but do not propagate.
     ///
-    /// Mirrors C++ `util::executeHookByOptName(group, option, pref)`.
+    /// Mirrors C++ `util::executeHookByOptName(group, option, pref)` followed
+    /// by `Notifier::notifyDownloadEvent()` — C++ performs both, in that
+    /// order, at every hook site.
     pub fn fire_event(&self, event: DownloadEvent, group: &RequestGroup) {
-        let command = self.resolve_hook_command(event, group);
+        // C++ `util::executeHook()` formats the GID with `GroupId::toHex()`,
+        // i.e. a zero-padded 16-digit lowercase hex string. Use the same
+        // canonical form here so hook arguments match the original *and* so
+        // observers receive exactly the GID the JSON-RPC layer publishes.
+        let gid_hex = group.gid().to_hex_string();
 
-        let Some(command) = command else {
-            debug!(
-                event = event.name(),
-                gid = group.gid().value(),
-                "No hook command configured, skipping event"
-            );
-            return;
-        };
-
-        if command.is_empty() {
-            return;
+        // ── Sink 1: user-configured shell hook (optional) ──────────────────
+        match self.resolve_hook_command(event, group) {
+            Some(command) if !command.is_empty() => {
+                let (num_files, first_file_path) = Self::extract_file_info(group);
+                self.spawn_hook(&command, &gid_hex, num_files, &first_file_path, event);
+            }
+            _ => {
+                debug!(
+                    event = event.name(),
+                    gid = %gid_hex,
+                    "No hook command configured, skipping shell hook"
+                );
+            }
         }
 
-        // Build arguments: GID hex, numFiles, firstFilePath
-        let gid_hex = format!("{:08x}", group.gid().value());
-
-        let (num_files, first_file_path) = if let Some(dctx) =
-            group.download_context.recover().as_ref()
-        {
-            let num = dctx.count_requested_file_entry();
-            let path = dctx
-                .first_file_path()
-                .unwrap_or_default()
-                .to_string();
-            (num, path)
-        } else {
-            (0, String::new())
-        };
-
-        self.spawn_hook(&command, &gid_hex, num_files, &first_file_path, event);
+        // ── Sink 2: observers (unconditional) ─────────────────────────────
+        // MUST run even when no shell hook is configured: the RPC WebSocket
+        // notifications (aria2.onDownloadComplete / onDownloadError /
+        // onBtDownloadComplete) are delivered through this path, and gating
+        // them on an unrelated `--on-download-*` CLI option would leave every
+        // default deployment without completion notifications.
+        self.notify_listeners(event, &gid_hex);
     }
 
     /// Fire a download event hook using direct parameters instead of a group.
     ///
     /// Useful when the RequestGroup is no longer available (e.g. after demotion)
     /// but the relevant data has already been extracted.
+    ///
+    /// `gid_hex` must be the canonical 16-digit hex GID (as produced by
+    /// [`DownloadEventContext::from_group`]).
     pub fn fire_event_with_params(
         &self,
         event: DownloadEvent,
@@ -204,10 +397,27 @@ impl DownloadEventHooks {
         first_file_path: &str,
         command: &str,
     ) {
-        if command.is_empty() {
-            return;
+        // Sink 1 — only when a shell command was actually configured.
+        if !command.is_empty() {
+            self.spawn_hook(command, gid_hex, num_files, first_file_path, event);
         }
-        self.spawn_hook(command, gid_hex, num_files, first_file_path, event);
+        // Sink 2 — always. See `fire_event` for why this must not be gated.
+        self.notify_listeners(event, gid_hex);
+    }
+
+    /// Extract `(numFiles, firstFilePath)` hook arguments from a group.
+    ///
+    /// Mirrors the C++ `executeHookByOptName` body, which reads
+    /// `group->getDownloadContext()->getNumFileEntries()` and the first
+    /// requested file entry's path.
+    fn extract_file_info(group: &RequestGroup) -> (usize, String) {
+        if let Some(dctx) = group.download_context.recover().as_ref() {
+            let num = dctx.count_requested_file_entry();
+            let path = dctx.first_file_path().unwrap_or_default().to_string();
+            (num, path)
+        } else {
+            (0, String::new())
+        }
     }
 
     /// Resolve the hook command for an event from per-group or global config.
@@ -383,7 +593,9 @@ impl DownloadEventContext {
     ///
     /// Must be called BEFORE `demote_group()` releases the download context.
     pub fn from_group(group: &RequestGroup) -> Self {
-        let gid_hex = format!("{:08x}", group.gid().value());
+        // Canonical 16-digit hex, matching C++ `GroupId::toHex()` and the GID
+        // format used by the JSON-RPC layer.
+        let gid_hex = group.gid().to_hex_string();
 
         let (num_files, first_file_path) =
             if let Some(dctx) = group.download_context.recover().as_ref() {
@@ -515,5 +727,160 @@ mod tests {
 
         let guard = hooks.global_hooks.recover();
         assert!(guard.is_empty());
+    }
+
+    // ── Observer (DownloadEventListener) tests ───────────────────────────
+
+    /// Records every event it is notified about.
+    #[derive(Default)]
+    struct RecordingListener {
+        seen: std::sync::Mutex<Vec<(DownloadEvent, String)>>,
+    }
+
+    impl RecordingListener {
+        fn events(&self) -> Vec<(DownloadEvent, String)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl DownloadEventListener for RecordingListener {
+        fn on_download_event(&self, event: DownloadEvent, gid: &str) {
+            self.seen.lock().unwrap().push((event, gid.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_add_listener_tracks_registration() {
+        let hooks = DownloadEventHooks::new();
+        assert_eq!(hooks.listener_count(), 0);
+        hooks.add_listener(Arc::new(RecordingListener::default()));
+        hooks.add_listener(Arc::new(RecordingListener::default()));
+        assert_eq!(hooks.listener_count(), 2);
+    }
+
+    #[test]
+    fn test_notify_listeners_delivers_to_all_listeners() {
+        let hooks = DownloadEventHooks::new();
+        let a = Arc::new(RecordingListener::default());
+        let b = Arc::new(RecordingListener::default());
+        hooks.add_listener(a.clone());
+        hooks.add_listener(b.clone());
+
+        hooks.notify_listeners(DownloadEvent::Complete, "00000000000000ff");
+
+        let expected = vec![(DownloadEvent::Complete, "00000000000000ff".to_string())];
+        assert_eq!(a.events(), expected);
+        assert_eq!(b.events(), expected);
+    }
+
+    /// Regression test for the P0 defect: observers were only reached when a
+    /// `--on-download-*` shell command happened to be configured, so RPC
+    /// clients never saw `aria2.onDownloadComplete` in a default deployment.
+    #[test]
+    fn test_fire_event_with_params_notifies_listener_without_shell_command() {
+        let hooks = DownloadEventHooks::new();
+        let listener = Arc::new(RecordingListener::default());
+        hooks.add_listener(listener.clone());
+
+        // Empty command == no `--on-download-complete` configured.
+        hooks.fire_event_with_params(
+            DownloadEvent::Complete,
+            "0000000000000001",
+            1,
+            "/tmp/a.bin",
+            "",
+        );
+
+        assert_eq!(
+            listener.events(),
+            vec![(DownloadEvent::Complete, "0000000000000001".to_string())],
+            "observers must be notified even with no shell hook configured"
+        );
+    }
+
+    #[test]
+    fn test_one_shot_events_are_deduplicated_per_gid() {
+        let hooks = DownloadEventHooks::new();
+        let listener = Arc::new(RecordingListener::default());
+        hooks.add_listener(listener.clone());
+
+        // Same terminal event emitted twice for the same download (state
+        // transition + engine-loop demotion) must reach the observer once.
+        hooks.notify_listeners(DownloadEvent::Complete, "000000000000000a");
+        hooks.notify_listeners(DownloadEvent::Complete, "000000000000000a");
+        // A different GID is a different download.
+        hooks.notify_listeners(DownloadEvent::Complete, "000000000000000b");
+        // A different terminal event for the first download still passes.
+        hooks.notify_listeners(DownloadEvent::BtComplete, "000000000000000a");
+
+        assert_eq!(
+            listener.events(),
+            vec![
+                (DownloadEvent::Complete, "000000000000000a".to_string()),
+                (DownloadEvent::Complete, "000000000000000b".to_string()),
+                (DownloadEvent::BtComplete, "000000000000000a".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_repeatable_events_are_not_deduplicated() {
+        let hooks = DownloadEventHooks::new();
+        let listener = Arc::new(RecordingListener::default());
+        hooks.add_listener(listener.clone());
+
+        // Pause/unpause cycles legitimately repeat Start and Pause.
+        hooks.notify_listeners(DownloadEvent::Pause, "000000000000000c");
+        hooks.notify_listeners(DownloadEvent::Start, "000000000000000c");
+        hooks.notify_listeners(DownloadEvent::Pause, "000000000000000c");
+
+        assert_eq!(listener.events().len(), 3);
+    }
+
+    #[test]
+    fn test_notify_listeners_is_noop_without_listeners() {
+        let hooks = DownloadEventHooks::new();
+        // Must not panic and must not consume de-duplication budget, so a
+        // listener registered later still receives the event.
+        hooks.notify_listeners(DownloadEvent::Complete, "000000000000000d");
+
+        let listener = Arc::new(RecordingListener::default());
+        hooks.add_listener(listener.clone());
+        hooks.notify_listeners(DownloadEvent::Complete, "000000000000000d");
+
+        assert_eq!(listener.events().len(), 1);
+    }
+
+    #[test]
+    fn test_shared_bus_is_a_singleton() {
+        let a = DownloadEventHooks::shared();
+        let b = DownloadEventHooks::shared();
+        assert!(Arc::ptr_eq(a, b), "shared() must return the same instance");
+    }
+
+    #[test]
+    fn test_is_once_per_download_classification() {
+        assert!(DownloadEvent::Complete.is_once_per_download());
+        assert!(DownloadEvent::Error.is_once_per_download());
+        assert!(DownloadEvent::BtComplete.is_once_per_download());
+        assert!(!DownloadEvent::Start.is_once_per_download());
+        assert!(!DownloadEvent::Pause.is_once_per_download());
+        assert!(!DownloadEvent::Stop.is_once_per_download());
+    }
+
+    #[test]
+    fn test_one_shot_ledger_rotates_and_stays_bounded() {
+        let mut ledger = OneShotLedger::default();
+        for i in 0..(DEDUP_GENERATION_CAPACITY + 10) {
+            assert!(ledger.claim((format!("{:016x}", i), DownloadEvent::Complete)));
+        }
+        // Rotation happened, so neither generation exceeds the cap.
+        assert!(ledger.current.len() <= DEDUP_GENERATION_CAPACITY);
+        assert!(ledger.previous.len() <= DEDUP_GENERATION_CAPACITY);
+        // The most recent entries are still remembered.
+        assert!(!ledger.claim((
+            format!("{:016x}", DEDUP_GENERATION_CAPACITY + 9),
+            DownloadEvent::Complete
+        )));
     }
 }

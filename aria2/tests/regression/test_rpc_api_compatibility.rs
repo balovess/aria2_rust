@@ -6,6 +6,7 @@
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::json_rpc::JsonRpcResponse;
+use aria2_rpc::server::RpcAuthMiddleware;
 
 /// Helper to create a JSON-RPC request.
 fn make_request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
@@ -144,7 +145,7 @@ async fn regression_remove_nonexistent_returns_error() {
     let req = make_request("aria2.remove", serde_json::json!(["nonexistent-gid-12345"]));
     let resp = engine.handle_request(&req).await;
 
-    assert_error_code(&resp, -32601); // MethodNotFound (GID not found)
+    assert_error_code(&resp, 1); // RpcExecution (domain error, matches C++)
 }
 
 /// Test: aria2.forceRemove returns the GID (matching C++ aria2).
@@ -409,7 +410,7 @@ async fn regression_get_option_nonexistent_gid() {
     let req = make_request("aria2.getOption", serde_json::json!(["nonexistent-gid"]));
     let resp = engine.handle_request(&req).await;
 
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 /// Test: aria2.changeOption validates option keys.
@@ -989,10 +990,10 @@ async fn regression_jsonrpc_version_field() {
 async fn regression_error_codes_jsonrpc_spec() {
     let engine = RpcEngine::new();
 
-    // Invalid method: -32601
+    // Invalid method: code 1 (C++ RpcMethod domain error, not -32601)
     let req = make_request("aria2.nonexistent", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 
     // Invalid params: -32602
     let req = make_request("aria2.addUri", serde_json::json!([])); // Missing URI
@@ -1000,7 +1001,7 @@ async fn regression_error_codes_jsonrpc_spec() {
     assert_error_code(&resp, -32602);
 }
 
-/// Test: Unknown method returns MethodNotFound error.
+/// Test: Unknown method returns RpcExecution error (code 1).
 #[tokio::test]
 async fn regression_unknown_method_error() {
     let engine = RpcEngine::new();
@@ -1008,8 +1009,8 @@ async fn regression_unknown_method_error() {
     let req = make_request("unknown.method", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
 
-    assert_error_code(&resp, -32601);
-    assert!(resp.error.unwrap().message.contains("Method not found"));
+    assert_error_code(&resp, 1);
+    assert!(resp.error.unwrap().message.contains("No such method"));
 }
 
 // =========================================================================
@@ -1093,5 +1094,384 @@ async fn regression_version_enabled_features_array() {
 
     for feature in features.as_array().unwrap() {
         assert!(feature.is_string(), "Each feature should be a string");
+    }
+}
+
+// =========================================================================
+// system.multicall dispatch parity (regression for the 12-of-33 method gap)
+//
+// `system.multicall` used to carry its own hard-coded match arm listing only
+// 12 of the 33 registered `aria2.*` methods; everything else fell through to
+// `-32601 Method not found`. AriaNg / webui-aria2 batch their entire refresh
+// loop into one multicall, so the UI silently lost most of its data.
+//
+// Sub-calls now go through the same dispatch table `handle_request` uses.
+// These tests lock in that the full method surface is reachable from a batch,
+// that nesting is still rejected, and that per-sub-call `token:` authorization
+// strips the secret instead of leaking it into positional arguments.
+// =========================================================================
+
+/// Extract multicall entry `index` from a response.
+///
+/// Successful entries are wrapped in one extra array level (`[[result]]`) per
+/// the aria2 spec; error entries stay flat (`{code, message}`).
+fn multicall_entry(resp: &JsonRpcResponse, index: usize) -> serde_json::Value {
+    let results = resp
+        .result
+        .as_ref()
+        .expect("multicall should produce a result")
+        .as_array()
+        .expect("multicall result should be an array");
+    results
+        .get(index)
+        .unwrap_or_else(|| panic!("multicall result should have an entry #{index}"))
+        .clone()
+}
+
+/// Assert multicall entry `index` succeeded and return its unwrapped payload.
+fn assert_multicall_ok(resp: &JsonRpcResponse, index: usize, label: &str) -> serde_json::Value {
+    let entry = multicall_entry(resp, index);
+    let inner = entry.as_array().unwrap_or_else(|| {
+        panic!("multicall entry #{index} ({label}) should be a success array, got: {entry}")
+    });
+    inner
+        .first()
+        .unwrap_or_else(|| panic!("multicall entry #{index} ({label}) wrapper should not be empty"))
+        .clone()
+}
+
+/// Assert multicall entry `index` is an error struct carrying `expected_code`.
+///
+/// The wire-format post-processor stringifies numbers recursively, so `code`
+/// arrives as a string; both representations are accepted.
+fn assert_multicall_error_code(resp: &JsonRpcResponse, index: usize, expected_code: i32) {
+    let entry = multicall_entry(resp, index);
+    let code = entry
+        .get("code")
+        .unwrap_or_else(|| panic!("multicall entry #{index} should be an error struct: {entry}"));
+    let actual = code
+        .as_i64()
+        .or_else(|| code.as_str().and_then(|s| s.parse::<i64>().ok()))
+        .unwrap_or_else(|| panic!("multicall error code should be numeric, got {code}"));
+    assert_eq!(
+        actual,
+        i64::from(expected_code),
+        "multicall entry #{index} should carry error code {expected_code}, got {entry}"
+    );
+}
+
+/// Test: the AriaNg refresh batch (tellActive + tellWaiting + tellStopped +
+/// getGlobalStat) resolves all four sub-calls instead of returning -32601.
+#[tokio::test]
+async fn regression_multicall_arianng_refresh_batch_all_methods_dispatch() {
+    let engine = RpcEngine::new();
+
+    let add = make_request(
+        "aria2.addUri",
+        serde_json::json!([["http://example.com/refresh.bin"]]),
+    );
+    assert_success(&engine.handle_request(&add).await);
+
+    let req = make_request(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.tellActive", "params": []},
+            {"methodName": "aria2.tellWaiting", "params": [0, 100]},
+            {"methodName": "aria2.tellStopped", "params": [0, 100]},
+            {"methodName": "aria2.getGlobalStat", "params": []},
+        ]]),
+    );
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    let labels = [
+        "aria2.tellActive",
+        "aria2.tellWaiting",
+        "aria2.tellStopped",
+        "aria2.getGlobalStat",
+    ];
+    for (index, label) in labels.iter().enumerate() {
+        let payload = assert_multicall_ok(&resp, index, label);
+        if *label == "aria2.getGlobalStat" {
+            assert!(
+                payload.get("downloadSpeed").is_some(),
+                "getGlobalStat payload should carry downloadSpeed, got {payload}"
+            );
+        } else {
+            assert!(
+                payload.is_array(),
+                "{label} payload should be an array, got {payload}"
+            );
+        }
+    }
+
+    let active = assert_multicall_ok(&resp, 0, "aria2.tellActive");
+    assert_eq!(
+        active.as_array().unwrap().len(),
+        1,
+        "tellActive inside a multicall should see the download added above"
+    );
+}
+
+/// Test: every previously missing high-frequency method is reachable through a
+/// multicall (no `-32601 Method not found`).
+#[tokio::test]
+async fn regression_multicall_covers_previously_missing_methods() {
+    let engine = RpcEngine::new();
+
+    let add = make_request(
+        "aria2.addUri",
+        serde_json::json!([["http://example.com/coverage.bin"]]),
+    );
+    let add_resp = engine.handle_request(&add).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    // Methods the old hard-coded multicall table did not know about.
+    let calls = serde_json::json!([
+        {"methodName": "aria2.tellStatus", "params": [gid]},
+        {"methodName": "aria2.getOption", "params": [gid]},
+        {"methodName": "aria2.getPeers", "params": [gid]},
+        {"methodName": "aria2.changeOption", "params": [gid, {"max-download-limit": "1M"}]},
+        {"methodName": "aria2.pause", "params": [gid]},
+        {"methodName": "aria2.unpause", "params": [gid]},
+        {"methodName": "aria2.getGlobalOption", "params": []},
+        {"methodName": "aria2.changeGlobalOption", "params": [{"max-overall-download-limit": "2M"}]},
+        {"methodName": "aria2.pauseAll", "params": []},
+        {"methodName": "aria2.unpauseAll", "params": []},
+        {"methodName": "aria2.tellWaiting", "params": [0, 10]},
+        {"methodName": "aria2.tellStopped", "params": [0, 10]},
+        {"methodName": "system.listMethods", "params": []},
+        {"methodName": "system.listNotifications", "params": []},
+    ]);
+    let expected_len = calls.as_array().unwrap().len();
+
+    let req = make_request("system.multicall", serde_json::json!([calls]));
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    let results = resp.result.as_ref().unwrap().as_array().unwrap();
+    assert_eq!(results.len(), expected_len);
+
+    for (index, entry) in results.iter().enumerate() {
+        let code = entry.get("code").and_then(|c| {
+            c.as_i64()
+                .or_else(|| c.as_str().and_then(|s| s.parse::<i64>().ok()))
+        });
+        assert_ne!(
+            code,
+            Some(-32601),
+            "multicall entry #{index} must not be 'Method not found': {entry}"
+        );
+    }
+}
+
+/// Test: a nested `system.multicall` is still rejected with -32600 without
+/// aborting the surrounding batch.
+#[tokio::test]
+async fn regression_multicall_nested_multicall_rejected() {
+    let engine = RpcEngine::new();
+
+    let req = make_request(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.getVersion", "params": []},
+            {"methodName": "system.multicall", "params": [[
+                {"methodName": "aria2.getVersion", "params": []}
+            ]]},
+            {"methodName": "aria2.getSessionInfo", "params": []},
+        ]]),
+    );
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    assert_multicall_ok(&resp, 0, "aria2.getVersion");
+    assert_multicall_error_code(&resp, 1, -32600);
+    assert_multicall_ok(&resp, 2, "aria2.getSessionInfo");
+}
+
+/// Test: an unknown sub-call still yields error code 1 for that entry only.
+#[tokio::test]
+async fn regression_multicall_unknown_method_isolated_to_entry() {
+    let engine = RpcEngine::new();
+
+    let req = make_request(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.nonexistentMethod", "params": []},
+            {"methodName": "aria2.getVersion", "params": []},
+        ]]),
+    );
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    assert_multicall_error_code(&resp, 0, 1);
+    assert_multicall_ok(&resp, 1, "aria2.getVersion");
+}
+
+/// Test: with `rpc-secret` configured, AriaNg's per-sub-call `"token:xxx"`
+/// first parameter is validated and stripped so the remaining positional
+/// arguments do not shift.
+///
+/// Before the fix the sub-request was built straight from the raw params, so
+/// the token leaked in as `params[0]` and
+/// `aria2.tellStatus(["token:s", gid])` read the token as the GID.
+#[tokio::test]
+async fn regression_multicall_subcall_token_is_stripped_not_leaked() {
+    let secret = "multicall-secret";
+    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
+
+    // Add a download using the same per-call token convention.
+    let add = make_request(
+        "aria2.addUri",
+        serde_json::json!([
+            format!("token:{secret}"),
+            ["http://example.com/auth.bin"]
+        ]),
+    );
+    let add_resp = engine.handle_request(&add).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    // No token on the envelope — exactly what AriaNg sends.
+    let req = make_request(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.tellStatus", "params": [format!("token:{secret}"), gid]},
+            {"methodName": "aria2.tellActive", "params": [format!("token:{secret}")]},
+            {"methodName": "aria2.getGlobalStat", "params": [format!("token:{secret}")]},
+        ]]),
+    );
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    let status = assert_multicall_ok(&resp, 0, "aria2.tellStatus");
+    assert_eq!(
+        status.get("gid").and_then(|v| v.as_str()),
+        Some(gid.as_str()),
+        "tellStatus must resolve the GID, not the stripped token: {status}"
+    );
+
+    let active = assert_multicall_ok(&resp, 1, "aria2.tellActive");
+    assert_eq!(active.as_array().unwrap().len(), 1);
+
+    let stat = assert_multicall_ok(&resp, 2, "aria2.getGlobalStat");
+    assert!(stat.get("downloadSpeed").is_some());
+}
+
+/// Test: a sub-call with a wrong/missing token is rejected per entry while
+/// correctly authenticated siblings still run.
+///
+/// Mirrors C++ `RpcMethod::execute()`, which turns a failed `authorize()` into
+/// that entry's error response and lets the loop continue.
+#[tokio::test]
+async fn regression_multicall_subcall_bad_token_isolated() {
+    let secret = "multicall-secret";
+    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
+
+    let req = make_request(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.getVersion", "params": ["token:wrong"]},
+            {"methodName": "aria2.getVersion", "params": []},
+            {"methodName": "aria2.getVersion", "params": [format!("token:{secret}")]},
+        ]]),
+    );
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    assert_multicall_error_code(&resp, 0, -32001);
+    assert_multicall_error_code(&resp, 1, -32001);
+    let ok = assert_multicall_ok(&resp, 2, "aria2.getVersion");
+    assert!(ok.get("version").is_some());
+}
+
+/// Test: a token supplied on the multicall envelope authorizes sub-calls that
+/// do not carry one of their own (the non-AriaNg client convention).
+#[tokio::test]
+async fn regression_multicall_envelope_token_authorizes_subcalls() {
+    let secret = "multicall-secret";
+    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
+
+    let req = make_request(
+        "system.multicall",
+        serde_json::json!([
+            format!("token:{secret}"),
+            [
+                {"methodName": "aria2.getVersion", "params": []},
+                {"methodName": "aria2.getGlobalStat", "params": []},
+            ]
+        ]),
+    );
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    assert!(
+        assert_multicall_ok(&resp, 0, "aria2.getVersion")
+            .get("version")
+            .is_some()
+    );
+    assert!(
+        assert_multicall_ok(&resp, 1, "aria2.getGlobalStat")
+            .get("downloadSpeed")
+            .is_some()
+    );
+}
+
+/// Test: an invalid token on the multicall envelope is still rejected outright.
+#[tokio::test]
+async fn regression_multicall_envelope_bad_token_rejected() {
+    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("real-secret"));
+
+    let req = make_request(
+        "system.multicall",
+        serde_json::json!([
+            "token:wrong",
+            [{"methodName": "aria2.getVersion", "params": []}]
+        ]),
+    );
+    let resp = engine.handle_request(&req).await;
+    assert_error_code(&resp, -32001);
+}
+
+/// Test: the wire-format post-processor reaches inside the `[[result]]`
+/// nesting, so numbers in multicall payloads are stringified exactly like they
+/// are in a top-level response.
+#[tokio::test]
+async fn regression_multicall_wire_format_applies_to_nested_results() {
+    let engine = RpcEngine::new();
+
+    let direct = make_request("aria2.getGlobalStat", serde_json::json!([]));
+    let direct_resp = engine.handle_request(&direct).await;
+    assert_success(&direct_resp);
+    let direct_stat = direct_resp.result.unwrap();
+
+    let batched = make_request(
+        "system.multicall",
+        serde_json::json!([[{"methodName": "aria2.getGlobalStat", "params": []}]]),
+    );
+    let batched_resp = engine.handle_request(&batched).await;
+    assert_success(&batched_resp);
+    let batched_stat = assert_multicall_ok(&batched_resp, 0, "aria2.getGlobalStat");
+
+    for key in [
+        "downloadSpeed",
+        "uploadSpeed",
+        "numActive",
+        "numWaiting",
+        "numStopped",
+    ] {
+        let nested = batched_stat
+            .get(key)
+            .unwrap_or_else(|| panic!("nested getGlobalStat should expose '{key}'"));
+        assert!(
+            nested.is_string(),
+            "'{key}' inside a multicall must be wire-formatted to a string, got {nested}"
+        );
+        assert_eq!(
+            nested,
+            direct_stat.get(key).unwrap(),
+            "'{key}' must be identical whether fetched directly or via multicall"
+        );
     }
 }

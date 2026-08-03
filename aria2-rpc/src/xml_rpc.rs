@@ -7,6 +7,8 @@ pub enum XmlRpcError {
     InvalidRequest(String),
     MethodNotFound(String),
     InvalidParams(String),
+    /// Domain error — fault_code: 1 (matches C++).
+    RpcExecution(String),
     ServerFault(i32, String),
 }
 
@@ -17,6 +19,7 @@ impl fmt::Display for XmlRpcError {
             Self::InvalidRequest(s) => write!(f, "Invalid Request: {}", s),
             Self::MethodNotFound(s) => write!(f, "Method not found: {}", s),
             Self::InvalidParams(s) => write!(f, "Invalid params: {}", s),
+            Self::RpcExecution(s) => write!(f, "Error: {}", s),
             Self::ServerFault(c, s) => write!(f, "Server fault ({}): {}", c, s),
         }
     }
@@ -31,6 +34,7 @@ impl XmlRpcError {
             Self::InvalidRequest(_) => -32600,
             Self::MethodNotFound(_) => -32601,
             Self::InvalidParams(_) => -32602,
+            Self::RpcExecution(_) => 1,
             Self::ServerFault(c, _) => *c,
         }
     }
@@ -41,6 +45,7 @@ impl XmlRpcError {
             | Self::InvalidRequest(s)
             | Self::MethodNotFound(s)
             | Self::InvalidParams(s)
+            | Self::RpcExecution(s)
             | Self::ServerFault(_, s) => s.clone(),
         }
     }
@@ -283,7 +288,7 @@ impl XmlRpcResponse {
         Self::Fault(code, msg.to_string())
     }
     pub fn method_not_found(method: &str) -> Self {
-        Self::Fault(-32601, format!("Method '{}' not found", method))
+        Self::Fault(1, format!("Method '{}' not found", method))
     }
     pub fn invalid_params(msg: &str) -> Self {
         Self::Fault(-32602, msg.to_string())
@@ -483,6 +488,7 @@ mod tests {
     fn test_error_codes() {
         assert_eq!(XmlRpcError::ParseError("x".into()).fault_code(), -32700);
         assert_eq!(XmlRpcError::MethodNotFound("x".into()).fault_code(), -32601);
+        assert_eq!(XmlRpcError::RpcExecution("x".into()).fault_code(), 1);
         assert_eq!(XmlRpcError::InvalidParams("x".into()).fault_code(), -32602);
         assert_eq!(XmlRpcError::ServerFault(400, "x".into()).fault_code(), 400);
     }

@@ -404,6 +404,12 @@ impl Command for DownloadCommand {
         self.group.recover().gid()
     }
 
+    fn request_group(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+        Some(std::sync::Arc::clone(&self.group))
+    }
+
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(
             constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS,

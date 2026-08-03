@@ -34,6 +34,12 @@ pub(crate) struct RunningTask {
     pub(crate) started: std::time::Instant,
     /// Per-command timeout. `None` means the command never times out.
     pub(crate) timeout: Option<Duration>,
+    /// Group this command belongs to, when the command exposes one.
+    ///
+    /// Retained so the engine can record a terminal `Error` status if the task
+    /// is aborted on timeout — the spawned future is cancelled at an await
+    /// point and therefore cannot report the failure itself.
+    pub(crate) group: Option<Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>,
 }
 
 pub struct DownloadEngine {
@@ -69,6 +75,13 @@ pub struct DownloadEngine {
     /// coordination across all active downloads.
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_registry: Arc<std::sync::RwLock<BtRegistry>>,
+    /// Download lifecycle event bus (shell hooks + observers).
+    ///
+    /// Defaults to the process-wide instance returned by
+    /// [`DownloadEventHooks::shared`], so a listener registered by the binary
+    /// crate before `run()` is observed by *both* engine loops as well as by
+    /// the group state transitions inside individual commands.
+    pub(crate) event_hooks: Arc<super::download_event_hooks::DownloadEventHooks>,
 }
 
 impl DownloadEngine {
@@ -105,6 +118,7 @@ impl DownloadEngine {
             keep_alive: false,
             #[cfg(feature = "bittorrent")]
             bt_registry: Arc::new(std::sync::RwLock::new(BtRegistry::new())),
+            event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 
         info!(
@@ -242,6 +256,17 @@ impl DownloadEngine {
     /// `ForceHaltAll` from external tasks (e.g., second Ctrl+C handler).
     pub fn engine_cmd_tx(&self) -> mpsc::UnboundedSender<EngineCommand> {
         self.engine_cmd_tx.clone()
+    }
+
+    /// Access the download lifecycle event bus.
+    ///
+    /// Layers above `aria2-core` use this to install a
+    /// [`DownloadEventListener`](super::download_event_hooks::DownloadEventListener)
+    /// **before** `run()` / `run_v2()` consumes the engine — for example the
+    /// adapter in the `aria2` binary that republishes lifecycle events as
+    /// JSON-RPC WebSocket notifications.
+    pub fn event_hooks(&self) -> &Arc<super::download_event_hooks::DownloadEventHooks> {
+        &self.event_hooks
     }
 }
 

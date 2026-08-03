@@ -8,6 +8,57 @@
 //! - `-V` → version (clap default)
 //! - `-L` → listen-port (renamed from `-h`)
 //! - `--save-cookies` has no short form (was `-V`, now reserved for version)
+//!
+//! # Boolean option semantics (`--opt[=true|false]`)
+//!
+//! Upstream aria2 registers every boolean option through `BooleanOptionHandler`
+//! with `OptionHandler::OPT_ARG`, which `OptionParser` maps onto `getopt_long`'s
+//! `optional_argument`. That yields exactly four accepted spellings:
+//!
+//! | Spelling         | Result                                                |
+//! |------------------|-------------------------------------------------------|
+//! | `--opt`          | `true` (value omitted → `A2_V_TRUE`)                   |
+//! | `--opt=true`     | `true`                                                 |
+//! | `--opt=false`    | `false`                                                |
+//! | `--opt=<other>`  | error: "must be either 'true' or 'false'."             |
+//!
+//! Critically, `--opt true` (space separated) is **not** consumed as a value:
+//! `optional_argument` only recognises the `=` form, so `true` falls through to
+//! the positional URI list. `aria2c --continue http://host/f.bin` therefore
+//! still downloads `http://host/f.bin`.
+//!
+//! The clap equivalent is:
+//!
+//! ```ignore
+//! #[arg(
+//!     long = "continue",
+//!     num_args(0..=1),
+//!     require_equals = true,
+//!     default_missing_value = "true",
+//!     value_name = "true|false"
+//! )]
+//! pub continue_dl: Option<bool>,
+//! ```
+//!
+//! * `num_args(0..=1)` makes the value optional.
+//! * `require_equals = true` reproduces `optional_argument`: the value must be
+//!   attached with `=`, so clap never swallows the following whitespace
+//!   separated argument.
+//! * `default_missing_value = "true"` supplies the implicit `true`.
+//! * clap's built-in `bool` value parser accepts only the literals `true` and
+//!   `false`, matching `BooleanOptionHandler::parseArg`.
+//!
+//! Every boolean is `Option<bool>` rather than `bool` so that the merge step in
+//! [`super::config`] can distinguish three states:
+//!
+//! * `None`        — the user did not mention the option; keep the config-file
+//!                   / environment / registry-default value.
+//! * `Some(true)`  — explicitly enabled on the command line.
+//! * `Some(false)` — explicitly disabled on the command line; this must override
+//!                   a `continue=true` line in `aria2.conf`.
+//!
+//! A plain `bool` collapses the first and last case, which silently dropped
+//! `--continue=false` style overrides.
 
 use std::path::PathBuf;
 
@@ -55,12 +106,25 @@ pub struct CliArgs {
     pub advanced: AdvancedArgs,
 
     /// Verbose output
-    #[arg(short = 'v', long)]
-    pub verbose: bool,
+    #[arg(
+        short = 'v',
+        long,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub verbose: Option<bool>,
 
     /// Disable colored output
-    #[arg(long = "no-color")]
-    pub no_color: bool,
+    #[arg(
+        long = "no-color",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub no_color: Option<bool>,
 
     /// Download URIs (HTTP/HTTPS/FTP/FTPS URLs or .torrent/.metalink file paths)
     #[arg(value_name = "URI")]
@@ -117,8 +181,14 @@ pub struct GeneralArgs {
     pub conf_path: Option<PathBuf>,
 
     /// Disable loading configuration file
-    #[arg(long = "no-conf")]
-    pub no_conf: bool,
+    #[arg(
+        long = "no-conf",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub no_conf: Option<bool>,
 
     /// URI input file
     #[arg(short = 'i', long = "input-file")]
@@ -137,104 +207,245 @@ pub struct GeneralArgs {
     pub auto_save_interval: Option<u64>,
 
     /// Enable colored output
-    #[arg(long = "enable-color")]
-    pub enable_color: bool,
+    #[arg(
+        long = "enable-color",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_color: Option<bool>,
 
     /// Quiet mode
-    #[arg(short = 'q', long)]
-    pub quiet: bool,
+    #[arg(
+        short = 'q',
+        long,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub quiet: Option<bool>,
 
     /// Dry run (check only, no download)
-    #[arg(short = 'n', long = "dry-run")]
-    pub dry_run: bool,
+    #[arg(
+        short = 'n',
+        long = "dry-run",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub dry_run: Option<bool>,
 
     /// Run as a background daemon (detached process)
-    #[arg(short = 'D', long)]
-    pub daemon: bool,
+    #[arg(
+        short = 'D',
+        long,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub daemon: Option<bool>,
 
     /// Path to PID file for daemon process management
     #[arg(long = "pid-file")]
     pub pid_file: Option<PathBuf>,
 
     /// Allow piece length change during download
-    #[arg(long = "allow-piece-length-change")]
-    pub allow_piece_length_change: bool,
+    #[arg(
+        long = "allow-piece-length-change",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub allow_piece_length_change: Option<bool>,
 
     /// Always resume download from available session data
-    #[arg(long = "always-resume")]
-    pub always_resume: bool,
+    #[arg(
+        long = "always-resume",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub always_resume: Option<bool>,
 
     /// Check file integrity by validating hash
-    #[arg(long = "check-integrity")]
-    pub check_integrity: bool,
+    #[arg(
+        long = "check-integrity",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub check_integrity: Option<bool>,
 
     /// Only download if newer than local file (HTTP conditional GET)
-    #[arg(long = "conditional-get")]
-    pub conditional_get: bool,
+    #[arg(
+        long = "conditional-get",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub conditional_get: Option<bool>,
 
     /// Read URIs from input file on-demand rather than at startup
-    #[arg(long = "deferred-input")]
-    pub deferred_input: bool,
+    #[arg(
+        long = "deferred-input",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub deferred_input: Option<bool>,
 
     /// Disable IPv6 support entirely
-    #[arg(long = "disable-ipv6")]
-    pub disable_ipv6: bool,
+    #[arg(
+        long = "disable-ipv6",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub disable_ipv6: Option<bool>,
 
     /// Only check hash integrity, do not download
-    #[arg(long = "hash-check-only")]
-    pub hash_check_only: bool,
+    #[arg(
+        long = "hash-check-only",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub hash_check_only: Option<bool>,
 
     /// Enable parameterized URI support (e.g. {a,b})
-    #[arg(long = "parameterized-uri")]
-    pub parameterized_uri: bool,
+    #[arg(
+        long = "parameterized-uri",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub parameterized_uri: Option<bool>,
 
     /// Start downloads in paused state
-    #[arg(long = "pause")]
-    pub pause: bool,
+    #[arg(
+        long = "pause",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub pause: Option<bool>,
 
     /// Remove control file before download
-    #[arg(long = "remove-control-file")]
-    pub remove_control_file: bool,
+    #[arg(
+        long = "remove-control-file",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub remove_control_file: Option<bool>,
 
     /// Reuse previously used URIs if connection fails
-    #[arg(long = "reuse-uri")]
-    pub reuse_uri: bool,
+    #[arg(
+        long = "reuse-uri",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub reuse_uri: Option<bool>,
 
     /// Save URIs that returned 404 as not found
-    #[arg(long = "save-not-found")]
-    pub save_not_found: bool,
+    #[arg(
+        long = "save-not-found",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub save_not_found: Option<bool>,
 
     /// Force sequential download of files
-    #[arg(long = "force-sequential")]
-    pub force_sequential: bool,
+    #[arg(
+        long = "force-sequential",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub force_sequential: Option<bool>,
 
     /// Disable netrc file parsing for authentication
-    #[arg(long = "no-netrc")]
-    pub no_netrc: bool,
+    #[arg(
+        long = "no-netrc",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub no_netrc: Option<bool>,
 
     /// Verify checksum for each chunk in real-time
-    #[arg(long = "realtime-chunk-checksum")]
-    pub realtime_chunk_checksum: bool,
+    #[arg(
+        long = "realtime-chunk-checksum",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub realtime_chunk_checksum: Option<bool>,
 
     /// Download result output format (default/full/hide)
     #[arg(long = "download-result")]
     pub download_result: Option<String>,
 
     /// Display file sizes in human-readable format
-    #[arg(long = "human-readable")]
-    pub human_readable: bool,
+    #[arg(
+        long = "human-readable",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub human_readable: Option<bool>,
 
     /// Keep result of unfinished downloads in results list
-    #[arg(long = "keep-unfinished-download-result")]
-    pub keep_unfinished_download_result: bool,
+    #[arg(
+        long = "keep-unfinished-download-result",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub keep_unfinished_download_result: Option<bool>,
 
     /// Truncate console readout to fit terminal width
-    #[arg(long = "truncate-console-readout")]
-    pub truncate_console_readout: bool,
+    #[arg(
+        long = "truncate-console-readout",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub truncate_console_readout: Option<bool>,
 
     /// Output all console messages to stderr instead of stdout
-    #[arg(long = "stderr")]
-    pub stderr: bool,
+    #[arg(
+        long = "stderr",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub stderr: Option<bool>,
 
     /// Max number of download results to remember
     #[arg(long = "max-download-result")]
@@ -389,68 +600,163 @@ pub struct HttpFtpArgs {
     pub max_connection_per_server: Option<u64>,
 
     /// Verify SSL certificate
-    #[arg(short = 'b', long = "check-certificate")]
-    pub check_certificate: bool,
+    #[arg(
+        short = 'b',
+        long = "check-certificate",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub check_certificate: Option<bool>,
 
     /// Disable SSL certificate verification
-    #[arg(long = "no-check-certificate", hide = true)]
-    pub no_check_certificate: bool,
+    #[arg(
+        long = "no-check-certificate",
+        hide = true,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub no_check_certificate: Option<bool>,
 
     /// CA certificate file
     #[arg(short = 'E', long = "ca-certificate")]
     pub ca_certificate: Option<PathBuf>,
 
     /// Allow overwriting existing files
-    #[arg(short = 'O', long = "allow-overwrite")]
-    pub allow_overwrite: bool,
+    #[arg(
+        short = 'O',
+        long = "allow-overwrite",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub allow_overwrite: Option<bool>,
 
     /// Auto rename conflicting files
-    #[arg(long = "auto-file-renaming")]
-    pub auto_file_renaming: bool,
+    #[arg(
+        long = "auto-file-renaming",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub auto_file_renaming: Option<bool>,
 
     /// Resume partial downloads
-    #[arg(short = 'c', long = "continue")]
-    pub continue_dl: bool,
+    #[arg(
+        short = 'c',
+        long = "continue",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub continue_dl: Option<bool>,
 
     /// Disable resume of partial downloads
-    #[arg(long = "no-continue", hide = true)]
-    pub no_continue: bool,
+    #[arg(
+        long = "no-continue",
+        hide = true,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub no_continue: Option<bool>,
 
     /// Use remote file timestamp
-    #[arg(long = "remote-time")]
-    pub remote_time: bool,
+    #[arg(
+        long = "remote-time",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub remote_time: Option<bool>,
 
     /// Enable HTTP persistent connection (keep-alive)
-    #[arg(long = "enable-http-keep-alive")]
-    pub enable_http_keep_alive: bool,
+    #[arg(
+        long = "enable-http-keep-alive",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_http_keep_alive: Option<bool>,
 
     /// Enable HTTP/1.1 pipelining
-    #[arg(long = "enable-http-pipelining")]
-    pub enable_http_pipelining: bool,
+    #[arg(
+        long = "enable-http-pipelining",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_http_pipelining: Option<bool>,
 
     /// Accept gzip-encoded HTTP responses
-    #[arg(long = "http-accept-gzip")]
-    pub http_accept_gzip: bool,
+    #[arg(
+        long = "http-accept-gzip",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub http_accept_gzip: Option<bool>,
 
     /// Send HTTP authentication header only after challenge
-    #[arg(long = "http-auth-challenge")]
-    pub http_auth_challenge: bool,
+    #[arg(
+        long = "http-auth-challenge",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub http_auth_challenge: Option<bool>,
 
     /// Send Cache-Control: no-cache with requests
-    #[arg(long = "http-no-cache")]
-    pub http_no_cache: bool,
+    #[arg(
+        long = "http-no-cache",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub http_no_cache: Option<bool>,
 
     /// Treat Content-Disposition filename as UTF-8
-    #[arg(long = "content-disposition-default-utf8")]
-    pub content_disposition_default_utf8: bool,
+    #[arg(
+        long = "content-disposition-default-utf8",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub content_disposition_default_utf8: Option<bool>,
 
     /// Use HEAD method for file existence checks
-    #[arg(long = "use-head")]
-    pub use_head: bool,
+    #[arg(
+        long = "use-head",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub use_head: Option<bool>,
 
     /// Omit Want-Digest header from HTTP requests
-    #[arg(long = "no-want-digest-header")]
-    pub no_want_digest_header: bool,
+    #[arg(
+        long = "no-want-digest-header",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub no_want_digest_header: Option<bool>,
 
     /// HTTP authentication username
     #[arg(long = "http-user")]
@@ -469,12 +775,24 @@ pub struct HttpFtpArgs {
     pub ftp_passwd: Option<String>,
 
     /// Use FTP passive mode
-    #[arg(long = "ftp-pasv")]
-    pub ftp_pasv: bool,
+    #[arg(
+        long = "ftp-pasv",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub ftp_pasv: Option<bool>,
 
     /// Reuse FTP data connection across downloads
-    #[arg(long = "ftp-reuse-connection")]
-    pub ftp_reuse_connection: bool,
+    #[arg(
+        long = "ftp-reuse-connection",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub ftp_reuse_connection: Option<bool>,
 
     /// FTP transfer type (binary/ascii)
     #[arg(long = "ftp-type")]
@@ -509,44 +827,94 @@ pub struct BitTorrentArgs {
     pub bt_max_open_files: Option<u64>,
 
     /// Seed without verifying hash
-    #[arg(long = "bt-seed-unverified")]
-    pub bt_seed_unverified: bool,
+    #[arg(
+        long = "bt-seed-unverified",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_seed_unverified: Option<bool>,
 
     /// Save metadata as .torrent file
-    #[arg(long = "bt-save-metadata")]
-    pub bt_save_metadata: bool,
+    #[arg(
+        long = "bt-save-metadata",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_save_metadata: Option<bool>,
 
     /// Force BT encryption
-    #[arg(short = 'X', long = "bt-force-encryption")]
-    pub bt_force_encryption: bool,
+    #[arg(
+        short = 'X',
+        long = "bt-force-encryption",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_force_encryption: Option<bool>,
 
     /// Min crypto level (plain/arc4)
     #[arg(long = "bt-min-crypto-level")]
     pub bt_min_crypto_level: Option<String>,
 
     /// Enable Local Peer Discovery
-    #[arg(long = "bt-enable-lpd")]
-    pub bt_enable_lpd: bool,
+    #[arg(
+        long = "bt-enable-lpd",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_enable_lpd: Option<bool>,
 
     /// Enable Local Peer Discovery (alias)
-    #[arg(long = "enable-lpd")]
-    pub enable_lpd: bool,
+    #[arg(
+        long = "enable-lpd",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_lpd: Option<bool>,
 
     /// UDP port for Local Peer Discovery
     #[arg(long = "lpd-listen-port")]
     pub lpd_listen_port: Option<u64>,
 
     /// Enable web seed (HTTP/FTP seeding)
-    #[arg(long = "bt-enable-web-seed")]
-    pub bt_enable_web_seed: bool,
+    #[arg(
+        long = "bt-enable-web-seed",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_enable_web_seed: Option<bool>,
 
     /// Enable DHT
-    #[arg(long = "enable-dht")]
-    pub enable_dht: bool,
+    #[arg(
+        long = "enable-dht",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_dht: Option<bool>,
 
     /// Disable DHT
-    #[arg(long = "no-enable-dht", hide = true)]
-    pub no_enable_dht: bool,
+    #[arg(
+        long = "no-enable-dht",
+        hide = true,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub no_enable_dht: Option<bool>,
 
     /// DHT listen port
     #[arg(long = "dht-listen-port")]
@@ -565,8 +933,14 @@ pub struct BitTorrentArgs {
     pub dht_message_path: Option<PathBuf>,
 
     /// Enable PEX
-    #[arg(long = "enable-peer-exchange")]
-    pub enable_peer_exchange: bool,
+    #[arg(
+        long = "enable-peer-exchange",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_peer_exchange: Option<bool>,
 
     /// Auto-handle .torrent (true/false/mem)
     #[arg(short = 'M', long = "follow-torrent")]
@@ -589,20 +963,38 @@ pub struct BitTorrentArgs {
     pub bt_prioritize_piece: Option<String>,
 
     /// Enable uTP (UDP Transport Protocol, BEP 29). Experimental
-    #[arg(long = "enable-utp")]
-    pub enable_utp: bool,
+    #[arg(
+        long = "enable-utp",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_utp: Option<bool>,
 
     /// UDP port for uTP connections. 0 = auto-assign
     #[arg(long = "utp-listen-port")]
     pub utp_listen_port: Option<u64>,
 
     /// Detach seed-only downloads from main session
-    #[arg(long = "bt-detach-seed-only")]
-    pub bt_detach_seed_only: bool,
+    #[arg(
+        long = "bt-detach-seed-only",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_detach_seed_only: Option<bool>,
 
     /// Run hook after hash check
-    #[arg(long = "bt-enable-hook-after-hash-check")]
-    pub bt_enable_hook_after_hash_check: bool,
+    #[arg(
+        long = "bt-enable-hook-after-hash-check",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_enable_hook_after_hash_check: Option<bool>,
 
     /// Comma-separated list of tracker announce URIs to exclude
     #[arg(long = "bt-exclude-tracker")]
@@ -613,28 +1005,58 @@ pub struct BitTorrentArgs {
     pub bt_external_ip: Option<String>,
 
     /// Seed after hash check
-    #[arg(long = "bt-hash-check-seed")]
-    pub bt_hash_check_seed: bool,
+    #[arg(
+        long = "bt-hash-check-seed",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_hash_check_seed: Option<bool>,
 
     /// Load saved metadata from previous session
-    #[arg(long = "bt-load-saved-metadata")]
-    pub bt_load_saved_metadata: bool,
+    #[arg(
+        long = "bt-load-saved-metadata",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_load_saved_metadata: Option<bool>,
 
     /// Network interface for Local Peer Discovery
     #[arg(long = "bt-lpd-interface")]
     pub bt_lpd_interface: Option<String>,
 
     /// Download only torrent metadata
-    #[arg(long = "bt-metadata-only")]
-    pub bt_metadata_only: bool,
+    #[arg(
+        long = "bt-metadata-only",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_metadata_only: Option<bool>,
 
     /// Remove unselected files when --select-file is used
-    #[arg(long = "bt-remove-unselected-file")]
-    pub bt_remove_unselected_file: bool,
+    #[arg(
+        long = "bt-remove-unselected-file",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_remove_unselected_file: Option<bool>,
 
     /// Require BitTorrent message encryption
-    #[arg(long = "bt-require-crypto")]
-    pub bt_require_crypto: bool,
+    #[arg(
+        long = "bt-require-crypto",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub bt_require_crypto: Option<bool>,
 
     /// Stop BT download after N seconds without progress
     #[arg(long = "bt-stop-timeout")]
@@ -661,8 +1083,14 @@ pub struct BitTorrentArgs {
     pub dht_message_timeout: Option<u64>,
 
     /// Enable IPv6 DHT
-    #[arg(long = "enable-dht6")]
-    pub enable_dht6: bool,
+    #[arg(
+        long = "enable-dht6",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_dht6: Option<bool>,
 
     /// IPv6 address for DHT to listen on
     #[arg(long = "dht-listen-addr6")]
@@ -689,12 +1117,25 @@ pub struct BitTorrentArgs {
 #[derive(Args, Debug)]
 pub struct RpcArgs {
     /// Enable JSON-RPC/XML-RPC server
-    #[arg(short = 'e', long = "enable-rpc")]
-    pub enable_rpc: bool,
+    #[arg(
+        short = 'e',
+        long = "enable-rpc",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_rpc: Option<bool>,
 
     /// Listen on all network interfaces
-    #[arg(long = "rpc-listen-all")]
-    pub rpc_listen_all: bool,
+    #[arg(
+        long = "rpc-listen-all",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub rpc_listen_all: Option<bool>,
 
     /// RPC server port
     #[arg(short = 'r', long = "rpc-listen-port")]
@@ -725,8 +1166,14 @@ pub struct RpcArgs {
     pub rpc_cors_domain: Option<String>,
 
     /// Enable HTTPS for RPC server
-    #[arg(long = "rpc-secure")]
-    pub rpc_secure: bool,
+    #[arg(
+        long = "rpc-secure",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub rpc_secure: Option<bool>,
 
     /// Path to TLS certificate file (PEM format)
     #[arg(long = "rpc-certificate")]
@@ -737,16 +1184,28 @@ pub struct RpcArgs {
     pub rpc_private_key: Option<PathBuf>,
 
     /// Allow all origins for RPC CORS (Access-Control-Allow-Origin: *)
-    #[arg(long = "rpc-allow-origin-all")]
-    pub rpc_allow_origin_all: bool,
+    #[arg(
+        long = "rpc-allow-origin-all",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub rpc_allow_origin_all: Option<bool>,
 
     /// Max RPC request body size
     #[arg(long = "rpc-max-request-size")]
     pub rpc_max_request_size: Option<String>,
 
     /// Save uploaded torrent/metadata files to a directory
-    #[arg(long = "rpc-save-upload-metadata")]
-    pub rpc_save_upload_metadata: bool,
+    #[arg(
+        long = "rpc-save-upload-metadata",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub rpc_save_upload_metadata: Option<bool>,
 }
 
 // =========================================================================
@@ -761,8 +1220,14 @@ pub struct AdvancedArgs {
     pub file_allocation: Option<String>,
 
     /// Zero-fill allocated space after fallocate (macOS/Windows)
-    #[arg(long = "secure-falloc")]
-    pub secure_falloc: bool,
+    #[arg(
+        long = "secure-falloc",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub secure_falloc: Option<bool>,
 
     /// File size threshold for mmap writes (default 256M)
     #[arg(long = "mmap-threshold")]
@@ -801,8 +1266,14 @@ pub struct AdvancedArgs {
     pub stop: Option<u64>,
 
     /// Force save state on every change
-    #[arg(long = "force-save")]
-    pub force_save: bool,
+    #[arg(
+        long = "force-save",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub force_save: Option<bool>,
 
     /// Path to save/load server performance statistics
     #[arg(long = "server-stat-file")]

@@ -247,7 +247,7 @@ impl RpcEngine {
         }
 
         // Step 3: task does not exist anywhere.
-        Err(JsonRpcError::MethodNotFound(format!(
+        Err(JsonRpcError::RpcExecution(format!(
             "GID {} not found",
             gid
         )))

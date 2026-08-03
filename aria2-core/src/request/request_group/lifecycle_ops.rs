@@ -6,6 +6,7 @@
 
 use tracing::debug;
 
+use crate::engine::download_event_hooks::{DownloadEvent, DownloadEventHooks};
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -13,6 +14,25 @@ use super::halt_reason::HaltReason;
 use super::status::DownloadStatus;
 
 impl super::RequestGroup {
+    /// Publish a terminal lifecycle event to the process-wide observer bus.
+    ///
+    /// The status transition itself is the only choke point that *every*
+    /// engine flavour passes through: the v1 `DownloadEngine::run()` loop that
+    /// production uses dispatches opaque `Box<dyn Command>` tasks and never
+    /// inspects group state, so the demotion-time hook site in
+    /// `RequestGroupMan::remove_stopped_groups()` (v2 only) is not reachable
+    /// there. Emitting here guarantees `aria2.onDownloadComplete` /
+    /// `aria2.onDownloadError` reach RPC clients on both paths; the bus
+    /// de-duplicates one-shot events so the v2 path does not double-fire.
+    ///
+    /// Only observers are notified — **not** the `--on-download-*` shell
+    /// hooks. Spawning a child process requires a Tokio runtime, and these
+    /// setters are also called from synchronous contexts; shell hooks stay
+    /// owned by the engine-loop hook sites where a runtime is guaranteed.
+    fn notify_terminal_event(&self, event: DownloadEvent) {
+        DownloadEventHooks::shared().notify_listeners(event, &self.gid.to_hex_string());
+    }
+
     // ── Status Transitions ───────────────────────────────────────────────
 
     /// Transition to `Active` status and record the start time.
@@ -113,27 +133,34 @@ impl super::RequestGroup {
     /// Sets completed_length equal to total_length (mirrors C++ behavior
     /// where the download is considered 100% done).
     pub fn complete(&mut self) -> Result<()> {
-        let mut status = self.status.recover_mut();
-        let mut end_time = self.end_time.recover_mut();
+        // Scope the guards so no lock is held while observers run.
+        {
+            let mut status = self.status.recover_mut();
+            let mut end_time = self.end_time.recover_mut();
 
-        let total = self.progress.total_length();
-        *status = DownloadStatus::Complete;
-        *end_time = Some(std::time::Instant::now());
-        self.progress.set_completed_length(total);
+            let total = self.progress.total_length();
+            *status = DownloadStatus::Complete;
+            *end_time = Some(std::time::Instant::now());
+            self.progress.set_completed_length(total);
+        }
 
         tracing::info!("Completing download task #{}", self.gid.value());
+        self.notify_terminal_event(DownloadEvent::Complete);
         Ok(())
     }
 
     /// Transition to `Error` status with an error message.
     pub fn error(&mut self, err: impl Into<String>) -> Result<()> {
-        let mut status = self.status.recover_mut();
-        let mut end_time = self.end_time.recover_mut();
+        {
+            let mut status = self.status.recover_mut();
+            let mut end_time = self.end_time.recover_mut();
 
-        *status = DownloadStatus::Error(err.into());
-        *end_time = Some(std::time::Instant::now());
+            *status = DownloadStatus::Error(err.into());
+            *end_time = Some(std::time::Instant::now());
+        }
 
         tracing::debug!("Download task #{} encountered error", self.gid.value());
+        self.notify_terminal_event(DownloadEvent::Error);
         Ok(())
     }
 
@@ -147,6 +174,7 @@ impl super::RequestGroup {
         *self.status.recover_mut() = DownloadStatus::Complete;
         *self.end_time.recover_mut() = Some(std::time::Instant::now());
         tracing::info!(gid = self.gid.value(), "Marked download as complete");
+        self.notify_terminal_event(DownloadEvent::Complete);
     }
 
     /// Mark the download as errored using interior mutability (`&self`).
@@ -159,6 +187,7 @@ impl super::RequestGroup {
         *self.status.recover_mut() = DownloadStatus::Error(message);
         *self.end_time.recover_mut() = Some(std::time::Instant::now());
         tracing::info!(gid = self.gid.value(), "Marked download as errored");
+        self.notify_terminal_event(DownloadEvent::Error);
     }
 
     /// Mark the download as paused using interior mutability (`&self`).

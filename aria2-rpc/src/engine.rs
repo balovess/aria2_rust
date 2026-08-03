@@ -5,7 +5,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
-use super::rpc_helpers::to_aria2_wire_format;
+use super::rpc_helpers::{split_auth_token, to_aria2_wire_format};
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, PeerInfo, SessionInfo, StatusInfo, TaskOptions};
 use super::websocket::EventPublisher;
@@ -341,55 +341,91 @@ impl RpcEngine {
     /// Main request dispatcher - routes RPC methods to their handlers.
     ///
     /// This is the central entry point for all JSON-RPC requests.
-    /// It matches on the method name and delegates to the appropriate
-    /// handler implementation in [rpc_handlers].
     ///
-    /// Before dispatching, validates the request token against the
-    /// configured `rpc-secret` (if any) via [`RpcAuthMiddleware`].
+    /// Pipeline:
+    /// 1. Split the `"token:xxx"` secret off `params[0]` and validate it
+    ///    against the configured `rpc-secret` (if any) via [`RpcAuthMiddleware`].
+    /// 2. Route `system.multicall` to [`RpcEngine::handle_multicall`] and every
+    ///    other method to [`RpcEngine::dispatch_single`].
+    /// 3. Post-process the result into aria2's wire format.
+    ///
+    /// `system.multicall` is deliberately exempt from step 1's *mandatory*
+    /// check: C++ aria2's `SystemMulticallRpcMethod::execute()` overrides the
+    /// base `RpcMethod::execute()` and therefore never calls `authorize()` on
+    /// the multicall envelope — each sub-call authorizes itself instead.
+    /// AriaNg / webui-aria2 depend on this, since they put the secret into
+    /// every sub-call's `params[0]` and never into the envelope. An envelope
+    /// token that *is* present is still validated here and additionally used
+    /// as the fallback secret for sub-calls that omit their own.
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+        let is_multicall = req.method == "system.multicall";
 
-        // Authenticate: extract token from params and validate
-        // Support both array-style ("token:xxx" as first param element)
+        // Authenticate: extract token from params and validate.
+        // Supports both array-style ("token:xxx" as first param element)
         // and object-style ({"token": "xxx"}) params for backward compatibility.
-        let token = if let Some(arr) = req.params.as_array() {
-            arr.first()
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.strip_prefix("token:"))
-        } else {
-            req.params.get("token").and_then(|v| v.as_str())
-        };
-        if let Err(auth_err) = self.auth_middleware.validate(token) {
-            return auth_err.into_response(req.id.clone());
+        let (token, stripped_params) = split_auth_token(&req.params);
+        if !is_multicall || token.is_some() {
+            if let Err(auth_err) = self.auth_middleware.validate(token.as_deref()) {
+                return auth_err.into_response(req.id.clone());
+            }
         }
 
-        // Strip the "token:xxx" prefix from params[0] so method handlers
-        // never see it — matching C++ aria2's authorize() behaviour which
-        // removes the token from the params array before dispatching.
+        // Dispatch against the token-stripped params so method handlers never
+        // see the secret — matching C++ aria2's authorize() behaviour which
+        // pops the token from the params array before dispatching.
         let stripped_req;
-        let dispatch_req = if let Some(arr) = req.params.as_array() {
-            if arr
-                .first()
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.starts_with("token:"))
-            {
-                let mut new_params = arr.clone();
-                new_params.remove(0);
+        let dispatch_req = match stripped_params {
+            Some(params) => {
                 stripped_req = JsonRpcRequest {
                     version: req.version.clone(),
                     method: req.method.clone(),
-                    params: serde_json::Value::Array(new_params),
+                    params,
                     id: req.id.clone(),
                 };
                 &stripped_req
-            } else {
-                req
             }
-        } else {
-            req
+            None => req,
         };
 
-        let mut resp = match dispatch_req.method.as_str() {
+        let mut resp = if is_multicall {
+            self.handle_multicall(dispatch_req, token.as_deref())
+                .await
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone()))
+        } else {
+            self.dispatch_single(dispatch_req).await
+        };
+
+        // Apply aria2 wire format: convert all numbers to strings and booleans to
+        // "true"/"false" strings, matching the original aria2 JSON-RPC response format.
+        // `to_aria2_wire_format` recurses through nested arrays and objects, so the
+        // `[[result]]` payload produced by system.multicall is converted exactly the
+        // same way a top-level response would be.
+        if let Some(result) = resp.result.take() {
+            resp.result = Some(to_aria2_wire_format(result));
+        }
+        resp
+    }
+
+    /// Dispatch one already-authenticated, token-stripped JSON-RPC request.
+    ///
+    /// This is *the* method table: every registered `aria2.*` method plus
+    /// `system.listMethods` / `system.listNotifications` is routed from here.
+    /// Both [`RpcEngine::handle_request`] (single calls) and
+    /// [`RpcEngine::handle_multicall`] (batched sub-calls) go through it, so
+    /// the batched API surface can never drift from the single-call one.
+    ///
+    /// `system.multicall` is intentionally *not* dispatched here — aria2
+    /// forbids nesting a multicall inside a multicall (C++
+    /// `SystemMulticallRpcMethod::execute` rejects it with "Recursive
+    /// system.multicall forbidden."). Excluding it also keeps this method
+    /// non-recursive, so no `Box::pin` indirection is required.
+    ///
+    /// The returned response is **not** converted to aria2 wire format; the
+    /// caller applies that once to the outermost response.
+    pub(crate) async fn dispatch_single(&self, dispatch_req: &JsonRpcRequest) -> JsonRpcResponse {
+        let id = dispatch_req.id.clone().unwrap_or(serde_json::Value::Null);
+
+        match dispatch_req.method.as_str() {
             "aria2.addUri" => self
                 .handle_add_uri(dispatch_req)
                 .await
@@ -501,10 +537,6 @@ impl RpcEngine {
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getVersion" => self.handle_version(dispatch_req),
             "aria2.getSessionInfo" => self.handle_session_info(dispatch_req),
-            "system.multicall" => self
-                .handle_multicall(dispatch_req)
-                .await
-                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "system.listMethods" => self
                 .handle_list_methods(dispatch_req)
                 .await
@@ -513,18 +545,20 @@ impl RpcEngine {
                 .handle_list_notifications(dispatch_req)
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            // Guard against recursion: a multicall may not contain a multicall.
+            // Mirrors C++ SystemMulticallRpcMethod::execute()'s
+            // "Recursive system.multicall forbidden." branch.
+            "system.multicall" => JsonRpcResponse::error(
+                id,
+                -32600,
+                "Nested system.multicall is not supported".to_string(),
+            ),
             _ => JsonRpcResponse::error(
                 id,
-                -32601,
-                format!("Method not found: {}", dispatch_req.method),
+                1,
+                format!("No such method: {}", dispatch_req.method),
             ),
-        };
-        // Apply aria2 wire format: convert all numbers to strings and booleans to
-        // "true"/"false" strings, matching the original aria2 JSON-RPC response format.
-        if let Some(result) = resp.result.take() {
-            resp.result = Some(to_aria2_wire_format(result));
         }
-        resp
     }
 }
 
@@ -554,7 +588,9 @@ mod tests {
         let req = JsonRpcRequest::new("aria2.nonExistent", serde_json::json!([])).with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_error());
-        assert_eq!(resp.error.unwrap().code, -32601);
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1);
+        assert!(err.message.contains("No such method"));
     }
 
     #[tokio::test]

@@ -382,7 +382,7 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
 }
 
 // =========================================================================
-// Test 8: aria2.getOption returns MethodNotFound for a GID that exists
+// Test 8: aria2.getOption returns RpcExecution error for a GID that exists
 // neither in task_opts nor in RequestGroupMan.
 // =========================================================================
 
@@ -398,7 +398,7 @@ async fn test_get_option_errors_for_unknown_gid() {
     );
     assert_eq!(
         resp.error.unwrap().code,
-        -32601,
-        "unknown GID should yield MethodNotFound (-32601)"
+        1,
+        "unknown GID should yield RpcExecution (1)"
     );
 }

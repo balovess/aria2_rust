@@ -5,6 +5,7 @@
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::rpc_helpers::split_auth_token;
 use crate::types::{DownloadStatus, FileInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 
@@ -24,7 +25,7 @@ impl RpcEngine {
                 "OK",
             ))
         } else {
-            Err(JsonRpcError::MethodNotFound(format!(
+            Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found in download results",
                 gid
             )))
@@ -45,7 +46,7 @@ impl RpcEngine {
                     JsonRpcError::InternalError(format!("Serialization failed: {}", e))
                 })?,
             )),
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -122,7 +123,7 @@ impl RpcEngine {
                     })?,
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -176,7 +177,7 @@ impl RpcEngine {
                     })?,
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -207,7 +208,7 @@ impl RpcEngine {
                     })?,
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -240,7 +241,7 @@ impl RpcEngine {
                         "OK",
                     ))
                 } else {
-                    Err(JsonRpcError::MethodNotFound(format!(
+                    Err(JsonRpcError::RpcExecution(format!(
                         "GID {} not found in download results",
                         gid
                     )))
@@ -269,9 +270,34 @@ impl RpcEngine {
     }
 
     /// Handle `system.multicall` - Execute multiple RPC calls in one HTTP request.
+    ///
+    /// Every sub-call is routed through [`RpcEngine::dispatch_single`] — the
+    /// exact same method table `handle_request` uses — so the batched API
+    /// surface always matches the single-call API surface. AriaNg and
+    /// webui-aria2 batch their whole refresh loop (`tellActive` +
+    /// `tellWaiting` + `tellStopped` + `getGlobalStat`) into one multicall,
+    /// so any method missing here shows up as missing data in the UI.
+    ///
+    /// # Authorization
+    ///
+    /// Follows C++ aria2 (`SystemMulticallRpcMethod::execute` →
+    /// `RpcMethod::execute` → `RpcMethod::authorize`): the multicall envelope
+    /// itself is not authorized, but **each sub-call is**. A sub-call carries
+    /// its own `"token:xxx"` first parameter, which is validated and then
+    /// stripped so the handler's positional arguments do not shift.
+    /// `envelope_token` is the secret that was found on the multicall request
+    /// itself (if any) and serves as the fallback for sub-calls that do not
+    /// carry one, so both client conventions keep working.
+    ///
+    /// # Error handling
+    ///
+    /// A failing sub-call never aborts the batch: its error is reported in
+    /// place and the loop continues, mirroring C++ which appends
+    /// `createErrorResponse(...)` and moves on to the next entry.
     pub async fn handle_multicall(
         &self,
         req: &JsonRpcRequest,
+        envelope_token: Option<&str>,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let calls: Vec<serde_json::Value> = req.get_param(0)?;
 
@@ -309,56 +335,20 @@ impl RpcEngine {
                 .cloned()
                 .unwrap_or(serde_json::json!([]));
 
-            let sub_request = JsonRpcRequest::new(method_name, call_params);
+            // Authorize the sub-call the same way C++ RpcMethod::authorize()
+            // does for every method invocation: pop a leading "token:xxx"
+            // parameter and validate it. Without this the token would leak
+            // into the handler as a positional argument and shift every
+            // subsequent parameter by one.
+            let (sub_token, stripped_params) = split_auth_token(&call_params);
+            let effective_token = sub_token.as_deref().or(envelope_token);
 
-            let id = sub_request.id.clone().unwrap_or_default();
-            let sub_response = match sub_request.method.as_str() {
-                "aria2.addUri" => self
-                    .handle_add_uri(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.tellActive" => self.handle_tell_active(&sub_request).await?,
-                "aria2.getGlobalStat" => self.handle_global_stat(&sub_request).await,
-                "aria2.getUris" => self
-                    .handle_get_uris(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getFiles" => self
-                    .handle_get_files(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getServers" => self
-                    .handle_get_servers(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getVersion" => self.handle_version(&sub_request),
-                "aria2.getSessionInfo" => self.handle_session_info(&sub_request),
-                "aria2.purgeDownloadResult" => self
-                    .handle_purge_download_result(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.saveSession" => self
-                    .handle_save_session(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.changePosition" => self
-                    .handle_change_position(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.forceRemove" => self
-                    .handle_force_remove(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "system.multicall" => JsonRpcResponse::error(
-                    Some(id),
-                    -32600,
-                    "Nested system.multicall is not supported".to_string(),
-                ),
-                _ => JsonRpcResponse::error(
-                    Some(id),
-                    -32601,
-                    format!("Method not found: {}", sub_request.method),
-                ),
+            let sub_request =
+                JsonRpcRequest::new(method_name, stripped_params.unwrap_or(call_params));
+
+            let sub_response = match self.auth_middleware.validate(effective_token) {
+                Ok(()) => self.dispatch_single(&sub_request).await,
+                Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
             };
 
             // Per C++ aria2 system.multicall spec: each successful result is

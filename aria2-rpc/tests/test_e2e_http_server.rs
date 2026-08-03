@@ -225,7 +225,7 @@ async fn e2e_unknown_rpc_method() {
     let client = Client::new();
 
     let resp = rpc_call(&client, &base, "aria2.nonexistentMethod", json!([])).await;
-    assert_error_code(&resp, -32601);
+    assert_error_code(&resp, 1);
 }
 
 // =========================================================================

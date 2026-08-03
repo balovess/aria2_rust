@@ -219,8 +219,8 @@ async fn test_force_pause_nonexistent_gid() {
     );
     assert_eq!(
         force_pause_resp.error.unwrap().code,
-        -32601,
-        "Error code should be MethodNotFound"
+        1,
+        "Error code should be RpcExecution (1)"
     );
 }
 

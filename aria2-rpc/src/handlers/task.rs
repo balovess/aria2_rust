@@ -268,7 +268,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -311,7 +311,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -352,7 +352,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -435,7 +435,7 @@ impl RpcEngine {
                     serde_json::json!(gid),
                 ))
             }
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -455,7 +455,7 @@ impl RpcEngine {
                     JsonRpcError::InternalError(format!("Serialization failed: {}", e))
                 })?,
             )),
-            None => Err(JsonRpcError::MethodNotFound(format!(
+            None => Err(JsonRpcError::RpcExecution(format!(
                 "GID {} not found",
                 gid
             ))),
@@ -550,7 +550,7 @@ impl RpcEngine {
         let mut tasks = self.tasks.write().await;
         let state = tasks
             .get_mut(&gid)
-            .ok_or_else(|| JsonRpcError::MethodNotFound(format!("GID {} not found", gid)))?;
+            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
 
         // Count deletions before modifying
         let del_count = if let Some(ref to_remove) = del_uris {
@@ -598,7 +598,7 @@ impl RpcEngine {
             Some(std::path::PathBuf::from(param_path))
         };
         let path = target.ok_or_else(|| {
-            JsonRpcError::MethodNotFound(
+            JsonRpcError::RpcExecution(
                 "Filename is not given. Set --save-session or pass a path.".into(),
             )
         })?;
@@ -655,7 +655,7 @@ impl RpcEngine {
         let mut tasks = self.tasks.write().await;
         let state = tasks
             .get_mut(&gid)
-            .ok_or_else(|| JsonRpcError::MethodNotFound(format!("GID {} not found", gid)))?;
+            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
 
         let len = state.uris.len() as i64;
         let current_pos = 0i64;
@@ -820,6 +820,7 @@ impl RpcEngine {
 
         // Start a real download if we have shared engine state
         // Prefer EngineCommand (v2) over Box<dyn Command> (v1).
+        let mut registered_in_group_man = false;
         if let (Some(group_man), Some(engine_cmd_tx)) = (&self.group_man, &self.engine_cmd_tx) {
             let man = group_man.read().await;
             man.add_group_with_gid(gid, uris.clone(), dl_options.clone())
@@ -838,6 +839,7 @@ impl RpcEngine {
                 .map_err(|e| {
                     JsonRpcError::InternalError(format!("Failed to send engine command: {}", e))
                 })?;
+            registered_in_group_man = true;
         } else if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
             // Fallback: v1 path using Box<dyn Command>.
             let man = group_man.read().await;
@@ -864,6 +866,7 @@ impl RpcEngine {
             cmd_tx.send(Box::new(cmd)).map_err(|e| {
                 JsonRpcError::InternalError(format!("Failed to send command: {}", e))
             })?;
+            registered_in_group_man = true;
         }
 
         // Track in RPC tasks map (for cancel_token, options metadata)
@@ -882,6 +885,15 @@ impl RpcEngine {
         {
             let mut tasks = self.tasks.write().await;
             tasks.insert(gid_str.clone(), state);
+        }
+        // Persist the merged per-task options so `aria2.getOption` can resolve
+        // them even when the engine has no shared RequestGroupMan (bare-engine
+        // mode). Wired engines resolve getOption through the live
+        // RequestGroupMan global options, so writing here would shadow that
+        // fallback with a stale add-time snapshot.
+        if !registered_in_group_man {
+            let mut task_opts = self.task_opts.write().await;
+            task_opts.insert(gid_str.clone(), merged_options);
         }
         // C++ aria2 notification only includes gid (no files field)
         let _ = self.event_publisher.publish(

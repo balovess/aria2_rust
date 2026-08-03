@@ -142,8 +142,8 @@ async fn test_tell_status_zero_for_nonexistent_gid() {
     );
     assert_eq!(
         tell_resp.error.unwrap().code,
-        -32601,
-        "error code should be MethodNotFound (-32601)"
+        1,
+        "error code should be RpcExecution (1)"
     );
 }
 
@@ -265,7 +265,7 @@ async fn test_get_peers_unknown_gid() {
         JsonRpcRequest::new("aria2.getPeers", serde_json::json!(["nonexistent-gid"])).with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_error(), "getPeers should fail for non-existent GID");
-    assert_eq!(resp.error.unwrap().code, -32601);
+    assert_eq!(resp.error.unwrap().code, 1);
 }
 
 #[tokio::test]
@@ -1003,8 +1003,8 @@ async fn test_get_uris_unknown_gid_returns_error() {
     assert!(resp.is_error(), "getUris should fail for unknown GID");
     assert_eq!(
         resp.error.unwrap().code,
-        -32601,
-        "Should be MethodNotFound error"
+        1,
+        "Should be RpcExecution error"
     );
 }
 
@@ -1090,7 +1090,7 @@ async fn test_get_files_unknown_gid_returns_error() {
     let req = JsonRpcRequest::new("aria2.getFiles", serde_json::json!(["unknown-gid"])).with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_error(), "getFiles should fail for unknown GID");
-    assert_eq!(resp.error.unwrap().code, -32601);
+    assert_eq!(resp.error.unwrap().code, 1);
 }
 
 #[tokio::test]
@@ -1198,7 +1198,7 @@ async fn test_get_servers_unknown_gid_returns_error() {
     let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!(["bad-gid"])).with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_error(), "getServers should fail for unknown GID");
-    assert_eq!(resp.error.unwrap().code, -32601);
+    assert_eq!(resp.error.unwrap().code, 1);
 }
 
 #[tokio::test]
@@ -1382,8 +1382,8 @@ async fn test_purge_download_result_gid_not_found() {
     );
     assert_eq!(
         resp.error.unwrap().code,
-        -32601,
-        "Should be MethodNotFound error"
+        1,
+        "Should be RpcExecution error"
     );
 }
 

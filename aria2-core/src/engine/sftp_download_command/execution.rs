@@ -323,6 +323,12 @@ impl Command for SftpDownloadCommand {
         self.group.recover().gid()
     }
 
+    fn request_group(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+        Some(std::sync::Arc::clone(&self.group))
+    }
+
     /// Return the timeout for this command.
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(constants::SFTP_COMMAND_TIMEOUT_SECS))

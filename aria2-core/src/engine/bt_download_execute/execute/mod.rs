@@ -342,6 +342,12 @@ impl Command for BtDownloadCommand {
         self.group.recover().gid()
     }
 
+    fn request_group(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>> {
+        Some(std::sync::Arc::clone(&self.group))
+    }
+
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(600))
     }

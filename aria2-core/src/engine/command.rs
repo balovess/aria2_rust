@@ -1,6 +1,7 @@
 use crate::error::Result;
-use crate::request::request_group::GroupId;
+use crate::request::request_group::{GroupId, RequestGroup};
 use async_trait::async_trait;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,4 +63,18 @@ pub trait Command: Send + Sync {
     /// to, so it can decrement the `num_commands` counter and check whether
     /// the group should be demoted from active to stopped.
     fn gid(&self) -> GroupId;
+
+    /// Returns the `RequestGroup` this command drives, when it has one.
+    ///
+    /// The v1 engine loop (`DownloadEngine::run()`) dispatches opaque
+    /// `Box<dyn Command>` tasks and has no `RequestGroupMan` of its own, so
+    /// without this accessor a failed download would leave its group stuck in
+    /// `Active` forever: `aria2.tellStatus` would keep reporting the download
+    /// as running and `aria2.onDownloadError` would never be emitted.
+    ///
+    /// Bookkeeping commands (session auto-save, etc.) have no group and keep
+    /// the default `None`.
+    fn request_group(&self) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
+        None
+    }
 }

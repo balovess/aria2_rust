@@ -11,6 +11,8 @@ pub enum JsonRpcError {
     InvalidParams(String),
     InternalError(String),
     ServerError(i32, String),
+    /// Domain error (e.g. "GID not found", "No such method") — code: 1 (matches C++).
+    RpcExecution(String),
     /// Authentication failure — token missing or invalid (code: -32001)
     Unauthorized(String),
 }
@@ -24,6 +26,7 @@ impl fmt::Display for JsonRpcError {
             Self::InvalidParams(s) => write!(f, "Invalid params: {}", s),
             Self::InternalError(s) => write!(f, "Internal error: {}", s),
             Self::ServerError(code, s) => write!(f, "Server error ({}): {}", code, s),
+            Self::RpcExecution(s) => write!(f, "Error: {}", s),
             Self::Unauthorized(s) => write!(f, "Unauthorized: {}", s),
         }
     }
@@ -40,6 +43,7 @@ impl JsonRpcError {
             Self::InvalidParams(_) => -32602,
             Self::InternalError(_) => -32603,
             Self::ServerError(c, _) => *c,
+            Self::RpcExecution(_) => 1,
             Self::Unauthorized(_) => -32001,
         }
     }
@@ -51,6 +55,7 @@ impl JsonRpcError {
             | Self::MethodNotFound(s)
             | Self::InvalidParams(s)
             | Self::InternalError(s)
+            | Self::RpcExecution(s)
             | Self::Unauthorized(s) => s.clone(),
             Self::ServerError(_, s) => s.clone(),
         }
@@ -383,6 +388,7 @@ mod tests {
         assert_eq!(JsonRpcError::ParseError("x".into()).code(), -32700);
         assert_eq!(JsonRpcError::InvalidRequest("x".into()).code(), -32600);
         assert_eq!(JsonRpcError::MethodNotFound("x".into()).code(), -32601);
+        assert_eq!(JsonRpcError::RpcExecution("x".into()).code(), 1);
         assert_eq!(JsonRpcError::InvalidParams("x".into()).code(), -32602);
         assert_eq!(JsonRpcError::InternalError("x".into()).code(), -32603);
         assert_eq!(JsonRpcError::ServerError(-100, "x".into()).code(), -100);

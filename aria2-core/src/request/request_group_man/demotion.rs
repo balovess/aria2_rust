@@ -286,8 +286,14 @@ impl super::RequestGroupMan {
                         _ => None,
                     };
 
-                    if let Some(cmd) = command {
-                        if !cmd.is_empty() {
+                    // NOTE: every branch below reaches the hook bus, because
+                    // the bus also drives the RPC WebSocket notifications
+                    // (aria2.onDownloadComplete / onDownloadError). Skipping
+                    // the call when no per-group command is configured — as an
+                    // earlier revision did for `Some("")` — silently dropped
+                    // those notifications.
+                    match command {
+                        Some(cmd) if !cmd.is_empty() => {
                             hooks.fire_event_with_params(
                                 event,
                                 &ctx.gid_hex,
@@ -296,9 +302,9 @@ impl super::RequestGroupMan {
                                 cmd,
                             );
                         }
-                    } else {
-                        // Fall back to global hooks
-                        hooks.fire_event(event, &*dg.group.recover());
+                        // No per-group command: fall back to global hooks
+                        // (and still notify observers unconditionally).
+                        _ => hooks.fire_event(event, &*dg.group.recover()),
                     }
                 }
             }
