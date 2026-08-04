@@ -612,8 +612,17 @@ const ZERO_FILL_CHUNK: usize = 256 * 1024;
 /// tick. `Falloc` and `Trunc` are atomic system calls and need no chunking;
 /// the `secure` flag is honoured only for fallocate (zero-fill on platforms
 /// that don't, e.g. macOS `F_PREALLOCATE` / Windows `SetFileValidData`).
-async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEntry) -> Result<()> {
+async fn allocate_single_file(
+    path: &Path,
+    length: u64,
+    entry: &FileAllocationEntry,
+    progress_base: u64,
+) -> Result<()> {
     let offset = current_size(path).await;
+    let existing = offset.min(length);
+    entry
+        .progress
+        .store(progress_base + existing, Ordering::Relaxed);
     if offset >= length {
         debug!(path = %path.display(), "Skipping allocation, file already large enough");
         return Ok(());
@@ -637,7 +646,7 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
                     let n = ((length - pos) as usize).min(ZERO_FILL_CHUNK);
                     adaptor.write(pos, &buf[..n]).await?;
                     pos += n as u64;
-                    entry.progress.store(pos, Ordering::Relaxed);
+                    entry.progress.store(progress_base + pos, Ordering::Relaxed);
                     tokio::task::yield_now().await;
                 }
                 if pos > length {
@@ -647,7 +656,9 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
             }
             AllocationStrategy::Trunc => {
                 adaptor.truncate(length).await?;
-                entry.progress.store(length, Ordering::Relaxed);
+                entry
+                    .progress
+                    .store(progress_base + length, Ordering::Relaxed);
                 Ok(())
             }
             AllocationStrategy::Falloc | AllocationStrategy::Mmap => {
@@ -661,7 +672,9 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
                     entry.secure_falloc,
                 )
                 .await?;
-                entry.progress.store(length, Ordering::Relaxed);
+                entry
+                    .progress
+                    .store(progress_base + length, Ordering::Relaxed);
                 Ok(())
             }
             AllocationStrategy::None => Ok(()),

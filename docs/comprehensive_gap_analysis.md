@@ -209,7 +209,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | FTP Connection Pool | Complete | Operations, stats, max connections |
 | FtpFinishDownload | Complete | 226 response + connection pooling |
 | FtpDownloadCommand | Partial | Pre-allocation integration could be improved |
-| Active mode (PORT/EPRT) | Missing | Only PASV/EPSV passive mode implemented |
+| Active mode (PORT/EPRT) | Partial | `FtpDownloadCommand` now reads `ftp-pasv`, advertises EPRT with IPv4 PORT fallback, waits for the server-side data connection after RETR, and preserves passive mode separately. Proxy/NAT external-address configuration and full active-mode integration tests remain. |
 
 #### C++ FTP Command Chain Status
 
@@ -573,7 +573,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | 8 | Cookie | eraseConfidentialInfo() | TODO |
 | 9 | LPD | Multicast interface config | TODO |
 | 10 | WebSocket | Extra onBtCacheChanged event type | Present |
-| 11 | FileAllocation | Allocation progress events | TODO |
+| 11 | FileAllocation | Allocation progress events | FIXED |
 | 12 | aria2-next | ED2K/eDonkey protocol | Missing |
 | 13 | aria2-next | Peer rename | NOT Adopted |
 | 14 | aria2-next | --detach-share-only rename | NOT Adopted |

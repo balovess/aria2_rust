@@ -318,6 +318,66 @@ impl RawFtpControl {
         }
     }
 
+    /// Create an active-mode listener and advertise it with EPRT/PORT.
+    pub(super) async fn enter_active_mode(&mut self) -> Result<tokio::net::TcpListener> {
+        let local_addr =
+            self.reader.get_ref().local_addr().map_err(|e| {
+                Aria2Error::Network(format!("FTP local address unavailable: {}", e))
+            })?;
+        let listener = tokio::net::TcpListener::bind(match local_addr {
+            std::net::SocketAddr::V4(_) => "0.0.0.0:0",
+            std::net::SocketAddr::V6(_) => "[::]:0",
+        })
+        .await
+        .map_err(|e| Aria2Error::Network(format!("FTP active listener bind failed: {}", e)))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| {
+                Aria2Error::Network(format!("FTP active listener address unavailable: {}", e))
+            })?
+            .port();
+        let ip = local_addr.ip();
+        let eprt = format!(
+            "EPRT |{}|{}|{}|",
+            if ip.is_ipv4() { 1 } else { 2 },
+            ip,
+            port
+        );
+        let response = self.command(&eprt).await?;
+        if !(200..300).contains(&response.0) {
+            if let std::net::IpAddr::V4(ipv4) = ip {
+                let octets = ipv4.octets();
+                let port_cmd = format!(
+                    "PORT {},{},{},{},{},{}",
+                    octets[0],
+                    octets[1],
+                    octets[2],
+                    octets[3],
+                    port / 256,
+                    port % 256
+                );
+                let port_response = self.command(&port_cmd).await?;
+                if !(200..300).contains(&port_response.0) {
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: format!(
+                                "PORT failed: {} {}",
+                                port_response.0, port_response.1
+                            ),
+                        },
+                    ));
+                }
+            } else {
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: format!("EPRT failed for IPv6: {} {}", response.0, response.1),
+                    },
+                ));
+            }
+        }
+        Ok(listener)
+    }
+
     /// Initiate file retrieval (RETR command)
     pub(super) async fn initiate_retr(&mut self, remote_path: &str) -> Result<()> {
         debug!("Initiating file retrieval: {}", remote_path);

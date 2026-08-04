@@ -209,53 +209,73 @@ impl FtpDownloadCommand {
             ctrl.set_resume_offset(self.resume_offset).await?;
         }
 
-        // Step 6: Negotiate data connection mode
-        let (data_host, data_port) = if self.passive_mode {
-            ctrl.enter_passive_mode().await?
+        // Step 6: Negotiate the data connection mode before RETR.
+        let passive_target = if self.passive_mode {
+            Some(ctrl.enter_passive_mode().await?)
         } else {
-            // Active mode would go here (not fully implemented in this version)
-            return Err(
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "Active mode not yet implemented".into(),
-                })
-                .into(),
-            );
+            None
+        };
+        let active_listener = if self.passive_mode {
+            None
+        } else {
+            Some(ctrl.enter_active_mode().await?)
         };
 
-        // Step 7: Initiate file transfer (RETR)
+        // Step 7: Initiate file transfer (RETR command).
         ctrl.initiate_retr(&self.remote_path).await?;
 
-        // Step 8: Connect to data port
-        let data_addr: std::net::SocketAddr = format!("{}:{}", data_host, data_port)
-            .parse()
+        // Step 8: Establish the data connection. In active mode the server
+        // connects back after RETR; never attempt a client-side connect.
+        let mut data_stream = if let Some((data_host, data_port)) = passive_target {
+            let data_addr: std::net::SocketAddr = format!("{}:{}", data_host, data_port)
+                .parse()
+                .map_err(|_| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: "Invalid data address".into(),
+                    })
+                })?;
+            tokio::time::timeout(
+                Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
+                tokio::net::TcpStream::connect(data_addr),
+            )
+            .await
             .map_err(|_| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "Invalid data address".into(),
+                    message: format!(
+                        "Data connection timeout via {}",
+                        ctrl.connection_context().peer_addr
+                    ),
                 })
-            })?;
-
-        let mut data_stream = tokio::time::timeout(
-            Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
-            tokio::net::TcpStream::connect(data_addr),
-        )
-        .await
-        .map_err(|_| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Data connection timeout via {}",
-                    ctrl.connection_context().peer_addr
-                ),
-            })
-        })?
-        .map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Data connection failed via {}: {}",
-                    ctrl.connection_context().peer_addr,
-                    e
-                ),
-            })
-        })?;
+            })?
+            .map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "Data connection failed via {}: {}",
+                        ctrl.connection_context().peer_addr,
+                        e
+                    ),
+                })
+            })?
+        } else {
+            let listener =
+                active_listener.expect("active listener is present when passive mode is disabled");
+            tokio::time::timeout(
+                Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
+                listener.accept(),
+            )
+            .await
+            .map_err(|_| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: "Active FTP data connection timeout".into(),
+                })
+            })?
+            .map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("Active FTP data connection failed: {}", e),
+                })
+            })?
+            .0
+        };
 
         // Set TCP no-delay on data connection
         let _ = data_stream.set_nodelay(true); // Ignore error if not supported

@@ -127,7 +127,7 @@ impl FtpDownloadCommand {
             username,
             password,
             resume_offset,
-            passive_mode: true, // Default to passive mode
+            passive_mode: options.ftp_pasv,
             max_retries: constants::DEFAULT_MAX_RETRIES,
             current_retry: 0,
             last_connection_context: None,
