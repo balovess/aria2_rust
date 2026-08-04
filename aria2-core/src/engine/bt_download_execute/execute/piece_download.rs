@@ -549,8 +549,8 @@ impl BtDownloadCommand {
                         piece_manager.mark_piece_complete(next_piece_idx as u32);
                         piece_picker.mark_completed(next_piece_idx as u32);
 
+                        let piece_bytes = bytes::Bytes::from(piece_data);
                         if let Some(ref layout) = self.multi_file_layout {
-                            let piece_bytes = bytes::Bytes::from(piece_data);
                             write_piece_to_multi_files_coalesced(
                                 layout,
                                 next_piece_idx as u32,
@@ -560,7 +560,10 @@ impl BtDownloadCommand {
                             .await?;
                         } else {
                             writer
-                                .write_at(next_piece_idx as u64 * piece_length as u64, &piece_data)
+                                .write_bytes_at(
+                                    next_piece_idx as u64 * piece_length as u64,
+                                    piece_bytes,
+                                )
                                 .await?;
                         }
 

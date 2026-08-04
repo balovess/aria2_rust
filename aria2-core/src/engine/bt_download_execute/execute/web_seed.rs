@@ -43,8 +43,8 @@ pub(super) async fn try_web_seed_fallback(
                 piece_picker.mark_completed(next_piece_idx as u32);
 
                 let web_seed_len = web_seed_data.len() as u64;
+                let web_seed_bytes = bytes::Bytes::from(web_seed_data);
                 if let Some(ref layout) = cmd.multi_file_layout {
-                    let web_seed_bytes = bytes::Bytes::from(web_seed_data);
                     write_piece_to_multi_files_coalesced(
                         layout,
                         next_piece_idx as u32,
@@ -54,9 +54,8 @@ pub(super) async fn try_web_seed_fallback(
                     .await?;
                 } else {
                     writer
-                        .write_at(next_piece_idx as u64 * piece_length as u64, &web_seed_data)
-                        .await
-                        .ok();
+                        .write_bytes_at(next_piece_idx as u64 * piece_length as u64, web_seed_bytes)
+                        .await?;
                 }
 
                 // Sync bitfield to RequestGroup for session persistence (Task 4)

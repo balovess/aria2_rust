@@ -120,8 +120,11 @@ pub struct FileAllocationEntry {
     /// Time when this entry was created (for logging elapsed time).
     pub created_at: Instant,
 
-    /// Set when this entry is cancelled (engine halt). Checked between chunks.
+    /// Set when the entry is cancelled (engine halt). Checked between chunks.
     cancelled: Arc<AtomicBool>,
+
+    /// Progress shared with the manager while the worker owns this entry.
+    progress: Arc<std::sync::atomic::AtomicU64>,
 
     /// Completion notification. The worker sends `Ok(())` on success, an
     /// `Err` on failure or cancellation. Taken out by the worker at the end.
@@ -147,6 +150,7 @@ impl FileAllocationEntry {
             protocol,
             created_at: Instant::now(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             done_tx: Some(done_tx),
         }
     }
@@ -168,6 +172,7 @@ impl FileAllocationEntry {
             protocol,
             created_at: Instant::now(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             done_tx: Some(done_tx),
         }
     }
@@ -199,6 +204,7 @@ struct PickedMeta {
     protocol: FileAllocationProtocol,
     created_at: Instant,
     cancelled: Arc<AtomicBool>,
+    progress: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PickedMeta {
@@ -213,6 +219,7 @@ impl PickedMeta {
             protocol: e.protocol,
             created_at: e.created_at,
             cancelled: Arc::clone(&e.cancelled),
+            progress: Arc::clone(&e.progress),
         }
     }
 }
@@ -241,6 +248,9 @@ pub struct FileAllocationMan {
     /// Metadata of the currently active allocation entry (if any).
     picked: Option<PickedMeta>,
 
+    /// Bytes completed by the active allocation iterator.
+    current_bytes: u64,
+
     /// Maximum number of concurrent allocations.
     /// C++ is always 1 (sequential). We allow >1 for instant strategies.
     max_concurrent: usize,
@@ -255,6 +265,7 @@ impl FileAllocationMan {
         Self {
             queue: VecDeque::new(),
             picked: None,
+            current_bytes: 0,
             max_concurrent: 1, // Sequential by default, matching C++
             active_count: 0,
         }
@@ -265,6 +276,7 @@ impl FileAllocationMan {
         Self {
             queue: VecDeque::new(),
             picked: None,
+            current_bytes: 0,
             max_concurrent: max_concurrent.max(1),
             active_count: 0,
         }
@@ -293,6 +305,7 @@ impl FileAllocationMan {
         }
         let entry = self.queue.pop_front()?;
         self.active_count += 1;
+        self.current_bytes = 0;
         debug!(gid = entry.gid, "File allocation entry picked by worker");
         self.picked = Some(PickedMeta::from_entry(&entry));
         Some(entry)
@@ -304,6 +317,7 @@ impl FileAllocationMan {
     pub fn drop_picked(&mut self) {
         if self.picked.take().is_some() {
             self.active_count = self.active_count.saturating_sub(1);
+            self.current_bytes = 0;
         }
     }
 
@@ -313,6 +327,7 @@ impl FileAllocationMan {
     pub fn complete_current(&mut self) {
         if let Some(meta) = self.picked.take() {
             self.active_count = self.active_count.saturating_sub(1);
+            self.current_bytes = 0;
             let elapsed = meta.created_at.elapsed();
             info!(
                 gid = meta.gid,
@@ -380,7 +395,24 @@ impl FileAllocationMan {
     ///
     /// Returns `(current_bytes, total_bytes)` for the picked entry.
     pub fn current_progress(&self) -> Option<(u64, u64)> {
-        self.picked.as_ref().map(|m| (0, m.total_length))
+        self.picked.as_ref().map(|m| {
+            (
+                m.progress
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .min(m.total_length),
+                m.total_length,
+            )
+        })
+    }
+
+    /// Update the active allocation progress from its iterator.
+    pub fn update_progress(&mut self, current_bytes: u64) {
+        if let Some(meta) = self.picked.as_ref() {
+            meta.progress.store(
+                current_bytes.min(meta.total_length),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
     }
 
     /// Get the currently picked entry's protocol type.
@@ -505,15 +537,14 @@ async fn run_entry_allocation(entry: &mut FileAllocationEntry) -> Result<()> {
             if entry.is_cancelled() {
                 return Err(cancelled_error());
             }
-            allocate_single_file(path, *length, entry).await
+            allocate_single_file(path, *length, entry, 0).await
         }
         AllocationKind::Multi { files } => {
             if entry.strategy == AllocationStrategy::None {
                 return Ok(());
             }
-            let mut total: u64 = 0;
+            let mut completed = 0u64;
             for (path, length) in files {
-                total += length;
                 if *length == 0 {
                     continue;
                 }
@@ -523,9 +554,9 @@ async fn run_entry_allocation(entry: &mut FileAllocationEntry) -> Result<()> {
                 if entry.is_cancelled() {
                     return Err(cancelled_error());
                 }
-                allocate_single_file(path, *length, entry).await?;
+                allocate_single_file(path, *length, entry, completed).await?;
+                completed = completed.saturating_add(*length);
             }
-            let _ = total;
             Ok(())
         }
     };
@@ -606,6 +637,7 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
                     let n = ((length - pos) as usize).min(ZERO_FILL_CHUNK);
                     adaptor.write(pos, &buf[..n]).await?;
                     pos += n as u64;
+                    entry.progress.store(pos, Ordering::Relaxed);
                     tokio::task::yield_now().await;
                 }
                 if pos > length {
@@ -613,7 +645,11 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
                 }
                 Ok(())
             }
-            AllocationStrategy::Trunc => adaptor.truncate(length).await,
+            AllocationStrategy::Trunc => {
+                adaptor.truncate(length).await?;
+                entry.progress.store(length, Ordering::Relaxed);
+                Ok(())
+            }
             AllocationStrategy::Falloc | AllocationStrategy::Mmap => {
                 // One-shot fallocate; `secure` zero-fills on platforms whose
                 // fallocate does not (macOS / Windows).
@@ -624,7 +660,9 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
                     AllocationStrategy::Falloc,
                     entry.secure_falloc,
                 )
-                .await
+                .await?;
+                entry.progress.store(length, Ordering::Relaxed);
+                Ok(())
             }
             AllocationStrategy::None => Ok(()),
         }
