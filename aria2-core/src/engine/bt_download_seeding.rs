@@ -6,6 +6,7 @@ use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use crate::engine::bt_upload_session::BtSeedingConfig;
 use crate::error::Result;
+use crate::request::request_group::HaltReason;
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
@@ -83,11 +84,10 @@ impl BtDownloadCommand {
                 (Vec::new(), None)
             }
         };
-        let announcer = Some(crate::engine::bt_tracker_comm::TrackerAnnouncer::new(
-            &announce_list,
-            &announce_url,
-        ));
-        let peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        let announcer = announce_url.as_ref().map(|_| {
+            crate::engine::bt_tracker_comm::TrackerAnnouncer::new(&announce_list, &announce_url)
+        });
+        let peer_id = self.local_peer_id;
 
         let mut manager = BtSeedManager::new_with_announcer(
             info_hash,
@@ -102,6 +102,9 @@ impl BtDownloadCommand {
         );
         manager.run_seeding_loop().await?;
 
+        if manager.halt_requested() {
+            self.group.recover().request_halt(HaltReason::UserRequest);
+        }
         self.total_uploaded = manager.total_uploaded();
         info!(
             "Seeding complete: uploaded {} bytes in {:?}",

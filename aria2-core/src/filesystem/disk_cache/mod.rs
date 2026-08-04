@@ -180,6 +180,39 @@ impl WrDiskCache {
             .count()
     }
 
+    /// Flush dirty entries through a caller-provided positioned writer.
+    ///
+    /// Entries are marked clean only after the writer reports success, so a
+    /// failed disk write remains retryable instead of being silently lost.
+    pub async fn flush_to(
+        &self,
+        writer: &mut dyn crate::filesystem::disk_writer::SeekableDiskWriter,
+    ) -> Result<()> {
+        let pending: Vec<_> = {
+            let entries = self.entries.lock().await;
+            entries
+                .values()
+                .filter(|entry| entry.dirty)
+                .map(|entry| (entry.offset, entry.data.clone(), entry.seq))
+                .collect()
+        };
+
+        for (offset, data, _) in &pending {
+            writer.write_bytes_at(*offset, data.clone()).await?;
+        }
+        writer.flush().await?;
+
+        let mut entries = self.entries.lock().await;
+        for (offset, _, seq) in pending {
+            if let Some(entry) = entries.get_mut(&offset)
+                && entry.seq == seq
+            {
+                entry.dirty = false;
+            }
+        }
+        Ok(())
+    }
+
     /// Clear all entries from the cache and reset size tracking.
     pub async fn clear(&self) -> Result<()> {
         let mut entries = self.entries.lock().await;

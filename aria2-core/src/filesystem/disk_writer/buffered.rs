@@ -216,18 +216,8 @@ impl CachedDiskWriter {
     /// entry without copying - the bytes are passed directly to
     /// `write_bytes_at` which forwards to `pwrite` (zero-copy from cache to disk).
     async fn flush_cache(&mut self) -> Result<()> {
-        if let Some(ref cache) = self.cache {
-            let entries = cache.flush().await?;
-            if !entries.is_empty() {
-                for entry in entries {
-                    let offset = entry.offset();
-                    let data = entry.into_data();
-                    if !data.is_empty() {
-                        self.writer.write_bytes_at(offset, data).await?;
-                    }
-                }
-                self.writer.flush().await?;
-            }
+        if let Some(cache) = self.cache.clone() {
+            cache.flush_to(self.writer.as_mut()).await?;
         }
         Ok(())
     }

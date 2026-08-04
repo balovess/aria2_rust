@@ -105,6 +105,8 @@ pub struct BtSeedManager {
     choking_algo: Option<ChokingAlgorithm>,
     /// Cancellation token for graceful shutdown
     cancel_token: CancellationToken,
+    /// Set when seed criteria ends the runtime, matching BtRuntime::halt.
+    halt_requested: bool,
     /// Timestamp of the last choke round
     last_choke_time: Instant,
     /// Tracker announcer for periodic re-announce while seeding
@@ -302,6 +304,7 @@ impl BtSeedManager {
             seeder_choke,
             choking_algo,
             cancel_token,
+            halt_requested: false,
             last_choke_time: Instant::now(),
             announcer,
             peer_id,
@@ -334,7 +337,22 @@ impl BtSeedManager {
             self.upload_sessions.len()
         );
 
+        // Signal the completed transition before regular seeding announces.
+        // This mirrors DefaultBtAnnounce's Completed -> Seeding event lifecycle
+        // and prevents the first seed announce from being sent as Started.
+        if let Some(announcer) = self.announcer.as_mut() {
+            announcer
+                .announce_completed(
+                    &self.info_hash,
+                    &self.peer_id,
+                    self.total_downloaded,
+                    self.total_uploaded,
+                )
+                .await;
+        }
+
         let mut tick = tokio::time::interval(SEED_TICK_INTERVAL);
+        let mut stopped_announce_sent = false;
 
         loop {
             // -- Cancellation check (non-blocking) ----------------------------
@@ -345,6 +363,7 @@ impl BtSeedManager {
 
             // -- Exit condition check ----------------------------------------
             if self.should_stop_seeding() {
+                self.halt_requested = true;
                 info!(
                     "Seed exit conditions met (uploaded={}, downloaded={}, duration={:?})",
                     self.total_uploaded,
@@ -414,11 +433,24 @@ impl BtSeedManager {
             }
         }
 
+        if let Some(announcer) = self.announcer.as_mut() {
+            announcer
+                .announce_stopped(
+                    &self.info_hash,
+                    &self.peer_id,
+                    self.total_downloaded,
+                    0,
+                    self.total_uploaded,
+                )
+                .await;
+            stopped_announce_sent = true;
+        }
         self.is_active = false;
         info!(
-            "Seeding loop ended: uploaded {} bytes in {:?}",
+            "Seeding loop ended: uploaded {} bytes in {:?} (stopped_announce_sent={})",
             self.total_uploaded,
-            self.seeding_duration()
+            self.seeding_duration(),
+            stopped_announce_sent
         );
         Ok(())
     }
@@ -590,6 +622,11 @@ impl BtSeedManager {
     /// Alias for `should_stop_seeding()`, matching C++ `shouldExit()` naming.
     pub fn should_exit(&self) -> bool {
         self.should_stop_seeding()
+    }
+
+    /// Whether a seed criterion requested runtime halt.
+    pub fn halt_requested(&self) -> bool {
+        self.halt_requested
     }
 
     /// Return total bytes uploaded during seeding.

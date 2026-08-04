@@ -172,9 +172,9 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | DefaultBtMessageFactory | PARTIAL | `BtPeerInteractive` now owns a factory-equivalent domain validator and the primary receive loop validates messages at the connection boundary. Seeder upload sessions also configure and apply the same domain validator before serving requests. BEP 5 now exposes an injectable DHT port handler on `BtPeerInteractive`. Extension dispatch now also exposes an injectable update sink, allowing metadata/PEX consumers to be wired without coupling the interaction state machine to storage or DHT implementations; PeerStorage, PieceStorage and concrete extension-factory context injection remains distributed across specialized dispatch paths. |
 | Zero-copy Piece optimization | P2 | Currently copies Piece data; C++ uses zero-copy path |
 | `addAllowedFastMessageToQueue()` | DONE | Canonical BEP 6 `compute_fast_set` is now used by the production BT setup path; identity-keyed sent tracking prevents duplicate AllowedFast messages. |
-| Write Disk Cache (WrDiskCache) | P1 | C++ has `WrDiskCacheEntry`; Rust has `disk_cache/` module but integration incomplete |
+| Write Disk Cache (WrDiskCache) | PARTIAL | `CachedDiskWriter` is used by BT single-file random piece writes and now flushes a snapshot through the positioned writer, marking entries clean only after durable writer success; concurrent replacement is protected by sequence checks. Remaining difference is C++ piece/segment-scoped cache aggregation and error propagation into piece state. |
 | `createFastIndexBitfield()` | P2 | Proper fast-piece filtering |
-| Seed phase tracker communication | P1 | Updating seed counts, re-announce during seeding |
+| Seed phase tracker communication | PARTIAL | `BtSeedManager` now emits `completed` on entry, interval-aware seeding announces, and `stopped` on exit with `downloaded=total`, `left=0`, cumulative `uploaded`, and the stable peer ID; seed criteria set a halt flag propagated to the request group. Full DownloadEngine command rescheduling and tracker event delivery under process-level shutdown still require integration testing. |
 
 ### 3. HTTP/FTP
 

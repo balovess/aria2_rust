@@ -1,4 +1,5 @@
-﻿use super::*;
+use super::*;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 
 /// Helper: create a cache with a small max size (in bytes) for testing eviction behavior
 fn make_small_cache(max_bytes: usize) -> WrDiskCache {
@@ -60,6 +61,26 @@ async fn test_flush_returns_dirty_entries() {
     assert_eq!(cache.dirty_count().await, 0);
     // But they're still in the cache
     assert_eq!(cache.count().await, 2);
+}
+
+#[tokio::test]
+async fn test_flush_to_persists_and_marks_only_successful_snapshot_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flush-to.bin");
+    let cache = make_small_cache(4096);
+    cache
+        .write(7, bytes::Bytes::from_static(b"cached"))
+        .await
+        .unwrap();
+
+    let mut writer = crate::filesystem::disk_writer::CachedDiskWriter::new(&path, None, None);
+    writer.open().await.unwrap();
+    cache.flush_to(&mut writer).await.unwrap();
+
+    assert_eq!(cache.dirty_count().await, 0);
+    writer.flush().await.unwrap();
+    let data = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&data[7..13], b"cached");
 }
 
 #[tokio::test]
