@@ -31,6 +31,8 @@ pub(crate) const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
 pub struct BtDownloadCommand {
+    /// Stable BitTorrent peer ID for this download session.
+    pub(crate) local_peer_id: [u8; 20],
     pub(crate) group: Arc<std::sync::RwLock<RequestGroup>>,
     /// Direct access to progress counters -- avoids RwLock on the hot path.
     pub(crate) progress: Arc<AtomicProgress>,
@@ -87,12 +89,13 @@ pub struct BtDownloadCommand {
 
     // BEP 6 (Fast Extension): track AllowedFast messages sent to peers
     /// Track which AllowedFast pieces have been sent to each peer
-    /// Key: peer identifier (using connection index for now)
+    /// Key: stable peer identity.
     #[allow(dead_code)]
-    pub(crate) allowed_fast_sent_peers: HashMap<usize, HashSet<u32>>,
+    pub(crate) allowed_fast_sent_peers:
+        HashMap<super::bt_download_execute::types::PeerKey, HashSet<u32>>,
 
-    /// Track suggest counts per peer to avoid spamming
-    pub(crate) suggest_sent_counts: HashMap<usize, usize>,
+    /// Track suggest counts per peer to avoid spamming.
+    pub(crate) suggest_sent_counts: HashMap<super::bt_download_execute::types::PeerKey, usize>,
 
     // Tracker event state machine (Phase 15 - H5): manages Started/Completed/Stopped events
     /// State machine for tracker announce events
@@ -139,6 +142,9 @@ pub struct BtDownloadCommand {
     /// piece writes share a single bandwidth ceiling with all concurrent
     /// downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
+
+    /// Shared rejection state for verified bad piece sources.
+    pub(crate) peer_rejection: crate::engine::bt_peer_storage::SharedPeerRejection,
 }
 
 impl BtDownloadCommand {

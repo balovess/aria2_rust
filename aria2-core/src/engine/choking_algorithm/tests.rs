@@ -1,4 +1,4 @@
-﻿//! Comprehensive test suite for the choking algorithm
+//! Comprehensive test suite for the choking algorithm
 
 use super::*;
 use std::net::SocketAddr;
@@ -10,8 +10,15 @@ fn create_test_peer(
     am_choking: bool,
     peer_interested: bool,
 ) -> PeerStats {
-    let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
-    let mut peer = PeerStats::new([0u8; 20], addr);
+    let addr: SocketAddr = format!(
+        "127.0.0.1:{}",
+        6881u32.saturating_add(download_speed as u32).min(65535)
+    )
+    .parse()
+    .unwrap();
+    let mut peer_id = [0u8; 20];
+    peer_id[..8].copy_from_slice(&download_speed.to_bits().to_be_bytes());
+    let mut peer = PeerStats::new(peer_id, addr);
     peer.download_speed = download_speed;
     peer.upload_speed = upload_speed;
     peer.am_choking = am_choking;
@@ -26,6 +33,28 @@ fn test_new_algorithm_empty() {
 
     assert!(algo.is_empty());
     assert_eq!(algo.len(), 0);
+}
+
+#[test]
+fn test_remove_peers_remaps_snubbed_and_optimistic_indices() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig::default());
+    for port in 1..=3 {
+        algo.add_peer(PeerStats::new(
+            [port as u8; 20],
+            format!("127.0.0.1:{port}").parse().unwrap(),
+        ));
+    }
+    algo.mark_peer_snubbed(1);
+    algo.current_optimistic_peer = Some(PeerIdentity {
+        peer_id: [2u8; 20],
+        addr: "127.0.0.1:2".parse().unwrap(),
+    });
+
+    algo.remove_peers(&[1]);
+
+    assert_eq!(algo.len(), 2);
+    assert!(!algo.is_explicitly_snubbed(1));
+    assert_eq!(algo.current_optimistic_peer, None);
 }
 
 #[test]
@@ -309,7 +338,7 @@ fn test_snub_detection_after_timeout() {
 }
 
 #[test]
-fn test_snubbed_peer_always_choked() {
+fn test_snubbed_peer_always_remains_choked() {
     // Test that explicitly snubbed peers always get choked
     let config = ChokingConfig {
         max_upload_slots: 2,
@@ -366,6 +395,27 @@ fn test_unsnub_on_data_received() {
         "Peer should be un-snubbed after data received"
     );
     assert_eq!(algo.snubbed_count(), 0);
+}
+
+#[test]
+fn test_identity_api_survives_peer_reordering() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig::default());
+    let first = create_test_peer(1000.0, 100.0, true, true);
+    let second = create_test_peer(2000.0, 200.0, true, true);
+    let first_identity = PeerIdentity::from(&first);
+    let second_identity = PeerIdentity::from(&second);
+    algo.add_peer(first);
+    algo.add_peer(second);
+
+    algo.mark_peer_snubbed(0);
+    algo.peers.swap(0, 1);
+    assert!(algo.is_explicitly_snubbed(1));
+    algo.on_data_received_by_identity(first_identity, 4096);
+    assert!(!algo.is_explicitly_snubbed(1));
+
+    algo.remove_peers_by_identity(&[second_identity]);
+    assert_eq!(algo.peers().len(), 1);
+    assert_eq!(PeerIdentity::from(&algo.peers()[0]), first_identity);
 }
 
 #[test]

@@ -27,6 +27,7 @@ pub const BAD_DATA_THRESHOLD: u32 = constants::PEER_STATS_BAD_DATA_THRESHOLD as 
 /// Tracks cumulative byte counts, real-time speeds via EMA, choke/interested states,
 /// timestamps for snubbed detection and unchoke rotation eligibility,
 /// and bad data detection for peer banning system.
+#[derive(Clone)]
 pub struct PeerStats {
     /// 20-byte peer identifier from the BitTorrent handshake.
     pub peer_id: [u8; 20],

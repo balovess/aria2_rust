@@ -73,7 +73,10 @@ const LEECHER_REGULAR_UNCHOKE_SLOTS: usize = 3;
 /// consistent view. Mirrors C++ `BtSeederStateChoke::PeerEntry`.
 #[derive(Debug, Clone)]
 struct SeederPeerEntry {
-    /// Index back into the caller's peer list
+    /// Stable peer identity.
+    /// Stable peer identity.
+    identity: crate::engine::choking_algorithm::PeerIdentity,
+    /// Legacy index back into the caller's peer list.
     index: usize,
     /// Whether this peer has outstanding (in-flight) upload requests
     outstanding_upload: bool,
@@ -92,6 +95,7 @@ impl SeederPeerEntry {
         let recent_unchoking =
             now.duration_since(last_am_unchoking) < SEEDER_RECENT_UNCHOKE_TIME_FRAME;
         Self {
+            identity: peer.into(),
             index,
             outstanding_upload: peer.outstanding_upload_count > 0,
             last_am_unchoking,
@@ -169,7 +173,10 @@ impl Eq for SeederPeerEntry {}
 /// Mirrors C++ `BtLeecherStateChoke::PeerEntry`.
 #[derive(Debug, Clone)]
 struct LeecherPeerEntry {
-    /// Index back into the caller's peer list
+    /// Stable peer identity.
+    #[allow(dead_code)]
+    identity: crate::engine::choking_algorithm::PeerIdentity,
+    /// Legacy index back into the caller's peer list.
     index: usize,
     /// Peer's download speed (bytes/sec), primary ranking criterion
     download_speed: i64,
@@ -186,6 +193,7 @@ impl LeecherPeerEntry {
                 .last_data_time
                 .is_some_and(|t| now.duration_since(t) < LEECHER_REGULAR_UNCHOKE_WINDOW);
         Self {
+            identity: peer.into(),
             index,
             download_speed: peer.download_speed as i64,
             regular_unchoker,

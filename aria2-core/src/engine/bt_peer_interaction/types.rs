@@ -211,14 +211,22 @@ pub enum CheckHaveResult {
 /// Collected during `receive_messages()` so the caller can apply
 /// side-effects (e.g., cancelling outstanding requests after choke)
 /// after the batch is processed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitfieldUpdate {
+    pub old: Vec<u8>,
+    pub new: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DispatchUpdate {
     /// Request slots removed by a Choke message (caller should send Cancel).
     pub cancelled_slots: Vec<RequestSlot>,
-    /// Piece index received via Have (caller should update bitfield).
+    /// Piece index received via Have (retained for compatibility).
     pub have_index: Option<u32>,
-    /// Bitfield data received (caller should update peer bitfield).
+    /// Bitfield data received (retained for compatibility).
     pub bitfield_data: Option<Vec<u8>>,
+    /// Exact old/new peer bitfield transition for one received message.
+    pub bitfield_update: Option<BitfieldUpdate>,
     /// Whether the peer choking state changed.
     pub peer_choking_changed: bool,
     /// New peer choking value (only meaningful if peer_choking_changed).

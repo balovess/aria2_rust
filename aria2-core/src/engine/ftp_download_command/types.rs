@@ -3,9 +3,12 @@
 //! Contains the `FtpDownloadCommand` struct definition, constructors,
 //! URI parsing, filename extraction, and FTP error classification.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use tracing::info;
+
+use crate::dns::dns_cache::DnsCache;
+use crate::network::ConnectionContext;
 
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -34,6 +37,9 @@ pub struct FtpDownloadCommand {
     pub(super) max_retries: u32,
     /// Current retry attempt count
     pub(super) current_retry: u32,
+    pub(super) last_connection_context: Option<ConnectionContext>,
+    pub(super) resolved_addresses: Vec<SocketAddr>,
+    pub(super) dns_cache: Option<Arc<tokio::sync::Mutex<DnsCache>>>,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for this download.
     pub(super) global_limiter: Option<RateLimiter>,
@@ -124,11 +130,22 @@ impl FtpDownloadCommand {
             passive_mode: true, // Default to passive mode
             max_retries: constants::DEFAULT_MAX_RETRIES,
             current_retry: 0,
+            last_connection_context: None,
+            resolved_addresses: Vec::new(),
+            dns_cache: None,
             global_limiter: None,
         })
     }
 
     /// Parse FTP URI into components
+    pub fn set_resolved_addresses(&mut self, addresses: Vec<SocketAddr>) {
+        self.resolved_addresses = addresses;
+    }
+
+    pub fn set_dns_cache(&mut self, dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) {
+        self.dns_cache = Some(dns_cache);
+    }
+
     pub(super) fn parse_uri(uri: &str) -> Result<(String, u16, String, String, String)> {
         if !uri.starts_with("ftp://") && !uri.starts_with("ftps://") {
             return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {

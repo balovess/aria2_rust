@@ -115,6 +115,10 @@ impl PieceProvider for DefaultPieceStorage {
         <Self as PieceStorage>::enter_end_game(self)
     }
 
+    fn update_piece_stats(&mut self, new_bitfield: &[u8], old_bitfield: &[u8]) {
+        <Self as PieceStorage>::update_piece_stats(self, new_bitfield, old_bitfield)
+    }
+
     // ── checkHave optimization support ────────────────────────────────────
 
     fn get_advertised_piece_indexes_ext(

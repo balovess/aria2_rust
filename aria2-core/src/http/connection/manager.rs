@@ -22,6 +22,7 @@ use crate::http::cookie_storage::{CookieJar, JarCookie};
 
 use super::active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
 use super::types::{HttpConfig, HttpResponse};
+use crate::network::ConnectionContext;
 
 /// HTTP connection manager
 ///
@@ -169,7 +170,38 @@ impl HttpConnectionManager {
 
     /// Legacy alias for `put_back()`.
     pub async fn release(&mut self, conn: ActiveConnection) {
-        self.put_back(conn).await;
+        self.put_back(conn).await
+    }
+
+    /// Drop an in-use connection after a network failure.
+    ///
+    /// This deliberately does not evict DNS state: the caller must decide
+    /// whether the peer was an origin address or a proxy address.
+    pub async fn discard(&mut self, mut conn: ActiveConnection) {
+        self.active_count = self.active_count.saturating_sub(1);
+        let _ = conn.shutdown().await;
+    }
+
+    /// Evict idle origin connections matching a concrete connection context.
+    /// Proxy connections are not matched because their peer is the proxy.
+    pub async fn evict_peer(&mut self, context: &ConnectionContext) -> usize {
+        let ids: Vec<u64> = self
+            .pool
+            .iter()
+            .filter_map(|(id, conn)| {
+                (!conn.is_proxied() && conn.connection_context() == context).then_some(*id)
+            })
+            .collect();
+        let mut evicted = 0;
+        for id in ids {
+            if let Some(mut conn) = self.pool.remove(&id) {
+                self.remove_from_key_deque(&conn.pool_key, id);
+                let _ = conn.shutdown().await;
+                self.active_count = self.active_count.saturating_sub(1);
+                evicted += 1;
+            }
+        }
+        evicted
     }
 
     /// Retrieve a pooled idle connection for a specific key without creating new.
@@ -525,6 +557,15 @@ impl HttpConnectionManager {
 
         let conn = ActiveConnection {
             id: conn_id,
+            connection: ConnectionContext::new(
+                host,
+                url.port_or_known_default().unwrap_or(80),
+                stream.peer_addr().map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("peer address unavailable: {e}"),
+                    })
+                })?,
+            ),
             stream,
             host: host.to_string(),
             last_used: Instant::now(),

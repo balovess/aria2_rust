@@ -16,7 +16,7 @@
 //! | `on_peer_choke/unchoke()` | Choke/unchoke event handlers |
 //! | `select_best_peer_for_request()` | Best peer selection in request loop |
 
-use crate::engine::choking_algorithm::ChokingAlgorithm;
+use crate::engine::choking_algorithm::{ChokingAlgorithm, PeerIdentity};
 use crate::engine::peer_stats::PeerStats;
 
 /// Add a peer to the choke tracking set.
@@ -25,6 +25,7 @@ use crate::engine::peer_stats::PeerStats;
 /// addition logic in C++ `PeerChokeCommand::execute()`.
 ///
 /// Returns the index of the newly added peer within the algorithm's peer list.
+/// Returns `0` when no choking algorithm is configured.
 pub fn add_peer_to_tracking(
     algo: &mut Option<ChokingAlgorithm>,
     peer_id: [u8; 8],
@@ -52,11 +53,23 @@ pub fn check_snubbed_peers(algo: &mut Option<ChokingAlgorithm>) -> Vec<usize> {
         .unwrap_or_default()
 }
 
+/// Handle a snubbed peer event by stable identity.
+pub async fn handle_snubbed_peer_by_identity(
+    algo: &mut Option<ChokingAlgorithm>,
+    identity: PeerIdentity,
+) -> crate::error::Result<()> {
+    if let Some(algo) = algo.as_mut()
+        && let Some(index) = algo
+            .peers()
+            .iter()
+            .position(|peer| PeerIdentity::from(peer) == identity)
+    {
+        algo.mark_peer_snubbed(index);
+    }
+    Ok(())
+}
+
 /// Handle a snubbed peer event.
-///
-/// Called when a peer is detected as snubbed. Marks the peer as explicitly
-/// snubbed in the algorithm (score penalty) so they get choked on the next
-/// rotation, and potentially triggers an optimistic unchoke of another peer.
 pub async fn handle_snubbed_peer(
     algo: &mut Option<ChokingAlgorithm>,
     peer_idx: usize,
@@ -71,6 +84,16 @@ pub async fn handle_snubbed_peer(
 ///
 /// Resets the snub timer for this peer. Mirrors C++ data-received
 /// side effect in the interaction loop.
+pub fn on_data_received_from_peer_by_identity(
+    algo: &mut Option<ChokingAlgorithm>,
+    identity: PeerIdentity,
+    bytes: u64,
+) {
+    if let Some(algo) = algo.as_mut() {
+        algo.on_data_received_by_identity(identity, bytes);
+    }
+}
+
 pub fn on_data_received_from_peer(
     algo: &mut Option<ChokingAlgorithm>,
     peer_idx: usize,
@@ -127,6 +150,13 @@ pub fn on_piece_received(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize, b
 ///
 /// Mirrors C++ best-peer selection in the request loop, where
 /// `peer_->peerChoking()` is checked first and snubbed peers are deprioritised.
+pub fn select_best_peer_for_request_by_identity(
+    algo: &Option<ChokingAlgorithm>,
+) -> Option<PeerIdentity> {
+    select_best_peer_for_request(algo)
+        .and_then(|index| algo.as_ref()?.get_peer(index).map(PeerIdentity::from))
+}
+
 pub fn select_best_peer_for_request(algo: &Option<ChokingAlgorithm>) -> Option<usize> {
     algo.as_ref().and_then(|a| {
         let peers = a.peers();

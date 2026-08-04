@@ -60,10 +60,6 @@ pub mod bt_message_receiver;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_message_receiver_tests;
 #[cfg(feature = "bittorrent")]
-pub mod bt_mse_handshake;
-#[cfg(all(test, feature = "bittorrent"))]
-pub mod bt_mse_handshake_tests;
-#[cfg(feature = "bittorrent")]
 pub mod bt_peer_blocklist;
 #[cfg(feature = "bittorrent")]
 pub mod bt_peer_connection;

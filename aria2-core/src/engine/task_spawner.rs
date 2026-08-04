@@ -16,6 +16,7 @@ use crate::error::Aria2Error;
 use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::selector::server_stat_man::ServerStatMan;
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Spawns a download command as a tokio task and wires up the completion
@@ -67,6 +68,12 @@ pub async fn spawn_download_task(
             result
         };
         if let Err(error) = dns_result {
+            let protocol = url::Url::parse(&first_uri)
+                .map(|url| url.scheme().to_string())
+                .unwrap_or_default();
+            let stat_man = ServerStatMan::shared();
+            stat_man.get_or_create_with_protocol(&hostname, &protocol);
+            stat_man.mark_failure_with_protocol(&hostname, &protocol, 0);
             warn!(gid = gid.value(), error = %error, "DNS resolution failed before command start");
             let completion_tx = completion_tx.clone();
             let handle = tokio::spawn(async move {
@@ -77,8 +84,14 @@ pub async fn spawn_download_task(
     }
 
     // Create the appropriate command based on URI scheme.
-    let cmd_result =
-        create_command_for_uri(&first_uri, Arc::clone(&group), &options, global_limiter);
+    let cmd_result = create_command_for_uri(
+        &first_uri,
+        Arc::clone(&group),
+        &options,
+        global_limiter,
+        &_dns_cache,
+    )
+    .await;
 
     let mut cmd: Box<dyn Command> = match cmd_result {
         Ok(c) => c,
@@ -142,11 +155,12 @@ fn direct_origin(uri: &str) -> Option<(String, u16)> {
 /// Uses `new_with_group` constructors so the externally-managed `RequestGroup`
 /// is preserved rather than creating a new one internally. This is critical
 /// for the engine loop's `num_commands` tracking and promotion/demotion flow.
-fn create_command_for_uri(
+async fn create_command_for_uri(
     uri: &str,
     group: Arc<std::sync::RwLock<RequestGroup>>,
     options: &DownloadOptions,
     global_limiter: Option<RateLimiter>,
+    dns_cache: &Arc<tokio::sync::Mutex<DnsCache>>,
 ) -> crate::error::Result<Box<dyn Command>> {
     let uri_lower = uri.to_lowercase();
 
@@ -175,6 +189,12 @@ fn create_command_for_uri(
         )?;
         if let Some(limiter) = global_limiter.clone() {
             cmd.set_global_limiter(limiter);
+        }
+        cmd.set_dns_cache(Arc::clone(dns_cache));
+        if let Some((hostname, port)) = direct_origin(uri) {
+            if let Ok(addresses) = dns_cache.lock().await.resolve(&hostname, port).await {
+                cmd.set_resolved_addresses(addresses);
+            }
         }
         return Ok(Box::new(cmd));
     }

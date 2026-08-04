@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
+use super::super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::Result;
@@ -148,7 +149,9 @@ impl BtDownloadCommand {
                 Ok(count) => {
                     total_sent += count as u64;
                     if !sent_for_peer.is_empty() {
-                        self.allowed_fast_sent_peers.insert(idx, sent_for_peer);
+                        if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
+                            self.allowed_fast_sent_peers.insert(peer_key, sent_for_peer);
+                        }
                     }
                 }
                 Err(e) => {
@@ -177,20 +180,21 @@ impl BtDownloadCommand {
     /// The caller should flush the buffer after calling this method.
     pub async fn send_suggest_to_peer(
         &mut self,
-        peer_idx: usize,
+        peer_key: PeerKey,
         piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
         conn: &mut BtPeerConn,
     ) -> Result<usize> {
         // Check if we've already sent too many suggests to this peer
         let sent_count = self
             .suggest_sent_counts
-            .get(&peer_idx)
+            .get(&peer_key)
             .copied()
             .unwrap_or(0);
         if sent_count >= Self::MAX_SUGGEST_PER_PEER {
             debug!(
                 "[BEP6] Already sent {} suggests to peer {}, skipping",
-                sent_count, peer_idx
+                sent_count,
+                peer_key.address()
             );
             return Ok(0);
         }
@@ -221,7 +225,8 @@ impl BtDownloadCommand {
             conn.queue_message(msg_bytes);
             debug!(
                 "[BEP6] Queued Suggest for piece {} to peer {}",
-                piece_idx, peer_idx
+                piece_idx,
+                peer_key.address()
             );
         }
 
@@ -230,11 +235,13 @@ impl BtDownloadCommand {
 
             // Update suggest count for this peer
             let new_count = sent_count + count;
-            self.suggest_sent_counts.insert(peer_idx, new_count);
+            self.suggest_sent_counts.insert(peer_key, new_count);
 
             info!(
                 "[BEP6] Sent {} Suggest messages to peer {} (total: {})",
-                count, peer_idx, new_count
+                count,
+                peer_key.address(),
+                new_count
             );
         }
 

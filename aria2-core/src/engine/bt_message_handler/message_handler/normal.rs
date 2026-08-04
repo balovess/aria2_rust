@@ -7,7 +7,7 @@ use tracing::{debug, info, trace, warn};
 
 use super::super::types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_BLOCK_READ_MESSAGES,
-    MAX_RETRIES,
+    MAX_RETRIES, PieceDownloadResult,
 };
 use super::BtMessageHandler;
 
@@ -50,6 +50,7 @@ impl BtMessageHandler {
         );
 
         let mut total_bytes = 0u64;
+        let mut failed_peers = Vec::new();
 
         // Try each peer in order until we get the block
         for (conn_idx, conn) in connections.iter_mut().enumerate() {
@@ -58,6 +59,9 @@ impl BtMessageHandler {
             // Send request to this peer
             if conn.send_request(req.clone()).await.is_err() {
                 warn!("[BT] Failed to send request to peer {}", conn_idx);
+                if let Ok(addr) = format!("{}:{}", conn.ip_addr, conn.port).parse() {
+                    failed_peers.push(addr);
+                }
                 continue;
             }
 
@@ -80,7 +84,9 @@ impl BtMessageHandler {
                     return Ok(BlockDownloadResult {
                         success: true,
                         data: Some(data),
+                        peer_index: Some(conn_idx),
                         bytes_received: total_bytes,
+                        failed_peers,
                     });
                 }
                 Ok(Err(e)) => {
@@ -88,12 +94,18 @@ impl BtMessageHandler {
                         "[BT] No PIECE message received from peer {}: {}",
                         conn_idx, e
                     );
+                    if let Ok(addr) = format!("{}:{}", conn.ip_addr, conn.port).parse() {
+                        failed_peers.push(addr);
+                    }
                 }
                 Err(_) => {
                     warn!(
                         "[BT] Block request timed out after {}s",
                         BLOCK_REQUEST_TIMEOUT_SECS
                     );
+                    if let Ok(addr) = format!("{}:{}", conn.ip_addr, conn.port).parse() {
+                        failed_peers.push(addr);
+                    }
                 }
             }
         }
@@ -103,7 +115,9 @@ impl BtMessageHandler {
         Ok(BlockDownloadResult {
             success: false,
             data: None,
+            peer_index: None,
             bytes_received: total_bytes,
+            failed_peers,
         })
     }
 
@@ -308,6 +322,32 @@ impl BtMessageHandler {
     /// # Returns
     /// * `Ok(Vec<u8>)` - Complete piece data if all blocks downloaded successfully
     /// * `Err(Aria2Error)` - If piece download fails after all retries
+    pub async fn download_piece_blocks_with_sources(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    ) -> Result<PieceDownloadResult> {
+        let mut source_peers = Vec::with_capacity(num_blocks as usize);
+        let mut failed_peers = Vec::new();
+        let data = Self::download_piece_blocks_inner(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            dht_engine,
+            &mut source_peers,
+            &mut failed_peers,
+        )
+        .await?;
+        Ok(PieceDownloadResult {
+            data,
+            source_peers,
+            failed_peers,
+        })
+    }
+
     pub async fn download_piece_blocks(
         connections: &mut [BtPeerConn],
         piece_index: u32,
@@ -315,8 +355,30 @@ impl BtMessageHandler {
         num_blocks: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<Vec<u8>> {
+        Ok(Self::download_piece_blocks_with_sources(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            dht_engine,
+        )
+        .await?
+        .data)
+    }
+
+    async fn download_piece_blocks_inner(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        source_peers: &mut Vec<std::net::SocketAddr>,
+        failed_peers: &mut Vec<std::net::SocketAddr>,
+    ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times
         for _retry in 0..MAX_RETRIES {
+            source_peers.clear();
+            failed_peers.clear();
             info!(
                 "[BT] Piece download attempt {} for piece {}",
                 _retry + 1,
@@ -350,20 +412,32 @@ impl BtMessageHandler {
                     .await
                 {
                     Ok(result) if result.success => {
+                        failed_peers.extend(result.failed_peers);
                         if let Some(data) = result.data {
+                            if let Some(peer_index) = result.peer_index {
+                                if let Some(peer) = connections.get(peer_index) {
+                                    if let Ok(ip) = peer.ip_addr.parse() {
+                                        source_peers.push(std::net::SocketAddr::new(ip, peer.port));
+                                    }
+                                }
+                            }
                             piece_data.extend_from_slice(&data);
                         } else {
                             all_blocks_ok = false;
                             break;
                         }
                     }
-                    Ok(_) => {
+                    Ok(result) => {
+                        failed_peers.extend(result.failed_peers);
                         warn!("[BT] Block {} request returned no data", block_idx);
                         all_blocks_ok = false;
                         break;
                     }
                     Err(e) => {
-                        warn!("[BT] Block {} request error: {}", block_idx, e);
+                        warn!(
+                            "[BT] Block {} request failed; retrying entire piece: {}",
+                            block_idx, e
+                        );
                         all_blocks_ok = false;
                         break;
                     }

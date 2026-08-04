@@ -145,6 +145,11 @@ fn test_resume_offset_calculation() {
 
 #[tokio::test]
 async fn test_raw_ftp_control_connect_invalid_address() {
-    let result = RawFtpControl::connect("invalid.host.name.invalid", 21).await;
+    let result = RawFtpControl::connect_at(
+        "invalid.host.name.invalid",
+        21,
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await;
     assert!(result.is_err());
 }

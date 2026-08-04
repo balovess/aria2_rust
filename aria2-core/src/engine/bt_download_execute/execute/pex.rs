@@ -23,10 +23,13 @@ use std::collections::HashSet;
 use std::time::Instant;
 use tracing::{debug, info, trace, warn};
 
+use super::super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::extension_registry::ExtensionUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::extension::pex::PexHandler;
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
 use aria2_protocol::bittorrent::peer::connection::PeerAddr;
@@ -206,17 +209,19 @@ impl BtDownloadCommand {
     /// connections up to a reasonable limit per batch.
     ///
     /// # Returns
-    /// * Number of newly connected peers.
+    /// The successfully connected peers, ready for piece scheduling.
     pub async fn connect_to_pex_discovered_peers(
         &mut self,
         new_peers: &[PeerAddr],
         info_hash_raw: &[u8; 20],
-        _num_pieces: u32,
+        num_pieces: u32,
         active_connections: &[BtPeerConn],
-    ) -> usize {
+        piece_length: u32,
+        total_size: u64,
+    ) -> Vec<BtPeerConn> {
         // BEP 0027: never connect to PEX-discovered peers for private torrents.
         if self.is_private || new_peers.is_empty() {
-            return 0;
+            return Vec::new();
         }
 
         // Build a set of already-connected (ip, port) tuples.
@@ -228,27 +233,45 @@ impl BtDownloadCommand {
         let peers_to_connect: Vec<PeerAddr> = new_peers
             .iter()
             .filter(|peer| !already_connected.contains(&(peer.ip.clone(), peer.port)))
+            .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
             .take(10) // Limit to 10 new connections per PEX batch
             .cloned()
             .collect();
 
         if peers_to_connect.is_empty() {
             debug!("[PEX] All discovered peers already connected");
-            return 0;
+            return Vec::new();
         }
 
         info!(
             "[PEX] Attempting to connect to {} new peers discovered via PEX",
             peers_to_connect.len()
         );
+        let (require_crypto, force_encrypt) = {
+            let group = self.group.recover();
+            (
+                group.options().bt_require_crypto,
+                group.options().bt_force_encrypt,
+            )
+        };
 
         // Attempt connections. Errors are logged but don't fail the batch.
-        let mut connected = 0usize;
+        let mut connected = Vec::with_capacity(peers_to_connect.len());
         for peer in &peers_to_connect {
-            match BtPeerConn::connect_plain(peer, info_hash_raw).await {
-                Ok(_conn) => {
+            match BtPeerInteraction::connect_peer_ready(
+                peer,
+                info_hash_raw,
+                require_crypto,
+                force_encrypt,
+                num_pieces,
+                piece_length,
+                total_size,
+            )
+            .await
+            {
+                Ok(conn) => {
                     debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
-                    connected += 1;
+                    connected.push(conn);
                 }
                 Err(e) => {
                     debug!(
@@ -259,6 +282,7 @@ impl BtDownloadCommand {
             }
         }
 
+        // Return only connections that were established successfully.
         connected
     }
 }
@@ -280,7 +304,7 @@ impl BtDownloadCommand {
 pub(super) async fn send_periodic_pex(
     cmd: &mut BtDownloadCommand,
     active_connections: &mut [BtPeerConn],
-    pex_enabled_peers: &HashSet<usize>,
+    pex_enabled_peers: &HashSet<PeerKey>,
     last_pex_send: &mut Instant,
     pex_send_interval_secs: u64,
 ) {
@@ -295,8 +319,11 @@ pub(super) async fn send_periodic_pex(
     let pex_peers_count = cmd.pex_known_peers.len();
     let mut sent_count = 0usize;
 
-    for &peer_idx in pex_enabled_peers.iter() {
-        if let Some(conn) = active_connections.get_mut(peer_idx) {
+    for &peer_key in pex_enabled_peers.iter() {
+        if let Some(conn) = active_connections
+            .iter_mut()
+            .find(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port) == Some(peer_key))
+        {
             // Get the remote peer's address to exclude it from the added list.
             let remote_addr = PeerAddr::new(&conn.ip_addr, conn.port);
 
@@ -315,7 +342,10 @@ pub(super) async fn send_periodic_pex(
                 if let Err(e) = conn.flush_send_buffer().await {
                     warn!(
                         "[PEX] Failed to flush send buffer for peer {} ({}:{}): {}",
-                        peer_idx, conn.ip_addr, conn.port, e
+                        peer_key.address(),
+                        conn.ip_addr,
+                        conn.port,
+                        e
                     );
                     continue;
                 }
@@ -323,7 +353,10 @@ pub(super) async fn send_periodic_pex(
                 sent_count += 1;
                 trace!(
                     "[PEX] Sent PEX to peer {} ({}:{}) with {} known peers",
-                    peer_idx, conn.ip_addr, conn.port, pex_peers_count
+                    peer_key.address(),
+                    conn.ip_addr,
+                    conn.port,
+                    pex_peers_count
                 );
             }
         }

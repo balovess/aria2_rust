@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::download::DownloadContext;
-use crate::engine::bt_peer_storage::PeerStorage;
+use crate::engine::bt_peer_storage::{PeerRejectionState, PeerStorage, SharedPeerRejection};
 use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::bt_tracker_comm::BtAnnounce;
 use crate::segment::piece_storage::PieceStorage;
@@ -41,6 +41,9 @@ pub struct BtObject {
     /// C++ uses `shared_ptr<PeerStorage>`.
     pub peer_storage: Option<Arc<dyn PeerStorage>>,
 
+    /// Shared temporary bad-peer state used by all peer discovery paths.
+    pub peer_rejection: Option<SharedPeerRejection>,
+
     /// Shared BT announce handler for this download.
     /// C++ uses `shared_ptr<BtAnnounce>`.
     pub bt_announce: Option<Arc<BtAnnounce>>,
@@ -57,6 +60,7 @@ impl BtObject {
             download_context: None,
             piece_storage: None,
             peer_storage: None,
+            peer_rejection: None,
             bt_announce: None,
             bt_progress_manager: None,
         }
@@ -90,6 +94,10 @@ impl fmt::Debug for BtObject {
             .field(
                 "peer_storage",
                 &self.peer_storage.as_ref().map(|_| "<PeerStorage>"),
+            )
+            .field(
+                "peer_rejection",
+                &self.peer_rejection.as_ref().map(|_| "<PeerRejection>"),
             )
             .field(
                 "bt_announce",
@@ -132,6 +140,7 @@ pub struct BtObjectBuilder {
     download_context: Option<Arc<DownloadContext>>,
     piece_storage: Option<Arc<dyn PieceStorage>>,
     peer_storage: Option<Arc<dyn PeerStorage>>,
+    peer_rejection: Option<SharedPeerRejection>,
     bt_announce: Option<Arc<BtAnnounce>>,
     bt_progress_manager: Option<Arc<BtProgressManager>>,
 }
@@ -155,6 +164,18 @@ impl BtObjectBuilder {
         self
     }
 
+    /// Set the shared temporary peer rejection state.
+    pub fn peer_rejection(mut self, state: SharedPeerRejection) -> Self {
+        self.peer_rejection = Some(state);
+        self
+    }
+
+    /// Create a new shared temporary peer rejection state.
+    pub fn with_peer_rejection(mut self) -> Self {
+        self.peer_rejection = Some(PeerRejectionState::shared());
+        self
+    }
+
     /// Set the BT announce handler.
     pub fn bt_announce(mut self, announce: Arc<BtAnnounce>) -> Self {
         self.bt_announce = Some(announce);
@@ -173,6 +194,7 @@ impl BtObjectBuilder {
             download_context: self.download_context,
             piece_storage: self.piece_storage,
             peer_storage: self.peer_storage,
+            peer_rejection: self.peer_rejection,
             bt_announce: self.bt_announce,
             bt_progress_manager: self.bt_progress_manager,
         }

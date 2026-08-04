@@ -1,4 +1,4 @@
-﻿//! Unchoke candidate selection logic (tit-for-tat rotation)
+//! Unchoke candidate selection logic (tit-for-tat rotation)
 
 use super::{ChokeAction, ChokingAlgorithm};
 use crate::constants;
@@ -29,7 +29,7 @@ pub(super) fn rotate_choke(algo: &mut ChokingAlgorithm) -> Vec<ChokeAction> {
         .iter()
         .enumerate()
         .map(|(i, peer)| {
-            let is_snubbed = algo.snubbed_peers.contains(&i);
+            let is_snubbed = algo.snubbed_peers.contains(&peer.into());
             (i, calculate_peer_score(peer, is_snubbed))
         })
         .collect();
@@ -76,6 +76,7 @@ pub(super) fn check_snubbed_peers_internal(algo: &mut ChokingAlgorithm) -> Vec<u
     let mut snubbed = vec![];
     for (i, peer) in algo.peers.iter_mut().enumerate() {
         if peer.check_snubbed(algo.config.snubbed_timeout_secs) {
+            algo.snubbed_peers.insert((&*peer).into());
             snubbed.push(i);
         }
     }

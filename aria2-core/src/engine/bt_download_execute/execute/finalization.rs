@@ -62,7 +62,7 @@ impl BtDownloadCommand {
         // C++ aria2 sends this in `DefaultBtAnnounce::announce()` when the
         // download completes, which transitions the event to COMPLETED.
         if let Some(ref mut announcer) = self.tracker_announcer {
-            let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+            let my_peer_id = self.local_peer_id;
             announcer
                 .announce_completed(
                     &meta.info_hash.bytes,
@@ -88,7 +88,7 @@ impl BtDownloadCommand {
         // Send "stopped" event to trackers before shutdown.
         // C++ aria2 sends stopped events in `DownloadEngine::setHaltRequested()`.
         if let Some(ref mut announcer) = self.tracker_announcer {
-            let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+            let my_peer_id = self.local_peer_id;
             announcer
                 .announce_stopped(
                     &meta.info_hash.bytes,

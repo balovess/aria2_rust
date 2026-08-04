@@ -242,7 +242,7 @@ fn test_dns_negative_cache_blocks_immediate_retry() {
     let mut cache = DnsCache::with_ttl(300, 5); // 5 second negative TTL
 
     // Record a failed lookup
-    cache.record_failure("nonexistent.invalid");
+    cache.record_failure("nonexistent.invalid", 80);
 
     // Immediate retry should be blocked
     let result = cache.resolve_no_network("nonexistent.invalid", 80);
@@ -262,7 +262,7 @@ fn test_dns_negative_cache_expiration_allows_retry() {
     let mut cache = DnsCache::with_ttl(300, 1); // 1 second negative TTL
 
     // Record a failed lookup
-    cache.record_failure("expired.invalid");
+    cache.record_failure("expired.invalid", 80);
 
     // Clear the cache to simulate expiration
     cache.clear();

@@ -92,6 +92,7 @@ pub mod filesystem;
 pub mod ftp;
 pub mod http;
 pub mod log;
+pub mod network;
 pub mod option;
 pub mod rate_limiter;
 pub mod request;

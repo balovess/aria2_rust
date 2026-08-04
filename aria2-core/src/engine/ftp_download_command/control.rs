@@ -9,6 +9,8 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
+use crate::network::ConnectionContext;
+
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 
@@ -44,19 +46,17 @@ pub(crate) fn urlencoding_decode(s: &str) -> String {
 pub(super) struct RawFtpControl {
     reader: BufReader<tokio::net::TcpStream>,
     host: String,
+    connection: ConnectionContext,
 }
 
 impl RawFtpControl {
-    /// Establish connection to FTP server and read welcome message
-    pub(super) async fn connect(host: &str, port: u16) -> Result<Self> {
+    pub(super) async fn connect_at(
+        host: &str,
+        port: u16,
+        socket_addr: std::net::SocketAddr,
+    ) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
-        let socket_addr: std::net::SocketAddr = addr.parse().map_err(|_| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("cannot parse address: {}", addr),
-            })
-        })?;
-
-        debug!("Connecting to FTP server at {}:{}", host, port);
+        debug!("Connecting to FTP server at {} via {}", addr, socket_addr);
 
         let stream = tokio::net::TcpStream::connect(socket_addr)
             .await
@@ -65,6 +65,15 @@ impl RawFtpControl {
                     message: format!("FTP connect failed to {}:{}: {}", host, port, e),
                 })
             })?;
+        let connection = ConnectionContext::new(
+            host,
+            port,
+            stream.peer_addr().map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("FTP peer address unavailable: {}", e),
+                })
+            })?,
+        );
 
         // Set TCP keepalive and no-delay options
         stream.set_nodelay(true).map_err(|e| {
@@ -76,6 +85,7 @@ impl RawFtpControl {
         let mut ctrl = Self {
             reader: BufReader::new(stream),
             host: host.to_string(),
+            connection,
         };
         let welcome = ctrl
             .read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS))
@@ -179,6 +189,10 @@ impl RawFtpControl {
         let code_val = code.unwrap_or(0);
         debug!("FTP RESP: {} {}", code_val, message.trim());
         Ok((code_val, message))
+    }
+
+    pub(super) fn connection_context(&self) -> &ConnectionContext {
+        &self.connection
     }
 
     /// Send command and read response in one operation

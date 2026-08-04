@@ -27,7 +27,9 @@ fn test_block_download_result_default() {
     let result = BlockDownloadResult {
         success: false,
         data: None,
+        peer_index: None,
         bytes_received: 0,
+        failed_peers: Vec::new(),
     };
     assert!(!result.success);
     assert!(result.data.is_none());

@@ -9,6 +9,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
 use super::entry::DnsEntry;
 use crate::error::Aria2Error;
+use crate::network::{ConnectionContext, EndpointKey};
 
 /// A DNS resolution cache with TTL support and negative caching.
 ///
@@ -23,13 +24,13 @@ use crate::error::Aria2Error;
 /// down via dependency injection rather than using global singletons.
 pub struct DnsCache {
     /// Cache of successful DNS resolutions: hostname -> DnsEntry
-    pub(crate) cache: HashMap<String, DnsEntry>,
+    pub(crate) cache: HashMap<EndpointKey, DnsEntry>,
     /// Default TTL for successfully resolved entries
     default_ttl: Duration,
     /// TTL for failed/negative lookups (prevents retry storms)
     negative_ttl: Duration,
     /// Negative cache: hostname -> timestamp of last failed lookup
-    pub(crate) negative_entries: HashMap<String, Instant>,
+    pub(crate) negative_entries: HashMap<EndpointKey, Instant>,
     /// Whether to prefer IPv4 addresses when sorting results
     ipv4_preference: bool,
     /// Fully-async hickory DNS resolver. When `None` (or on lookup error) resolution
@@ -104,15 +105,16 @@ impl DnsCache {
         hostname: &str,
         port: u16,
     ) -> Result<Vec<SocketAddr>, Aria2Error> {
+        let endpoint = EndpointKey::new(hostname, port);
         // 1. Check positive cache first
-        if let Some(entry) = self.cache.get(hostname)
+        if let Some(entry) = self.cache.get(&endpoint)
             && !entry.is_expired()
         {
             return Ok(entry.all_addresses());
         }
 
         // 2. Check negative cache (recently failed lookup)
-        if let Some(failed_at) = self.negative_entries.get(hostname)
+        if let Some(failed_at) = self.negative_entries.get(&endpoint)
             && failed_at.elapsed() < self.negative_ttl
         {
             return Err(Aria2Error::NameResolve(format!(
@@ -143,16 +145,15 @@ impl DnsCache {
                             });
                         }
 
-                        let hostname_owned = hostname.to_string();
-                        let entry = DnsEntry {
-                            hostname: hostname_owned.clone(),
-                            addresses: addrs.clone(),
-                            resolved_at: Instant::now(),
-                            ttl: actual_ttl,
-                            ipv4_preferred: self.ipv4_preference,
-                        };
-                        self.cache.insert(hostname_owned, entry);
-                        self.negative_entries.remove(hostname);
+                        let entry = DnsEntry::new(
+                            endpoint.clone(),
+                            addrs.clone(),
+                            Instant::now(),
+                            actual_ttl,
+                            self.ipv4_preference,
+                        );
+                        self.cache.insert(endpoint.clone(), entry);
+                        self.negative_entries.remove(&endpoint);
 
                         tracing::trace!(
                             hostname = hostname,
@@ -195,16 +196,15 @@ impl DnsCache {
                     });
                 }
 
-                let hostname_owned = hostname.to_string();
-                let entry = DnsEntry {
-                    hostname: hostname_owned.clone(),
-                    addresses: sorted.clone(),
-                    resolved_at: Instant::now(),
-                    ttl: self.default_ttl,
-                    ipv4_preferred: self.ipv4_preference,
-                };
-                self.cache.insert(hostname_owned, entry);
-                self.negative_entries.remove(hostname);
+                let entry = DnsEntry::new(
+                    endpoint.clone(),
+                    sorted.clone(),
+                    Instant::now(),
+                    self.default_ttl,
+                    self.ipv4_preference,
+                );
+                self.cache.insert(endpoint.clone(), entry);
+                self.negative_entries.remove(&endpoint);
 
                 tracing::trace!(
                     hostname = hostname,
@@ -215,8 +215,7 @@ impl DnsCache {
             }
             Err(e) => {
                 // Record failure in negative cache to prevent retry storms
-                self.negative_entries
-                    .insert(hostname.to_string(), Instant::now());
+                self.negative_entries.insert(endpoint, Instant::now());
                 tracing::debug!(
                     hostname = hostname,
                     error = %e,
@@ -244,7 +243,7 @@ impl DnsCache {
         hostname: &str,
         port: u16,
     ) -> Result<Vec<SocketAddr>, Aria2Error> {
-        self.cache.remove(hostname);
+        self.remove_cached(hostname, port);
         self.resolve(hostname, port).await
     }
 
@@ -257,14 +256,16 @@ impl DnsCache {
     /// Mark one resolved address as bad without discarding other addresses.
     ///
     /// This mirrors C++ `DnsCache::markBad(hostname, ipaddr, port)`: the
-    /// address is removed from the candidate list while the hostname entry
-    /// remains available for retry with another address.
+    /// address is retained as a bad candidate while good addresses remain
+    /// available for retry.
     pub fn mark_bad(&mut self, hostname: &str, address: SocketAddr) {
-        if let Some(entry) = self.cache.get_mut(hostname) {
-            entry.addresses.retain(|candidate| *candidate != address);
-            if entry.addresses.is_empty() {
-                self.cache.remove(hostname);
-            }
+        self.mark_bad_context(&ConnectionContext::new(hostname, address.port(), address));
+    }
+
+    /// Mark the peer selected by a concrete connection context as bad.
+    pub fn mark_bad_context(&mut self, context: &ConnectionContext) {
+        if let Some(entry) = self.cache.get_mut(&context.endpoint) {
+            entry.mark_bad(context.peer_addr);
         }
     }
 
@@ -273,9 +274,10 @@ impl DnsCache {
     /// This mirrors C++ `DownloadEngine::removeCachedIPAddress` and also
     /// clears the negative-cache marker so the next connection performs a
     /// fresh lookup.
-    pub fn remove_cached(&mut self, hostname: &str, _port: u16) {
-        self.cache.remove(hostname);
-        self.negative_entries.remove(hostname);
+    pub fn remove_cached(&mut self, hostname: &str, port: u16) {
+        let endpoint = EndpointKey::new(hostname, port);
+        self.cache.remove(&endpoint);
+        self.negative_entries.remove(&endpoint);
     }
 
     /// Remove expired entries from the cache.
@@ -326,9 +328,9 @@ impl DnsCache {
     ///
     /// This is useful for testing negative cache behavior without
     /// depending on network DNS resolution.
-    pub fn record_failure(&mut self, hostname: &str) {
+    pub fn record_failure(&mut self, hostname: &str, port: u16) {
         self.negative_entries
-            .insert(hostname.to_string(), Instant::now());
+            .insert(EndpointKey::new(hostname, port), Instant::now());
     }
 
     /// Check cache only (no network resolution).
@@ -341,15 +343,16 @@ impl DnsCache {
         hostname: &str,
         port: u16,
     ) -> Result<Vec<SocketAddr>, Aria2Error> {
+        let endpoint = EndpointKey::new(hostname, port);
         // 1. Check positive cache first
-        if let Some(entry) = self.cache.get(hostname)
+        if let Some(entry) = self.cache.get(&endpoint)
             && !entry.is_expired()
         {
             return Ok(entry.all_addresses());
         }
 
         // 2. Check negative cache (recently failed lookup)
-        if let Some(failed_at) = self.negative_entries.get(hostname)
+        if let Some(failed_at) = self.negative_entries.get(&endpoint)
             && failed_at.elapsed() < self.negative_ttl
         {
             return Err(Aria2Error::NameResolve(format!(

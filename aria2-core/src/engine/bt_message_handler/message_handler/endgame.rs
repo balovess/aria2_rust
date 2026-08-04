@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 
 use super::super::types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_BLOCK_READ_MESSAGES,
-    MAX_RETRIES,
+    MAX_RETRIES, PieceDownloadResult,
 };
 use super::BtMessageHandler;
 
@@ -30,6 +30,34 @@ impl BtMessageHandler {
     /// # Returns
     /// * `Ok(Vec<u8>)` - Complete piece data if all blocks downloaded successfully
     /// * `Err(Aria2Error)` - If piece download fails after all retries
+    pub async fn download_piece_blocks_endgame_with_sources(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    ) -> Result<PieceDownloadResult> {
+        let mut source_peers = Vec::with_capacity(num_blocks as usize);
+        let mut failed_peers = Vec::new();
+        let data = Self::download_piece_blocks_endgame_inner(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            &mut source_peers,
+            &mut failed_peers,
+        )
+        .await?;
+        Ok(PieceDownloadResult {
+            data,
+            source_peers,
+            failed_peers,
+        })
+    }
+
     pub async fn download_piece_blocks_endgame(
         connections: &mut [BtPeerConn],
         piece_index: u32,
@@ -38,8 +66,32 @@ impl BtMessageHandler {
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<Vec<u8>> {
+        Ok(Self::download_piece_blocks_endgame_with_sources(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+        )
+        .await?
+        .data)
+    }
+
+    async fn download_piece_blocks_endgame_inner(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        source_peers: &mut Vec<std::net::SocketAddr>,
+        failed_peers: &mut Vec<std::net::SocketAddr>,
+    ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
         for _retry in 0..MAX_RETRIES {
+            source_peers.clear();
+            failed_peers.clear();
             info!(
                 "[BT] Endgame piece download attempt {} for piece {} ({} peers)",
                 _retry + 1,
@@ -81,7 +133,15 @@ impl BtMessageHandler {
                 .await
                 {
                     Ok(result) if result.success => {
+                        failed_peers.extend(result.failed_peers);
                         if let Some(data) = result.data {
+                            if let Some(peer_index) = result.peer_index {
+                                if let Some(peer) = connections.get(peer_index) {
+                                    if let Ok(ip) = peer.ip_addr.parse() {
+                                        source_peers.push(std::net::SocketAddr::new(ip, peer.port));
+                                    }
+                                }
+                            }
                             // Phase 14 - B2: Cancel redundant requests now that we have the block
                             Self::cancel_redundant_requests(
                                 connections,
@@ -98,7 +158,8 @@ impl BtMessageHandler {
                             break;
                         }
                     }
-                    Ok(_) => {
+                    Ok(result) => {
+                        failed_peers.extend(result.failed_peers);
                         warn!("[BT] Endgame: Block {} request returned no data", block_idx);
                         all_blocks_ok = false;
                         break;
@@ -160,6 +221,7 @@ impl BtMessageHandler {
         };
 
         let mut total_bytes = 0u64;
+        let mut failed_peers = Vec::new();
 
         // Phase 14 - B1: Send request to ALL peers (not just one)
         for (conn_idx, conn) in connections.iter_mut().enumerate() {
@@ -175,11 +237,22 @@ impl BtMessageHandler {
                     "[BT] Endgame: Failed to send request to peer {}, skipping",
                     conn_idx
                 );
+                if let Ok(addr) = format!("{}:{}", conn.ip_addr, conn.port).parse() {
+                    failed_peers.push(addr);
+                }
                 continue;
             }
 
             // Track this duplicate request in endgame state
-            endgame_state.track_request(piece_index, block_offset, block_length, conn_idx);
+            let peer_key = format!("{}:{}", conn.ip_addr, conn.port)
+                .parse()
+                .map(crate::engine::bt_download_execute::types::PeerKey::new)
+                .map_err(|_| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: "invalid peer address".to_string(),
+                    })
+                })?;
+            endgame_state.track_request(piece_index, block_offset, block_length, peer_key);
         }
 
         // Now wait for the FIRST response from any peer (others will be cancelled later)
@@ -209,7 +282,9 @@ impl BtMessageHandler {
                 return Ok(BlockDownloadResult {
                     success: true,
                     data: Some(data),
+                    peer_index: Some(_peer_idx),
                     bytes_received: total_bytes,
+                    failed_peers,
                 });
             }
             Ok(Err(e)) => {
@@ -231,7 +306,9 @@ impl BtMessageHandler {
         Ok(BlockDownloadResult {
             success: false,
             data: None,
+            peer_index: None,
             bytes_received: total_bytes,
+            failed_peers,
         })
     }
 
@@ -352,19 +429,30 @@ impl BtMessageHandler {
         );
 
         // Send Cancel to each peer that had a pending request
-        for peer_id in targets {
-            if let Some(conn) = connections.get_mut(peer_id) {
+        for peer_key in targets {
+            if let Some(conn) = connections.iter_mut().find(|conn| {
+                format!("{}:{}", conn.ip_addr, conn.port)
+                    .parse::<std::net::SocketAddr>()
+                    .ok()
+                    .is_some_and(|address| {
+                        crate::engine::bt_download_execute::types::PeerKey::new(address) == peer_key
+                    })
+            }) {
                 match conn.send_cancel(&cancel_req).await {
                     Ok(()) => {
                         debug!(
                             "[BT] Endgame: Sent Cancel to peer {} for piece {} offset={} len={}",
-                            peer_id, piece_index, offset, len
+                            peer_key.address(),
+                            piece_index,
+                            offset,
+                            len
                         );
                     }
                     Err(e) => {
                         warn!(
                             "[BT] Endgame: Failed to send Cancel to peer {}: {}",
-                            peer_id, e
+                            peer_key.address(),
+                            e
                         );
                     }
                 }

@@ -44,8 +44,13 @@ impl BtPeerConn {
                     last_keepalive_sent: now,
                     last_message_received: now,
                     stats: PeerStats::new([0u8; 20], std::net::SocketAddr::new(
-                        addr.ip.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-                        addr.port,
+                        addr.ip.parse().map_err(|_| {
+                                Aria2Error::Fatal(FatalError::Config(format!(
+                                    "Invalid peer IP address: {}",
+                                    addr.ip
+                                )))
+                            })?,
+                            addr.port,
                     )),
                     pending_pex_peers: Vec::new(),
                 })
@@ -83,9 +88,12 @@ impl BtPeerConn {
                     stats: PeerStats::new(
                         [0u8; 20],
                         std::net::SocketAddr::new(
-                            addr.ip
-                                .parse()
-                                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                            addr.ip.parse().map_err(|_| {
+                                Aria2Error::Fatal(FatalError::Config(format!(
+                                    "Invalid peer IP address: {}",
+                                    addr.ip
+                                )))
+                            })?,
                             addr.port,
                         ),
                     ),

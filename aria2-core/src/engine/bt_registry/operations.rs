@@ -182,6 +182,16 @@ impl BtRegistry {
         self.pool.get(&gid).and_then(|obj| obj.peer_storage.clone())
     }
 
+    /// Get the shared temporary peer rejection state for the given GID.
+    pub fn get_peer_rejection(
+        &self,
+        gid: u64,
+    ) -> Option<crate::engine::bt_peer_storage::SharedPeerRejection> {
+        self.pool
+            .get(&gid)
+            .and_then(|obj| obj.peer_rejection.clone())
+    }
+
     /// Get the `PeerStorage` by info hash.
     ///
     /// Combines info_hash secondary index lookup with peer_storage retrieval.

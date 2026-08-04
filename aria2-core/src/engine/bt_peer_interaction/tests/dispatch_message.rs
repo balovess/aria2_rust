@@ -69,6 +69,9 @@ fn test_dispatch_have_updates_bitfield() {
         interactive.dispatch_message(BtMessage::Have { piece_index: 0 }, &mut conn, |_| false);
 
     assert_eq!(update.have_index, Some(0));
+    let transition = update.bitfield_update.expect("Have transition");
+    assert_eq!(transition.old, vec![0]);
+    assert_eq!(transition.new, vec![0x80]);
     // The peer should now have piece 0
     assert!(conn.has_piece(0));
 }
@@ -105,9 +108,27 @@ fn test_dispatch_have_all_marks_seeder() {
     let mut conn = make_test_conn();
     conn.allocate_session_resource(256 * 1024, 1024 * 1024);
 
-    let _update = interactive.dispatch_message(BtMessage::HaveAll, &mut conn, |_| false);
+    let update = interactive.dispatch_message(BtMessage::HaveAll, &mut conn, |_| false);
 
+    let transition = update.bitfield_update.expect("HaveAll transition");
+    assert_eq!(transition.old, vec![0]);
+    assert_eq!(transition.new, vec![0xf0]);
     assert!(conn.seeder);
+}
+
+#[test]
+fn test_dispatch_have_none_emits_clearing_transition() {
+    let info_hash = [0u8; 20];
+    let mut interactive = BtPeerInteractive::new(info_hash, 100);
+    let mut conn = make_test_conn();
+    conn.allocate_session_resource(256 * 1024, 1024 * 1024);
+    interactive.dispatch_message(BtMessage::HaveAll, &mut conn, |_| false);
+
+    let update = interactive.dispatch_message(BtMessage::HaveNone, &mut conn, |_| false);
+    let transition = update.bitfield_update.expect("HaveNone transition");
+    assert_eq!(transition.old, vec![0xf0]);
+    assert_eq!(transition.new, vec![0]);
+    assert!(!conn.seeder);
 }
 
 #[test]

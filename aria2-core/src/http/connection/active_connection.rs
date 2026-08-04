@@ -9,6 +9,8 @@ use tokio::time::timeout;
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 
+use crate::network::ConnectionContext;
+
 /// Proxy configuration for a pooled connection.
 ///
 /// Matches the C++ `createProxyRequest()` concept: connections through
@@ -44,6 +46,8 @@ pub struct ActiveConnection {
     pub stream: TcpStream,
     /// Target host (host:port)
     pub host: String,
+    /// Concrete origin connection selected by DNS.
+    pub connection: ConnectionContext,
     /// Last used timestamp (updated on every I/O and on pool re-entry)
     pub last_used: Instant,
     /// Timestamp when this connection was placed into the idle pool.
@@ -155,6 +159,16 @@ impl ActiveConnection {
                 Ok(())
             }
         }
+    }
+
+    /// Return the logical and concrete identity of this connection.
+    pub fn connection_context(&self) -> &ConnectionContext {
+        &self.connection
+    }
+
+    /// Whether this connection is routed through a proxy.
+    pub fn is_proxied(&self) -> bool {
+        self.pool_key.proxy.is_some()
     }
 
     /// Get peer address

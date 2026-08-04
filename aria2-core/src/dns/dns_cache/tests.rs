@@ -3,6 +3,17 @@ use std::time::{Duration, Instant};
 
 use super::cache::DnsCache;
 use super::entry::DnsEntry;
+use crate::network::EndpointKey;
+
+fn entry(hostname: &str, port: u16, addresses: Vec<SocketAddr>, ttl: Duration) -> DnsEntry {
+    DnsEntry::new(
+        EndpointKey::new(hostname, port),
+        addresses,
+        Instant::now(),
+        ttl,
+        true,
+    )
+}
 
 /// Helper: create a test cache with very short TTLs for fast testing
 fn create_test_cache() -> DnsCache {
@@ -15,14 +26,8 @@ fn test_mark_bad_removes_only_selected_address() {
     let good: SocketAddr = "127.0.0.1:80".parse().unwrap();
     let bad: SocketAddr = "127.0.0.2:80".parse().unwrap();
     cache.cache.insert(
-        "mirror.test".into(),
-        DnsEntry {
-            hostname: "mirror.test".into(),
-            addresses: vec![bad, good],
-            resolved_at: Instant::now(),
-            ttl: Duration::from_secs(60),
-            ipv4_preferred: true,
-        },
+        EndpointKey::new("mirror.test", 80),
+        entry("mirror.test", 80, vec![bad, good], Duration::from_secs(60)),
     );
     cache.mark_bad("mirror.test", bad);
     assert_eq!(
@@ -32,9 +37,86 @@ fn test_mark_bad_removes_only_selected_address() {
 }
 
 #[test]
+fn test_mark_bad_preserves_candidate_state_until_cache_removal() {
+    let mut cache = create_test_cache();
+    let address: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    let key = EndpointKey::new("mirror.test", 80);
+    cache.cache.insert(
+        key.clone(),
+        entry("mirror.test", 80, vec![address], Duration::from_secs(60)),
+    );
+
+    cache.mark_bad("mirror.test", address);
+
+    assert!(cache.cache.contains_key(&key));
+    assert!(
+        cache
+            .resolve_no_network("mirror.test", 80)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!cache.cache[&key].addresses[0].is_good());
+}
+
+#[test]
+fn test_cache_keys_include_port() {
+    let mut cache = create_test_cache();
+    let http: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    let https: SocketAddr = "127.0.0.1:443".parse().unwrap();
+    cache.cache.insert(
+        EndpointKey::new("mirror.test", 80),
+        entry("mirror.test", 80, vec![http], Duration::from_secs(60)),
+    );
+    cache.cache.insert(
+        EndpointKey::new("mirror.test", 443),
+        entry("mirror.test", 443, vec![https], Duration::from_secs(60)),
+    );
+
+    cache.mark_bad("mirror.test", http);
+
+    assert!(
+        cache
+            .resolve_no_network("mirror.test", 80)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        cache.resolve_no_network("mirror.test", 443).unwrap(),
+        vec![https]
+    );
+    cache.remove_cached("mirror.test", 80);
+    assert!(cache.resolve_no_network("mirror.test", 80).is_err());
+    assert_eq!(
+        cache.resolve_no_network("mirror.test", 443).unwrap(),
+        vec![https]
+    );
+}
+
+#[test]
+fn test_negative_cache_keys_include_port() {
+    let mut cache = create_test_cache();
+    cache.record_failure("mirror.test", 80);
+
+    assert!(
+        cache
+            .resolve_no_network("mirror.test", 80)
+            .unwrap_err()
+            .to_string()
+            .contains("recently failed")
+    );
+    assert!(
+        cache
+            .resolve_no_network("mirror.test", 443)
+            .unwrap_err()
+            .to_string()
+            .contains("No cached entry")
+    );
+}
+
+#[test]
 fn test_remove_cached_clears_positive_and_negative_entries() {
     let mut cache = create_test_cache();
-    cache.record_failure("mirror.test");
+    cache.record_failure("mirror.test", 80);
     cache.remove_cached("mirror.test", 80);
     assert!(matches!(
         cache.resolve_no_network("mirror.test", 80),
@@ -44,22 +126,16 @@ fn test_remove_cached_clears_positive_and_negative_entries() {
 
 #[test]
 fn test_dns_entry_is_expired() {
-    let entry = DnsEntry {
-        hostname: "test.com".to_string(),
-        addresses: vec![],
-        resolved_at: Instant::now(),
-        ttl: Duration::from_secs(60),
-        ipv4_preferred: true,
-    };
+    let entry = entry("test.com", 80, vec![], Duration::from_secs(60));
     assert!(!entry.is_expired());
 
-    let expired_entry = DnsEntry {
-        hostname: "old.com".to_string(),
-        addresses: vec![],
-        resolved_at: Instant::now() - Duration::from_secs(61),
-        ttl: Duration::from_secs(60),
-        ipv4_preferred: false,
-    };
+    let expired_entry = DnsEntry::new(
+        EndpointKey::new("old.com", 80),
+        vec![],
+        Instant::now() - Duration::from_secs(61),
+        Duration::from_secs(60),
+        false,
+    );
     assert!(expired_entry.is_expired());
 }
 
@@ -68,13 +144,12 @@ fn test_dns_entry_best_address_ipv4_preferred() {
     let ipv6_addr: SocketAddr = "[::1]:8080".parse().unwrap();
     let ipv4_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
-    let entry = DnsEntry {
-        hostname: "mixed.com".to_string(),
-        addresses: vec![ipv6_addr, ipv4_addr], // IPv6 first
-        resolved_at: Instant::now(),
-        ttl: Duration::from_secs(60),
-        ipv4_preferred: true,
-    };
+    let entry = entry(
+        "mixed.com",
+        8080,
+        vec![ipv6_addr, ipv4_addr],
+        Duration::from_secs(60),
+    );
 
     // Should prefer IPv4 even though it's second in list
     let best = entry.best_address().unwrap();
@@ -85,13 +160,12 @@ fn test_dns_entry_best_address_ipv4_preferred() {
 fn test_dns_entry_best_address_no_ipv4() {
     let ipv6_addr: SocketAddr = "[::1]:8080".parse().unwrap();
 
-    let entry = DnsEntry {
-        hostname: "ipv6only.com".to_string(),
-        addresses: vec![ipv6_addr],
-        resolved_at: Instant::now(),
-        ttl: Duration::from_secs(60),
-        ipv4_preferred: true,
-    };
+    let entry = entry(
+        "ipv6only.com",
+        8080,
+        vec![ipv6_addr],
+        Duration::from_secs(60),
+    );
 
     let best = entry.best_address().unwrap();
     assert_eq!(best, ipv6_addr);
@@ -99,13 +173,7 @@ fn test_dns_entry_best_address_no_ipv4() {
 
 #[test]
 fn test_dns_entry_best_address_empty() {
-    let entry = DnsEntry {
-        hostname: "empty.com".to_string(),
-        addresses: vec![],
-        resolved_at: Instant::now(),
-        ttl: Duration::from_secs(60),
-        ipv4_preferred: true,
-    };
+    let entry = entry("empty.com", 80, vec![], Duration::from_secs(60));
 
     assert!(entry.best_address().is_none());
 }
@@ -129,17 +197,18 @@ fn test_dns_cache_with_custom_ttl() {
 fn test_dns_cache_clear() {
     let mut cache = create_test_cache();
     // Manually insert something into the cache
-    let entry = DnsEntry {
-        hostname: "example.com".to_string(),
-        addresses: vec!["127.0.0.1:80".parse().unwrap()],
-        resolved_at: Instant::now(),
-        ttl: Duration::from_secs(60),
-        ipv4_preferred: true,
-    };
-    cache.cache.insert("example.com".to_string(), entry);
+    let entry = entry(
+        "example.com",
+        80,
+        vec!["127.0.0.1:80".parse().unwrap()],
+        Duration::from_secs(60),
+    );
+    cache
+        .cache
+        .insert(EndpointKey::new("example.com", 80), entry);
     cache
         .negative_entries
-        .insert("failed.com".to_string(), Instant::now());
+        .insert(EndpointKey::new("failed.com", 80), Instant::now());
 
     assert_eq!(cache.len(), 1);
     cache.clear();
@@ -193,7 +262,7 @@ fn test_negative_cache_blocks_retry() {
     let mut cache = DnsCache::with_ttl(300, 2); // 2-second negative TTL
 
     // Inject a negative cache entry directly (no network dependency)
-    cache.record_failure("test-host.invalid");
+    cache.record_failure("test-host.invalid", 80);
 
     // Immediate retry should be blocked by negative cache
     let result = cache.resolve_no_network("test-host.invalid", 80);
@@ -218,28 +287,27 @@ fn test_purge_expired_removes_old() {
     let mut cache = DnsCache::with_ttl(1, 60); // 1-second TTL
 
     // Insert an already-expired entry
-    let expired_entry = DnsEntry {
-        hostname: "expired.example.com".to_string(),
-        addresses: vec!["10.0.0.1:80".parse().unwrap()],
-        resolved_at: Instant::now() - Duration::from_secs(5), // Expired 5 seconds ago
-        ttl: Duration::from_secs(1),
-        ipv4_preferred: true,
-    };
+    let expired_entry = DnsEntry::new(
+        EndpointKey::new("expired.example.com", 80),
+        vec!["10.0.0.1:80".parse().unwrap()],
+        Instant::now() - Duration::from_secs(5),
+        Duration::from_secs(1),
+        true,
+    );
     cache
         .cache
-        .insert("expired.example.com".to_string(), expired_entry);
+        .insert(EndpointKey::new("expired.example.com", 80), expired_entry);
 
     // Insert a still-valid entry
-    let fresh_entry = DnsEntry {
-        hostname: "fresh.example.com".to_string(),
-        addresses: vec!["10.0.0.2:80".parse().unwrap()],
-        resolved_at: Instant::now(),
-        ttl: Duration::from_secs(3600), // 1 hour TTL
-        ipv4_preferred: true,
-    };
+    let fresh_entry = entry(
+        "fresh.example.com",
+        80,
+        vec!["10.0.0.2:80".parse().unwrap()],
+        Duration::from_secs(3600),
+    );
     cache
         .cache
-        .insert("fresh.example.com".to_string(), fresh_entry);
+        .insert(EndpointKey::new("fresh.example.com", 80), fresh_entry);
 
     assert_eq!(cache.len(), 2, "Should have 2 entries before purge");
 
@@ -247,11 +315,15 @@ fn test_purge_expired_removes_old() {
     assert_eq!(removed, 1, "Should remove exactly 1 expired entry");
     assert_eq!(cache.len(), 1, "Should have 1 entry remaining");
     assert!(
-        cache.cache.contains_key("fresh.example.com"),
+        cache
+            .cache
+            .contains_key(&EndpointKey::new("fresh.example.com", 80)),
         "Fresh entry should still exist"
     );
     assert!(
-        !cache.cache.contains_key("expired.example.com"),
+        !cache
+            .cache
+            .contains_key(&EndpointKey::new("expired.example.com", 80)),
         "Expired entry should be removed"
     );
 }
@@ -307,14 +379,15 @@ fn test_force_refresh_clears_cache_entry() {
     let mut cache = create_test_cache();
 
     // Manually pre-populate cache
-    let entry = DnsEntry {
-        hostname: "preloaded.com".to_string(),
-        addresses: vec!["192.168.1.1:443".parse().unwrap()],
-        resolved_at: Instant::now(),
-        ttl: Duration::from_secs(3600),
-        ipv4_preferred: true,
-    };
-    cache.cache.insert("preloaded.com".to_string(), entry);
+    let entry = entry(
+        "preloaded.com",
+        443,
+        vec!["192.168.1.1:443".parse().unwrap()],
+        Duration::from_secs(3600),
+    );
+    cache
+        .cache
+        .insert(EndpointKey::new("preloaded.com", 443), entry);
     assert_eq!(cache.len(), 1);
 
     // force_refresh should remove the existing entry (we don't await here
@@ -358,7 +431,7 @@ async fn test_dns_ttl_capped_at_default() {
     let mut cache = DnsCache::with_ttl(60, 10); // default 60s
     let _ = cache.resolve("localhost", 80).await;
     // Verify the cached entry has ttl <= 60s (capped at default_ttl).
-    if let Some(entry) = cache.cache.get("localhost") {
+    if let Some(entry) = cache.cache.get(&EndpointKey::new("localhost", 80)) {
         assert!(
             entry.ttl <= Duration::from_secs(60),
             "ttl should be capped at default, got {:?}",

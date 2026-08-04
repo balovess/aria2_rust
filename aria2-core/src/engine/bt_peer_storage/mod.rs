@@ -22,6 +22,7 @@
 mod constants;
 mod peer_entry;
 mod peer_storage_trait;
+mod rejection_state;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -33,4 +34,5 @@ pub use constants::{
 };
 pub use peer_entry::PeerEntry;
 pub use peer_storage_trait::PeerStorage;
+pub use rejection_state::{PeerRejectionState, SharedPeerRejection};
 pub use storage::DefaultPeerStorage;

@@ -1,5 +1,6 @@
 use super::*;
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::bt_download_execute::types::PeerKey;
 use std::collections::HashSet;
 
 #[test]
@@ -45,9 +46,9 @@ fn test_endgame_track_request() {
 
     let targets = es.get_cancel_targets(0, 0, 16384);
     assert_eq!(targets.len(), 3);
-    assert!(targets.contains(&0));
-    assert!(targets.contains(&1));
-    assert!(targets.contains(&2));
+    assert!(targets.contains(&PeerKey::from(0)));
+    assert!(targets.contains(&PeerKey::from(1)));
+    assert!(targets.contains(&PeerKey::from(2)));
 }
 
 #[test]
@@ -87,8 +88,8 @@ fn test_endgame_multiple_blocks_tracked_independently() {
 
     let remaining = es.get_cancel_targets(0, 16384, 16384);
     assert_eq!(remaining.len(), 2);
-    assert!(remaining.contains(&0));
-    assert!(remaining.contains(&2));
+    assert!(remaining.contains(&PeerKey::from(0)));
+    assert!(remaining.contains(&PeerKey::from(2)));
 }
 
 #[test]
@@ -126,6 +127,33 @@ fn test_endgame_track_different_piece_offsets_lengths() {
 
     let targets = es.get_cancel_targets(0, 32768, 8000);
     assert_eq!(targets.len(), 2);
+}
+
+#[test]
+fn test_endgame_remove_peer_preserves_stable_keys() {
+    let mut es = EndgameState::new();
+    es.enter_endgame();
+    es.track_request(0, 0, 16384, 0);
+    es.track_request(0, 0, 16384, 1);
+    es.track_request(0, 0, 16384, 2);
+
+    es.remove_peers(&[PeerKey::from(1)]);
+
+    assert_eq!(
+        es.get_cancel_targets(0, 0, 16384),
+        vec![PeerKey::from(0), PeerKey::from(2)]
+    );
+}
+
+#[test]
+fn test_endgame_remove_last_peer_drops_request() {
+    let mut es = EndgameState::new();
+    es.enter_endgame();
+    es.track_request(0, 0, 16384, 1);
+
+    es.remove_peers(&[PeerKey::from(1)]);
+
+    assert_eq!(es.tracked_count(), 0);
 }
 
 #[test]

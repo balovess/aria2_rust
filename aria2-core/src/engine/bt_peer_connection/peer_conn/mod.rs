@@ -132,3 +132,22 @@ pub struct BtPeerConn {
     /// types through the legacy `BtMessageHandler` API.
     pub pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
 }
+
+impl BtPeerConn {
+    /// Returns the remote peer ID learned during the protocol handshake.
+    pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
+        match &self.inner {
+            InnerConnection::Plain(conn) => conn.remote_peer_id,
+            InnerConnection::Encrypted(conn) => conn.remote_peer_id().copied(),
+            InnerConnection::Utp(_) => self.peer_id,
+        }
+    }
+
+    /// Synchronize the peer identity captured by the transport handshake.
+    pub fn sync_peer_identity(&mut self) {
+        if let Some(peer_id) = self.remote_peer_id() {
+            self.peer_id = Some(peer_id);
+            self.stats.peer_id = peer_id;
+        }
+    }
+}

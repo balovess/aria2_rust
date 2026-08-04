@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
+
 use tracing::debug;
 
 pub struct ReadyConnection {
@@ -107,6 +108,17 @@ impl BtConnectionPool {
 
     pub fn contains_addr(&self, addr: &SocketAddr) -> bool {
         self.connections.iter().any(|c| &c.addr == addr)
+    }
+
+    pub fn evict_peer(&mut self, addr: SocketAddr) -> bool {
+        let Some(index) = self
+            .connections
+            .iter()
+            .position(|connection| connection.addr == addr)
+        else {
+            return false;
+        };
+        self.connections.remove(index).is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -235,5 +247,21 @@ mod tests {
         let result2 = pool.prewarm(addr).await.unwrap();
         assert!(!result2);
         assert_eq!(pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_evict_peer_removes_only_matching_address() {
+        let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = listener1.local_addr().unwrap();
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let mut pool = BtConnectionPool::new();
+        pool.prewarm(addr1).await.unwrap();
+        pool.prewarm(addr2).await.unwrap();
+
+        assert!(pool.evict_peer(addr1));
+        assert!(!pool.contains_addr(&addr1));
+        assert!(pool.contains_addr(&addr2));
+        assert!(!pool.evict_peer(addr1));
     }
 }

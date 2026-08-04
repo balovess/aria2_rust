@@ -62,7 +62,7 @@ impl BtPeerInteractive {
         get_advertised_pieces: impl Fn() -> Vec<u32>,
         is_in_allowed_fast: impl Fn(u32) -> bool + Clone,
         is_block_acquired: impl Fn(u32, u32) -> bool,
-        piece_storage: Option<&mut dyn PieceProvider>,
+        mut piece_storage: Option<&mut dyn PieceProvider>,
         cuid: u64,
     ) -> Result<InteractionResult> {
         // If not yet wired, skip interaction processing
@@ -77,7 +77,7 @@ impl BtPeerInteractive {
             {
                 warn!("Failed to send keepalive in metadata-get mode: {}", e);
             }
-            let (count, pex_update) = self
+            let (count, pex_update, _) = self
                 .receive_messages(conn, is_in_allowed_fast.clone())
                 .await?;
             self.num_received_message = count;
@@ -117,9 +117,15 @@ impl BtPeerInteractive {
         }
 
         // ── Step 3: receiveMessages ─────────────────────────────────────
-        let (received_count, pex_update) = self
+        let (received_count, pex_update, bitfield_updates) = self
             .receive_messages(conn, is_in_allowed_fast.clone())
             .await?;
+        if let Some(storage) = piece_storage {
+            for update in &bitfield_updates {
+                storage.update_piece_stats(&update.new, &update.old);
+            }
+            piece_storage = Some(storage);
+        }
         self.num_received_message = received_count;
 
         // ── Step 4: detectMessageFlooding ───────────────────────────────

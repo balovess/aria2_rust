@@ -83,6 +83,40 @@ async fn test_connection_pool_reuse() {
 }
 
 #[tokio::test]
+async fn test_discard_decrements_active_count() {
+    let config = HttpConfig::default();
+    let mut manager = HttpConnectionManager::new(&config);
+    let (addr, server_handle) = start_test_server(|_stream| {}).await;
+    let url = Url::parse(&format!("http://{}", addr)).unwrap();
+    let conn = manager.acquire(&url, None).await.unwrap();
+    assert_eq!(manager.active_count(), 1);
+
+    manager.discard(conn).await;
+
+    assert_eq!(manager.active_count(), 0);
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_evict_peer_removes_matching_idle_direct_connection() {
+    let config = HttpConfig::default();
+    let mut manager = HttpConnectionManager::new(&config);
+    let (addr, server_handle) = start_test_server(|_stream| {}).await;
+    let url = Url::parse(&format!("http://{}", addr)).unwrap();
+    let conn = manager.acquire(&url, None).await.unwrap();
+    let context = conn.connection_context().clone();
+    manager.release(conn).await;
+    assert_eq!(manager.pool_size(), 1);
+
+    let evicted = manager.evict_peer(&context).await;
+
+    assert_eq!(evicted, 1);
+    assert_eq!(manager.pool_size(), 0);
+    assert_eq!(manager.active_count(), 0);
+    server_handle.abort();
+}
+
+#[tokio::test]
 async fn test_timeout_on_slow_server() {
     use std::time::Instant;
 

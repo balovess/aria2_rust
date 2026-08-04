@@ -97,13 +97,15 @@ impl PeerSessionResource {
     ///
     /// Copies `bitfield` into the internal storage, truncating or
     /// zero-extending as needed.
-    pub fn set_bitfield(&mut self, bitfield: &[u8]) {
+    pub fn set_bitfield(&mut self, bitfield: &[u8]) -> Vec<u8> {
+        let old = self.bitfield.clone();
         let copy_len = std::cmp::min(bitfield.len(), self.bitfield.len());
         self.bitfield[..copy_len].copy_from_slice(&bitfield[..copy_len]);
         // Zero-fill remaining bytes if source is shorter
         for byte in &mut self.bitfield[copy_len..] {
             *byte = 0;
         }
+        old
     }
 
     /// Update the peer bitfield: set (operation=1) or clear (operation=0)

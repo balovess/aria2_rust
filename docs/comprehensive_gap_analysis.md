@@ -1,6 +1,6 @@
 # aria2_rust Comprehensive Gap Analysis
 # Deep-comparison audit against C++ aria2_original and aria2-next
-# Updated: 2026-08-03 (HTTP range validation, strict segment lengths, and fallback gap safety)
+# Updated: 2026-08-04 (standard MSE API migration and BT dynamic-peer lifecycle validation)
 
 ## Executive Summary
 
@@ -119,7 +119,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | `SocketPool` (multimap) | Architectural difference | Rust uses `reqwest` connection pool instead of manual socket pooling; `FtpConnectionPool` for FTP |
 | `CookieStorage` | Present | Owned by engine in C++; separate `CookieStorage` in Rust HTTP module |
 | `BtRegistry` | Complete | `Arc<RwLock<BtRegistry>>` owned by engine, accessible via `bt_registry()` |
-| `DNSCache` | Complete | `Arc<Mutex<DnsCache>>` owned by engine |
+| `DNSCache` | Partial | Engine-owned `Arc<Mutex<DnsCache>>`; positive and negative entries are keyed by `(hostname, port)`, and candidates retain Good/Bad state. HTTP production connector integration and full exhausted-set refresh policy remain incomplete |
 | `AuthConfigFactory` | Partial | C++ has factory with resolver hierarchy. Rust has auth modules but no centralized factory |
 | `CUIDCounter` | Architectural difference | Rust uses `GroupId` (auto-incrementing atomic) instead of C++'s `cuid_t` |
 | `CheckIntegrityMan` | Missing | C++ has integrity check queue + `CheckIntegrityDispatcherCommand`. Rust has validators but no queue |
@@ -128,7 +128,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | `WebSocketSessionMan` | N/A | Handled by axum in RPC crate |
 | `RequestGroupMan` | Complete | `Arc<RwLock<RequestGroupMan>>` with DashMap active + VecDeque reserved + Vec stopped |
 | `FileAllocationMan` | Partial | Allocation strategies + iterators exist; queue/concurrent control missing |
-| `poolSocket()`/`popPooledSocket()` | Missing | Rust uses reqwest connection pool; no manual socket pooling for HTTP |
+| `poolSocket()`/`popPooledSocket()` | Partial | Raw HTTP manager has keyed LRU pooling, timeout cleanup, `discard`, and context-based idle peer eviction; reqwest download paths still use the library-managed pool |
 | `validateToken()` | Missing | C++ HMAC-based RPC token validation. Rust has separate auth middleware |
 
 ### 2. BitTorrent Core
@@ -159,7 +159,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | BtSeedManager | Partial | -- | Seed criteria tracking; re-announce communication missing |
 | BtPieceDownloader | Partial | -- | Piece download pipeline; Fast Extension Reject not fully integrated |
 | BtUploadSession | Complete | -- | Upload slot management |
-| MSE Handshake | Complete | -- | X25519 + RC4 in `aria2-protocol`; legacy impl deprecated |
+| MSE Handshake | Complete | `aria2-protocol` | Standard 768-bit DH + RC4 implementation is the only BT MSE implementation; obsolete non-interoperable engine implementation removed |
 | BtDownloadCommand | Complete | 92+ | Full execute sub-modules: piece_download, peer_management, web_seed, pex, dht, bep6, finalization |
 | Metadata Exchange | Complete | -- | `metadata_exchange.rs` for magnet link metadata fetch |
 | Magnet Download | Complete | -- | `magnet_download_command.rs` |
@@ -442,8 +442,9 @@ Missing options include: various SFTP options, some advanced logging options, a 
 
 ### 13. MSE (Protocol Encryption)
 
-**Status:** Complete
+**Status:** Partial
 **Rust files:** `aria2-protocol/src/bittorrent/extension/mse_handshake`
+**Notes:** Standard MSE/DH/RC4 is used by production, deep integration tests, and benchmarks. Dynamic PEX/tracker peers reuse the initial crypto and session initialization path. Transport-handshake peer IDs are synchronized into `BtPeerConn`/`PeerStats` before registration. Local peer ID generation is now scoped to `BtDownloadCommand` and reused for tracker started/periodic/completed/stopped announcements and self-connection checks. Dynamic PEX/tracker connections now initialize snub timing, AllowedFast/suggest state, peer tracker bitfields, and PEX registration through the same download-loop path. Have/Bitfield/HaveAll/HaveNone now emit exact old/new bitfield transitions and update global piece availability statistics through the PieceProvider boundary; regression coverage verifies Have, HaveAll, and HaveNone transitions. Block failures now return concrete failed peer addresses; the download loop releases session resources, removes failed peers, synchronizes choking and endgame index state, removes peer bitfield statistics, rebuilds index-based PEX/snubbing/AllowedFast state, and propagates final writer flush/close errors. Choking/bitfield-tracker removal and external-client interoperability still require verification. Endgame duplicate-request ownership, PEX-enabled tracking, snub timing, AllowedFast bookkeeping, and Suggest counters now use stable `PeerKey` identities rather than compacted vector positions. Choking algorithm state now stores explicit snubbing and optimistic-unchoke ownership by `PeerIdentity` (peer ID plus address). Identity-aware remove, data-received, best-peer selection, optimistic-unchoke, and choke-rotation APIs are available and covered by regression tests; legacy `usize` action/hooks remain only as compatibility boundaries while the seeder/leecher snapshot implementations are incrementally converted.
 
 ### 14. SFTP
 
@@ -550,7 +551,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | 21 | aria2-next | reduceActiveDownloadsToLimit() | DONE | `request_group_man/promotion.rs` `reduce_to_limit`, called from engine_loop |
 | 22 | aria2-next | Content-Disposition edge cases | Missing |
 | 23 | aria2-next | SeedCheckCommand without btRuntime | DONE |
-| 24 | Engine | Output-file control file lifecycle | PARTIAL | Binary output `.aria2` is saved/removed by sequential and concurrent paths; streaming creation can degrade with warning, legacy concurrent creation errors propagate. Pause/remove/fallback force progress saves; errored downloads retain the file. RequestGroup active remove now waits for command completion before terminal demotion, while timeout records a structured `TimeOut`; force remove/force halt and timeout inject a synthetic `Cancelled` completion before Tokio abort; completion processing de-duplicates by command generation rather than GID, so multiple commands under one RequestGroup each decrement `num_commands` independently; terminal Complete/Error/Removed state is deferred until the final command completion, while earlier failures only update the error snapshot; retry/promotion clears command_failure, and mapped codes preserve timeout/cannot-resume/404/checksum outcomes; the numeric `DownloadResultCode` table now matches C++ (`ChecksumError=32`, `Removed=31`), with only Rust-local `Paused=33` beyond the wire table. Full error-code coverage and RPC/core result precedence remain incomplete; direct protocol/file classification is now covered for FTP/HTTP errors, 404/503, disk space, file I/O, and option errors; JSON, Metalink, Bencode, BitTorrent, and Magnet parse failures now carry dedicated structured variants. HTTP header/status 与 FTP PASV 错误已细分为 protocol error，主要 disk writer 的目录创建、文件创建/打开已细分，控制文件读写使用 FileIo；DNS cache 失败已统一返回结构化 `Aria2Error::NameResolve`，task spawner 对 HTTP/HTTPS/FTP/FTPS promotion 前解析失败会通过 generation completion 进入 `NameResolveError`；DNS cache 的 `mark_bad/remove_cached` 与 `DownloadEngine` 异步 API 已对齐 C++ 坏地址淘汰/主机刷新语义；io_uring 的 open/read/write/truncate/flush/close 已细分为 FileOpen/FileIo；file-lock acquire 已返回结构化 Aria2Error 并区分 FileCreate/DirCreate/FileIo；HTTP redirect/auth 分类和完整 RPC/core precedence remain incomplete. End-to-end flush/save under forced termination and RPC/core stopped-result de-duplication still lack evidence. Session `{gid}.aria2` JSON persistence is a separate lifecycle and format. |
+| 24 | Engine | Output-file control file lifecycle | PARTIAL | Binary output `.aria2` is saved/removed by sequential and concurrent paths; streaming creation can degrade with warning, legacy concurrent creation errors propagate. Pause/remove/fallback force progress saves; errored downloads retain the file. RequestGroup active remove now waits for command completion before terminal demotion, while timeout records a structured `TimeOut`; force remove/force halt and timeout inject a synthetic `Cancelled` completion before Tokio abort; completion processing de-duplicates by command generation rather than GID, so multiple commands under one RequestGroup each decrement `num_commands` independently; terminal Complete/Error/Removed state is deferred until the final command completion, while earlier failures only update the error snapshot; retry/promotion clears command_failure, and mapped codes preserve timeout/cannot-resume/404/checksum outcomes; the numeric `DownloadResultCode` table now matches C++ (`ChecksumError=32`, `Removed=31`), with only Rust-local `Paused=33` beyond the wire table. Full error-code coverage and RPC/core result precedence remain incomplete; direct protocol/file classification is now covered for FTP/HTTP errors, 404/503, disk space, file I/O, and option errors; JSON, Metalink, Bencode, BitTorrent, and Magnet parse failures now carry dedicated structured variants. HTTP header/status 与 FTP PASV 错误已细分为 protocol error，主要 disk writer 的目录创建、文件创建/打开已细分，控制文件读写使用 FileIo；DNS cache 失败已统一返回结构化 `Aria2Error::NameResolve`，task spawner 对 HTTP/HTTPS/FTP/FTPS promotion 前解析失败会通过 generation completion 进入 `NameResolveError`；DNS cache 正负缓存按 `(hostname, port)` 隔离并保留 Good/Bad 候选状态；FTP control connect 在拨号前保存真实候选，首次失败可准确标坏，候选耗尽后重新解析，协议及 data-transfer 错误不会误淘汰 control 地址；raw HTTP manager 已有 direct-origin peer discard/idle eviction，但 reqwest 生产路径尚无 selected-peer callback；BT pool 使用独立 SocketAddr 身份，不参与 DNS 淘汰，piece-hash 责任 peer 回调仍缺失；io_uring 的 open/read/write/truncate/flush/close 已细分为 FileOpen/FileIo；file-lock acquire 已返回结构化 Aria2Error 并区分 FileCreate/DirCreate/FileIo；HTTP redirect/auth 分类和完整 RPC/core precedence remain incomplete. End-to-end flush/save under forced termination and RPC/core stopped-result de-duplication still lack evidence. Session `{gid}.aria2` JSON persistence is a separate lifecycle and format. |
 | 25 | Engine | AuthConfigFactory centralized factory | DONE | `http/auth.rs` `AuthConfigFactory`, used by auth challenge handler + auth_retry |
 | 26 | Engine | poolSocket()/popPooledSocket() for FTP | N/A | `FtpConnectionPool` covers pooling; reqwest pool covers HTTP |
 | 27 | Engine | validateToken() HMAC token validation | FIXED | `server.rs` `verify_token` now uses `constant_time_eq` for token comparison (prevents timing side-channel). `RpcAuthMiddleware` present. Matches C++ security semantics |
@@ -613,6 +614,8 @@ Missing options include: various SFTP options, some advanced logging options, a 
 ## Architectural Decisions
 
 ### HTTP Client: reqwest/hyper vs Raw Sockets
+
+**Connection-failure boundary (2026-08-04):** Protocol-neutral `EndpointKey` and `ConnectionContext` keep the logical `(hostname, port)` separate from the selected socket peer. The raw HTTP manager can discard an active connection or evict matching idle direct-origin connections; proxy pooled connections are deliberately excluded from origin eviction. FTP constructs the context before `connect`, rejects only failed control-connection candidates, and refreshes DNS after the good candidate set is exhausted. BitTorrent pools use `SocketAddr` peer identity and do not share DNS bad-address semantics. The piece download path now returns stable concrete source peer addresses and temporarily rejects a source IP only when every verified block came from that one peer; mixed-source or unknown-source pieces reject no peer to avoid false positives. The rejection state is shared through the BT registry so piece verification, tracker/DHT/public-tracker/LPD discovery, and PEX connection attempts use one download-scoped state; block-level attribution can be added when the scheduler preserves block responsibility. The reqwest-based download path still does not expose a reliable selected peer to the engine, so it must not call DNS bad-address eviction until a connector-level peer callback exists.
 
 **Pros:** Robust HTTP/1.1 and HTTP/2, TLS via rustls, connection pooling built-in
 **Cons:** Less control over incremental parsing; harder to implement HttpRequestEntry tracking

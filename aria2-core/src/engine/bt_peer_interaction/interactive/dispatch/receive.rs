@@ -28,12 +28,13 @@ impl BtPeerInteractive {
         &mut self,
         conn: &mut BtPeerConn,
         is_in_allowed_fast: F,
-    ) -> Result<(usize, Option<ExtensionUpdate>)>
+    ) -> Result<(usize, Option<ExtensionUpdate>, Vec<BitfieldUpdate>)>
     where
         F: Fn(u32) -> bool,
     {
         let mut count = 0usize;
         let mut last_pex_update: Option<ExtensionUpdate> = None;
+        let mut bitfield_updates = Vec::new();
 
         // Read up to a reasonable batch of messages per iteration.
         // The C++ code reads in a loop while messages are available.
@@ -65,6 +66,10 @@ impl BtPeerInteractive {
                         }
                     }
 
+                    if let Some(bitfield_update) = update.bitfield_update {
+                        bitfield_updates.push(bitfield_update);
+                    }
+
                     // Collect inbound PEX updates for the caller.
                     if let Some(ext) = &update.extension_update
                         && matches!(ext, ExtensionUpdate::PeerExchange { .. })
@@ -86,6 +91,6 @@ impl BtPeerInteractive {
             }
         }
 
-        Ok((count, last_pex_update))
+        Ok((count, last_pex_update, bitfield_updates))
     }
 }

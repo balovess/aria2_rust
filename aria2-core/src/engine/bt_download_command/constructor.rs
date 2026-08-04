@@ -188,6 +188,7 @@ impl BtDownloadCommand {
 
         let progress = group.progress.clone();
         Ok(Self {
+            local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id(),
             group: Arc::new(std::sync::RwLock::new(group)),
             progress,
             output_path: effective_output_path,
@@ -256,6 +257,8 @@ impl BtDownloadCommand {
 
             // Process-wide rate limiter (set via set_global_limiter after construction)
             global_limiter: None,
+
+            peer_rejection: crate::engine::bt_peer_storage::PeerRejectionState::shared(),
         })
     }
 }

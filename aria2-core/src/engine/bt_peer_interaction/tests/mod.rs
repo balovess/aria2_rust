@@ -104,6 +104,8 @@ impl PieceProvider for MockPieceProvider {
         self.entered_end_game = true;
     }
 
+    fn update_piece_stats(&mut self, _new_bitfield: &[u8], _old_bitfield: &[u8]) {}
+
     fn get_advertised_piece_indexes_ext(
         &self,
         _my_cuid: u64,

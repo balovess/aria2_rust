@@ -78,12 +78,13 @@ impl BtPeerInteractive {
                 trace!("Dispatched NotInterested message");
             }
             BtMessage::Have { piece_index } => {
-                // Update the peer's bitfield
+                // Update the peer's bitfield and expose the exact transition.
                 if let Some(ref mut res) = conn.session_resource {
+                    let old = res.bitfield().to_vec();
                     res.update_bitfield(piece_index as usize, 1);
+                    let new = res.bitfield().to_vec();
+                    update.bitfield_update = Some(BitfieldUpdate { old, new });
                 }
-                // If the peer was a seeder before and now has even more,
-                // or if the peer now has all pieces, mark as seeder
                 if let Some(ref res) = conn.session_resource
                     && res.is_seeder()
                 {
@@ -95,7 +96,9 @@ impl BtPeerInteractive {
             BtMessage::Bitfield { data } => {
                 // Update the peer's bitfield from the full bitfield message
                 if let Some(ref mut res) = conn.session_resource {
-                    res.set_bitfield(&data);
+                    let old = res.set_bitfield(&data);
+                    let new = res.bitfield().to_vec();
+                    update.bitfield_update = Some(BitfieldUpdate { old, new });
                     if res.is_seeder() {
                         conn.seeder = true;
                     }
@@ -178,7 +181,13 @@ impl BtPeerInteractive {
             }
             BtMessage::HaveAll => {
                 // BEP 6: peer has all pieces
-                conn.mark_seeder();
+                if let Some(ref mut res) = conn.session_resource {
+                    let old = res.bitfield().to_vec();
+                    res.mark_seeder();
+                    let new = res.bitfield().to_vec();
+                    update.bitfield_update = Some(BitfieldUpdate { old, new });
+                }
+                conn.seeder = true;
                 trace!("Dispatched HaveAll message");
             }
             BtMessage::HaveNone => {
@@ -186,7 +195,10 @@ impl BtPeerInteractive {
                 // Clear the peer's bitfield to reflect this.
                 // Mirrors C++ `BtHaveNoneMessage::doReceivedAction()`.
                 if let Some(ref mut res) = conn.session_resource {
+                    let old = res.bitfield().to_vec();
                     res.clear_bitfield();
+                    let new = res.bitfield().to_vec();
+                    update.bitfield_update = Some(BitfieldUpdate { old, new });
                 }
                 conn.seeder = false;
                 trace!("Dispatched HaveNone message");

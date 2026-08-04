@@ -14,12 +14,36 @@ use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
+use crate::network::ConnectionContext;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::control::RawFtpControl;
 use super::types::FtpDownloadCommand;
+
+struct FtpAttemptError {
+    source: Aria2Error,
+    failed_control: Option<ConnectionContext>,
+}
+
+impl FtpAttemptError {
+    fn control(source: Aria2Error, context: ConnectionContext) -> Self {
+        Self {
+            source,
+            failed_control: Some(context),
+        }
+    }
+}
+
+impl From<Aria2Error> for FtpAttemptError {
+    fn from(source: Aria2Error) -> Self {
+        Self {
+            source,
+            failed_control: None,
+        }
+    }
+}
 
 #[async_trait]
 impl Command for FtpDownloadCommand {
@@ -57,7 +81,28 @@ impl Command for FtpDownloadCommand {
                     );
                     return Ok(());
                 }
-                Err(e) => {
+                Err(attempt_error) => {
+                    let FtpAttemptError {
+                        source: e,
+                        failed_control,
+                    } = attempt_error;
+                    let reject_control = matches!(
+                        e,
+                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+                            | Aria2Error::Recoverable(RecoverableError::Timeout)
+                    );
+                    if reject_control && let Some(context) = failed_control.as_ref() {
+                        if let Some(cache) = self.dns_cache.as_ref() {
+                            cache.lock().await.mark_bad_context(context);
+                        }
+                        self.resolved_addresses
+                            .retain(|address| *address != context.peer_addr);
+                        tracing::debug!(
+                            host = %context.endpoint.hostname(),
+                            peer = %context.peer_addr,
+                            "FTP control connection failed; peer was rejected"
+                        );
+                    }
                     // Check if this is a retry-worthy error
                     let should_retry = matches!(
                         e,
@@ -120,9 +165,29 @@ impl Command for FtpDownloadCommand {
 
 impl FtpDownloadCommand {
     /// Execute a single download attempt
-    async fn execute_single_attempt(&mut self) -> Result<()> {
-        // Step 1: Connect to FTP server
-        let mut ctrl = RawFtpControl::connect(&self.host, self.port).await?;
+    async fn execute_single_attempt(&mut self) -> std::result::Result<(), FtpAttemptError> {
+        if self.resolved_addresses.is_empty() {
+            self.refresh_control_addresses().await?;
+        }
+        let control_address =
+            self.resolved_addresses[self.current_retry as usize % self.resolved_addresses.len()];
+        let context = ConnectionContext::new(&self.host, self.port, control_address);
+        let connect_result = tokio::time::timeout(
+            Duration::from_secs(constants::FTP_DEFAULT_COMMAND_TIMEOUT_SECS),
+            RawFtpControl::connect_at(&self.host, self.port, control_address),
+        )
+        .await;
+        let mut ctrl = match connect_result {
+            Ok(Ok(ctrl)) => ctrl,
+            Ok(Err(error)) => return Err(FtpAttemptError::control(error, context)),
+            Err(_) => {
+                return Err(FtpAttemptError::control(
+                    Aria2Error::Recoverable(RecoverableError::Timeout),
+                    context,
+                ));
+            }
+        };
+        self.last_connection_context = Some(ctrl.connection_context().clone());
 
         // Step 2: Authenticate
         ctrl.authenticate(&self.username, &self.password).await?;
@@ -149,11 +214,12 @@ impl FtpDownloadCommand {
             ctrl.enter_passive_mode().await?
         } else {
             // Active mode would go here (not fully implemented in this version)
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+            return Err(
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                     message: "Active mode not yet implemented".into(),
-                },
-            ));
+                })
+                .into(),
+            );
         };
 
         // Step 7: Initiate file transfer (RETR)
@@ -175,12 +241,19 @@ impl FtpDownloadCommand {
         .await
         .map_err(|_| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: "Data connection timeout".into(),
+                message: format!(
+                    "Data connection timeout via {}",
+                    ctrl.connection_context().peer_addr
+                ),
             })
         })?
         .map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Data connection failed: {}", e),
+                message: format!(
+                    "Data connection failed via {}: {}",
+                    ctrl.connection_context().peer_addr,
+                    e
+                ),
             })
         })?;
 
@@ -321,6 +394,42 @@ impl FtpDownloadCommand {
             g.complete()?;
         }
 
+        Ok(())
+    }
+
+    async fn refresh_control_addresses(&mut self) -> Result<()> {
+        if let Some(cache) = self.dns_cache.as_ref() {
+            let mut cache = cache.lock().await;
+            let mut addresses = cache.resolve(&self.host, self.port).await?;
+            if addresses.is_empty() {
+                cache.remove_cached(&self.host, self.port);
+                addresses = cache.resolve(&self.host, self.port).await?;
+            }
+            if addresses.is_empty() {
+                return Err(Aria2Error::NameResolve(format!(
+                    "No usable address for {}:{}",
+                    self.host, self.port
+                )));
+            }
+            self.resolved_addresses = addresses;
+            return Ok(());
+        }
+
+        self.resolved_addresses = tokio::net::lookup_host((self.host.as_str(), self.port))
+            .await
+            .map_err(|error| {
+                Aria2Error::NameResolve(format!(
+                    "DNS resolution failed for {}:{}: {}",
+                    self.host, self.port, error
+                ))
+            })?
+            .collect();
+        if self.resolved_addresses.is_empty() {
+            return Err(Aria2Error::NameResolve(format!(
+                "No address resolved for {}:{}",
+                self.host, self.port
+            )));
+        }
         Ok(())
     }
 }

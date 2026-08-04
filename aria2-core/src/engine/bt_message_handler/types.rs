@@ -76,6 +76,20 @@ pub struct BlockDownloadResult {
     pub success: bool,
     /// The received data (if successful)
     pub data: Option<Vec<u8>>,
+    /// Index of the peer that supplied the block.
+    pub peer_index: Option<usize>,
     /// Number of bytes received (for statistics)
     pub bytes_received: u64,
+    /// Concrete peers that failed while attempting this block.
+    pub failed_peers: Vec<std::net::SocketAddr>,
+}
+
+/// Data for a complete piece and the peers that supplied its blocks.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PieceDownloadResult {
+    pub data: Vec<u8>,
+    /// Concrete peers that supplied blocks in this piece attempt.
+    pub source_peers: Vec<std::net::SocketAddr>,
+    /// Concrete peers that failed while this piece was being downloaded.
+    pub failed_peers: Vec<std::net::SocketAddr>,
 }

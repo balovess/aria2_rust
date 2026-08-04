@@ -25,6 +25,7 @@
 //! ```
 
 mod active_connection;
+mod context;
 pub mod happy_eyeballs;
 mod manager;
 mod pipeline;
@@ -36,6 +37,7 @@ mod tests;
 
 // Re-export all public types to preserve the public API
 pub use active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
+pub use context::ConnectionContext;
 pub use happy_eyeballs::{HappyEyeballsResult, connect_with_happy_eyeballs, resolve_dual_stack};
 pub use manager::HttpConnectionManager;
 pub use pipeline::{HttpPipelineConnection, NtlmState, PendingRequest, PipelineResponse};

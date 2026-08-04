@@ -34,4 +34,4 @@ mod tests;
 
 // Re-export all public items so that `dns_cache::X` still works for external consumers.
 pub use cache::DnsCache;
-pub use entry::DnsEntry;
+pub use entry::{CandidateAddress, DnsEntry};

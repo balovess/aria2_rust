@@ -72,10 +72,13 @@ impl BtPeerInteraction {
     ///
     /// # Returns
     /// * `PeerConnectionResult` containing connected peers and failure count
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_to_peers(
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         info_hash_raw: &[u8; 20],
         num_pieces: u32,
+        piece_length: u32,
+        total_length: u64,
         require_crypto: bool,
         force_encrypt: bool,
     ) -> Result<PeerConnectionResult> {
@@ -87,42 +90,21 @@ impl BtPeerInteraction {
         for addr in peer_addrs {
             debug!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
 
-            let conn_result =
-                Self::connect_single_peer(addr, info_hash_raw, require_crypto, force_encrypt).await;
-
-            match conn_result {
-                Ok(mut conn) => {
-                    info!(
-                        "[BT] Connected to peer {}:{} (encrypted={})",
-                        addr.ip,
-                        addr.port,
-                        conn.is_encrypted()
-                    );
-
-                    // Initialize the connection
-                    if let Err(e) = Self::initialize_connection(&mut conn, num_pieces).await {
-                        warn!("[BT] Failed to initialize peer {}: {}", addr.ip, e);
-                        failed_count += 1;
-                        continue;
-                    }
-
-                    // Wait for unchoke
-                    match Self::wait_for_unchoke(&mut conn, addr).await {
-                        Ok(()) => {
-                            active_connections.push(conn);
-                        }
-                        Err(e) => {
-                            warn!("[BT] No unchoke from peer {}: {}", addr.ip, e);
-                            // Still add the connection even without unchoke
-                            // (it might unchoke later)
-                            active_connections.push(conn);
-                        }
-                    }
-                }
+            match Self::connect_peer_ready(
+                addr,
+                info_hash_raw,
+                require_crypto,
+                force_encrypt,
+                num_pieces,
+                piece_length,
+                total_length,
+            )
+            .await
+            {
+                Ok(conn) => active_connections.push(conn),
                 Err(e) => {
                     error!("[BT] Failed to connect peer {}: {}", addr.ip, e);
                     failed_count += 1;
-                    continue;
                 }
             }
         }
@@ -141,6 +123,36 @@ impl BtPeerInteraction {
             connections: active_connections,
             failed_count,
         })
+    }
+
+    /// Establish and initialize one peer using the same crypto and protocol path
+    /// as the initial peer batch.
+    pub async fn connect_peer_ready(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash_raw: &[u8; 20],
+        require_crypto: bool,
+        force_encrypt: bool,
+        num_pieces: u32,
+        piece_length: u32,
+        total_length: u64,
+    ) -> Result<BtPeerConn> {
+        let mut conn =
+            Self::connect_single_peer(addr, info_hash_raw, require_crypto, force_encrypt).await?;
+        conn.sync_peer_identity();
+        conn.allocate_session_resource(piece_length, total_length);
+        info!(
+            "[BT] Connected to peer {}:{} (encrypted={}, piece_length={}, total_length={})",
+            addr.ip,
+            addr.port,
+            conn.is_encrypted(),
+            piece_length,
+            total_length
+        );
+        Self::initialize_connection(&mut conn, num_pieces).await?;
+        if let Err(error) = Self::wait_for_unchoke(&mut conn, addr).await {
+            warn!("[BT] No unchoke from peer {}: {}", addr.ip, error);
+        }
+        Ok(conn)
     }
 
     /// Connect to a single peer with encryption fallback logic
@@ -255,6 +267,13 @@ impl BtPeerInteraction {
         }
     }
 
+    /// Return the stable key used by the peer bitfield tracker.
+    pub fn peer_tracker_key(conn: &BtPeerConn) -> String {
+        conn.remote_peer_id()
+            .map(|id| String::from_utf8_lossy(&id).into_owned())
+            .unwrap_or_else(|| format!("{}:{}", conn.ip_addr, conn.port))
+    }
+
     /// Initialize peer bitfield tracker for all connections
     ///
     /// Sets up tracking of which pieces each peer claims to have.
@@ -265,12 +284,16 @@ impl BtPeerInteraction {
     /// * `peer_tracker` - Mutable reference to the peer bitfield tracker
     pub fn initialize_peer_tracking(
         connections: &[BtPeerConn],
-        num_pieces: u32,
+        _num_pieces: u32,
         peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
     ) {
-        for (i, _conn) in connections.iter().enumerate() {
-            let empty_bf = vec![0xFFu8; (num_pieces as usize).div_ceil(8)];
-            peer_tracker.update_peer_bitfield(&format!("peer_{}", i), &empty_bf);
+        for conn in connections {
+            let peer_key = Self::peer_tracker_key(conn);
+            let bitfield = conn
+                .session_resource
+                .as_ref()
+                .map_or(&[][..], |resource| resource.bitfield());
+            peer_tracker.update_peer_bitfield(&peer_key, bitfield);
         }
 
         debug!(

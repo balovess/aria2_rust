@@ -13,15 +13,38 @@ use std::collections::HashSet;
 
 use super::peer_stats::PeerStats;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PeerIdentity {
+    pub peer_id: [u8; 20],
+    pub addr: std::net::SocketAddr,
+}
+
+impl From<&PeerStats> for PeerIdentity {
+    fn from(peer: &PeerStats) -> Self {
+        Self {
+            peer_id: peer.peer_id,
+            addr: peer.addr,
+        }
+    }
+}
+
 /// Action to take for a peer during choke rotation
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChokeAction {
-    /// Unchoke peer at index
+    /// Unchoke peer at the legacy vector index.
     Unchoke(usize),
-    /// Choke peer at index
+    /// Choke peer at the legacy vector index.
     Choke(usize),
-    /// No action needed for this peer
+    /// No action needed for this peer.
     NoChange(usize),
+}
+
+/// Identity-based choke decision returned by the modern API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityChokeAction {
+    Unchoke(PeerIdentity),
+    Choke(PeerIdentity),
+    NoChange(PeerIdentity),
 }
 
 /// Configuration for the choking algorithm
@@ -59,11 +82,10 @@ impl Default for ChokingConfig {
 pub struct ChokingAlgorithm {
     pub(crate) peers: Vec<PeerStats>,
     pub(crate) config: ChokingConfig,
-    /// Explicitly snubbed peer indices (separate from PeerStats.is_snubbed for
-    /// algorithm-level control). Peers in this set always receive score -1000.
-    pub(crate) snubbed_peers: HashSet<usize>,
-    /// Index of the current optimistically unchoked peer (for rotation).
-    pub(crate) current_optimistic_peer: Option<usize>,
+    /// Explicitly snubbed peer identities (separate from PeerStats.is_snubbed).
+    pub(crate) snubbed_peers: HashSet<PeerIdentity>,
+    /// Identity of the current optimistically unchoked peer (for rotation).
+    pub(crate) current_optimistic_peer: Option<PeerIdentity>,
     /// Round-robin counter for optimistic unchoke rotation.
     pub(crate) optimistic_rotation_counter: usize,
 }
@@ -85,11 +107,67 @@ impl ChokingAlgorithm {
         self.peers.push(stats);
     }
 
-    /// Remove a peer at the given index
-    pub fn remove_peer(&mut self, idx: usize) {
-        if idx < self.peers.len() {
-            self.peers.remove(idx);
+    /// Remove peers by stable network identity, preserving remaining order.
+    pub fn remove_peers_by_identity(&mut self, identities: &[PeerIdentity]) {
+        self.peers
+            .retain(|peer| !identities.contains(&PeerIdentity::from(peer)));
+        self.snubbed_peers
+            .retain(|identity| !identities.contains(identity));
+        if self
+            .current_optimistic_peer
+            .is_some_and(|identity| identities.contains(&identity))
+        {
+            self.current_optimistic_peer = None;
         }
+        self.optimistic_rotation_counter %= self.peers.len().max(1);
+    }
+
+    pub fn remove_peers_by_addr(&mut self, addresses: &[std::net::SocketAddr]) {
+        self.peers.retain(|peer| !addresses.contains(&peer.addr));
+        self.snubbed_peers
+            .retain(|identity| !addresses.contains(&identity.addr));
+        if self
+            .current_optimistic_peer
+            .is_some_and(|identity| addresses.contains(&identity.addr))
+        {
+            self.current_optimistic_peer = None;
+        }
+        self.optimistic_rotation_counter %= self.peers.len().max(1);
+    }
+
+    /// Legacy index removal at the command boundary. The index is resolved to
+    /// the peer's stable identity before removing exactly that vector entry.
+    pub fn remove_peers(&mut self, indices: &[usize]) {
+        let mut removed = vec![false; self.peers.len()];
+        for &index in indices {
+            if let Some(slot) = removed.get_mut(index) {
+                *slot = true;
+            }
+        }
+        self.peers = self
+            .peers
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, peer)| (!removed[index]).then_some(peer))
+            .collect();
+        self.snubbed_peers.retain(|identity| {
+            self.peers
+                .iter()
+                .any(|peer| PeerIdentity::from(peer) == *identity)
+        });
+        if self.current_optimistic_peer.is_some_and(|identity| {
+            !self
+                .peers
+                .iter()
+                .any(|peer| PeerIdentity::from(peer) == identity)
+        }) {
+            self.current_optimistic_peer = None;
+        }
+        self.optimistic_rotation_counter %= self.peers.len().max(1);
+    }
+
+    pub fn remove_peer(&mut self, idx: usize) {
+        self.remove_peers(&[idx]);
     }
 
     /// Returns the number of peers being managed
@@ -116,6 +194,27 @@ impl ChokingAlgorithm {
         selection::rotate_choke(self)
     }
 
+    /// Rotate choke state while returning stable peer identities.
+    pub fn rotate_choke_by_identity(&mut self) -> Vec<IdentityChokeAction> {
+        selection::rotate_choke(self)
+            .into_iter()
+            .filter_map(|action| match action {
+                ChokeAction::Unchoke(index) => self
+                    .peers
+                    .get(index)
+                    .map(|peer| IdentityChokeAction::Unchoke(peer.into())),
+                ChokeAction::Choke(index) => self
+                    .peers
+                    .get(index)
+                    .map(|peer| IdentityChokeAction::Choke(peer.into())),
+                ChokeAction::NoChange(index) => self
+                    .peers
+                    .get(index)
+                    .map(|peer| IdentityChokeAction::NoChange(peer.into())),
+            })
+            .collect()
+    }
+
     /// Called every ~30 seconds (config.optimistic_unchoke_interval_secs)
     ///
     /// Selects ONE choked+interested peer for optimistic unchoke.
@@ -127,6 +226,12 @@ impl ChokingAlgorithm {
     /// Returns Some(index) if found, None if no eligible peer
     pub fn optimistically_unchoke(&mut self) -> Option<usize> {
         optimistic::optimistically_unchoke(self)
+    }
+
+    /// Select an optimistic-un choke target using stable identity.
+    pub fn optimistically_unchoke_by_identity(&mut self) -> Option<PeerIdentity> {
+        self.optimistically_unchoke()
+            .and_then(|index| self.peers.get(index).map(PeerIdentity::from))
     }
 
     /// Rotate which peer gets the optimistic unchoke slot using round-robin.
@@ -145,6 +250,17 @@ impl ChokingAlgorithm {
 
     /// Called whenever we receive data from a peer.
     /// Automatically unsnubs the peer if it was in the explicit snubbed set.
+    pub fn on_data_received_by_identity(&mut self, identity: PeerIdentity, bytes: u64) {
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| PeerIdentity::from(&**peer) == identity)
+        {
+            peer.on_data_received(bytes);
+        }
+        self.snubbed_peers.remove(&identity);
+    }
+
     pub fn on_data_received(&mut self, peer_idx: usize, bytes: u64) {
         if let Some(peer) = self.peers.get_mut(peer_idx) {
             peer.on_data_received(bytes);
@@ -159,8 +275,10 @@ impl ChokingAlgorithm {
     /// calculate_peer_score to return -1000 for this peer, ensuring
     /// they always get choked on the next rotation.
     pub fn mark_peer_snubbed(&mut self, peer_id: usize) {
-        if self.snubbed_peers.insert(peer_id) {
-            tracing::debug!("[BT] Peer {} explicitly marked as snubbed", peer_id);
+        if let Some(peer) = self.peers.get(peer_id)
+            && self.snubbed_peers.insert(PeerIdentity::from(peer))
+        {
+            tracing::debug!("[BT] Peer {} explicitly marked as snubbed", peer.addr);
         }
     }
 
@@ -169,8 +287,11 @@ impl ChokingAlgorithm {
     /// Returns true if the peer was actually in the snubbed set (newly un-snubbed),
     /// false if they were not snubbed.
     pub fn unsnub_peer(&mut self, peer_id: usize) -> bool {
-        if self.snubbed_peers.remove(&peer_id) {
-            tracing::debug!("[BT] Peer {} un-snubbed (data received)", peer_id);
+        let Some(identity) = self.peers.get(peer_id).map(PeerIdentity::from) else {
+            return false;
+        };
+        if self.snubbed_peers.remove(&identity) {
+            tracing::debug!("[BT] Peer {} un-snubbed (data received)", identity.addr);
             true
         } else {
             false
@@ -179,7 +300,9 @@ impl ChokingAlgorithm {
 
     /// Check if a peer is in the explicit snubbed set.
     pub fn is_explicitly_snubbed(&self, peer_id: usize) -> bool {
-        self.snubbed_peers.contains(&peer_id)
+        self.peers
+            .get(peer_id)
+            .is_some_and(|peer| self.snubbed_peers.contains(&PeerIdentity::from(peer)))
     }
 
     /// Get the number of explicitly snubbed peers.

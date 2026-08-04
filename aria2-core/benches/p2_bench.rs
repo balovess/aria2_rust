@@ -6,10 +6,12 @@ use aria2_core::auth::credential_store::CredentialStore;
 use aria2_core::auth::digest_auth::{
     AuthChallenge, DigestAlgorithm, DigestAuthProvider, parse_www_authenticate,
 };
-use aria2_core::engine::bt_mse_handshake::{CryptoMethod, MseCryptoContext, MseHandshakeManager};
 use aria2_core::engine::bt_progress_info_file::{BtProgress, BtProgressManager, DownloadStats};
 use aria2_core::engine::lpd_manager::{LpdManager, parse_lpd_announcement};
 use aria2_core::http::stream_filter::{ChunkedDecoder, GZipDecoder, StreamFilter, process_filters};
+use aria2_protocol::bittorrent::extension::mse_crypto::Arc4Cipher;
+use aria2_protocol::bittorrent::extension::mse_dh::MseDhKeyExchange;
+use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -275,86 +277,62 @@ fn bench_lpd_manager_handle_packet(c: &mut Criterion) {
     });
 }
 
-// ====== MSE 加密 Benchmarks (3个) ======
+// ====== MSE Benchmarks (3) ======
 
-fn bench_mse_handshake_full_3phase(c: &mut Criterion) {
+fn bench_mse_handshake_full(c: &mut Criterion) {
     let info_hash = make_test_hash(0xAA);
-
-    c.bench_function("mse_handshake_full_3phase", |b| {
+    c.bench_function("mse_handshake_full", |b| {
         b.iter(|| {
-            // Phase 1: Method selection
-            let mut mgr_a = MseHandshakeManager::new(black_box(info_hash)).unwrap();
-            let mut mgr_b = MseHandshakeManager::new(black_box(info_hash)).unwrap();
-
-            let method_sel_a = black_box(mgr_a.build_method_selection());
-            let method_sel_b = black_box(mgr_b.build_method_selection());
-
-            // Parse remote method selection
-            let _ = MseHandshakeManager::parse_remote_method_selection(&method_sel_b);
-            let _ = MseHandshakeManager::parse_remote_method_selection(&method_sel_a);
-
-            // Phase 2: Key exchange
-            let payload_a = black_box(
-                mgr_a
-                    .build_key_exchange_payload(&[CryptoMethod::Rc4])
-                    .unwrap(),
-            );
-            let payload_b = black_box(
-                mgr_b
-                    .build_key_exchange_payload(&[CryptoMethod::Rc4])
-                    .unwrap(),
-            );
-
-            let _ = mgr_a.process_remote_key_exchange(&payload_b);
-            let _ = mgr_b.process_remote_key_exchange(&payload_a);
-
-            // Phase 3: Verification
-            let verify_a = black_box(mgr_a.build_verification_payload(CryptoMethod::Rc4).unwrap());
-            let verify_b = black_box(mgr_b.build_verification_payload(CryptoMethod::Rc4).unwrap());
-
-            let ctx_a = mgr_b.process_remote_verification(&verify_a);
-            let ctx_b = mgr_a.process_remote_verification(&verify_b);
-
-            black_box(ctx_a.is_ok() && ctx_b.is_ok())
+            let mut initiator = MseHandshake::new_initiator(black_box(info_hash));
+            let mut responder = MseHandshake::new_responder(black_box(info_hash));
+            let initiator_step1 = initiator.build_step1();
+            let responder_step1 = responder.build_step1();
+            let _ = initiator.receive_step1(&responder_step1);
+            let _ = responder.receive_step1(&initiator_step1);
+            let initiator_step2 = initiator
+                .build_initiator_step2()
+                .expect("build initiator step2");
+            let _ = responder.receive_initiator_step2(&initiator_step2, &[info_hash]);
+            let responder_step2 = responder
+                .build_receiver_step2()
+                .expect("build responder step2");
+            let _ = initiator.receive_receiver_step2(&responder_step2);
+            let initiator_state = initiator.finalize().expect("finalize initiator");
+            let responder_state = responder.finalize().expect("finalize responder");
+            black_box((
+                initiator_state.is_encrypted(),
+                responder_state.is_encrypted(),
+            ));
         });
     });
 }
 
 fn bench_rc4_encrypt_1mb(c: &mut Criterion) {
-    let mut ctx =
-        MseCryptoContext::new(b"0123456789abcdef", b"fedcba9876543210", CryptoMethod::Rc4);
-    let data_1mb = vec![0x42u8; 1024 * 1024];
-
+    let key = [0x42u8; 20];
+    let mut cipher = Arc4Cipher::new(&key);
+    let data = vec![0x42u8; 1024 * 1024];
     c.bench_function("rc4_encrypt_1mb", |b| {
         b.iter(|| {
-            let encrypted = black_box(ctx.encrypt(black_box(&data_1mb)));
-            black_box(encrypted.map(|d| d.len()))
+            let mut block = black_box(data.clone());
+            cipher.encrypt(&mut block);
+            black_box(block.len())
         });
     });
 }
 
-fn bench_x25519_key_exchange(c: &mut Criterion) {
-    c.bench_function("x25519_key_exchange_single", |b| {
+fn bench_mse_dh_key_exchange(c: &mut Criterion) {
+    c.bench_function("mse_dh_key_exchange_single", |b| {
         b.iter(|| {
-            let hash = black_box(make_test_hash(0xBB));
-            let mut mgr = MseHandshakeManager::new(hash).unwrap();
-            let mut peer_mgr = MseHandshakeManager::new(hash).unwrap();
-
-            let payload = mgr
-                .build_key_exchange_payload(&[CryptoMethod::Rc4])
-                .unwrap();
-            let peer_payload = peer_mgr
-                .build_key_exchange_payload(&[CryptoMethod::Rc4])
-                .unwrap();
-
-            let r1 = mgr.process_remote_key_exchange(&peer_payload);
-            let r2 = peer_mgr.process_remote_key_exchange(&payload);
-
-            black_box(r1.is_ok() && r2.is_ok())
+            let initiator = MseDhKeyExchange::new();
+            let responder = MseDhKeyExchange::new();
+            let initiator_public = initiator.generate_public_key();
+            let responder_public = responder.generate_public_key();
+            let initiator_secret = initiator.compute_shared_secret(&responder_public);
+            let responder_secret = responder.compute_shared_secret(&initiator_public);
+            black_box((initiator_secret, responder_secret));
         });
     });
 }
-
 // ====== Stream Decoder Benchmarks (3) ======
 
 fn bench_gzip_decode_1mb(c: &mut Criterion) {
@@ -435,9 +413,9 @@ criterion_group!(
     bench_lpd_announce_serialize_50,
     bench_lpd_announce_deserialize_50,
     bench_lpd_manager_handle_packet,
-    bench_mse_handshake_full_3phase,
+    bench_mse_handshake_full,
     bench_rc4_encrypt_1mb,
-    bench_x25519_key_exchange,
+    bench_mse_dh_key_exchange,
     bench_gzip_decode_1mb,
     bench_chunked_decode_100chunks_8kb,
     bench_filter_chain_gzip_then_chunked_512kb,

@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 use crate::engine::bt_download_command::{
     BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY, PUBLIC_TRACKER_PEER_THRESHOLD,
 };
+use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_handshake_validation::filter_duplicate_peer_connections;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
@@ -26,7 +27,7 @@ impl BtDownloadCommand {
         total_size: u64,
         info_hash_raw: &[u8; 20],
     ) -> Result<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>> {
-        let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        let my_peer_id = self.local_peer_id;
 
         // Initialize the unified TrackerAnnouncer from the torrent's announce list.
         // This replaces the separate HTTP-only + ad-hoc UDP approach with a single
@@ -115,6 +116,7 @@ impl BtDownloadCommand {
         let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
             peer_addrs
                 .into_iter()
+                .filter(|(ip, _)| !self.is_peer_temporarily_rejected(ip))
                 .map(|(ip, port)| {
                     aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
                 })
@@ -188,9 +190,10 @@ impl BtDownloadCommand {
                         &ip_str,
                         addr.port(),
                     );
-                    if !peer_addrs
-                        .iter()
-                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                    if !self.is_peer_temporarily_rejected(&paddr.ip)
+                        && !peer_addrs
+                            .iter()
+                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
                     {
                         peer_addrs.push(paddr);
                     }
@@ -257,9 +260,10 @@ impl BtDownloadCommand {
                 for (ip, port) in extra_peers {
                     let paddr =
                         aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port);
-                    if !peer_addrs
-                        .iter()
-                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                    if !self.is_peer_temporarily_rejected(&paddr.ip)
+                        && !peer_addrs
+                            .iter()
+                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
                     {
                         peer_addrs.push(paddr);
                     }
@@ -295,9 +299,10 @@ impl BtDownloadCommand {
                         &ip_str,
                         lpd_peer.port,
                     );
-                    if !peer_addrs
-                        .iter()
-                        .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                    if !self.is_peer_temporarily_rejected(&paddr.ip)
+                        && !peer_addrs
+                            .iter()
+                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
                     {
                         peer_addrs.push(paddr);
                     }
@@ -338,6 +343,8 @@ impl BtDownloadCommand {
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         info_hash_raw: &[u8; 20],
         num_pieces: u32,
+        piece_length: u32,
+        total_size: u64,
     ) -> Result<Vec<BtPeerConn>> {
         let require_crypto = { self.group.recover().options().bt_require_crypto };
         let force_encrypt = { self.group.recover().options().bt_force_encrypt };
@@ -347,12 +354,25 @@ impl BtDownloadCommand {
         // Note: C++ generates the static peer ID once per session; here we
         // generate it at connection time. For future sessions, this should
         // be a per-session singleton.
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        let local_peer_id = self.local_peer_id;
+
+        let mut eligible_peers = Vec::with_capacity(peer_addrs.len());
+        for peer in peer_addrs {
+            if let Ok(ip) = peer.ip.parse::<std::net::IpAddr>() {
+                if self.is_peer_temporarily_rejected(&ip.to_string()) {
+                    tracing::debug!(peer = %ip, port = peer.port, "Skipping temporarily rejected peer");
+                    continue;
+                }
+            }
+            eligible_peers.push(peer.clone());
+        }
 
         let conn_result = BtPeerInteraction::connect_to_peers(
-            peer_addrs,
+            &eligible_peers,
             info_hash_raw,
             num_pieces,
+            piece_length,
+            total_size,
             require_crypto,
             force_encrypt,
         )
@@ -394,14 +414,13 @@ impl BtDownloadCommand {
 
             let mut algo = ChokingAlgorithm::new(config);
 
-            for addr in peer_addrs {
-                let socket_addr = std::net::SocketAddr::new(
-                    addr.ip.parse().unwrap_or_else(|_| {
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-                    }),
-                    addr.port,
-                );
-                let peer_stats = PeerStats::new([0u8; 20], socket_addr);
+            for conn in &active_connections {
+                let Ok(ip) = conn.ip_addr.parse::<std::net::IpAddr>() else {
+                    warn!(peer = %conn.ip_addr, port = conn.port, "Skipping active peer with invalid IP");
+                    continue;
+                };
+                let socket_addr = std::net::SocketAddr::new(ip, conn.port);
+                let peer_stats = PeerStats::new(conn.peer_id.unwrap_or([0u8; 20]), socket_addr);
                 algo.add_peer(peer_stats);
             }
 
@@ -420,7 +439,8 @@ impl BtDownloadCommand {
     pub(super) fn check_and_mark_snubbed_peers(
         &mut self,
         last_snub_check: &mut Instant,
-        peer_last_data_time: &HashMap<usize, Instant>,
+        peer_last_data_time: &HashMap<PeerKey, Instant>,
+        active_connections: &[BtPeerConn],
     ) {
         const SNUB_CHECK_INTERVAL_SECS: u64 = 10;
         const SNUB_TIMEOUT_SECS: u64 = 30;
@@ -433,11 +453,16 @@ impl BtDownloadCommand {
         let mut newly_snubbed = Vec::new();
         for (&peer_id, &last_time) in peer_last_data_time {
             if last_time.elapsed().as_secs() > SNUB_TIMEOUT_SECS {
-                self.mark_peer_snubbed(peer_id);
+                if let Some(index) = active_connections
+                    .iter()
+                    .position(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port) == Some(peer_id))
+                {
+                    self.mark_peer_snubbed(index);
+                }
                 newly_snubbed.push(peer_id);
                 debug!(
                     "[BT] Peer {} marked as snubbed (no data for {}s)",
-                    peer_id,
+                    peer_id.address(),
                     last_time.elapsed().as_secs()
                 );
             }
@@ -482,7 +507,7 @@ impl BtDownloadCommand {
             return Vec::new();
         }
 
-        let my_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        let my_peer_id = self.local_peer_id;
 
         match announcer
             .announce(info_hash, &my_peer_id, downloaded, left, uploaded)

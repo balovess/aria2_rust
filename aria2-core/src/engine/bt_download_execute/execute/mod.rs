@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
@@ -69,6 +70,7 @@ impl Command for BtDownloadCommand {
                 .download_context(download_context.unwrap_or_else(|| {
                     Arc::new(crate::download::DownloadContext::new(0, 0, String::new()))
                 }))
+                .peer_rejection(self.peer_rejection.clone())
                 .bt_announce(bt_announce)
                 .build();
             if let Ok(mut reg) = registry.write() {
@@ -192,7 +194,13 @@ impl Command for BtDownloadCommand {
         }
 
         let mut active_connections = self
-            .connect_to_peers(&peer_addrs, &meta.info_hash.bytes, num_pieces)
+            .connect_to_peers(
+                &peer_addrs,
+                &meta.info_hash.bytes,
+                num_pieces,
+                piece_length,
+                total_size,
+            )
             .await?;
 
         // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
@@ -234,7 +242,7 @@ impl Command for BtDownloadCommand {
         // Each peer may support ut_pex extension (BEP 11) for peer discovery.
         // BEP 0027 (Private Torrent): leave pex_enabled_peers empty so no PEX
         // messages are ever sent.
-        let mut pex_enabled_peers: HashSet<usize> = HashSet::new();
+        let mut pex_enabled_peers: HashSet<PeerKey> = HashSet::new();
         let mut last_pex_send = Instant::now();
         const PEX_SEND_INTERVAL_SECS: u64 = 60;
 
@@ -244,8 +252,10 @@ impl Command for BtDownloadCommand {
             // refined to check extension handshake results (ut_pex in
             // the m dict). For now, enable PEX for all connections as
             // the PEX layer gracefully handles peers that don't respond.
-            for (idx, _conn) in active_connections.iter().enumerate() {
-                pex_enabled_peers.insert(idx);
+            for conn in active_connections.iter() {
+                if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
+                    pex_enabled_peers.insert(peer_key);
+                }
             }
             info!(
                 "[PEX] Initialized PEX tracking for {} peers (assuming ut_pex support)",
@@ -280,7 +290,9 @@ impl Command for BtDownloadCommand {
                     if let Err(e) = conn.flush_send_buffer().await {
                         warn!("[BEP6] Failed to flush AllowedFast to peer {}: {}", idx, e);
                     } else {
-                        self.allowed_fast_sent_peers.insert(idx, sent);
+                        if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
+                            self.allowed_fast_sent_peers.insert(peer_key, sent);
+                        }
                         debug!(
                             "[BEP6] Sent {} AllowedFast pieces to peer {} ({})",
                             fast_pieces.len(),
@@ -292,6 +304,7 @@ impl Command for BtDownloadCommand {
             }
         }
 
+        // Download pieces from the connected peers, using web seeds and PEX as configured.
         self.download_pieces_loop(
             &mut active_connections,
             &meta,

@@ -33,6 +33,6 @@ pub use message_handler::BtMessageHandler;
 pub use peer_message_handler::BtPeerMessageHandler;
 pub use types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, DEFAULT_MAX_OUTSTANDING_REQUEST,
-    MAX_BLOCK_READ_MESSAGES, MAX_RETRIES, PeerStateUpdate, RequestResponse,
+    MAX_BLOCK_READ_MESSAGES, MAX_RETRIES, PeerStateUpdate, PieceDownloadResult, RequestResponse,
     UB_MAX_OUTSTANDING_REQUEST,
 };

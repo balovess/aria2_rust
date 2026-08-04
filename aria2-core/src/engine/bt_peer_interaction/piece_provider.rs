@@ -60,6 +60,9 @@ pub trait PieceProvider: Send + Sync {
     /// Mirrors C++ `PieceStorage::enterEndGame()`.
     fn enter_end_game(&mut self);
 
+    /// Apply a peer bitfield transition to global piece availability stats.
+    fn update_piece_stats(&mut self, new_bitfield: &[u8], old_bitfield: &[u8]);
+
     // ── checkHave optimization support ──────────────────────────────────
 
     /// Get piece indexes advertised since `last_have_index` by CUIDs other

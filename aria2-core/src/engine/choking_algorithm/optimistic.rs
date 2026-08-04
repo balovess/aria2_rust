@@ -1,6 +1,6 @@
 //! Optimistic unchoke logic (round-robin rotation)
 
-use super::ChokingAlgorithm;
+use super::{ChokingAlgorithm, PeerIdentity};
 
 /// Select ONE choked+interested peer for optimistic unchoke.
 ///
@@ -19,11 +19,11 @@ pub(super) fn optimistically_unchoke(algo: &mut ChokingAlgorithm) -> Option<usiz
         .peers
         .iter()
         .enumerate()
-        .filter(|(i, peer)| {
+        .filter(|(_, peer)| {
             peer.am_choking
                 && peer.peer_interested
                 && !peer.is_snubbed
-                && !algo.snubbed_peers.contains(i)
+                && !algo.snubbed_peers.contains(&(*peer).into())
                 && peer.time_since_last_optimistic_unchoke().as_secs()
                     >= algo.config.optimistic_unchoke_interval_secs
         })
@@ -41,7 +41,7 @@ pub(super) fn optimistically_unchoke(algo: &mut ChokingAlgorithm) -> Option<usiz
     if let Some(peer) = algo.peers.get_mut(selected) {
         peer.record_optimistic_unchoke();
     }
-    algo.current_optimistic_peer = Some(selected);
+    algo.current_optimistic_peer = algo.peers.get(selected).map(PeerIdentity::from);
 
     Some(selected)
 }
@@ -73,9 +73,13 @@ pub(super) fn rotate_optimistic_unchoked(
     }
 
     // Find position of current optimistic peer in eligible list
-    let current_pos = algo
-        .current_optimistic_peer
-        .and_then(|curr| eligible_peers.iter().position(|&x| x == curr));
+    let current_pos = algo.current_optimistic_peer.and_then(|curr| {
+        eligible_peers.iter().position(|&index| {
+            algo.peers
+                .get(index)
+                .is_some_and(|peer| PeerIdentity::from(peer) == curr)
+        })
+    });
 
     // Advance to next peer in round-robin order
     let next_pos = match current_pos {

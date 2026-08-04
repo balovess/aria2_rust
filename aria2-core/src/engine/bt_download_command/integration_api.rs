@@ -61,6 +61,22 @@ impl BtDownloadCommand {
     }
 
     /// Set the engine's BtRegistry reference for self-registration.
+    /// Check the download-scoped temporary bad-peer state.
+    pub(crate) fn is_peer_temporarily_rejected(&self, ipaddr: &str) -> bool {
+        self.peer_rejection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_rejected(ipaddr)
+    }
+
+    /// Record a verified bad peer in the shared download-scoped state.
+    pub(crate) fn reject_peer_temporarily(&self, ipaddr: &str) {
+        self.peer_rejection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reject(ipaddr);
+    }
+
     pub fn set_bt_registry(
         &mut self,
         registry: Arc<std::sync::RwLock<super::super::bt_registry::BtRegistry>>,
