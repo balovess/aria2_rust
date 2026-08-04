@@ -1,4 +1,4 @@
-﻿//! File locking to prevent concurrent aria2 instances from writing to same file.
+//! File locking to prevent concurrent aria2 instances from writing to same file.
 //!
 //! This module provides platform-appropriate file locking mechanisms:
 //!
@@ -15,6 +15,7 @@
 //!
 //! // Acquire exclusive lock on a specific file
 //! let lock = FileLock::acquire(Path::new("/data/file.zip")).unwrap();
+use crate::error::Aria2Error;
 ///
 /// // ... perform download while holding lock ...
 ///
@@ -67,7 +68,7 @@ impl FileLock {
     /// Returns `Err` if:
     /// - The file cannot be created/opened (permission denied, disk full, etc.)
     /// - Another process already holds the lock (Unix only)
-    pub fn acquire(path: &Path) -> Result<Self, String> {
+    pub fn acquire(path: &Path) -> Result<Self, Aria2Error> {
         #[cfg(unix)]
         {
             Self::acquire_unix(path)
@@ -84,12 +85,13 @@ impl FileLock {
 
     /// Unix implementation: flock(LOCK_EX | LOCK_NB).
     #[cfg(unix)]
-    fn acquire_unix(path: &Path) -> Result<Self, String> {
+    fn acquire_unix(path: &Path) -> Result<Self, Aria2Error> {
         use std::os::unix::io::AsRawFd;
 
         // Create or open the target file
-        let f = std::fs::File::create(path)
-            .map_err(|e| format!("Failed to create '{}': {}", path.display(), e))?;
+        let f = std::fs::File::create(path).map_err(|e| {
+            Aria2Error::FileCreate(format!("Failed to create '{}': {}", path.display(), e))
+        })?;
 
         let fd = f.as_raw_fd();
 
@@ -102,11 +104,11 @@ impl FileLock {
 
         if ret != 0 {
             let err = std::io::Error::last_os_error();
-            return Err(format!(
+            return Err(Aria2Error::FileIo(format!(
                 "Cannot acquire lock on '{}': {} (already in use by another process?)",
                 path.display(),
                 err
-            ));
+            )));
         }
 
         tracing::debug!(path = %path.display(), "File lock acquired (Unix flock)");
@@ -119,7 +121,7 @@ impl FileLock {
 
     /// Windows implementation: .lock marker file with exclusive create.
     #[cfg(windows)]
-    fn acquire_windows(path: &Path) -> Result<Self, String> {
+    fn acquire_windows(path: &Path) -> Result<Self, Aria2Error> {
         use std::io::Write;
         // Use a clearly separate lock file name to avoid ambiguity with
         // with_extension() behavior on dotted filenames like ".aria2.lock"
@@ -152,17 +154,17 @@ impl FileLock {
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    Err(format!(
+                    Err(Aria2Error::FileIo(format!(
                         "Cannot acquire lock on '{}': lock file '{}' already exists",
                         path.display(),
                         lock_path.display()
-                    ))
+                    )))
                 } else {
-                    Err(format!(
+                    Err(Aria2Error::FileCreate(format!(
                         "Failed to create lock file '{}': {}",
                         lock_path.display(),
                         e
-                    ))
+                    )))
                 }
             }
         }
@@ -170,7 +172,7 @@ impl FileLock {
 
     /// Fallback for unsupported platforms: no-op.
     #[cfg(not(any(unix, windows)))]
-    fn acquire_fallback(path: &Path) -> Result<Self, String> {
+    fn acquire_fallback(path: &Path) -> Result<Self, Aria2Error> {
         tracing::warn!(
             path = %path.display(),
             "File locking not supported on this platform; proceeding without lock"
@@ -345,15 +347,15 @@ impl DownloadPathLock {
     /// Returns `Err` if:
     /// - The directory does not exist and cannot be created.
     /// - Another process holds the lock on `.aria2.lock` in this directory.
-    pub fn acquire_for_download(output_dir: &Path) -> Result<Self, String> {
+    pub fn acquire_for_download(output_dir: &Path) -> Result<Self, Aria2Error> {
         // Ensure output directory exists
         if !output_dir.exists() {
             std::fs::create_dir_all(output_dir).map_err(|e| {
-                format!(
+                Aria2Error::DirCreate(format!(
                     "Failed to create output directory '{}': {}",
                     output_dir.display(),
                     e
-                )
+                ))
             })?;
         }
 

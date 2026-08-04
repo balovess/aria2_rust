@@ -173,24 +173,54 @@ impl RequestGroupMan {
     }
 
     pub fn remove_group(&self, gid: GroupId) -> Result<()> {
-        if let Some(group_lock) = self.remove_group_by_id(gid) {
+        // C++ aria2 keeps an active group in requestGroups_ and only marks it
+        // for halt; RequestGroupMan removes it after its last command exits.
+        if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
+            group_lock.recover().request_halt(HaltReason::UserRequest);
+            info!("Requested removal of active download task #{}", gid.value());
+            return Ok(());
+        }
+
+        // A reserved group has no command to drain, so it can be removed now.
+        if let Some(group_lock) = self.reserved.remove_by_gid(gid) {
             let mut group = group_lock.recover_mut();
             group.remove()?;
-            info!("Removing download task #{}", gid.value());
-
-            // Record a REMOVED DownloadResult in the stopped storage so
-            // `tellStopped` / `getDownloadResult` can surface it.
-            // Mirrors C++ `ProcessStoppedGroup` -> `addDownloadResult(REMOVED)`.
-            let result = group.create_download_result();
-            self.stopped.add(result);
-
-            debug!(
-                "Remaining: active={}, reserved={}",
-                self.active.len(),
-                self.reserved.len()
-            );
+            info!("Removing reserved download task #{}", gid.value());
+            self.stopped.add(group.create_download_result());
         }
         Ok(())
+    }
+
+    /// Request immediate removal of an active group.
+    ///
+    /// The engine still owns task abortion and completion accounting; this
+    /// method only publishes the C++ force-halt intent on the group.
+    pub fn force_remove_group(&self, gid: GroupId) -> Result<()> {
+        if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
+            group_lock
+                .recover()
+                .request_force_halt(HaltReason::UserRequest);
+            info!(
+                "Requested force removal of active download task #{}",
+                gid.value()
+            );
+            return Ok(());
+        }
+        self.remove_group(gid)
+    }
+
+    /// Mark an active command as timed out while preserving finalization.
+    pub fn timeout_group(&self, gid: GroupId) -> bool {
+        if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
+            let group = group_lock.recover();
+            group.request_halt(HaltReason::Timeout);
+            group.set_last_error(
+                crate::request::request_group::DownloadResultCode::TimeOut,
+                "Download timed out",
+            );
+            return true;
+        }
+        false
     }
 
     /// Handle a promoted group whose download task failed to spawn.
@@ -717,6 +747,45 @@ mod tests {
         let promoted = man.fill_from_reserver();
         assert_eq!(promoted.len(), 1);
         assert_eq!(man.active_count(), 1);
+    }
+
+    #[test]
+    fn test_active_remove_requests_halt_without_removing_group() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        man.fill_from_reserver();
+
+        man.remove_group(gid).unwrap();
+
+        let group = man.find_group(gid).expect("active group must be retained");
+        let guard = group.recover();
+        assert!(guard.is_halt_requested());
+        assert_eq!(guard.get_halt_reason(), HaltReason::UserRequest);
+        assert_eq!(man.stopped_count(), 0);
+    }
+
+    #[test]
+    fn test_force_remove_requests_force_halt_without_removing_group() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        man.fill_from_reserver();
+
+        man.force_remove_group(gid).unwrap();
+
+        let group = man.find_group(gid).expect("active group must be retained");
+        let guard = group.recover();
+        assert!(guard.is_force_halt_requested());
+        assert_eq!(guard.get_halt_reason(), HaltReason::UserRequest);
     }
 
     // ── Remove writes a REMOVED stopped result ──────────────────────────

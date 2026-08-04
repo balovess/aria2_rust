@@ -21,6 +21,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 impl super::RequestGroupMan {
     /// Promote groups from the reserved queue to the active DashMap
     /// until `max_concurrent` is reached or the reserved queue is empty.
+    /// A limit of zero means unlimited, matching aria2's option semantics.
     ///
     /// Returns the list of groups that were promoted (so the engine can
     /// create and spawn their download commands).
@@ -38,7 +39,11 @@ impl super::RequestGroupMan {
     pub fn fill_from_reserver(&self) -> Vec<Arc<std::sync::RwLock<super::RequestGroup>>> {
         let max = self.max_concurrent();
         let current_active = self.active_count();
-        let slots_available = max.saturating_sub(current_active);
+        let slots_available = if max == 0 {
+            self.reserved.len()
+        } else {
+            max.saturating_sub(current_active)
+        };
 
         if slots_available == 0 || self.reserved.is_empty() {
             return Vec::new();
@@ -105,6 +110,7 @@ impl super::RequestGroupMan {
                 // Only promote groups that are in Waiting or Paused status.
                 match g.status() {
                     DownloadStatus::Waiting | DownloadStatus::Paused => {
+                        g.clear_command_failure();
                         g.start().ok(); // Sets status to Active
                         g.control_flags.clear_pause();
                     }

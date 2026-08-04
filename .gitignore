@@ -12,4 +12,5 @@ bindings/python/tests/__pycache__/
 *.md
 *.7z
 *.bak
+docs/
 

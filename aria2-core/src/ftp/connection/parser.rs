@@ -21,47 +21,41 @@ impl FtpClient {
     /// Returns a `(host, port)` tuple
     pub(super) fn parse_pasv_response(text: &str) -> Result<(String, u16)> {
         let start = text.find('(').ok_or_else(|| {
-            Aria2Error::Parse("PASV response missing opening parenthesis".to_string())
+            Aria2Error::FtpProtocol("PASV response missing opening parenthesis".to_string())
         })?;
 
         let end = text.find(')').ok_or_else(|| {
-            Aria2Error::Parse("PASV response missing closing parenthesis".to_string())
+            Aria2Error::FtpProtocol("PASV response missing closing parenthesis".to_string())
         })?;
 
         let inner = &text[start + 1..end];
         let parts: Vec<&str> = inner.split(',').collect();
 
         if parts.len() != 6 {
-            return Err(Aria2Error::Parse(format!(
+            return Err(Aria2Error::FtpProtocol(format!(
                 "PASV response format error: expected 6 parts, got {}",
                 parts.len()
             )));
         }
 
-        let h1: u8 = parts[0]
-            .trim()
-            .parse()
-            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h1".to_string()))?;
-        let h2: u8 = parts[1]
-            .trim()
-            .parse()
-            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h2".to_string()))?;
-        let h3: u8 = parts[2]
-            .trim()
-            .parse()
-            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h3".to_string()))?;
-        let h4: u8 = parts[3]
-            .trim()
-            .parse()
-            .map_err(|_| Aria2Error::Parse("PASV response: invalid IP byte h4".to_string()))?;
-        let p1: u16 = parts[4]
-            .trim()
-            .parse()
-            .map_err(|_| Aria2Error::Parse("PASV response: invalid port byte p1".to_string()))?;
-        let p2: u16 = parts[5]
-            .trim()
-            .parse()
-            .map_err(|_| Aria2Error::Parse("PASV response: invalid port byte p2".to_string()))?;
+        let h1: u8 = parts[0].trim().parse().map_err(|_| {
+            Aria2Error::FtpProtocol("PASV response: invalid IP byte h1".to_string())
+        })?;
+        let h2: u8 = parts[1].trim().parse().map_err(|_| {
+            Aria2Error::FtpProtocol("PASV response: invalid IP byte h2".to_string())
+        })?;
+        let h3: u8 = parts[2].trim().parse().map_err(|_| {
+            Aria2Error::FtpProtocol("PASV response: invalid IP byte h3".to_string())
+        })?;
+        let h4: u8 = parts[3].trim().parse().map_err(|_| {
+            Aria2Error::FtpProtocol("PASV response: invalid IP byte h4".to_string())
+        })?;
+        let p1: u16 = parts[4].trim().parse().map_err(|_| {
+            Aria2Error::FtpProtocol("PASV response: invalid port byte p1".to_string())
+        })?;
+        let p2: u16 = parts[5].trim().parse().map_err(|_| {
+            Aria2Error::FtpProtocol("PASV response: invalid port byte p2".to_string())
+        })?;
 
         let host = format!("{}.{}.{}.{}", h1, h2, h3, h4);
         let port = p1 * 256 + p2;

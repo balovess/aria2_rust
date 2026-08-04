@@ -6,7 +6,7 @@
 //! file size limit.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use tracing::info;
 
@@ -110,6 +110,9 @@ pub struct RequestGroup {
     /// Last error message recorded for this download.
     pub last_error_message: std::sync::RwLock<String>,
 
+    /// Whether any command in the current command generation failed.
+    pub command_failure: AtomicBool,
+
     /// Whether saving the .aria2 control file is currently enabled.
     /// Disabled during hash checking to prevent corrupt state.
     pub save_control_file_enabled: std::sync::RwLock<std::sync::atomic::AtomicBool>,
@@ -132,6 +135,12 @@ pub struct RequestGroup {
     /// post-download handler creates child groups from this download.
     /// Used by RPC `followedBy` field.
     pub followed_by_gids: std::sync::RwLock<Vec<GroupId>>,
+
+    /// GID of the download this group belongs to.
+    ///
+    /// Mirrors C++ `RequestGroup::belongsToGID_`, used for child downloads
+    /// such as Metalink/torrent follow-up groups.
+    pub belongs_to_gid: std::sync::RwLock<Option<GroupId>>,
 }
 
 impl RequestGroup {
@@ -164,12 +173,14 @@ impl RequestGroup {
             halt_reason: std::sync::RwLock::new(HaltReason::None),
             last_error_code: std::sync::RwLock::new(DownloadResultCode::UnknownError),
             last_error_message: std::sync::RwLock::new(String::new()),
+            command_failure: AtomicBool::new(false),
             save_control_file_enabled: std::sync::RwLock::new(std::sync::atomic::AtomicBool::new(
                 true,
             )),
             dependency: std::sync::RwLock::new(None),
             following_gid: std::sync::RwLock::new(None),
             followed_by_gids: std::sync::RwLock::new(Vec::new()),
+            belongs_to_gid: std::sync::RwLock::new(None),
         }
     }
 }

@@ -10,6 +10,39 @@ fn create_test_cache() -> DnsCache {
 }
 
 #[test]
+fn test_mark_bad_removes_only_selected_address() {
+    let mut cache = create_test_cache();
+    let good: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    let bad: SocketAddr = "127.0.0.2:80".parse().unwrap();
+    cache.cache.insert(
+        "mirror.test".into(),
+        DnsEntry {
+            hostname: "mirror.test".into(),
+            addresses: vec![bad, good],
+            resolved_at: Instant::now(),
+            ttl: Duration::from_secs(60),
+            ipv4_preferred: true,
+        },
+    );
+    cache.mark_bad("mirror.test", bad);
+    assert_eq!(
+        cache.resolve_no_network("mirror.test", 80).unwrap(),
+        vec![good]
+    );
+}
+
+#[test]
+fn test_remove_cached_clears_positive_and_negative_entries() {
+    let mut cache = create_test_cache();
+    cache.record_failure("mirror.test");
+    cache.remove_cached("mirror.test", 80);
+    assert!(matches!(
+        cache.resolve_no_network("mirror.test", 80),
+        Err(crate::error::Aria2Error::NameResolve(message)) if message.contains("No cached entry")
+    ));
+}
+
+#[test]
 fn test_dns_entry_is_expired() {
     let entry = DnsEntry {
         hostname: "test.com".to_string(),
@@ -168,7 +201,7 @@ fn test_negative_cache_blocks_retry() {
         result.is_err(),
         "Lookup should be blocked by negative cache"
     );
-    let err_msg = result.unwrap_err();
+    let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("recently failed"),
         "Error should mention recent failure: {}",

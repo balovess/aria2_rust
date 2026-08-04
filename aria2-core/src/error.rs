@@ -11,8 +11,44 @@ pub enum Aria2Error {
     #[error("Parse error: {0}")]
     Parse(String),
 
+    #[error("JSON parse error: {0}")]
+    JsonParse(String),
+
+    #[error("Metalink parse error: {0}")]
+    MetalinkParse(String),
+
+    #[error("Bencode parse error: {0}")]
+    BencodeParse(String),
+
+    #[error("BitTorrent parse error: {0}")]
+    BittorrentParse(String),
+
+    #[error("Magnet parse error: {0}")]
+    MagnetParse(String),
+
     #[error("Checksum failed: {0}")]
     Checksum(String),
+
+    #[error("HTTP protocol error: {0}")]
+    HttpProtocol(String),
+
+    #[error("FTP protocol error: {0}")]
+    FtpProtocol(String),
+
+    #[error("File open error: {0}")]
+    FileOpen(String),
+
+    #[error("File create error: {0}")]
+    FileCreate(String),
+
+    #[error("File I/O error: {0}")]
+    FileIo(String),
+
+    #[error("Directory create error: {0}")]
+    DirCreate(String),
+
+    #[error("Name resolve error: {0}")]
+    NameResolve(String),
 
     #[error("Download failed: {0}")]
     DownloadFailed(String),
@@ -29,7 +65,7 @@ pub enum Aria2Error {
 
 impl From<serde_json::Error> for Aria2Error {
     fn from(err: serde_json::Error) -> Self {
-        Aria2Error::Parse(err.to_string())
+        Aria2Error::JsonParse(err.to_string())
     }
 }
 

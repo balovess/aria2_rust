@@ -133,6 +133,7 @@ pub fn run_post_download_processing(
 
                     for child in &groups {
                         child.recover().set_following_gid(info.gid);
+                        child.recover().set_belongs_to_gid(info.gid);
                     }
 
                     info!(

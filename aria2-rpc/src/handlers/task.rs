@@ -459,12 +459,20 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gids = super::parse_gids(req, 0)?;
 
-        // Propagate to RequestGroupMan when available
-        if let Some(group_man) = &self.group_man {
+        // Propagate force-remove intent to the core engine when available.
+        if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
+            use aria2_core::engine::engine_command::EngineCommand;
+            for gid in &gids {
+                if let Some(gid_parsed) = GroupId::from_hex_string(gid) {
+                    let _ =
+                        engine_cmd_tx.send(EngineCommand::ForceRemoveDownload { gid: gid_parsed });
+                }
+            }
+        } else if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
             for gid in &gids {
                 if let Some(gid_parsed) = GroupId::from_hex_string(gid) {
-                    let _ = man.remove_group(gid_parsed);
+                    let _ = man.force_remove_group(gid_parsed);
                 }
             }
         }

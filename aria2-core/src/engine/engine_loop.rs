@@ -10,6 +10,7 @@
 //! 6. Run periodic housekeeping (session auto-save, socket pool eviction, etc.)
 //! 7. Check exit condition
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -20,11 +21,11 @@ use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
 use super::engine_command::{EngineCommand, TaskResult};
 use super::task_spawner::spawn_download_task;
 use crate::dns::dns_cache::DnsCache;
-use crate::error::Aria2Error;
+use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::RateLimiter;
-use crate::request::request_group::{DownloadStatus, GroupId};
+use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -75,9 +76,13 @@ pub struct EngineLoopContext {
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.
+type CommandGeneration = u64;
+
 struct RunningDownload {
     /// JoinHandle for the spawned tokio task.
     _handle: JoinHandle<()>,
+    /// Stable identity of this command instance, independent of its GID.
+    generation: CommandGeneration,
     /// Instant the task was spawned.
     started: Instant,
     /// Per-command timeout. `None` means the task never times out.
@@ -116,12 +121,15 @@ pub async fn run_engine_loop(
     info!("Engine loop started (tick={:?})", tick_interval);
 
     let mut running_downloads: Vec<(GroupId, RunningDownload)> = Vec::new();
+    let mut completed_generations: HashSet<CommandGeneration> = HashSet::new();
+    let mut next_generation: CommandGeneration = 1;
     let mut last_housekeeping = Instant::now();
     let mut halt_requested = false;
     let mut force_halt_requested = false;
 
     // Completion channel: spawned tasks send (GID, TaskResult) here when done.
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+    let (completion_tx, mut completion_rx) =
+        mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
 
     let mut ticker = tokio::time::interval(tick_interval);
 
@@ -136,6 +144,7 @@ pub async fn run_engine_loop(
             &mut running_downloads,
             &mut halt_requested,
             &mut force_halt_requested,
+            &completion_tx,
         )
         .await;
 
@@ -156,11 +165,14 @@ pub async fn run_engine_loop(
 
         for group in &promoted {
             let gid = group.recover().gid();
+            let generation = next_generation;
+            next_generation = next_generation.wrapping_add(1);
             match spawn_download_task(
                 Arc::clone(group),
                 Arc::clone(&ctx.ftp_pool),
                 Arc::clone(&ctx.dns_cache),
                 ctx.global_limiter.clone(),
+                generation,
                 completion_tx.clone(),
             )
             .await
@@ -171,6 +183,7 @@ pub async fn run_engine_loop(
                         gid,
                         RunningDownload {
                             _handle: handle,
+                            generation,
                             started: Instant::now(),
                             timeout,
                         },
@@ -210,7 +223,13 @@ pub async fn run_engine_loop(
 
         // ── 3. Collect completed task notifications ──────────────────────
         // Process all pending task completion messages.
-        process_task_completions(&ctx, &mut completion_rx, &mut running_downloads).await;
+        process_task_completions(
+            &ctx,
+            &mut completion_rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
 
         // ── 4. Demote stopped groups (active → stopped results) ──────────
         // Mirrors C++ `removeStoppedGroup()`.
@@ -227,7 +246,7 @@ pub async fn run_engine_loop(
 
         // ── 5. Periodic housekeeping ─────────────────────────────────────
         if last_housekeeping.elapsed() >= HOUSEKEEPING_INTERVAL {
-            run_housekeeping(&ctx, &mut running_downloads).await;
+            run_housekeeping(&ctx, &mut running_downloads, &completion_tx).await;
             last_housekeeping = Instant::now();
         }
 
@@ -245,9 +264,10 @@ pub async fn run_engine_loop(
         // since `all_done && !keep_alive` can never be true there.
         let graceful_done = halt_requested && running_downloads.is_empty();
 
-        if force_halt_requested || graceful_done || (all_done && !ctx.keep_alive) {
+        let force_done = force_halt_requested && running_downloads.is_empty();
+        if force_done || graceful_done || (all_done && !ctx.keep_alive) {
             if force_halt_requested {
-                info!("Force halt requested, shutting down engine");
+                info!("Force halt completed, shutting down engine");
             } else if graceful_done {
                 info!("Graceful halt completed, engine shutting down");
             } else {
@@ -290,6 +310,7 @@ async fn process_engine_commands(
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
     halt_requested: &mut bool,
     force_halt_requested: &mut bool,
+    completion_tx: &mpsc::UnboundedSender<(GroupId, CommandGeneration, TaskResult)>,
 ) {
     while let Ok(cmd) = cmd_rx.try_recv() {
         // Every EngineCommand mutates session state (queue membership,
@@ -310,15 +331,20 @@ async fn process_engine_commands(
                 if let Err(e) = man.remove_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to remove download");
                 }
-                // Also abort any running task for this GID.
-                running_downloads.retain(|(id, rd)| {
-                    if *id == gid {
-                        rd._handle.abort();
-                        false
-                    } else {
-                        true
-                    }
-                });
+            }
+
+            EngineCommand::ForceRemoveDownload { gid } => {
+                let man = ctx.group_man.read().await;
+                if let Err(e) = man.force_remove_group(gid) {
+                    warn!(gid = gid.value(), error = %e, "Failed to force-remove download");
+                    continue;
+                }
+                // Publish the accounting event before aborting. The task may
+                // be cancelled before its own completion send runs.
+                for (_, running) in running_downloads.iter().filter(|(id, _)| *id == gid) {
+                    let _ = completion_tx.send((gid, running.generation, TaskResult::Cancelled));
+                    running._handle.abort();
+                }
             }
 
             EngineCommand::Pause { gid } => {
@@ -390,9 +416,14 @@ async fn process_engine_commands(
                 let man = ctx.group_man.read().await;
                 man.force_halt_all(reason);
                 *force_halt_requested = true;
-                // Abort all running tasks immediately.
-                for (_, rd) in running_downloads.drain(..) {
-                    rd._handle.abort();
+
+                // Abort is not allowed to bypass command accounting. Publish
+                // one synthetic completion for every running command before
+                // aborting its Tokio task; duplicate task-side sends are
+                // ignored by the completion ledger.
+                for (gid, running) in running_downloads.iter() {
+                    let _ = completion_tx.send((*gid, running.generation, TaskResult::Cancelled));
+                    running._handle.abort();
                 }
             }
 
@@ -427,33 +458,132 @@ async fn process_engine_commands(
 }
 
 /// Process all pending task completion notifications.
+fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
+    match error {
+        Aria2Error::Recoverable(RecoverableError::Timeout) => DownloadResultCode::TimeOut,
+        Aria2Error::Checksum(_) => DownloadResultCode::ChecksumError,
+        Aria2Error::JsonParse(_) => DownloadResultCode::JsonParseError,
+        Aria2Error::MetalinkParse(_) => DownloadResultCode::MetalinkParseError,
+        Aria2Error::BencodeParse(_) => DownloadResultCode::BencodeParseError,
+        Aria2Error::BittorrentParse(_) => DownloadResultCode::BittorrentParseError,
+        Aria2Error::MagnetParse(_) => DownloadResultCode::MagnetParseError,
+        Aria2Error::Recoverable(RecoverableError::CannotResume) => DownloadResultCode::CannotResume,
+        Aria2Error::FtpProtocol(_) => DownloadResultCode::FtpProtocolError,
+        Aria2Error::HttpProtocol(_) => DownloadResultCode::HttpProtocolError,
+        Aria2Error::Recoverable(RecoverableError::FtpProtocolError { .. }) => {
+            DownloadResultCode::FtpProtocolError
+        }
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError { .. }) => {
+            DownloadResultCode::HttpProtocolError
+        }
+        Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 404 => {
+            DownloadResultCode::ResourceNotFound
+        }
+        Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 503 => {
+            DownloadResultCode::HttpServiceUnavailable
+        }
+        Aria2Error::Recoverable(RecoverableError::ServerError { .. }) => {
+            DownloadResultCode::NetworkProblem
+        }
+        Aria2Error::Network(_) => DownloadResultCode::NetworkProblem,
+        Aria2Error::FileOpen(_) => DownloadResultCode::FileOpenError,
+        Aria2Error::FileCreate(_) => DownloadResultCode::FileCreateError,
+        Aria2Error::FileIo(_) => DownloadResultCode::FileIoError,
+        Aria2Error::DirCreate(_) => DownloadResultCode::DirCreateError,
+        Aria2Error::NameResolve(_) => DownloadResultCode::NameResolveError,
+        Aria2Error::Io(_) => DownloadResultCode::FileIoError,
+        Aria2Error::InvalidArgument(_) => DownloadResultCode::OptionError,
+        Aria2Error::Parse(_) => DownloadResultCode::UnknownError,
+        Aria2Error::Fatal(crate::error::FatalError::Config(_)) => DownloadResultCode::OptionError,
+        Aria2Error::Fatal(crate::error::FatalError::DiskSpaceExhausted) => {
+            DownloadResultCode::NotEnoughDiskSpace
+        }
+        Aria2Error::Recoverable(_) => DownloadResultCode::NetworkProblem,
+        _ => DownloadResultCode::UnknownError,
+    }
+}
+
 async fn process_task_completions(
     ctx: &EngineLoopContext,
-    completion_rx: &mut mpsc::UnboundedReceiver<(GroupId, TaskResult)>,
+    completion_rx: &mut mpsc::UnboundedReceiver<(GroupId, CommandGeneration, TaskResult)>,
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
+    completed_generations: &mut HashSet<CommandGeneration>,
 ) {
-    while let Ok((gid, result)) = completion_rx.try_recv() {
+    while let Ok((gid, generation, result)) = completion_rx.try_recv() {
+        // A task may race with force-remove/timeout cleanup and publish more
+        // than one terminal notification. Account for exactly one completion.
+        if !completed_generations.insert(generation) {
+            debug!(
+                gid = gid.value(),
+                generation, "Ignoring duplicate task completion"
+            );
+            continue;
+        }
+
         // A task finished: its status/progress changed, so persist it.
         mark_session_dirty(ctx);
 
-        // Remove from running_downloads list.
-        running_downloads.retain(|(id, _)| *id != gid);
+        // Remove only this command instance. A RequestGroup may have several
+        // active commands, just as C++ tracks several AbstractCommand objects
+        // under one RequestGroup.
+        running_downloads.retain(|(id, running)| *id != gid || running.generation != generation);
 
         // Decrement num_commands and update group status.
         let man = ctx.group_man.read().await;
         if let Some(group) = man.find_group(gid) {
             let prev = group.recover().dec_commands();
+            let last_command = prev == 1;
             debug!(
                 gid = gid.value(),
-                prev, "Task completed, decremented num_commands"
+                prev, last_command, "Task completed, decremented num_commands"
             );
 
             match result {
+                TaskResult::Success if last_command => {
+                    let had_failure = group
+                        .recover()
+                        .command_failure
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    if had_failure {
+                        let message = group.recover().get_last_error_message();
+                        let code = group.recover().get_last_error_code();
+                        group.recover().mark_error_with_code(code, message);
+                    } else {
+                        match group.recover().get_halt_reason() {
+                            crate::request::request_group::HaltReason::UserRequest => {
+                                group.recover().mark_removed();
+                            }
+                            crate::request::request_group::HaltReason::Timeout => {
+                                group.recover().mark_timeout();
+                            }
+                            crate::request::request_group::HaltReason::ShutdownSignal => {}
+                            crate::request::request_group::HaltReason::None => {
+                                group.recover_mut().mark_complete();
+                            }
+                        }
+                    }
+                }
                 TaskResult::Success => {
-                    group.recover_mut().mark_complete();
+                    // C++ removes a RequestGroup only after its final
+                    // AbstractCommand is destroyed. Keep the group active
+                    // while other command instances are still running.
+                }
+                TaskResult::Failed(e) if !last_command => {
+                    // A non-final command failure is recorded for the group,
+                    // but terminal state is deferred until all commands have
+                    // exited, matching C++ numCommand_ semantics.
+                    let message = e.to_string();
+                    let code = map_error_code(&e);
+                    group.recover().set_last_error(code, message);
+                    group
+                        .recover()
+                        .command_failure
+                        .store(true, std::sync::atomic::Ordering::Release);
                 }
                 TaskResult::Failed(e) => {
-                    // A pause-induced failure (`aria2.pause` / `aria2.forcePause`
+                    // Handle failures from the final command, including pause-induced
+                    // termination, before treating them as errors.
+                    // (`aria2.pause` / `aria2.forcePause`
                     // marks the group Paused and the download loop aborts via
                     // check_cancelled) must leave the group Paused — resumable —
                     // rather than recording an Error that can never be unpaused.
@@ -466,10 +596,26 @@ async fn process_task_completions(
                         &e,
                         Aria2Error::DownloadFailed(msg) if msg == "Download paused"
                     );
+                    let was_halt_requested = group_state.is_halt_requested();
                     drop(group_state);
 
                     if was_pause_requested {
                         group.recover_mut().mark_paused();
+                    } else if was_halt_requested {
+                        // User removal is terminal and must become a REMOVED
+                        // result after the command counter reaches zero.
+                        match group.recover().get_halt_reason() {
+                            crate::request::request_group::HaltReason::UserRequest => {
+                                group.recover().mark_removed();
+                            }
+                            crate::request::request_group::HaltReason::Timeout => {
+                                group.recover().mark_timeout();
+                            }
+                            crate::request::request_group::HaltReason::ShutdownSignal
+                            | crate::request::request_group::HaltReason::None => {}
+                        }
+                        // A shutdown halt remains non-terminal so its result
+                        // maps to IN_PROGRESS and is not re-queued after exit.
                     } else if is_pause_error {
                         // A pause was requested and then undone (`unpause`)
                         // before the task fully exited. Leave the group
@@ -485,11 +631,44 @@ async fn process_task_completions(
                             group.recover().mark_waiting();
                         }
                     } else {
-                        group.recover_mut().mark_error(e.to_string());
+                        group
+                            .recover()
+                            .mark_error_with_code(map_error_code(&e), e.to_string());
                     }
+                    group
+                        .recover()
+                        .command_failure
+                        .store(false, std::sync::atomic::Ordering::Release);
                 }
                 TaskResult::Cancelled => {
-                    // Status is already set by the halt/pause handler.
+                    // Synthetic cancellation is emitted before Tokio abort, so
+                    // finalize the group here rather than relying on the
+                    // cancelled task to mutate its status.
+                    let group_state = group.recover();
+                    let was_pause_requested =
+                        group_state.is_pause_requested() || group_state.is_paused_flag();
+                    let halt_reason = group_state.get_halt_reason();
+                    drop(group_state);
+
+                    if was_pause_requested {
+                        group.recover_mut().mark_paused();
+                    } else if !last_command {
+                        group
+                            .recover()
+                            .command_failure
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    } else {
+                        match halt_reason {
+                            crate::request::request_group::HaltReason::UserRequest => {
+                                group.recover().mark_removed();
+                            }
+                            crate::request::request_group::HaltReason::Timeout => {
+                                group.recover().mark_timeout();
+                            }
+                            crate::request::request_group::HaltReason::ShutdownSignal
+                            | crate::request::request_group::HaltReason::None => {}
+                        }
+                    }
                 }
             }
         }
@@ -506,6 +685,7 @@ async fn process_task_completions(
 async fn run_housekeeping(
     ctx: &EngineLoopContext,
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
+    completion_tx: &mpsc::UnboundedSender<(GroupId, CommandGeneration, TaskResult)>,
 ) {
     // ── Timeout enforcement ──────────────────────────────────────────────
     // Abort tasks whose per-command timeout has elapsed.
@@ -513,19 +693,28 @@ async fn run_housekeeping(
     // via the Command::STATUS_ACTIVE mechanism).
     let now = Instant::now();
     let mut timed_out = Vec::new();
-    running_downloads.retain(|(gid, rd)| {
+    for (gid, rd) in running_downloads.iter() {
         if let Some(timeout) = rd.timeout
-            && now.duration_since(rd.started) > timeout
+            && now.duration_since(rd.started) >= timeout
         {
             timed_out.push(*gid);
-            rd._handle.abort();
-            return false;
         }
-        true
-    });
+    }
 
-    for gid in timed_out {
-        warn!(gid = gid.value(), "Download task timed out, aborting");
+    if !timed_out.is_empty() {
+        let man = ctx.group_man.read().await;
+        for gid in timed_out {
+            if man.timeout_group(gid) {
+                for (_, running) in running_downloads.iter().filter(|(id, _)| *id == gid) {
+                    let _ = completion_tx.send((gid, running.generation, TaskResult::Cancelled));
+                    running._handle.abort();
+                }
+                warn!(
+                    gid = gid.value(),
+                    "Download task timed out, requesting halt"
+                );
+            }
+        }
     }
 
     // ── Session auto-save ────────────────────────────────────────────────
@@ -732,15 +921,16 @@ mod tests {
         )));
         tx.send(EngineCommand::AddDownload { group }).unwrap();
 
-        let mut running = Vec::new();
         let mut halt_requested = false;
         let mut force_halt_requested = false;
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         process_engine_commands(
             &ctx,
             &mut rx,
-            &mut running,
+            &mut Vec::new(),
             &mut halt_requested,
             &mut force_halt_requested,
+            &completion_tx,
         )
         .await;
 
@@ -800,16 +990,25 @@ mod tests {
         }
 
         // The download command terminates because it observed the pause.
-        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+        let (completion_tx, mut completion_rx) =
+            mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
         completion_tx
             .send((
                 gid,
+                1,
                 TaskResult::Failed(Aria2Error::DownloadFailed("Download paused".into())),
             ))
             .unwrap();
 
         let mut running_downloads = Vec::new();
-        process_task_completions(&ctx, &mut completion_rx, &mut running_downloads).await;
+        let mut completed_generations = HashSet::new();
+        process_task_completions(
+            &ctx,
+            &mut completion_rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
 
         let status = {
             let man = ctx.group_man.read().await;
@@ -819,6 +1018,213 @@ mod tests {
             status,
             DownloadStatus::Paused,
             "a pause-induced task failure must keep the group Paused (resumable), not Error"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_completion_decrements_command_once() {
+        let ctx = test_ctx(false);
+        let gid = {
+            let man = ctx.group_man.read().await;
+            let gid = man
+                .add_group(
+                    vec!["http://example.com/file.bin".to_string()],
+                    DownloadOptions::default(),
+                )
+                .unwrap();
+            man.fill_from_reserver();
+            man.find_group(gid).unwrap().recover().inc_commands();
+            gid
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
+        tx.send((
+            gid,
+            1,
+            TaskResult::Failed(Aria2Error::Network("failed".into())),
+        ))
+        .unwrap();
+        tx.send((
+            gid,
+            1,
+            TaskResult::Failed(Aria2Error::Network("duplicate".into())),
+        ))
+        .unwrap();
+
+        let mut running_downloads: Vec<(GroupId, RunningDownload)> = Vec::new();
+        let mut completed_generations: HashSet<CommandGeneration> = HashSet::new();
+        process_task_completions(
+            &ctx,
+            &mut rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
+
+        let man = ctx.group_man.read().await;
+        let group = man.find_group(gid).unwrap();
+        assert_eq!(group.recover().num_commands(), 0);
+        assert_eq!(completed_generations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn same_gid_commands_have_independent_completion_generations() {
+        let ctx = test_ctx(false);
+        let gid = {
+            let man = ctx.group_man.read().await;
+            let gid = man
+                .add_group(
+                    vec!["http://example.com/file.bin".to_string()],
+                    DownloadOptions::default(),
+                )
+                .unwrap();
+            man.fill_from_reserver();
+            let group = man.find_group(gid).unwrap();
+            group.recover().inc_commands();
+            group.recover().inc_commands();
+            gid
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
+        tx.send((
+            gid,
+            1,
+            TaskResult::Failed(Aria2Error::Network("first command".into())),
+        ))
+        .unwrap();
+        tx.send((
+            gid,
+            2,
+            TaskResult::Failed(Aria2Error::Network("second command".into())),
+        ))
+        .unwrap();
+
+        let mut running_downloads = Vec::new();
+        let mut completed_generations = HashSet::new();
+        process_task_completions(
+            &ctx,
+            &mut rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
+
+        let man = ctx.group_man.read().await;
+        assert_eq!(man.find_group(gid).unwrap().recover().num_commands(), 0);
+        assert_eq!(completed_generations.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn non_final_command_failure_waits_for_final_completion() {
+        let ctx = test_ctx(false);
+        let gid = {
+            let man = ctx.group_man.read().await;
+            let gid = man
+                .add_group(
+                    vec!["http://example.com/file.bin".to_string()],
+                    DownloadOptions::default(),
+                )
+                .unwrap();
+            man.fill_from_reserver();
+            let group = man.find_group(gid).unwrap();
+            group.recover().inc_commands();
+            group.recover().inc_commands();
+            gid
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
+        tx.send((
+            gid,
+            1,
+            TaskResult::Failed(Aria2Error::Network("first command failed".into())),
+        ))
+        .unwrap();
+
+        let mut running_downloads = Vec::new();
+        let mut completed_generations = HashSet::new();
+        process_task_completions(
+            &ctx,
+            &mut rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
+
+        {
+            let man = ctx.group_man.read().await;
+            let group = man.find_group(gid).unwrap();
+            assert_eq!(group.recover().num_commands(), 1);
+            assert!(matches!(group.recover().status(), DownloadStatus::Active));
+        }
+
+        tx.send((gid, 2, TaskResult::Success)).unwrap();
+        process_task_completions(
+            &ctx,
+            &mut rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
+
+        let man = ctx.group_man.read().await;
+        let group = man.find_group(gid).unwrap();
+        assert_eq!(group.recover().num_commands(), 0);
+        assert!(matches!(group.recover().status(), DownloadStatus::Error(_)));
+    }
+
+    #[test]
+    fn error_code_mapping_preserves_aria2_semantics() {
+        assert_eq!(
+            map_error_code(&Aria2Error::Recoverable(RecoverableError::Timeout)),
+            DownloadResultCode::TimeOut
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::Recoverable(RecoverableError::CannotResume)),
+            DownloadResultCode::CannotResume
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 404
+            })),
+            DownloadResultCode::ResourceNotFound
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::Checksum("bad digest".into())),
+            DownloadResultCode::ChecksumError
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: "550".into(),
+                }
+            )),
+            DownloadResultCode::FtpProtocolError
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::Io("disk write".into())),
+            DownloadResultCode::FileIoError
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::Fatal(
+                crate::error::FatalError::DiskSpaceExhausted
+            )),
+            DownloadResultCode::NotEnoughDiskSpace
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::HttpProtocol("bad status".into())),
+            DownloadResultCode::HttpProtocolError
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::FtpProtocol("bad PASV".into())),
+            DownloadResultCode::FtpProtocolError
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::DirCreate("permission denied".into())),
+            DownloadResultCode::DirCreateError
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::FileOpen("cannot open".into())),
+            DownloadResultCode::FileOpenError
         );
     }
 
@@ -842,16 +1248,25 @@ mod tests {
             g.recover().inc_commands();
         }
 
-        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(GroupId, TaskResult)>();
+        let (completion_tx, mut completion_rx) =
+            mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
         completion_tx
             .send((
                 gid,
+                1,
                 TaskResult::Failed(Aria2Error::Network("connection refused".into())),
             ))
             .unwrap();
 
         let mut running_downloads = Vec::new();
-        process_task_completions(&ctx, &mut completion_rx, &mut running_downloads).await;
+        let mut completed_generations = HashSet::new();
+        process_task_completions(
+            &ctx,
+            &mut completion_rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
 
         let status = {
             let man = ctx.group_man.read().await;

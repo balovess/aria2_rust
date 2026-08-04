@@ -59,7 +59,7 @@ impl BatchedDiskWriter {
                 .open(&self.path)
                 .await
                 .map_err(|e| {
-                    Aria2Error::Io(format!("Failed to open {}: {}", self.path.display(), e))
+                    Aria2Error::FileOpen(format!("Failed to open {}: {}", self.path.display(), e))
                 })?;
             self.file = Some(f);
             self.opened = true;

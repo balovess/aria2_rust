@@ -44,14 +44,16 @@ impl super::RequestGroupMan {
             let num_cmd = g.num_commands();
             let status = g.status();
 
-            // A group is "stopped" when num_commands == 0 AND in terminal state.
-            // C++ checks `numCommand_ == 0` in the AbstractCommand destructor path.
+            // C++ processes every zero-command group. A shutdown-halted
+            // non-terminal group becomes an IN_PROGRESS result, while normal
+            // terminal states become their corresponding stopped result.
             let is_terminal = matches!(
                 status,
                 DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
             );
+            let is_halted = g.is_halt_requested();
 
-            if num_cmd == 0 && is_terminal {
+            if num_cmd == 0 && (is_terminal || is_halted) {
                 debug!(
                     gid = gid.value(),
                     ?status,
@@ -126,7 +128,8 @@ impl super::RequestGroupMan {
             if matches!(
                 status,
                 DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
-            ) {
+            ) || (g.is_halt_requested() && !g.is_pause_requested())
+            {
                 continue;
             }
             to_move.push((*entry.key(), entry.value().clone()));
@@ -136,6 +139,7 @@ impl super::RequestGroupMan {
         for (gid, group) in to_move {
             let was_pause_requested = group.recover().is_pause_requested();
             let was_restart_requested = group.recover().is_restart_requested();
+            let was_halt_requested = group.recover().is_halt_requested();
 
             if self.active.remove(&gid).is_none() {
                 continue;
@@ -173,9 +177,12 @@ impl super::RequestGroupMan {
 
             // Fire on-download-pause hook for groups that are actually
             // pausing (not the reduce-to-limit auto-restart case).
-            if let (Some(hooks), true, false) =
-                (event_hooks, was_pause_requested, was_restart_requested)
-            {
+            if let (Some(hooks), true, false, false) = (
+                event_hooks,
+                was_pause_requested,
+                was_restart_requested,
+                was_halt_requested,
+            ) {
                 hooks.fire_event(DownloadEvent::Pause, &*group.recover());
             }
 

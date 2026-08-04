@@ -1,4 +1,4 @@
-﻿//! Memory-mapped disk writer using `memmap2::MmapMut` for direct memory access
+//! Memory-mapped disk writer using `memmap2::MmapMut` for direct memory access
 //! to the file's page cache.
 //!
 //! # Architecture
@@ -120,7 +120,8 @@ impl MmapDiskWriter {
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Aria2Error::DirCreate(format!("{}: {e}", parent.display())))?;
             debug!("Created parent directories for {:?}", self.path);
         }
         Ok(())
@@ -138,7 +139,8 @@ impl MmapDiskWriter {
             .write(true)
             .read(true)
             .truncate(false) // Explicit: preserve existing data for resume scenarios.
-            .open(&self.path)?;
+            .open(&self.path)
+            .map_err(|e| Aria2Error::FileOpen(format!("{}: {e}", self.path.display())))?;
 
         // Pre-allocate if total_size is provided and file is new (size 0).
         if let Some(size) = self.total_size {

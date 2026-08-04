@@ -29,15 +29,15 @@ use crate::util::rwlock_ext::RwLockRecover;
 /// Before spawning, increments `RequestGroup::num_commands`
 /// (mirrors C++ AbstractCommand constructor).
 ///
-/// After the task completes, sends `(GID, TaskResult)` via the completion
-/// channel so the engine loop can decrement `num_commands` and check for
-/// demotion.
+/// After the task completes, sends `(GID, generation, TaskResult)` via the completion
+/// channel so the engine can decrement `num_commands` and check for demotion.
 pub async fn spawn_download_task(
     group: Arc<std::sync::RwLock<RequestGroup>>,
     _ftp_pool: Arc<FtpConnectionPool>,
     _dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
     global_limiter: Option<RateLimiter>,
-    completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, TaskResult)>,
+    generation: u64,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, u64, TaskResult)>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let gid = group.recover().gid();
     let uris = group.recover().uris().to_vec();
@@ -55,6 +55,26 @@ pub async fn spawn_download_task(
             return None;
         }
     };
+
+    // Resolve the origin before constructing the command. This keeps DNS failures
+    // on the same structured completion path as other command failures and lets
+    // the engine apply NameResolveError consistently.
+    if let Some((hostname, port)) = direct_origin(&first_uri) {
+        let dns_result = {
+            let mut cache = _dns_cache.lock().await;
+            let result = cache.resolve(&hostname, port).await;
+            drop(cache);
+            result
+        };
+        if let Err(error) = dns_result {
+            warn!(gid = gid.value(), error = %error, "DNS resolution failed before command start");
+            let completion_tx = completion_tx.clone();
+            let handle = tokio::spawn(async move {
+                let _ = completion_tx.send((gid, generation, TaskResult::Failed(error)));
+            });
+            return Some(handle);
+        }
+    }
 
     // Create the appropriate command based on URI scheme.
     let cmd_result =
@@ -94,7 +114,7 @@ pub async fn spawn_download_task(
 
         // Send completion notification. If the channel is closed, the engine
         // has already shut down; just log and move on.
-        if completion_tx.send((gid, task_result)).is_err() {
+        if completion_tx.send((gid, generation, task_result)).is_err() {
             debug!(
                 gid = gid.value(),
                 "Completion channel closed, engine likely shut down"
@@ -103,6 +123,18 @@ pub async fn spawn_download_task(
     });
 
     Some(handle)
+}
+
+fn direct_origin(uri: &str) -> Option<(String, u16)> {
+    let parsed = url::Url::parse(uri).ok()?;
+    let scheme = parsed.scheme();
+    if !matches!(scheme, "http" | "https" | "ftp" | "ftps") {
+        return None;
+    }
+    Some((
+        parsed.host_str()?.to_string(),
+        parsed.port_or_known_default()?,
+    ))
 }
 
 /// Create the appropriate `Command` implementation for a URI.

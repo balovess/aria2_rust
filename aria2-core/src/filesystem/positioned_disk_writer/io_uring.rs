@@ -82,7 +82,8 @@ impl SeekableDiskWriter for IoUringDiskWriter {
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Aria2Error::DirCreate(format!("{}: {e}", parent.display())))?;
             debug!("Created parent directories for {:?}", self.path);
         }
 
@@ -98,7 +99,8 @@ impl SeekableDiskWriter for IoUringDiskWriter {
                 .create(true)
                 .write(true)
                 .read(true)
-                .open(&self.path)?;
+                .open(&self.path)
+                .map_err(|e| Aria2Error::FileOpen(format!("{}: {e}", self.path.display())))?;
             let current_size = std_file.metadata()?.len();
             if current_size == 0 && size > 0 {
                 std_file.set_len(size)?;
@@ -115,7 +117,7 @@ impl SeekableDiskWriter for IoUringDiskWriter {
             .read(true)
             .open(&self.path)
             .await
-            .map_err(|e| Aria2Error::Io(format!("io_uring open failed: {e}")))?;
+            .map_err(|e| Aria2Error::FileOpen(format!("io_uring open failed: {e}")))?;
         debug!("Opened file for io_uring positioned I/O: {:?}", self.path);
 
         self.file = Some(file);
@@ -126,7 +128,7 @@ impl SeekableDiskWriter for IoUringDiskWriter {
         let file = self
             .file
             .as_ref()
-            .ok_or_else(|| Aria2Error::Io("io_uring file not open".into()))?;
+            .ok_or_else(|| Aria2Error::FileOpen("io_uring file not open".into()))?;
         write_all_at_uring(file, data, offset).await
     }
 
@@ -173,7 +175,7 @@ impl SeekableDiskWriter for IoUringDiskWriter {
         if let Some(ref file) = self.file {
             file.sync_all()
                 .await
-                .map_err(|e| Aria2Error::Io(format!("io_uring sync_all failed: {e}")))?;
+                .map_err(|e| Aria2Error::FileIo(format!("io_uring sync_all failed: {e}")))?;
         }
         Ok(())
     }
@@ -202,7 +204,7 @@ impl SeekableDiskWriter for IoUringDiskWriter {
         if let Some(file) = self.file.take() {
             file.close()
                 .await
-                .map_err(|e| Aria2Error::Io(format!("io_uring close failed: {e}")))?;
+                .map_err(|e| Aria2Error::FileIo(format!("io_uring close failed: {e}")))?;
         }
         Ok(())
     }
@@ -221,9 +223,9 @@ async fn write_all_at_uring(
 ) -> Result<()> {
     while !buf.is_empty() {
         let (res, _) = file.write_at(buf, offset).await;
-        let n = res.map_err(|e| Aria2Error::Io(format!("io_uring write_at failed: {e}")))?;
+        let n = res.map_err(|e| Aria2Error::FileIo(format!("io_uring write_at failed: {e}")))?;
         if n == 0 {
-            return Err(Aria2Error::Io(
+            return Err(Aria2Error::FileIo(
                 "io_uring write_at returned 0 — failed to write whole buffer".into(),
             ));
         }
@@ -244,7 +246,7 @@ async fn read_exact_at_uring(
     let mut filled = 0usize;
     while !buf.is_empty() {
         let (res, returned_buf) = file.read_at(buf, offset).await;
-        let n = res.map_err(|e| Aria2Error::Io(format!("io_uring read_at failed: {e}")))?;
+        let n = res.map_err(|e| Aria2Error::FileIo(format!("io_uring read_at failed: {e}")))?;
         if n == 0 {
             break; // EOF reached
         }

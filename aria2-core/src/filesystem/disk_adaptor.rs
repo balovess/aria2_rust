@@ -55,12 +55,10 @@ impl DiskAdaptor for DirectDiskAdaptor {
             open_opts.write(true).create(true).read(true);
         }
 
-        self.file = Some(
-            open_opts
-                .open(path)
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?,
-        );
+        self.file =
+            Some(open_opts.open(path).await.map_err(|e| {
+                crate::error::Aria2Error::FileOpen(format!("{}: {e}", path.display()))
+            })?);
 
         Ok(())
     }

@@ -148,7 +148,10 @@ impl MultiFileAllocationIterator {
                 && !parent.exists()
             {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    crate::error::Aria2Error::Io(format!("create_dir_all {:?}: {}", parent, e))
+                    crate::error::Aria2Error::DirCreate(format!(
+                        "create_dir_all {:?}: {}",
+                        parent, e
+                    ))
                 })?;
             }
 

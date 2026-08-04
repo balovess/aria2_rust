@@ -73,13 +73,16 @@ impl PositionedDiskWriter {
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Aria2Error::DirCreate(format!("{}: {e}", parent.display())))?;
             debug!("Created parent directories for {:?}", self.path);
         }
 
         let mut opts = std::fs::OpenOptions::new();
         opts.create(true).write(true).read(true);
-        let file = opts.open(&self.path)?;
+        let file = opts
+            .open(&self.path)
+            .map_err(|e| Aria2Error::FileOpen(format!("{}: {e}", self.path.display())))?;
         debug!("Opened file for positioned I/O: {:?}", self.path);
 
         // Pre-allocate the file if a total size was specified and the file is

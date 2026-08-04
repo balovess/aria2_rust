@@ -209,6 +209,18 @@ impl DownloadEngine {
         &self.dns_cache
     }
 
+    /// Mark one connected address as bad while retaining other resolved
+    /// candidates for the same hostname.
+    pub async fn mark_bad_ip_address(&self, hostname: &str, address: std::net::SocketAddr) {
+        self.dns_cache.lock().await.mark_bad(hostname, address);
+    }
+
+    /// Remove cached addresses for a hostname, forcing the next connection to
+    /// resolve it again.
+    pub async fn remove_cached_ip_address(&self, hostname: &str, port: u16) {
+        self.dns_cache.lock().await.remove_cached(hostname, port);
+    }
+
     /// Get a reference to the BitTorrent registry.
     ///
     /// The registry maps GID to [`BtObject`](super::bt_registry::BtObject) and

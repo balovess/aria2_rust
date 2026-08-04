@@ -28,7 +28,7 @@ impl super::RequestGroup {
         let last_msg = self.last_error_message.recover().clone();
         let gid = self.gid;
 
-        let (code, _message) = match status {
+        let (code, message) = match status {
             DownloadStatus::Complete => {
                 // Check if checksum verification is still pending
                 let checksum_pending = self
@@ -74,6 +74,10 @@ impl super::RequestGroup {
                         DownloadResultCode::Removed,
                         "Download removed by user".to_string(),
                     ),
+                    HaltReason::Timeout => (
+                        DownloadResultCode::TimeOut,
+                        "Download timed out".to_string(),
+                    ),
                     HaltReason::None => {
                         if last_code != DownloadResultCode::UnknownError {
                             (last_code, last_msg)
@@ -89,12 +93,14 @@ impl super::RequestGroup {
         };
 
         let mut result = DownloadResult::new(gid, status, code);
+        result.message = message;
         result.fill_from_group(self);
 
         // Fill parent-child relationships from RequestGroup fields.
         // Mirrors C++ `DownloadResult::followedBy` / `following`.
         result.following = *self.following_gid.recover();
         result.followed_by = self.followed_by_gids.recover().clone();
+        result.belongs_to = *self.belongs_to_gid.recover();
 
         result
     }
@@ -124,5 +130,15 @@ impl super::RequestGroup {
     /// Get the list of child GIDs spawned by this download.
     pub fn followed_by_gids(&self) -> Vec<GroupId> {
         self.followed_by_gids.recover().clone()
+    }
+
+    /// Set the parent GID this group belongs to.
+    pub fn set_belongs_to_gid(&self, parent_gid: GroupId) {
+        *self.belongs_to_gid.recover_mut() = Some(parent_gid);
+    }
+
+    /// Get the parent GID this group belongs to.
+    pub fn belongs_to_gid(&self) -> Option<GroupId> {
+        *self.belongs_to_gid.recover()
     }
 }

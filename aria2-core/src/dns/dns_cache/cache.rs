@@ -8,6 +8,7 @@ use hickory_resolver::TokioAsyncResolver;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
 use super::entry::DnsEntry;
+use crate::error::Aria2Error;
 
 /// A DNS resolution cache with TTL support and negative caching.
 ///
@@ -97,8 +98,12 @@ impl DnsCache {
     ///
     /// # Returns
     ///
-    /// A vector of resolved `SocketAddr` on success, or an error string on failure.
-    pub async fn resolve(&mut self, hostname: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    /// A vector of resolved `SocketAddr` on success, or a structured `NameResolve` error on failure.
+    pub async fn resolve(
+        &mut self,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, Aria2Error> {
         // 1. Check positive cache first
         if let Some(entry) = self.cache.get(hostname)
             && !entry.is_expired()
@@ -110,14 +115,14 @@ impl DnsCache {
         if let Some(failed_at) = self.negative_entries.get(hostname)
             && failed_at.elapsed() < self.negative_ttl
         {
-            return Err(format!(
+            return Err(Aria2Error::NameResolve(format!(
                 "DNS lookup recently failed for {} (retry after {:?})",
                 hostname,
                 self.negative_ttl.saturating_sub(failed_at.elapsed())
-            ));
+            )));
         }
 
-        // 3. Try the fully-async hickory resolver first (avoids blocking getaddrinfo).
+        // 3. Try the hickory async resolver first; fall back to tokio::net::lookup_host on failure.
         if let Some(resolver) = self.resolver.as_ref() {
             match resolver.lookup_ip(hostname).await {
                 Ok(lookup) => {
@@ -217,7 +222,10 @@ impl DnsCache {
                     error = %e,
                     "DNS resolution failed via fallback"
                 );
-                Err(e.to_string())
+                Err(Aria2Error::NameResolve(format!(
+                    "DNS resolution failed for {}: {}",
+                    hostname, e
+                )))
             }
         }
     }
@@ -235,7 +243,7 @@ impl DnsCache {
         &mut self,
         hostname: &str,
         port: u16,
-    ) -> Result<Vec<SocketAddr>, String> {
+    ) -> Result<Vec<SocketAddr>, Aria2Error> {
         self.cache.remove(hostname);
         self.resolve(hostname, port).await
     }
@@ -244,6 +252,30 @@ impl DnsCache {
     pub fn clear(&mut self) {
         self.cache.clear();
         self.negative_entries.clear();
+    }
+
+    /// Mark one resolved address as bad without discarding other addresses.
+    ///
+    /// This mirrors C++ `DnsCache::markBad(hostname, ipaddr, port)`: the
+    /// address is removed from the candidate list while the hostname entry
+    /// remains available for retry with another address.
+    pub fn mark_bad(&mut self, hostname: &str, address: SocketAddr) {
+        if let Some(entry) = self.cache.get_mut(hostname) {
+            entry.addresses.retain(|candidate| *candidate != address);
+            if entry.addresses.is_empty() {
+                self.cache.remove(hostname);
+            }
+        }
+    }
+
+    /// Remove every cached address for a hostname and port.
+    ///
+    /// This mirrors C++ `DownloadEngine::removeCachedIPAddress` and also
+    /// clears the negative-cache marker so the next connection performs a
+    /// fresh lookup.
+    pub fn remove_cached(&mut self, hostname: &str, _port: u16) {
+        self.cache.remove(hostname);
+        self.negative_entries.remove(hostname);
     }
 
     /// Remove expired entries from the cache.
@@ -308,7 +340,7 @@ impl DnsCache {
         &mut self,
         hostname: &str,
         port: u16,
-    ) -> Result<Vec<SocketAddr>, String> {
+    ) -> Result<Vec<SocketAddr>, Aria2Error> {
         // 1. Check positive cache first
         if let Some(entry) = self.cache.get(hostname)
             && !entry.is_expired()
@@ -320,14 +352,17 @@ impl DnsCache {
         if let Some(failed_at) = self.negative_entries.get(hostname)
             && failed_at.elapsed() < self.negative_ttl
         {
-            return Err(format!(
+            return Err(Aria2Error::NameResolve(format!(
                 "DNS lookup recently failed for {} (retry after {:?})",
                 hostname,
                 self.negative_ttl.saturating_sub(failed_at.elapsed())
-            ));
+            )));
         }
 
-        Err(format!("No cached entry for {}:{}", hostname, port))
+        Err(Aria2Error::NameResolve(format!(
+            "No cached entry for {}:{}",
+            hostname, port
+        )))
     }
 }
 

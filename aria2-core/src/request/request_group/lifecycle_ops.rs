@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::halt_reason::HaltReason;
+use super::result_code::DownloadResultCode;
 use super::status::DownloadStatus;
 
 impl super::RequestGroup {
@@ -58,6 +59,7 @@ impl super::RequestGroup {
 
         if matches!(*status, DownloadStatus::Active | DownloadStatus::Waiting) {
             *status = DownloadStatus::Paused;
+            self.control_flags.request_halt();
             self.control_flags.request_pause();
             tracing::info!("Pausing download task #{}", self.gid.value());
         }
@@ -72,6 +74,7 @@ impl super::RequestGroup {
 
         if matches!(*status, DownloadStatus::Active | DownloadStatus::Waiting) {
             *status = DownloadStatus::Paused;
+            self.control_flags.request_force_halt();
             self.control_flags.request_force_pause();
             tracing::info!("Force-pausing download task #{}", self.gid.value());
         }
@@ -85,7 +88,9 @@ impl super::RequestGroup {
 
         if matches!(*status, DownloadStatus::Paused) {
             *status = DownloadStatus::Waiting;
+            self.clear_command_failure();
             self.control_flags.clear_pause();
+            self.control_flags.clear_halt();
             // Also clear a pending restart intent so a group that was paused
             // by `reduce_to_limit()` (which sets the restart flag alongside
             // pause) does not carry a stale flag after a manual unpause.
@@ -110,6 +115,14 @@ impl super::RequestGroup {
 
         tracing::info!("Removing download task #{}", self.gid.value());
         Ok(())
+    }
+
+    /// Mark the group as removed after its command has stopped.
+    pub fn mark_removed(&self) {
+        *self.status.recover_mut() = DownloadStatus::Removed;
+        *self.end_time.recover_mut() = Some(std::time::Instant::now());
+        *self.halt_reason.recover_mut() = HaltReason::UserRequest;
+        tracing::info!(gid = self.gid.value(), "Marked download as removed");
     }
 
     /// Request a graceful halt (let in-flight chunks finish).
@@ -151,13 +164,16 @@ impl super::RequestGroup {
 
     /// Transition to `Error` status with an error message.
     pub fn error(&mut self, err: impl Into<String>) -> Result<()> {
+        let message = err.into();
         {
             let mut status = self.status.recover_mut();
             let mut end_time = self.end_time.recover_mut();
 
-            *status = DownloadStatus::Error(err.into());
+            *status = DownloadStatus::Error(message.clone());
             *end_time = Some(std::time::Instant::now());
         }
+        *self.last_error_message.recover_mut() = message;
+        *self.last_error_code.recover_mut() = DownloadResultCode::UnknownError;
 
         tracing::debug!("Download task #{} encountered error", self.gid.value());
         self.notify_terminal_event(DownloadEvent::Error);
@@ -182,11 +198,26 @@ impl super::RequestGroup {
     /// Stores the error message in `last_error_message` and the error code
     /// in `last_error_code`, then transitions status to `Error`.
     pub fn mark_error(&self, message: String) {
+        self.mark_error_with_code(DownloadResultCode::UnknownError, message);
+    }
+
+    /// Mark the download as errored while preserving the mapped aria2 code.
+    pub fn mark_error_with_code(&self, code: DownloadResultCode, message: String) {
         *self.last_error_message.recover_mut() = message.clone();
-        *self.last_error_code.recover_mut() = super::result_code::DownloadResultCode::UnknownError;
+        *self.last_error_code.recover_mut() = code;
         *self.status.recover_mut() = DownloadStatus::Error(message);
         *self.end_time.recover_mut() = Some(std::time::Instant::now());
-        tracing::info!(gid = self.gid.value(), "Marked download as errored");
+        tracing::info!(gid = self.gid.value(), ?code, "Marked download as errored");
+        self.notify_terminal_event(DownloadEvent::Error);
+    }
+
+    /// Mark a timeout as a terminal error while retaining its structured code.
+    pub fn mark_timeout(&self) {
+        *self.last_error_message.recover_mut() = "Download timed out".to_string();
+        *self.last_error_code.recover_mut() = DownloadResultCode::TimeOut;
+        *self.status.recover_mut() = DownloadStatus::Error("Download timed out".to_string());
+        *self.end_time.recover_mut() = Some(std::time::Instant::now());
+        tracing::info!(gid = self.gid.value(), "Marked download as timed out");
         self.notify_terminal_event(DownloadEvent::Error);
     }
 

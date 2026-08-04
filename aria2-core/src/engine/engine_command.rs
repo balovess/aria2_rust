@@ -25,8 +25,11 @@ pub enum EngineCommand {
         group: Arc<std::sync::RwLock<RequestGroup>>,
     },
 
-    /// Remove a download group by GID (from either active or reserved).
+    /// Gracefully remove a download group by GID.
     RemoveDownload { gid: GroupId },
+
+    /// Forcefully remove a download group by GID.
+    ForceRemoveDownload { gid: GroupId },
 
     /// Pause an active or reserved download.
     Pause { gid: GroupId },

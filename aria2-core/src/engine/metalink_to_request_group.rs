@@ -162,11 +162,11 @@ impl MetalinkToRequestGroup {
             // The parser accepts base_uri via MetalinkDocument::parse_with_base
             // For now, just parse and set base_uri afterwards
             let mut doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
-                .map_err(Aria2Error::Parse)?;
+                .map_err(Aria2Error::MetalinkParse)?;
             doc.base_uri = Some(base.clone());
             doc
         } else {
-            MetalinkDocument::parse(metalink_data, None).map_err(Aria2Error::Parse)?
+            MetalinkDocument::parse(metalink_data, None).map_err(Aria2Error::MetalinkParse)?
         };
 
         self.create_request_groups(doc, options)

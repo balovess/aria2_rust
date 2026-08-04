@@ -132,7 +132,8 @@ impl MetalinkPostDownloadHandler {
             ));
         }
 
-        let doc = MetalinkDocument::parse(metalink_data, None).map_err(Aria2Error::Parse)?;
+        let doc =
+            MetalinkDocument::parse(metalink_data, None).map_err(Aria2Error::MetalinkParse)?;
 
         if doc.files.is_empty() {
             tracing::info!("Metalink document contains no downloadable files");

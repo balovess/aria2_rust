@@ -92,4 +92,10 @@ impl super::RequestGroup {
     pub fn get_last_error_message(&self) -> String {
         self.last_error_message.recover().clone()
     }
+
+    /// Clear command-failure state before starting a new command generation.
+    pub fn clear_command_failure(&self) {
+        self.command_failure
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
 }

@@ -112,7 +112,7 @@ impl BtTorrentPostDownloadHandler {
         // Parse the bencode metainfo.
         // C++: `bittorrent::ValueBaseBencodeParser().parseFinal(content, size, error)`
         let meta = TorrentMeta::parse(torrent_data).map_err(|e| {
-            Aria2Error::Parse(format!("Could not parse BitTorrent metainfo: {}", e))
+            Aria2Error::BittorrentParse(format!("Could not parse BitTorrent metainfo: {}", e))
         })?;
 
         let info_hash_hex = meta.info_hash.as_hex();
@@ -164,6 +164,7 @@ impl BtTorrentPostDownloadHandler {
         child_options.follow_torrent = Some(false);
 
         let child_group = RequestGroup::new(child_gid, uris, child_options);
+        child_group.set_belongs_to_gid(parent_gid);
 
         // Set BitTorrent-specific metadata on the child group.
         // This data will be used by BtDownloadCommand when the group

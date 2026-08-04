@@ -45,7 +45,7 @@ impl ControlFile {
     ) -> Result<Self> {
         if ctrl_path.exists() {
             Self::load(ctrl_path).await?.ok_or_else(|| {
-                Aria2Error::Io(format!(
+                Aria2Error::FileIo(format!(
                     "Failed to load control file: {}",
                     ctrl_path.display()
                 ))
@@ -72,19 +72,22 @@ impl ControlFile {
 
         let data = tokio::fs::read(path)
             .await
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+            .map_err(|e| Aria2Error::FileIo(format!("{}: {e}", path.display())))?;
 
         if data.len() < 8 {
             return Ok(None);
         }
 
         if &data[0..4] != CONTROL_MAGIC {
-            return Err(Aria2Error::Io("Invalid control file magic".to_string()));
+            return Err(Aria2Error::FileIo("Invalid control file magic".to_string()));
         }
 
         let version = u16_from_le(&data[4..6]);
         if version > CONTROL_VERSION {
-            return Err(Aria2Error::Io(format!("Unsupported version: {}", version)));
+            return Err(Aria2Error::FileIo(format!(
+                "Unsupported version: {}",
+                version
+            )));
         }
 
         let flags = data[6];

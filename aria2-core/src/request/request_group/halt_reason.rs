@@ -24,6 +24,8 @@ pub enum HaltReason {
     ShutdownSignal,
     /// The user explicitly requested the halt (RPC `aria2.remove`, etc.).
     UserRequest,
+    /// The command exceeded its configured timeout.
+    Timeout,
 }
 
 /// Atomic control flags for download lifecycle transitions.

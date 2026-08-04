@@ -207,8 +207,9 @@
 
 - **问题**：`process_task_completions` 不区分 pause 与 error/completion，暂停的任务被当作已完成而降级丢弃；pause 即毁任务不可恢复。
 - **修复**：
-  - `request_group_man/demotion.rs` 新增 `requeue_non_terminal_groups`：将非终态（Paused）组重新放回 active 队列而非丢弃
-  - `engine_loop.rs` `process_task_completions` 区分 pause/error/completion 三种终态，pause 走 requeue 而非 demote
+  - `request_group_man/demotion.rs` 新增 `requeue_non_terminal_groups`：暂停组从 active 移出并放入 reserved，取消暂停后由 promotion 再次进入 active
+  - `engine_loop.rs` `process_task_completions` 区分 pause/error/completion 三种终态，pause 走 requeue 而非 demote；completion ledger 按 command generation 去重，不再按 GID 粗粒度丢弃同组的其他 command
+  - 手动 pause/forcePause 保持 Paused，必须显式 unpause；`reduce_to_limit()` 设置 restart 标志后允许自动恢复
   - `mark_session_dirty` 挂接 engine loop，状态变更触发会话自动保存
   - 新增 6 个测试
 

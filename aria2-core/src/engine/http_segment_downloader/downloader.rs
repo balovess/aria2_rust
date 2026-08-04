@@ -477,6 +477,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_download_range_streaming_short_body_is_rejected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).await.expect("read should succeed");
+            stream
+                .write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/20\r\nContent-Length: 5\r\nConnection: close\r\n\r\n01234")
+                .await
+                .expect("write should succeed");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let dl = HttpSegmentDownloader::new(&client);
+        let url = format!("http://{}", addr);
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+
+        let result = dl
+            .download_range_streaming(&url, 0, 10, None, &[], None, &write_tx, 20)
+            .await;
+        assert!(result.is_err(), "short streaming body should be rejected");
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
+    }
+
+    #[tokio::test]
     async fn test_download_range_short_body_is_rejected() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -489,7 +523,7 @@ mod tests {
             let mut buf = [0u8; 2048];
             let _ = stream.read(&mut buf).await.expect("read should succeed");
             stream
-                .write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/20\r\nContent-Length: 10\r\nConnection: close\r\n\r\n01234")
+                .write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/20\r\nContent-Length: 5\r\nConnection: close\r\n\r\n01234")
                 .await
                 .expect("write should succeed");
         });

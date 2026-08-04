@@ -67,10 +67,8 @@ impl MagnetDownloadCommand {
             (uri, opts)
         };
 
-        let _ml =
-            aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri).map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Invalid magnet link: {}", e)))
-            })?;
+        let _ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri)
+            .map_err(|e| Aria2Error::MagnetParse(format!("Invalid magnet link: {}", e)))?;
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -158,9 +156,8 @@ impl Command for MagnetDownloadCommand {
             self.started = true;
         }
 
-        let ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&self.magnet_uri).map_err(
-            |e| Aria2Error::Fatal(FatalError::Config(format!("Magnet parse error: {}", e))),
-        )?;
+        let ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&self.magnet_uri)
+            .map_err(|e| Aria2Error::MagnetParse(format!("Magnet parse error: {}", e)))?;
 
         info!(
             "Magnet download: hash={}, name={:?}",
