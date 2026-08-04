@@ -180,6 +180,10 @@ impl PeerStorage for DefaultPeerStorage {
         self.choke_round_interval_elapsed()
     }
 
+    fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]) {
+        self.execute_choke_by_identity(peers)
+    }
+
     fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
         self.execute_choke(peers)
     }

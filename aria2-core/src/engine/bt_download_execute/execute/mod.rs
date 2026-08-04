@@ -270,35 +270,27 @@ impl Command for BtDownloadCommand {
         // or HaveNone instead of a full Bitfield when appropriate.
         for (idx, conn) in active_connections.iter_mut().enumerate() {
             if conn.is_fast_extension_enabled() {
-                // Compute the BEP 6 fast-set for this peer's IP
-                let fast_pieces = aria2_protocol::bittorrent::fast_set::compute_fast_set(
-                    &conn.ip_addr,
+                let mut sent = HashSet::new();
+                match Self::send_allowed_fast_for_torrent(
+                    conn,
                     num_pieces,
                     &meta.info_hash.bytes,
-                    10, // MAX_ALLOWED_FAST_PER_PEER
-                );
-                if !fast_pieces.is_empty() {
-                    let mut sent = HashSet::new();
-                    for piece_idx in &fast_pieces {
-                        let msg_bytes =
-                            aria2_protocol::bittorrent::message::serializer::serialize_allowed_fast(
-                                *piece_idx,
-                            );
-                        conn.queue_message(msg_bytes);
-                        sent.insert(*piece_idx);
-                    }
-                    if let Err(e) = conn.flush_send_buffer().await {
-                        warn!("[BEP6] Failed to flush AllowedFast to peer {}: {}", idx, e);
-                    } else {
+                    &mut sent,
+                )
+                .await
+                {
+                    Ok(count) if count > 0 => {
                         if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
                             self.allowed_fast_sent_peers.insert(peer_key, sent);
                         }
                         debug!(
                             "[BEP6] Sent {} AllowedFast pieces to peer {} ({})",
-                            fast_pieces.len(),
-                            idx,
-                            conn.ip_addr
+                            count, idx, conn.ip_addr
                         );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("[BEP6] Failed to flush AllowedFast to peer {}: {}", idx, e);
                     }
                 }
             }

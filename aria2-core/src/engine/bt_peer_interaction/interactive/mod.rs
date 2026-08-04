@@ -22,6 +22,7 @@ use crate::engine::bt_message_dispatcher::{ActiveInteractionChecker, FloodingSta
 use crate::engine::bt_message_handler::BtPeerMessageHandler;
 use crate::engine::bt_request_factory::BtRequestFactory;
 use crate::engine::extension_registry::ExtensionRegistry;
+use aria2_protocol::bittorrent::message::validation::BtMessageValidator;
 
 use super::types::*;
 
@@ -112,14 +113,22 @@ pub struct BtPeerInteractive {
     pub(crate) ut_pex_enabled: bool,
     /// Whether DHT is enabled (C++ `dhtEnabled_`).
     pub(crate) dht_enabled: bool,
+    /// Callback for BEP 5 Port messages, equivalent to DHT context injection.
+    pub(crate) dht_port_handler: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
     /// Whether we are in metadata-get mode (C++ `metadataGetMode_`).
     pub(crate) metadata_get_mode: bool,
+    /// Domain validator equivalent to DefaultBtMessageFactory's per-message validators.
+    pub(crate) message_validator: Option<BtMessageValidator>,
     /// Whether the download is finished (affects addRequests step).
     pub(crate) download_finished: bool,
 
     // ── Extension Protocol (BEP 10) ──────────────────────────────────────
     /// Per-peer extension registry tracking local and peer ext_id assignments.
     pub(crate) extension_registry: ExtensionRegistry,
+    /// Optional sink for factory-created extension message side effects.
+    pub(crate) extension_update_handler: Option<
+        std::sync::Arc<dyn Fn(&crate::engine::extension_registry::ExtensionUpdate) + Send + Sync>,
+    >,
 
     // ── Request generation (C++ DefaultBtRequestFactory) ──────────────────
     /// Per-peer request factory managing target pieces and generating Request messages.

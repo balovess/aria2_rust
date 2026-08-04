@@ -41,8 +41,11 @@ use crate::engine::peer_stats::PeerStats;
 
 // Re-export hooks for backward compatibility (importers use bt_choke_manager::*)
 pub use crate::engine::bt_choke_hooks::{
-    add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
-    on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
+    add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer,
+    handle_snubbed_peer_by_identity, on_data_received_from_peer,
+    on_data_received_from_peer_by_identity, on_peer_choke, on_peer_unchoke, on_piece_received,
+    optimistically_unchoke_by_identity, rotate_choke_by_identity, select_best_peer_for_request,
+    select_best_peer_for_request_by_identity,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,7 +77,7 @@ const LEECHER_REGULAR_UNCHOKE_SLOTS: usize = 3;
 #[derive(Debug, Clone)]
 struct SeederPeerEntry {
     /// Stable peer identity.
-    /// Stable peer identity.
+    #[allow(dead_code)]
     identity: crate::engine::choking_algorithm::PeerIdentity,
     /// Legacy index back into the caller's peer list.
     index: usize,
@@ -146,7 +149,10 @@ impl Ord for SeederPeerEntry {
             _ => {}
         }
         // Priority 3: higher upload speed = higher priority = "less than" in sort
-        other.upload_speed.cmp(&self.upload_speed)
+        other
+            .upload_speed
+            .cmp(&self.upload_speed)
+            .then_with(|| self.identity.cmp(&other.identity))
     }
 }
 
@@ -204,7 +210,10 @@ impl LeecherPeerEntry {
 impl Ord for LeecherPeerEntry {
     /// Higher download speed = higher priority = "less than" in sort.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.download_speed.cmp(&self.download_speed)
+        other
+            .download_speed
+            .cmp(&self.download_speed)
+            .then_with(|| self.identity.cmp(&other.identity))
     }
 }
 
@@ -261,6 +270,10 @@ impl BtLeecherStateChoke {
     ///    unchoke top `LEECHER_REGULAR_UNCHOKE_SLOTS` interested peers
     ///
     /// Mirrors C++ `BtLeecherStateChoke::executeChoke()`.
+    pub fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]) {
+        self.execute_choke(peers);
+    }
+
     pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
         tracing::debug!("Leecher state, {} choke round started", self.round);
         self.last_round = Some(Instant::now());
@@ -502,6 +515,10 @@ impl BtSeederStateChoke {
     /// 5. Rounds 0-1: optimistic unchoke on a random remaining peer
     ///
     /// Mirrors C++ `BtSeederStateChoke::executeChoke()`.
+    pub fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]) {
+        self.execute_choke(peers);
+    }
+
     pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
         tracing::debug!("Seeder state, {} choke round started", self.round);
         self.last_round = Some(Instant::now());

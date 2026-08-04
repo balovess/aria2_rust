@@ -35,12 +35,16 @@ impl DefaultPeerStorage {
     /// Otherwise, delegates to the leecher choke algorithm.
     ///
     /// Matches C++ DefaultPeerStorage::executeChoke.
-    pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
+    pub fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]) {
         if self.download_finished {
-            self.seeder_state_choke.execute_choke(peers);
+            self.seeder_state_choke.execute_choke_by_identity(peers);
         } else {
-            self.leecher_state_choke.execute_choke(peers);
+            self.leecher_state_choke.execute_choke_by_identity(peers);
         }
+    }
+
+    pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
+        self.execute_choke_by_identity(peers);
     }
 
     // ==================================================================

@@ -39,7 +39,10 @@ impl BtPeerInteractive {
         // Read up to a reasonable batch of messages per iteration.
         // The C++ code reads in a loop while messages are available.
         for _ in 0..UB_MAX_OUTSTANDING_REQUEST {
-            match conn.read_message().await {
+            match conn
+                .read_message_validated(self.message_validator.as_ref())
+                .await
+            {
                 Ok(Some(msg)) => {
                     count += 1;
                     trace!("Received message from peer: {:?}", msg);

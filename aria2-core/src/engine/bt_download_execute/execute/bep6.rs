@@ -75,14 +75,42 @@ impl BtDownloadCommand {
         fast_set
     }
 
-    /// Send AllowedFast messages to a peer that supports BEP 6 Fast Extension.
+    /// Send the canonical BEP 6 fast set for a torrent to one peer.
     ///
-    /// This should be called after the extension handshake completes and we've
-    /// received the peer's bitfield. It allows us to request specific pieces
-    /// even when choked.
-    ///
-    /// The messages are serialized and queued into the peer's send buffer.
-    /// The caller should flush the buffer after calling this method.
+    /// BEP 6 derives the set from the peer address, piece count and info hash;
+    /// it does not depend on the peer bitfield or our current piece picker.
+    pub async fn send_allowed_fast_for_torrent(
+        peer_conn: &mut BtPeerConn,
+        num_pieces: u32,
+        info_hash: &[u8; 20],
+        already_sent: &mut HashSet<u32>,
+    ) -> Result<usize> {
+        let fast_set = aria2_protocol::bittorrent::fast_set::compute_fast_set(
+            &peer_conn.ip_addr,
+            num_pieces,
+            info_hash,
+            Self::MAX_ALLOWED_FAST_PER_PEER,
+        );
+        let new_pieces: Vec<_> = fast_set
+            .into_iter()
+            .filter(|piece_idx| already_sent.insert(*piece_idx))
+            .collect();
+        let count: usize = new_pieces.len();
+        if count == 0 {
+            return Ok(0);
+        }
+
+        for piece_idx in new_pieces {
+            peer_conn.queue_message(serializer::serialize_allowed_fast(piece_idx));
+            peer_conn.add_allowed_fast(piece_idx);
+        }
+        peer_conn.flush_send_buffer().await?;
+        Ok(count)
+    }
+
+    /// Compatibility helper for callers that intentionally provide a filtered
+    /// piece set. New torrent setup code should use
+    /// [`Self::send_allowed_fast_for_torrent`].
     pub async fn send_allowed_fast_to_peer(
         peer_conn: &mut BtPeerConn,
         needed_pieces: &[u32],

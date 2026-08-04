@@ -1,6 +1,6 @@
 //! Unchoke candidate selection logic (tit-for-tat rotation)
 
-use super::{ChokeAction, ChokingAlgorithm};
+use super::{ChokeAction, ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::constants;
 
 /// Core algorithm: performs tit-for-tat choke rotation.
@@ -13,6 +13,51 @@ use crate::constants;
 ///    BUT: keep currently unchoked peers unchoked if they're still in top K
 ///    (avoid churn - only change what's necessary)
 /// 5. Return only the actions that changed state
+pub(super) fn rotate_choke_by_identity(algo: &mut ChokingAlgorithm) -> Vec<IdentityChokeAction> {
+    check_snubbed_peers_internal(algo);
+    if algo.peers.is_empty() {
+        return Vec::new();
+    }
+    let max_slots = algo.config.max_upload_slots;
+    let mut scored: Vec<(PeerIdentity, f64)> = algo
+        .peers
+        .iter()
+        .map(|peer| {
+            let identity = peer.into();
+            (
+                identity,
+                calculate_peer_score(peer, algo.snubbed_peers.contains(&identity)),
+            )
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    scored
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (identity, _))| {
+            let peer = algo
+                .peers
+                .iter_mut()
+                .find(|peer| PeerIdentity::from(&**peer) == identity)
+                .expect("scored peer must remain registered");
+            if rank < max_slots {
+                if peer.am_choking {
+                    peer.record_unchoke();
+                    IdentityChokeAction::Unchoke(identity)
+                } else {
+                    IdentityChokeAction::NoChange(identity)
+                }
+            } else if !peer.am_choking {
+                peer.record_choke();
+                IdentityChokeAction::Choke(identity)
+            } else {
+                IdentityChokeAction::NoChange(identity)
+            }
+        })
+        .collect()
+}
+
 pub(super) fn rotate_choke(algo: &mut ChokingAlgorithm) -> Vec<ChokeAction> {
     // Step 1: Check and mark snubbed peers
     check_snubbed_peers_internal(algo);

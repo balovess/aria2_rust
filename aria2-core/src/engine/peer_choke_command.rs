@@ -134,12 +134,16 @@ impl PeerChokeDriver {
     ///
     /// Useful for testing or immediate choke adjustment after a peer state
     /// change (e.g. peer disconnect).
-    pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
+    pub fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]) {
         if self.download_finished {
-            self.seeder_choke.execute_choke(peers);
+            self.seeder_choke.execute_choke_by_identity(peers);
         } else {
-            self.leecher_choke.execute_choke(peers);
+            self.leecher_choke.execute_choke_by_identity(peers);
         }
+    }
+
+    pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
+        self.execute_choke_by_identity(peers);
     }
 
     // ------------------------------------------------------------------

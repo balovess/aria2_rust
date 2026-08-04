@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use super::peer_stats::PeerStats;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerIdentity {
     pub peer_id: [u8; 20],
     pub addr: std::net::SocketAddr,
@@ -45,6 +45,14 @@ pub enum IdentityChokeAction {
     Unchoke(PeerIdentity),
     Choke(PeerIdentity),
     NoChange(PeerIdentity),
+}
+
+impl IdentityChokeAction {
+    pub fn identity(&self) -> PeerIdentity {
+        match self {
+            Self::Unchoke(identity) | Self::Choke(identity) | Self::NoChange(identity) => *identity,
+        }
+    }
 }
 
 /// Configuration for the choking algorithm
@@ -196,23 +204,7 @@ impl ChokingAlgorithm {
 
     /// Rotate choke state while returning stable peer identities.
     pub fn rotate_choke_by_identity(&mut self) -> Vec<IdentityChokeAction> {
-        selection::rotate_choke(self)
-            .into_iter()
-            .filter_map(|action| match action {
-                ChokeAction::Unchoke(index) => self
-                    .peers
-                    .get(index)
-                    .map(|peer| IdentityChokeAction::Unchoke(peer.into())),
-                ChokeAction::Choke(index) => self
-                    .peers
-                    .get(index)
-                    .map(|peer| IdentityChokeAction::Choke(peer.into())),
-                ChokeAction::NoChange(index) => self
-                    .peers
-                    .get(index)
-                    .map(|peer| IdentityChokeAction::NoChange(peer.into())),
-            })
-            .collect()
+        selection::rotate_choke_by_identity(self)
     }
 
     /// Called every ~30 seconds (config.optimistic_unchoke_interval_secs)
@@ -230,8 +222,7 @@ impl ChokingAlgorithm {
 
     /// Select an optimistic-un choke target using stable identity.
     pub fn optimistically_unchoke_by_identity(&mut self) -> Option<PeerIdentity> {
-        self.optimistically_unchoke()
-            .and_then(|index| self.peers.get(index).map(PeerIdentity::from))
+        optimistic::optimistically_unchoke_by_identity(self)
     }
 
     /// Rotate which peer gets the optimistic unchoke slot using round-robin.

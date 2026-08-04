@@ -8,6 +8,7 @@ use crate::engine::bt_message_dispatcher::{ActiveInteractionChecker, FloodingSta
 use crate::engine::bt_message_handler::BtPeerMessageHandler;
 use crate::engine::bt_request_factory::BtRequestFactory;
 use crate::engine::extension_registry::ExtensionRegistry;
+use aria2_protocol::bittorrent::message::validation::BtMessageValidator;
 use tracing::debug;
 
 use super::super::types::*;
@@ -47,9 +48,12 @@ impl BtPeerInteractive {
             info_hash,
             ut_pex_enabled: false,
             dht_enabled: false,
+            dht_port_handler: None,
             metadata_get_mode: false,
+            message_validator: None,
             download_finished: false,
             extension_registry: ExtensionRegistry::new(),
+            extension_update_handler: None,
             request_factory: BtRequestFactory::new(constants::BT_BLOCK_SIZE as u32),
             endgame: false,
         }
@@ -93,10 +97,36 @@ impl BtPeerInteractive {
         self.dht_enabled = enabled;
     }
 
+    pub fn set_dht_port_handler<F>(&mut self, handler: F)
+    where
+        F: Fn(u16) + Send + Sync + 'static,
+    {
+        self.dht_port_handler = Some(std::sync::Arc::new(handler));
+    }
+
+    pub fn set_piece_length(&mut self, piece_length: u32) {
+        if let Some(validator) = &mut self.message_validator {
+            validator.piece_length = piece_length;
+        }
+    }
+
+    pub fn configure_message_validator(&mut self, piece_length: u32) {
+        let mut validator = BtMessageValidator::new(self.num_pieces, piece_length);
+        validator.metadata_get_mode = self.metadata_get_mode;
+        self.message_validator = Some(validator);
+    }
+
+    pub fn set_metadata_get_mode(&mut self, enabled: bool) {
+        self.metadata_get_mode = enabled;
+        if let Some(validator) = &mut self.message_validator {
+            validator.metadata_get_mode = enabled;
+        }
+    }
+
     /// Enable metadata-get mode.
     /// Matches C++ `enableMetadataGetMode()`.
     pub fn enable_metadata_get_mode(&mut self) {
-        self.metadata_get_mode = true;
+        self.set_metadata_get_mode(true);
     }
 
     /// Set whether the download is finished (affects addRequests step).
@@ -174,6 +204,13 @@ impl BtPeerInteractive {
     /// Get a mutable reference to the per-peer extension registry.
     pub fn extension_registry_mut(&mut self) -> &mut ExtensionRegistry {
         &mut self.extension_registry
+    }
+
+    pub fn set_extension_update_handler<F>(&mut self, handler: F)
+    where
+        F: Fn(&crate::engine::extension_registry::ExtensionUpdate) + Send + Sync + 'static,
+    {
+        self.extension_update_handler = Some(std::sync::Arc::new(handler));
     }
 
     // ── State machine transitions ──────────────────────────────────────

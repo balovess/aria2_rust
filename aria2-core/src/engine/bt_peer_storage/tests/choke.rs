@@ -32,6 +32,18 @@ fn test_choke_round_interval_elapsed_after_round() {
 // ------------------------------------------------------------------
 
 #[test]
+fn test_identity_choke_execution_matches_legacy_execution() {
+    let mut storage = DefaultPeerStorage::new();
+    let mut peers = vec![
+        PeerStats::new([1u8; 20], "127.0.0.1:7001".parse().unwrap()),
+        PeerStats::new([2u8; 20], "127.0.0.1:7002".parse().unwrap()),
+    ];
+    let mut refs: Vec<&mut PeerStats> = peers.iter_mut().collect();
+    storage.execute_choke_by_identity(&mut refs);
+    assert!(peers.iter().all(|peer| peer.am_choking));
+}
+
+#[test]
 fn test_set_download_finished_affects_choke_algorithm() {
     let mut storage = DefaultPeerStorage::new();
 

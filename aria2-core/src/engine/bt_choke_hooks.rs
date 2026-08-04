@@ -16,7 +16,7 @@
 //! | `on_peer_choke/unchoke()` | Choke/unchoke event handlers |
 //! | `select_best_peer_for_request()` | Best peer selection in request loop |
 
-use crate::engine::choking_algorithm::{ChokingAlgorithm, PeerIdentity};
+use crate::engine::choking_algorithm::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::engine::peer_stats::PeerStats;
 
 /// Add a peer to the choke tracking set.
@@ -150,6 +150,19 @@ pub fn on_piece_received(algo: &mut Option<ChokingAlgorithm>, peer_idx: usize, b
 ///
 /// Mirrors C++ best-peer selection in the request loop, where
 /// `peer_->peerChoking()` is checked first and snubbed peers are deprioritised.
+pub fn rotate_choke_by_identity(algo: &mut Option<ChokingAlgorithm>) -> Vec<IdentityChokeAction> {
+    algo.as_mut()
+        .map(ChokingAlgorithm::rotate_choke_by_identity)
+        .unwrap_or_default()
+}
+
+pub fn optimistically_unchoke_by_identity(
+    algo: &mut Option<ChokingAlgorithm>,
+) -> Option<PeerIdentity> {
+    algo.as_mut()
+        .and_then(ChokingAlgorithm::optimistically_unchoke_by_identity)
+}
+
 pub fn select_best_peer_for_request_by_identity(
     algo: &Option<ChokingAlgorithm>,
 ) -> Option<PeerIdentity> {

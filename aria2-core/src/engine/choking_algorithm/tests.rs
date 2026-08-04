@@ -419,6 +419,30 @@ fn test_identity_api_survives_peer_reordering() {
 }
 
 #[test]
+fn test_identity_actions_match_registered_peers() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig {
+        max_upload_slots: 1,
+        ..Default::default()
+    });
+    let first = create_test_peer(3000.0, 0.0, true, true);
+    let second = create_test_peer(1000.0, 0.0, true, true);
+    let first_identity = PeerIdentity::from(&first);
+    let second_identity = PeerIdentity::from(&second);
+    algo.add_peer(first);
+    algo.add_peer(second);
+
+    let actions = algo.rotate_choke_by_identity();
+    assert!(actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == first_identity)
+    }));
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.identity() == second_identity)
+    );
+}
+
+#[test]
 fn test_opt_unchoking_rotation_changes_peer() {
     // Test that optimistic unchoke rotates among eligible peers
     let config = ChokingConfig {

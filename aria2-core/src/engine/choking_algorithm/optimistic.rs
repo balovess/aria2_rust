@@ -2,6 +2,13 @@
 
 use super::{ChokingAlgorithm, PeerIdentity};
 
+pub(super) fn optimistically_unchoke_by_identity(
+    algo: &mut ChokingAlgorithm,
+) -> Option<PeerIdentity> {
+    let index = optimistically_unchoke(algo)?;
+    algo.peers.get(index).map(PeerIdentity::from)
+}
+
 /// Select ONE choked+interested peer for optimistic unchoke.
 ///
 /// This gives new/unknown peers a chance to prove themselves.

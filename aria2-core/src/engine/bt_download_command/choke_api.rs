@@ -1,7 +1,10 @@
 use crate::engine::bt_choke_manager::{
     add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
-    on_peer_choke, on_peer_unchoke, on_piece_received, select_best_peer_for_request,
+    on_peer_choke, on_peer_unchoke, on_piece_received, optimistically_unchoke_by_identity,
+    rotate_choke_by_identity, select_best_peer_for_request,
+    select_best_peer_for_request_by_identity,
 };
+use crate::engine::choking_algorithm::{IdentityChokeAction, PeerIdentity};
 use crate::error::{Aria2Error, FatalError, Result};
 
 use super::BtDownloadCommand;
@@ -29,6 +32,18 @@ impl BtDownloadCommand {
 
     pub fn select_best_peer_for_request(&self) -> Option<usize> {
         select_best_peer_for_request(&self.choking_algo)
+    }
+
+    pub fn rotate_choke_by_identity(&mut self) -> Vec<IdentityChokeAction> {
+        rotate_choke_by_identity(&mut self.choking_algo)
+    }
+
+    pub fn optimistically_unchoke_by_identity(&mut self) -> Option<PeerIdentity> {
+        optimistically_unchoke_by_identity(&mut self.choking_algo)
+    }
+
+    pub fn select_best_peer_for_request_by_identity(&self) -> Option<PeerIdentity> {
+        select_best_peer_for_request_by_identity(&self.choking_algo)
     }
 
     pub async fn handle_snubbed_peer(&mut self, peer_idx: usize) -> Result<()> {

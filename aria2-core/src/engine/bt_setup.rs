@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::download::download_context::ContextAttributeType;
+use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
 use crate::request::request_group::RequestGroup;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -65,6 +65,16 @@ impl BtSetup {
             Some(ctx) => ctx.has_attribute(ContextAttributeType::BitTorrent),
             None => false,
         };
+        let is_metadata_mode = ctx_guard
+            .as_ref()
+            .and_then(|ctx| ctx.get_attribute(ContextAttributeType::BitTorrent))
+            .and_then(|attr| attr.downcast_ref::<TorrentAttribute>())
+            .is_some_and(|torrent| torrent.metadata.is_empty());
+        let is_private = ctx_guard
+            .as_ref()
+            .and_then(|ctx| ctx.get_attribute(ContextAttributeType::BitTorrent))
+            .and_then(|attr| attr.downcast_ref::<TorrentAttribute>())
+            .is_some_and(|torrent| torrent.private_torrent);
         drop(ctx_guard);
 
         if !has_bt {
@@ -98,7 +108,9 @@ impl BtSetup {
 
         info!(
             gid = gid.value(),
-            "BT setup completed (runtime will be marked ready by BtDownloadCommand)"
+            metadata_mode = is_metadata_mode,
+            private_torrent = is_private,
+            "BT setup completed; tracker, peer, choke and discovery components are owned by the async download command"
         );
 
         true

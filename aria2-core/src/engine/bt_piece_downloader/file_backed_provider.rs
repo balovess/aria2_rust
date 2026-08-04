@@ -145,4 +145,8 @@ impl PieceDataProvider for FileBackedPieceProvider {
     fn num_pieces(&self) -> u32 {
         self.num_pieces
     }
+
+    fn piece_length(&self) -> u32 {
+        self.piece_length
+    }
 }

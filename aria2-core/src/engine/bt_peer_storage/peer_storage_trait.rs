@@ -107,6 +107,9 @@ pub trait PeerStorage: Send + Sync {
     /// Matches C++ `PeerStorage::chokeRoundIntervalElapsed`.
     fn choke_round_interval_elapsed(&self) -> bool;
 
+    /// Execute a choke round through stable peer identities.
+    fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]);
+
     /// Execute a choke round on the given peers.
     ///
     /// Matches C++ `PeerStorage::executeChoke`.

@@ -213,6 +213,14 @@ impl BtPeerConn {
     pub async fn read_message(
         &mut self,
     ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
+        self.read_message_validated(None).await
+    }
+
+    /// Read and optionally apply torrent-domain validation before dispatch.
+    pub async fn read_message_validated(
+        &mut self,
+        validator: Option<&aria2_protocol::bittorrent::message::validation::BtMessageValidator>,
+    ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
         let result = match &mut self.inner {
             InnerConnection::Plain(c) => c.read_message().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
@@ -230,7 +238,17 @@ impl BtPeerConn {
                 }
             }
         };
-        // Update keep-alive tracking on any successful message receipt
+        let result = result.and_then(|message| {
+            if let (Some(validator), Some(message)) = (validator, message.as_ref()) {
+                validator.validate(message).map_err(|error| {
+                    Aria2Error::Fatal(FatalError::Config(format!(
+                        "invalid BitTorrent peer message: {error}"
+                    )))
+                })?;
+            }
+            Ok(message)
+        });
+        // Update keep-alive tracking on any successfully validated message receipt
         if result.is_ok() {
             self.on_message_received();
         }

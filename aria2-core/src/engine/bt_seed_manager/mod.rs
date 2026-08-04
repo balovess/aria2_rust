@@ -260,7 +260,14 @@ impl BtSeedManager {
         // Create upload sessions from peer connections
         let upload_sessions: Vec<BtUploadSession> = connections
             .into_iter()
-            .map(|conn| BtUploadSession::new(conn, &config))
+            .map(|conn| {
+                let mut session = BtUploadSession::new(conn, &config);
+                session.configure_message_validator(
+                    piece_provider.num_pieces(),
+                    piece_provider.piece_length(),
+                );
+                session
+            })
             .collect();
 
         // Initialise PeerStats for each session (seeder-state algorithm needs
