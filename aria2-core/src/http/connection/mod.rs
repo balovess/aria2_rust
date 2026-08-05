@@ -19,8 +19,8 @@
 //!         max_idle_per_host: 8,
 //!     };
 //!
-//!     let manager = HttpConnectionManager::new(&config);
-//!     // Use the connection manager...
+//!     let manager = HttpConnectionManager::with_shared_cookie_storage(&config);
+//!     // Use the connection manager with process-wide CookieStorage...
 //! }
 //! ```
 

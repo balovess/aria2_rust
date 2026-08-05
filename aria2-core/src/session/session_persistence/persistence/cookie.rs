@@ -4,11 +4,30 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::http::cookie_storage::CookieJar;
+use crate::http::cookie_storage::{CookieJar, CookieStorage};
 
 use super::types::SessionPersistence;
 
 impl SessionPersistence {
+    /// Save canonical CookieStorage using the aria2 Netscape cookie format.
+    pub(super) async fn save_cookie_storage_to_file(
+        storage: &CookieStorage,
+        path: &Path,
+    ) -> Result<(), String> {
+        storage.save_file(path).map_err(|e| e.to_string())
+    }
+
+    /// Load canonical CookieStorage from an aria2 Netscape cookie file.
+    pub(super) async fn load_cookie_storage_from_file(
+        storage: &CookieStorage,
+        path: &Path,
+    ) -> Result<(), String> {
+        storage
+            .load_file(path)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// Save cookie jar to a JSON file for persistence.
     ///
     /// Serializes all cookies in the jar to JSON format for storage alongside

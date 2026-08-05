@@ -152,6 +152,11 @@ impl LpdAnnouncer {
             .map_err(|e| format!("Failed to get local address: {}", e))
     }
 
+    /// Return the configured multicast interface, if one was selected.
+    pub fn interface(&self) -> Option<Ipv4Addr> {
+        self.interface
+    }
+
     /// Send an LPD announcement for a torrent
     ///
     /// Formats and sends a BEP 14 compliant LPD message:

@@ -124,7 +124,10 @@ impl super::RequestGroup {
     /// child groups on the parent. Called when a post-download handler
     /// creates child groups.
     pub fn add_followed_by_gid(&self, child_gid: GroupId) {
-        self.followed_by_gids.recover_mut().push(child_gid);
+        let mut followed_by_gids = self.followed_by_gids.recover_mut();
+        if !followed_by_gids.contains(&child_gid) {
+            followed_by_gids.push(child_gid);
+        }
     }
 
     /// Get the list of child GIDs spawned by this download.

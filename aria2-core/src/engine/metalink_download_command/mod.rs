@@ -286,7 +286,15 @@ impl MetalinkDownloadCommand {
 
         let client = build_http_client()?;
 
-        if file.urls.is_empty() {
+        let torrent_metaurls: Vec<_> = file
+            .meta_urls
+            .iter()
+            .filter(|metaurl| {
+                metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+            })
+            .cloned()
+            .collect();
+        if file.urls.is_empty() && torrent_metaurls.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -308,10 +316,10 @@ impl MetalinkDownloadCommand {
             .map(|u| u.url.clone())
             .collect();
 
-        if urls.is_empty() {
+        if urls.is_empty() && torrent_metaurls.is_empty() {
             tracing::debug!(
                 name = %file.name,
-                "Skipping Metalink file with no non-P2P URLs"
+                "Skipping Metalink file with no downloadable resources"
             );
             return Ok(Vec::new());
         }
@@ -323,12 +331,7 @@ impl MetalinkDownloadCommand {
             hash_entry: file.strongest_hash().cloned(),
             sorted_urls,
             pieces: file.pieces.clone(),
-            torrent_metaurls: file
-                .meta_urls
-                .iter()
-                .filter(|m| m.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent)
-                .cloned()
-                .collect(),
+            torrent_metaurls,
         };
 
         info!(

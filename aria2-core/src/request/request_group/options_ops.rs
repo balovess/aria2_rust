@@ -168,6 +168,12 @@ impl super::RequestGroup {
                 }
                 true
             }
+            "bt-detach-seed-only" => {
+                if let Some(v) = value.as_bool() {
+                    opts.bt_detach_seed_only = v;
+                }
+                true
+            }
             "dir" => {
                 opts.dir = value.as_str().map(|s| s.to_string());
                 true

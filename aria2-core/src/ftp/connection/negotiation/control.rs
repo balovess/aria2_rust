@@ -149,6 +149,16 @@ pub(super) struct FreshControl {
 }
 
 impl FreshControl {
+    pub(super) fn peer_ip(&self) -> Result<std::net::IpAddr> {
+        self.reader
+            .get_ref()
+            .peer_addr()
+            .map(|address| address.ip())
+            .map_err(|error| {
+                Aria2Error::Network(format!("FTP control peer unavailable: {}", error))
+            })
+    }
+
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         debug!("FTP CMD: {}", cmd.trim());
@@ -193,6 +203,16 @@ pub(super) struct PooledControl {
 }
 
 impl PooledControl {
+    pub(super) fn peer_ip(&self) -> Result<std::net::IpAddr> {
+        self.reader
+            .get_ref()
+            .peer_addr()
+            .map(|address| address.ip())
+            .map_err(|error| {
+                Aria2Error::Network(format!("FTP control peer unavailable: {}", error))
+            })
+    }
+
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         debug!("FTP CMD (pooled): {}", cmd.trim());

@@ -51,13 +51,38 @@ impl super::RequestGroup {
         true
     }
 
-    /// Remove the .aria2 control file (download completed or user removed).
-    ///
-    /// Mirrors C++ `RequestGroup::removeControlFile()`. Called after
-    /// successful download completion to clean up the progress checkpoint.
+    /// Request removal of the .aria2 control file.
     pub fn remove_control_file(&self) {
         self.control_flags.request_remove_control();
         tracing::debug!(gid = self.gid.value(), "Requested control file removal");
+    }
+
+    /// Associate this group with its output file's `.aria2` sidecar.
+    pub fn set_control_file_path(&self, path: impl Into<std::path::PathBuf>) {
+        *self.control_file_path.recover_mut() = Some(path.into());
+    }
+
+    /// Remove the sidecar immediately when a user halt requests cleanup.
+    ///
+    /// Missing files are treated as success, matching C++ cleanup semantics.
+    pub fn process_remove_control_file(&self) -> crate::error::Result<bool> {
+        if !self.control_flags.is_remove_control_requested() {
+            return Ok(false);
+        }
+        if let Some(path) = self.control_file_path.recover().clone() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(crate::error::Aria2Error::FileIo(format!(
+                        "failed to remove control file {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        self.control_flags.clear_remove_control();
+        Ok(true)
     }
 
     /// Enable saving the .aria2 control file.

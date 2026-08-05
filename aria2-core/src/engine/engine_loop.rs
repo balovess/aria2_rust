@@ -246,7 +246,7 @@ pub async fn run_engine_loop(
 
         // ── 5. Periodic housekeeping ─────────────────────────────────────
         if last_housekeeping.elapsed() >= HOUSEKEEPING_INTERVAL {
-            run_housekeeping(&ctx, &mut running_downloads, &completion_tx).await;
+            run_housekeeping(&ctx, &mut running_downloads).await;
             last_housekeeping = Instant::now();
         }
 
@@ -476,6 +476,22 @@ fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
         Aria2Error::Recoverable(RecoverableError::HttpProtocolError { .. }) => {
             DownloadResultCode::HttpProtocolError
         }
+        Aria2Error::Recoverable(RecoverableError::HttpAuthFailed { .. }) => {
+            DownloadResultCode::HttpAuthFailed
+        }
+        Aria2Error::Recoverable(RecoverableError::HttpTooManyRedirects { .. }) => {
+            DownloadResultCode::HttpTooManyRedirects
+        }
+        Aria2Error::Recoverable(RecoverableError::ServerError { code })
+            if *code == 401 || *code == 407 =>
+        {
+            DownloadResultCode::HttpAuthFailed
+        }
+        Aria2Error::Recoverable(RecoverableError::ServerError { code })
+            if matches!(*code, 502 | 503 | 504) =>
+        {
+            DownloadResultCode::HttpServiceUnavailable
+        }
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 404 => {
             DownloadResultCode::ResourceNotFound
         }
@@ -685,7 +701,6 @@ async fn process_task_completions(
 async fn run_housekeeping(
     ctx: &EngineLoopContext,
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
-    completion_tx: &mpsc::UnboundedSender<(GroupId, CommandGeneration, TaskResult)>,
 ) {
     // ── Timeout enforcement ──────────────────────────────────────────────
     // Abort tasks whose per-command timeout has elapsed.
@@ -705,13 +720,14 @@ async fn run_housekeeping(
         let man = ctx.group_man.read().await;
         for gid in timed_out {
             if man.timeout_group(gid) {
-                for (_, running) in running_downloads.iter().filter(|(id, _)| *id == gid) {
-                    let _ = completion_tx.send((gid, running.generation, TaskResult::Cancelled));
-                    running._handle.abort();
-                }
+                // Timeout is a graceful halt: the command observes the halt
+                // flag, flushes its writer, saves resumable progress, and
+                // publishes the single completion used for accounting. Do not
+                // abort here; aborting would bypass protocol-specific cleanup
+                // and can leave buffered bytes newer than the control file.
                 warn!(
                     gid = gid.value(),
-                    "Download task timed out, requesting halt"
+                    "Download task timed out, requesting graceful halt"
                 );
             }
         }
@@ -1187,6 +1203,28 @@ mod tests {
                 code: 404
             })),
             DownloadResultCode::ResourceNotFound
+        );
+        for code in [502, 503, 504] {
+            assert_eq!(
+                map_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
+                    code
+                })),
+                DownloadResultCode::HttpServiceUnavailable
+            );
+        }
+        for code in [401, 407] {
+            assert_eq!(
+                map_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
+                    code
+                })),
+                DownloadResultCode::HttpAuthFailed
+            );
+        }
+        assert_eq!(
+            map_error_code(&Aria2Error::Recoverable(
+                RecoverableError::HttpTooManyRedirects { count: 20 }
+            )),
+            DownloadResultCode::HttpTooManyRedirects
         );
         assert_eq!(
             map_error_code(&Aria2Error::Checksum("bad digest".into())),

@@ -117,6 +117,14 @@ pub struct RequestGroup {
     /// Disabled during hash checking to prevent corrupt state.
     pub save_control_file_enabled: std::sync::RwLock<std::sync::atomic::AtomicBool>,
 
+    /// Whether the BitTorrent payload has completed and this group is now
+    /// seed-only. Seed-only groups remain available for seeding but do not
+    /// consume the normal active-download concurrency budget.
+    pub seed_only: AtomicBool,
+
+    /// Output path whose sidecar `.aria2` file belongs to this group.
+    pub control_file_path: std::sync::RwLock<Option<std::path::PathBuf>>,
+
     /// Optional dependency that must be resolved before this group
     /// can be promoted from reserved to active.
     pub dependency: std::sync::RwLock<Option<Box<dyn super::dependency::Dependency>>>,
@@ -177,6 +185,8 @@ impl RequestGroup {
             save_control_file_enabled: std::sync::RwLock::new(std::sync::atomic::AtomicBool::new(
                 true,
             )),
+            seed_only: AtomicBool::new(false),
+            control_file_path: std::sync::RwLock::new(None),
             dependency: std::sync::RwLock::new(None),
             following_gid: std::sync::RwLock::new(None),
             followed_by_gids: std::sync::RwLock::new(Vec::new()),

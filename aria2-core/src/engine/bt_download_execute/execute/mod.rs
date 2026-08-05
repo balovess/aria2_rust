@@ -18,6 +18,7 @@ use super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
+use crate::filesystem::control_file::ControlFile;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -83,38 +84,83 @@ impl Command for BtDownloadCommand {
         }
 
         let (meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
+        self.group
+            .recover()
+            .set_control_file_path(ControlFile::control_path_for(&self.output_path));
 
         // --check-integrity: verify existing data against the torrent's piece
         // hashes before allocating/downloading (mirrors C++
-        // CheckIntegrityMan + CheckIntegrityCommand). Only single-file
-        // torrents for now — multi-file layouts need per-file piece range
-        // mapping (tracked in the gap analysis).
-        if self.check_integrity && self.multi_file_layout.is_none() {
+        // CheckIntegrityMan + CheckIntegrityCommand).
+        let mut verified_piece_indices = Vec::new();
+        if self.check_integrity {
             use crate::checksum::check_integrity::man as ci_man;
             use crate::checksum::message_digest::HashType;
             use crate::util::rwlock_ext::RwLockRecover;
             let gid = self.group.recover().gid().value();
             let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
-            if let Some(task) = ci_man::file_task(
-                &self.output_path,
-                piece_length as u64,
-                total_size,
-                piece_hashes_hex,
-                HashType::Sha1,
-            )? {
+            let task = if let Some(ref layout) = self.multi_file_layout {
+                let files: Vec<_> = layout
+                    .file_list()
+                    .iter()
+                    .filter_map(|entry| {
+                        layout
+                            .file_absolute_path(entry.index)
+                            .map(|path| (path.to_path_buf(), entry.length))
+                    })
+                    .collect();
+                ci_man::cut_multi_file_trailing_garbage(&files).await?;
+                ci_man::multi_file_task(
+                    files,
+                    piece_length as u64,
+                    total_size,
+                    piece_hashes_hex,
+                    HashType::Sha1,
+                )?
+            } else {
+                ci_man::cut_trailing_garbage(&self.output_path, total_size).await?;
+                ci_man::file_task(
+                    &self.output_path,
+                    piece_length as u64,
+                    total_size,
+                    piece_hashes_hex,
+                    HashType::Sha1,
+                )?
+            };
+            if let Some(task) = task {
                 info!(
                     gid,
                     "Checking integrity of existing data against piece hashes"
                 );
-                let ok = ci_man::enqueue(&ci_man::shared(), gid, task).await?;
-                if !ok {
-                    return Err(Aria2Error::Fatal(FatalError::Config(
-                        "Integrity check failed: existing file does not match torrent piece hashes"
-                            .to_string(),
-                    )));
+                let outcome = ci_man::enqueue_with_outcome(&ci_man::shared(), gid, task).await?;
+                verified_piece_indices = outcome.verified_piece_indices;
+                if !outcome.failed_piece_indices.is_empty() {
+                    warn!(
+                        gid,
+                        failed_pieces = ?outcome.failed_piece_indices,
+                        "Integrity check found pieces to re-download"
+                    );
                 }
-                info!(gid, "Integrity check passed, proceeding with download");
+                // Only verified pieces enter the picker as complete. Failed
+                // pieces are intentionally left missing, which makes the
+                // runtime piece manager request them again rather than relying
+                // on stale control-file state.
+                info!(
+                    gid,
+                    verified_pieces = verified_piece_indices.len(),
+                    "Integrity check completed, proceeding with download"
+                );
             }
+        }
+
+        if self.hash_check_only {
+            info!("hash-check-only enabled; stopping after integrity validation");
+            if self.check_integrity && verified_piece_indices.len() == num_pieces as usize {
+                self.group.recover_mut().complete()?;
+                return Ok(());
+            }
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "hash-check-only: existing data failed torrent piece hash validation".into(),
+            )));
         }
 
         // File pre-allocation (mirrors C++ BtFileAllocationEntry queued into
@@ -307,6 +353,7 @@ impl Command for BtDownloadCommand {
             &mut pex_enabled_peers,
             &mut last_pex_send,
             PEX_SEND_INTERVAL_SECS,
+            &verified_piece_indices,
         )
         .await?;
 

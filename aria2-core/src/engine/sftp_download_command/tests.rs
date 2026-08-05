@@ -126,6 +126,28 @@ fn test_map_network_error_to_recoverable() {
 }
 
 #[test]
+fn test_resume_offset_accepts_existing_prefix() {
+    assert_eq!(
+        SftpDownloadCommand::validate_resume_offset(256, 1024).unwrap(),
+        256
+    );
+}
+
+#[test]
+fn test_resume_offset_rejects_oversized_local_output() {
+    let error = SftpDownloadCommand::validate_resume_offset(1200, 1024).unwrap_err();
+    assert!(matches!(error, Aria2Error::FileIo(_)));
+}
+
+#[test]
+fn test_resume_offset_accepts_complete_output() {
+    assert_eq!(
+        SftpDownloadCommand::validate_resume_offset(1024, 1024).unwrap(),
+        1024
+    );
+}
+
+#[test]
 fn test_constants() {
     assert_eq!(constants::SFTP_CONNECT_TIMEOUT_SECS, 15);
     assert_eq!(constants::SFTP_READ_TIMEOUT_SECS, 30);

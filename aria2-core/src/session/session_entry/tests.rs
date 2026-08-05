@@ -423,6 +423,7 @@ fn test_download_options_to_map_all_fields() {
         mmap_threshold: Some(128 * 1024 * 1024),
         secure_falloc: true,
         check_integrity: false,
+        hash_check_only: false,
         bt_tracker: None,
         // Checksum
         checksum: Some(("sha256".to_string(), "abc123".to_string())),
@@ -442,6 +443,7 @@ fn test_download_options_to_map_all_fields() {
         bt_optimistic_unchoke_interval: Some(30),
         bt_snubbed_timeout: Some(60),
         bt_prioritize_piece: "head".to_string(),
+        bt_detach_seed_only: true,
         enable_utp: true,
         utp_listen_port: Some(6882),
         // Retry

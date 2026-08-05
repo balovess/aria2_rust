@@ -2,6 +2,8 @@
 
 use super::deserialization::deserialize;
 use super::*;
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -27,6 +29,24 @@ http://example.com/file2.iso
     assert_eq!(entries[1].uris[0], "http://example.com/file2.iso");
     assert!(!entries[0].paused, "First entry should not be paused");
     assert!(entries[1].paused, "Second entry should be paused");
+}
+
+#[test]
+fn test_generated_child_groups_are_not_saved() {
+    let parent = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/parent.torrent".to_string()],
+        DownloadOptions::default(),
+    )));
+    let child = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2),
+        vec!["http://example.com/payload.bin".to_string()],
+        DownloadOptions::default(),
+    )));
+    child.recover().set_belongs_to_gid(GroupId::new(1));
+
+    assert!(group_to_entry(&parent.recover()).is_some());
+    assert!(group_to_entry(&child.recover()).is_none());
 }
 
 #[test]

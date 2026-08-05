@@ -97,9 +97,12 @@ pub(super) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
     let h2: u8 = parts[1].trim().parse().ok()?;
     let h3: u8 = parts[2].trim().parse().ok()?;
     let h4: u8 = parts[3].trim().parse().ok()?;
-    let p1: u16 = parts[4].trim().parse().ok()?;
-    let p2: u16 = parts[5].trim().parse().ok()?;
-    Some((format!("{}.{}.{}.{}", h1, h2, h3, h4), p1 * 256 + p2))
+    let p1: u8 = parts[4].trim().parse().ok()?;
+    let p2: u8 = parts[5].trim().parse().ok()?;
+    Some((
+        format!("{}.{}.{}.{}", h1, h2, h3, h4),
+        u16::from(p1) * 256 + u16::from(p2),
+    ))
 }
 
 /// Parse EPSV response to extract port.

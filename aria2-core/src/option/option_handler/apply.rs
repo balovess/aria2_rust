@@ -244,6 +244,7 @@ impl OptionHandlerApply for OptionHandler {
                 .as_str()
                 .unwrap_or("")
                 .to_string(),
+            bt_detach_seed_only: self.get("bt-detach-seed-only").as_bool().unwrap_or(false),
             enable_utp: self.get("enable-utp").as_bool().unwrap_or(false),
             utp_listen_port: get_usize("utp-listen-port"),
             header: {
@@ -262,7 +263,9 @@ impl OptionHandlerApply for OptionHandler {
             file_allocation: get_str("file-allocation"),
             mmap_threshold: get_u64("mmap-threshold"),
             secure_falloc: self.get("secure-falloc").as_bool().unwrap_or(false),
-            check_integrity: self.get("check-integrity").as_bool().unwrap_or(false),
+            check_integrity: self.get("check-integrity").as_bool().unwrap_or(false)
+                || self.get("hash-check-only").as_bool().unwrap_or(false),
+            hash_check_only: self.get("hash-check-only").as_bool().unwrap_or(false),
             // Metalink
             metalink_version: get_str("metalink-version"),
             metalink_language: get_str("metalink-language"),

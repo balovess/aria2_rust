@@ -490,26 +490,14 @@ pub(super) fn parse_raw(header_value: &str) -> Option<(String, RawFilename)> {
         i += 1;
     }
 
-    // Handle end-of-input terminal states.
-    //
-    // aria2_rust intentionally **accepts** a trailing `;` — i.e. ending in
-    // `ParseState::BeforeParmName`. RFC 6266 defines the parameter list as
-    // `*( ";" disposition-parm )`, so zero or more trailing empty parameters
-    // are legal. Upstream C++ aria2 rejects this: its terminal `switch(state)`
-    // does not accept `CD_BEFORE_DISPOSITION_PARM_NAME`
-    // (`attwithasciifilenamenqs`: `attachment; filename=foo.html ;` → -1). That
-    // is a long-standing bug (GitHub issue #1118, open 5+ years) that breaks
-    // downloads from S3 / CloudFront / nginx, which routinely emit a trailing
-    // `;`. We deliberately diverge from C++ here. Empty parameters in the
-    // *middle* of the header (`attachment; ;filename=foo`) are still rejected,
-    // but by the `BeforeParmName` state handler — a non-token byte such as `;`
-    // triggers `return None` — not by this terminal check.
+    // Handle end-of-input terminal states.  Keep the terminal-state rules
+    // identical to C++ aria2: a semicolon starts a parameter and therefore a
+    // header ending in `;` (or `;` followed only by whitespace) is malformed.
     match state {
         ParseState::BeforeDispositionType
         | ParseState::AfterDispositionType
         | ParseState::DispositionType
         | ParseState::AfterValue
-        | ParseState::BeforeParmName
         | ParseState::Token => {}
         ParseState::ValueChars => {
             if ext_charset == Charset::Utf8 && std::str::from_utf8(&ext_value_bytes).is_err() {

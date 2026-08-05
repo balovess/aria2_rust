@@ -12,7 +12,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use super::{LpdManager, LpdPeer, is_private_address, parse_lpd_announcement};
+use super::{LpdAnnouncer, LpdManager, LpdPeer, is_private_address, parse_lpd_announcement};
 
 // =========================================================================
 // Helper Functions
@@ -40,6 +40,16 @@ fn make_bep14_message(info_hash: &str, port: u16) -> Vec<u8> {
         port, info_hash
     )
     .into_bytes()
+}
+
+// =========================================================================
+// Test: Multicast interface configuration
+// =========================================================================
+
+#[test]
+fn test_lpd_announcer_exposes_configured_interface() {
+    let announcer = LpdAnnouncer::with_interface(30, Some(Ipv4Addr::LOCALHOST)).unwrap();
+    assert_eq!(announcer.interface(), Some(Ipv4Addr::LOCALHOST));
 }
 
 // =========================================================================

@@ -134,10 +134,18 @@ impl Command for SftpDownloadCommand {
             total_length as f64 / (1024.0 * 1024.0)
         );
 
-        // Update RequestGroup with total length
+        // Update RequestGroup with total length and recover a local prefix.
+        // SFTP reads are positioned, so an existing partial file can be resumed
+        // without downloading or rewriting its already-present prefix.
+        let existing_length = tokio::fs::metadata(&self.output_path)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        self.completed_bytes = Self::validate_resume_offset(existing_length, total_length)?;
         {
             let g = self.group.recover();
             g.set_total_length(total_length);
+            g.update_progress(existing_length);
         }
 
         // -----------------------------------------------------------------
@@ -155,7 +163,8 @@ impl Command for SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 5: Prepare Local Disk Writer
         // -----------------------------------------------------------------
-        let raw_writer = DefaultDiskWriter::new(&self.output_path);
+        let raw_writer =
+            DefaultDiskWriter::new_with_offset(&self.output_path, self.completed_bytes);
 
         // Apply rate limiting if configured
         let rate_limit = {
@@ -212,7 +221,10 @@ impl Command for SftpDownloadCommand {
                         "[SFTP-CMD] EOF at offset {} (expected {})",
                         self.completed_bytes, total_length
                     );
-                    break;
+                    return Err(Aria2Error::DownloadFailed(format!(
+                        "SFTP remote file ended before the advertised length: {} < {}",
+                        self.completed_bytes, total_length
+                    )));
                 }
                 Ok(data) => data,
                 Err(e) => {
@@ -267,10 +279,13 @@ impl Command for SftpDownloadCommand {
             warn!("[SFTP-CMD] Warning closing remote file: {}", e);
         }
 
-        // Finalize disk writer (flush, sync, etc.)
-        if let Err(e) = writer.finalize().await {
-            warn!("[SFTP-CMD] Warning finalizing disk writer: {}", e);
-        }
+        // Finalize disk writer (flush, sync, etc.). Completion is not valid
+        // unless the local bytes have been durably finalized.
+        writer.finalize().await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "[SFTP-CMD] Failed to finalize disk writer: {error}"
+            ))
+        })?;
 
         // Disconnect SSH session
         if let Err(e) = conn.disconnect().await {

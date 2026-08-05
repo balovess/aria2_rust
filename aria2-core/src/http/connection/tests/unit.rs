@@ -325,6 +325,19 @@ fn test_debug_format() {
 // ==================== Cookie Jar Integration Tests (J4) ====================
 
 #[test]
+fn test_shared_cookie_storage_is_used_by_manager() {
+    let storage = std::sync::Arc::new(crate::http::cookie::CookieStorage::new());
+    storage.parse_and_store("sid=shared; Path=/", "example.com", "/");
+    let mut manager = HttpConnectionManager::new(&create_test_config());
+    manager.set_cookie_storage(Some(storage));
+    let url = url::Url::parse("http://example.com/").unwrap();
+    assert_eq!(
+        manager.attach_cookies_to_request(&url).as_deref(),
+        Some("sid=shared")
+    );
+}
+
+#[test]
 fn test_cookie_jar_initially_none() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
     assert!(manager.cookie_jar().is_none());

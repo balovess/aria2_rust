@@ -6,7 +6,7 @@
 
 use url::Url;
 
-use crate::error::Aria2Error;
+use crate::error::{Aria2Error, RecoverableError};
 use crate::http::digest_auth::DigestAuthChallenge;
 use crate::http::request_response::HttpMethod;
 use crate::http::stream_filter::{AutoFilterSelector, NullSinkFilter, process_filters};
@@ -202,10 +202,11 @@ impl HttpSkipResponseHandler {
     ) -> Result<SkipResponseResult, Aria2Error> {
         // Check redirect count limit
         if redirect_count >= self.max_redirects {
-            return Err(Aria2Error::Network(format!(
-                "Too many redirects: count={}",
-                redirect_count
-            )));
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::HttpTooManyRedirects {
+                    count: redirect_count,
+                },
+            ));
         }
 
         // Extract Location header

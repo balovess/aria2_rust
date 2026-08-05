@@ -48,7 +48,7 @@ pub const MAX_COOKIE_PER_DOMAIN: usize = 50;
 /// Controls whether a cookie is sent with cross-site requests.
 /// Absent SameSite attribute defaults to `SameSite::None` for compatibility
 /// with C++ aria2 behavior (newer browsers treat absent as Lax).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SameSite {
     /// No SameSite attribute specified — cookie is sent in all contexts.
     #[default]

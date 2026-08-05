@@ -1,9 +1,10 @@
 //! SessionPersistence struct definition, constants, constructors, and accessors.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::http::cookie_storage::CookieJar;
+use crate::http::cookie_storage::{CookieJar, CookieStorage};
 
 /// Default auto-save interval in seconds
 pub const DEFAULT_AUTO_SAVE_INTERVAL_SECS: u64 = 60;
@@ -37,7 +38,9 @@ pub struct SessionPersistence {
     pub(crate) auto_save_interval: Duration,
     /// Whether auto-save is enabled
     pub(crate) auto_save_enabled: bool,
-    /// Optional cookie jar for persisting cookies alongside session data
+    /// Canonical shared storage persisted alongside session data.
+    pub(crate) cookie_storage: Arc<CookieStorage>,
+    /// Legacy cookie jar retained for JSON/API compatibility.
     pub(crate) cookie_jar: Option<CookieJar>,
 }
 
@@ -52,6 +55,7 @@ impl SessionPersistence {
             session_dir: session_dir.to_path_buf(),
             auto_save_interval: Duration::from_secs(DEFAULT_AUTO_SAVE_INTERVAL_SECS),
             auto_save_enabled: true,
+            cookie_storage: CookieStorage::shared(),
             cookie_jar: None,
         }
     }
@@ -68,7 +72,14 @@ impl SessionPersistence {
         self
     }
 
-    /// Set cookie jar for persistence alongside session data
+    /// Bind canonical shared cookie storage for persistence.
+    pub fn with_cookie_storage(mut self, storage: Arc<CookieStorage>) -> Self {
+        self.cookie_storage = storage;
+        self
+    }
+
+    /// Set cookie jar for persistence alongside session data.
+    /// Retained for JSON/API compatibility; new code should use `with_cookie_storage`.
     pub fn with_cookie_jar(mut self, jar: CookieJar) -> Self {
         self.cookie_jar = Some(jar);
         self

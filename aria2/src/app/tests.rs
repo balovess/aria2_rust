@@ -89,6 +89,18 @@ ftp://server.com/bigfile.bin
     let man = app.request_man.read().await;
     let group_count = man.count();
     assert_eq!(group_count, 3, "RequestGroupMan should have 3 groups");
+    assert!(
+        man.find_group(aria2_core::request::request_group::GroupId::new(1))
+            .is_some()
+    );
+    assert!(
+        man.find_group(aria2_core::request::request_group::GroupId::new(2))
+            .is_some()
+    );
+    assert!(
+        man.find_group(aria2_core::request::request_group::GroupId::new(3))
+            .is_some()
+    );
 }
 
 /// Test 2: Skip completed entries

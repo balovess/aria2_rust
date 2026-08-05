@@ -84,13 +84,20 @@ impl SessionPersistence {
         // Save global options summary
         self.save_global_options(groups).await?;
 
-        // Persist cookies if cookie jar is available
+        // Persist canonical cookies using aria2's Netscape-compatible format.
+        let cookie_path = self.session_dir.join("cookies.txt");
+        if let Err(e) = Self::save_cookie_storage_to_file(&self.cookie_storage, &cookie_path).await
+        {
+            warn!("Failed to persist cookies: {}", e);
+        } else {
+            debug!(path = %cookie_path.display(), "Cookies persisted to session");
+        }
+
+        // Keep the legacy JSON adapter available for existing callers.
         if let Some(ref jar) = self.cookie_jar {
-            let cookie_path = self.session_dir.join("cookies.json");
-            if let Err(e) = Self::save_cookie_jar_to_file(jar, &cookie_path).await {
-                warn!("Failed to persist cookies: {}", e);
-            } else {
-                debug!(path = %cookie_path.display(), "Cookies persisted to session");
+            let legacy_path = self.session_dir.join("cookies.json");
+            if let Err(e) = Self::save_cookie_jar_to_file(jar, &legacy_path).await {
+                warn!("Failed to persist legacy cookies: {}", e);
             }
         }
 
@@ -192,16 +199,29 @@ impl SessionPersistence {
         // Load global options if available
         let _ = self.load_global_options().await;
 
-        // Load cookies from session directory
-        let cookie_path = self.session_dir.join("cookies.json");
+        // Load canonical cookies first, matching aria2's save-cookies format.
+        let cookie_path = self.session_dir.join("cookies.txt");
         if cookie_path.exists() {
-            match Self::load_cookie_jar_from_file(&cookie_path).await {
+            if let Err(e) =
+                Self::load_cookie_storage_from_file(&self.cookie_storage, &cookie_path).await
+            {
+                warn!("Failed to load cookies from session: {}", e);
+            } else {
+                info!("Loaded canonical cookies from session");
+            }
+        }
+
+        // Read the legacy JSON adapter when present so existing session/API
+        // callers continue to observe the persisted jar alongside canonical storage.
+        let legacy_path = self.session_dir.join("cookies.json");
+        if legacy_path.exists() {
+            match Self::load_cookie_jar_from_file(&legacy_path).await {
                 Ok(jar) => {
                     self.cookie_jar = Some(jar);
-                    info!("Loaded cookies from session");
+                    info!("Loaded legacy cookies from session");
                 }
                 Err(e) => {
-                    warn!("Failed to load cookies from session: {}", e);
+                    warn!("Failed to load legacy cookies from session: {}", e);
                 }
             }
         }

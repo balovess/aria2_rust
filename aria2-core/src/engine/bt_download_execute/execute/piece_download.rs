@@ -166,6 +166,7 @@ impl BtDownloadCommand {
         pex_enabled_peers: &mut HashSet<PeerKey>,
         last_pex_send: &mut Instant,
         pex_send_interval_secs: u64,
+        verified_piece_indices: &[usize],
     ) -> Result<()> {
         // Single-file torrents are written with a positioned + cached writer:
         // BT downloads pieces out of order (RarestFirst etc.), so writes must
@@ -269,6 +270,12 @@ impl BtDownloadCommand {
             &mut peer_tracker,
         );
 
+        for &index in verified_piece_indices {
+            if index < num_pieces as usize {
+                piece_picker.mark_completed(index as u32);
+                piece_manager.mark_piece_complete(index as u32);
+            }
+        }
         piece_selector.initialize_frequencies(&mut piece_picker, &peer_tracker);
 
         tracing::info!(
@@ -293,6 +300,21 @@ impl BtDownloadCommand {
         }
 
         loop {
+            let halt_requested = {
+                let group = self.group.recover();
+                group.is_force_halt_requested() || group.is_halt_requested()
+            };
+            if halt_requested {
+                writer.flush().await.map_err(|error| {
+                    Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
+                })?;
+                writer.close().await.map_err(|error| {
+                    Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
+                })?;
+                return Err(Aria2Error::DownloadFailed(
+                    "BitTorrent download halted".into(),
+                ));
+            }
             if BtPieceSelector::is_complete(&piece_picker) {
                 if endgame_state.is_endgame_active() {
                     endgame_state.exit_endgame();

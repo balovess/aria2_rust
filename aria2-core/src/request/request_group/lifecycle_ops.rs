@@ -141,6 +141,22 @@ impl super::RequestGroup {
         tracing::info!(gid = self.gid.value(), ?reason, "Force halt requested");
     }
 
+    /// Mark the payload as complete and enter seed-only mode.
+    ///
+    /// This mirrors C++ `RequestGroup::enableSeedOnly()`: the torrent stays
+    /// alive for seeding, while the payload is no longer an active download.
+    pub fn enable_seed_only(&self) {
+        if self.options().bt_detach_seed_only {
+            self.seed_only
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Return whether this group has entered seed-only mode.
+    pub fn is_seed_only(&self) -> bool {
+        self.seed_only.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Transition to `Complete` status and record the end time.
     ///
     /// Sets completed_length equal to total_length (mirrors C++ behavior

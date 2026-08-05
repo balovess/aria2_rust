@@ -115,6 +115,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
             opts.bt_prioritize_piece.clone(),
         );
     }
+    if opts.bt_detach_seed_only {
+        map.insert("bt-detach-seed-only".to_string(), "true".to_string());
+    }
     if opts.enable_utp {
         map.insert("enable-utp".to_string(), "true".to_string());
     }

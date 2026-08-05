@@ -267,7 +267,11 @@ impl RawFtpControl {
         debug!("Querying file size: {}", remote_path);
         let resp = self.command(&format!("SIZE {}", remote_path)).await?;
         if resp.0 == 213 {
-            let size: u64 = resp.1.trim().parse().unwrap_or(0);
+            let size = resp.1.trim().parse::<u64>().map_err(|error| {
+                Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+                    message: format!("Invalid FTP SIZE response {:?}: {}", resp.1, error),
+                })
+            })?;
             debug!("File size: {} bytes", size);
             return Ok(Some(size));
         }

@@ -16,6 +16,15 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
+        if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            if man.remove_stopped_result(&gid).is_some() {
+                return Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    "OK",
+                ));
+            }
+        }
         let mut stopped = self.stopped_tasks.write().await;
         let original_len = stopped.len();
         stopped.retain(|s| s.gid != gid);
@@ -219,6 +228,15 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         match req.get_param::<String>(0) {
             Ok(gid) => {
+                if let Some(group_man) = &self.group_man {
+                    let man = group_man.read().await;
+                    if man.remove_stopped_result(&gid).is_some() {
+                        return Ok(JsonRpcResponse::success(
+                            req.id.clone().unwrap_or_default(),
+                            "OK",
+                        ));
+                    }
+                }
                 let mut stopped = self.stopped_tasks.write().await;
                 let original_len = stopped.len();
                 stopped.retain(|s| s.gid != gid);
@@ -236,6 +254,14 @@ impl RpcEngine {
                 }
             }
             Err(_) => {
+                if let Some(group_man) = &self.group_man {
+                    let man = group_man.read().await;
+                    man.purge_stopped_results();
+                    return Ok(JsonRpcResponse::success(
+                        req.id.clone().unwrap_or_default(),
+                        "OK",
+                    ));
+                }
                 let mut stopped = self.stopped_tasks.write().await;
                 stopped.clear();
                 Ok(JsonRpcResponse::success(

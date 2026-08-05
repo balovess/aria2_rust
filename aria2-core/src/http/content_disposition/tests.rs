@@ -371,15 +371,12 @@ fn test_real_world_attachment() {
 }
 
 #[test]
-fn test_real_world_attachment_with_trailing_semicolon_accepted() {
-    // Real-world S3 / CloudFront / nginx headers frequently carry a trailing
-    // `;`. C++ aria2 rejects the whole header (issue #1118); aria2_rust
-    // accepts it per RFC 6266 so these downloads succeed.
+fn test_real_world_attachment_with_trailing_semicolon_rejected() {
     let result = parse_content_disposition(
         "attachment; filename=\"genome.jpeg\"; modification-date=\"Wed, 12 Feb 1997 16:29:51 -0500\";",
     );
-    assert_eq!(result.disposition_type, "attachment");
-    assert_eq!(result.filename.as_deref(), Some("genome.jpeg"));
+    assert_eq!(result.disposition_type, "");
+    assert!(result.filename.is_none());
 }
 
 #[test]
@@ -527,56 +524,36 @@ fn assert_accepted_without_filename(header: &str, disposition_type: &str) {
     );
 }
 
-// -- Trailing `;` / empty final parameter: accepted per RFC 6266 -----------
-// (aria2_rust diverges from C++ aria2 issue #1118, which rejects a trailing
-// `;` and breaks S3 / CloudFront / nginx downloads.)
+// -- Trailing `;` / empty final parameter: rejected for C++ parity --------
 
 #[test]
-fn test_trailing_semicolon_after_token_accepted() {
-    // RFC 6266 allows zero or more trailing empty parameters. aria2_rust
-    // accepts a trailing `;` even though C++ aria2 rejects it (issue #1118),
-    // which breaks S3 / CloudFront / nginx downloads.
-    let result = parse_content_disposition("attachment; filename=foo.html ;");
-    assert_eq!(result.disposition_type, "attachment");
-    assert_eq!(result.filename.as_deref(), Some("foo.html"));
+fn test_trailing_semicolon_after_token_rejected() {
+    assert_rejected("attachment; filename=foo.html ;");
 }
 
 #[test]
-fn test_trailing_semicolon_without_space_accepted() {
-    // Ends in CD_BEFORE_DISPOSITION_PARM_NAME, which C++ rejects at EOF but
-    // aria2_rust accepts (RFC 6266 `*( ";" disposition-parm )`).
-    let result = parse_content_disposition("attachment; filename=foo.html;");
-    assert_eq!(result.disposition_type, "attachment");
-    assert_eq!(result.filename.as_deref(), Some("foo.html"));
+fn test_trailing_semicolon_without_space_rejected() {
+    assert_rejected("attachment; filename=foo.html;");
 }
 
 #[test]
-fn test_trailing_semicolon_after_quoted_string_accepted() {
-    let result = parse_content_disposition("attachment; filename=\"foo.html\";");
-    assert_eq!(result.disposition_type, "attachment");
-    assert_eq!(result.filename.as_deref(), Some("foo.html"));
+fn test_trailing_semicolon_after_quoted_string_rejected() {
+    assert_rejected("attachment; filename=\"foo.html\";");
 }
 
 #[test]
-fn test_trailing_semicolon_after_ext_value_accepted() {
-    let result = parse_content_disposition("attachment; filename*=UTF-8''foo.html;");
-    assert_eq!(result.disposition_type, "attachment");
-    assert_eq!(result.filename.as_deref(), Some("foo.html"));
+fn test_trailing_semicolon_after_ext_value_rejected() {
+    assert_rejected("attachment; filename*=UTF-8''foo.html;");
 }
 
 #[test]
-fn test_bare_trailing_semicolon_after_disposition_type_accepted() {
-    // `attachment;` — a trailing empty parameter is legal per RFC 6266.
-    let result = parse_content_disposition("attachment;");
-    assert_eq!(result.disposition_type, "attachment");
-    assert!(result.filename.is_none());
+fn test_bare_trailing_semicolon_after_disposition_type_rejected() {
+    assert_rejected("attachment;");
 }
 
 #[test]
-fn test_trailing_semicolon_with_whitespace_accepted() {
-    let result = parse_content_disposition("attachment; filename=foo.html ;   ");
-    assert_eq!(result.disposition_type, "attachment");
-    assert_eq!(result.filename.as_deref(), Some("foo.html"));
+fn test_trailing_semicolon_with_whitespace_rejected() {
+    assert_rejected("attachment; filename=foo.html ;   ");
 }
 
 #[test]

@@ -77,6 +77,9 @@ impl DiskWriter for DefaultDiskWriter {
             file.flush()
                 .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            file.sync_all()
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
             // Close the file synchronously by converting to std::fs::File.
             // tokio::fs::File's Drop spawns a background close task, which on
             // Windows can leave the handle open briefly and cause "Access denied"

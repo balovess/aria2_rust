@@ -107,6 +107,7 @@ pub async fn execute(
     // piece bitfield that survive across process restarts.
     let num_pieces = manager.num_segments().max(1);
     let ctrl_path = ControlFile::control_path_for(&dl.output_path);
+    dl.group.recover().set_control_file_path(ctrl_path.clone());
     let mut ctrl_file =
         match ControlFile::open_or_create(&ctrl_path, total_length, num_pieces).await {
             Ok(cf) => Some(cf),
@@ -451,6 +452,21 @@ pub async fn execute(
             // when segment futures are blocked on slow network reads.
             _ = cancel_tick.tick() => {
                 if let Err(e) = dl.check_cancelled() {
+                    // Flush already-received chunks before persisting progress.
+                    while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+                        writer.write_bytes_at(offset, data).await.map_err(|write_err| {
+                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                                "Write failed while cancelling: {}",
+                                write_err
+                            )))
+                        })?;
+                    }
+                    writer.flush().await.map_err(|flush_err| {
+                        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                            "Flush failed while cancelling: {}",
+                            flush_err
+                        )))
+                    })?;
                     // ADR-0001: Save control file before exiting on pause/remove.
                     if let Some(ref mut cf) = ctrl_file {
                         cf.update_completed_length(completed_bytes);

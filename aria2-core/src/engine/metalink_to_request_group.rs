@@ -338,15 +338,7 @@ impl MetalinkToRequestGroup {
 
             for &idx in &file_indices {
                 let file = &files[idx];
-                if file.urls.is_empty() {
-                    // Entries with only metaurls (BT) are handled separately
-                    // in C++ via BtDependency. For now, skip them.
-                    if !metaurl_key.is_empty() {
-                        debug!(
-                            metaurl = %metaurl_key,
-                            "Skipping metaurl-only entry (BT dependency not yet implemented)"
-                        );
-                    }
+                if file.urls.is_empty() && metaurl_key.is_empty() {
                     continue;
                 }
 
@@ -484,6 +476,30 @@ mod tests {
             .generate_from_bytes(&make_multi_file_metalink(), &options)
             .unwrap();
         assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn metaurl_only_torrent_entry_is_not_dropped() {
+        let options = DownloadOptions::default();
+        let converter = MetalinkToRequestGroup::new();
+        let commands = converter
+            .generate_from_bytes(
+                br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload"><metaurl mediatype="torrent">https://example.test/payload.torrent</metaurl></file></metalink>"#,
+                &options,
+            )
+            .unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].group.read().unwrap().uris(),
+            Vec::<String>::new()
+        );
+
+        let info = commands[0].file_info.as_ref().unwrap();
+        assert_eq!(info.torrent_metaurls.len(), 1);
+        assert_eq!(
+            info.torrent_metaurls[0].url,
+            "https://example.test/payload.torrent"
+        );
     }
 
     #[test]

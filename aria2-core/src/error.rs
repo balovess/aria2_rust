@@ -116,6 +116,12 @@ pub enum RecoverableError {
     #[error("HTTP protocol error: {message}")]
     HttpProtocolError { message: String },
 
+    #[error("HTTP authentication failed: {message}")]
+    HttpAuthFailed { message: String },
+
+    #[error("Too many redirects: count={count}")]
+    HttpTooManyRedirects { count: u32 },
+
     #[error("Handshake rejected: {reason}")]
     HandshakeRejection { reason: String },
 }

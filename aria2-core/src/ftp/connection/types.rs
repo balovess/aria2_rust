@@ -196,6 +196,9 @@ pub struct FtpClient {
     pub(crate) binary_mode: bool,
     /// Server host address
     pub(crate) host: String,
+    /// Control connection's selected peer address. Passive data channels
+    /// must use this address rather than trusting a PASV response host.
+    pub(crate) control_peer: std::net::IpAddr,
     /// Server port
     #[allow(dead_code)] // Port field retained for FTP connection configuration
     pub(crate) port: u16,

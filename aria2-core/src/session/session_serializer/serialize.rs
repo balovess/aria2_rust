@@ -28,6 +28,13 @@ use super::download_options_to_map;
 ///
 /// This function extracts information from synchronous fields and methods on the RequestGroup.
 pub fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
+    // aria2 does not persist generated child groups. They are recreated by
+    // the parent metadata handler after restart, so persisting them would
+    // duplicate work and break the parent-child lifecycle.
+    if group.belongs_to_gid().is_some() {
+        return None;
+    }
+
     let status = group.status();
 
     match status {
@@ -129,7 +136,9 @@ pub fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
 /// # Filtering
 ///
 /// Only groups with non-empty URIs and non-terminal statuses are included.
-/// Complete, removed, and error groups are skipped.
+/// Complete, removed, error, and generated child groups are skipped. Parent
+/// groups remain eligible so their persisted GID can be used to recreate the
+/// metadata workflow after restart.
 ///
 /// # Example
 ///

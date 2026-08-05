@@ -53,6 +53,14 @@ fn test_parse_pasv_response_invalid() {
     let msg2 = "Entering Passive Mode (192,168,1,100,195)";
     let result2 = FtpClient::parse_pasv_response(msg2);
     assert!(result2.is_err());
+
+    for invalid in [
+        "Entering Passive Mode (127,0,0,1,256,1)",
+        "Entering Passive Mode (127,0,0,1,1,256)",
+        "Entering Passive Mode (256,0,0,1,1,1)",
+    ] {
+        assert!(FtpClient::parse_pasv_response(invalid).is_err());
+    }
 }
 
 #[test]

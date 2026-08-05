@@ -19,7 +19,22 @@ impl super::RequestGroup {
     /// Set the total file length.
     pub fn set_total_length(&self, length: u64) {
         self.progress.set_total_length(length);
-        tracing::debug!("Setting total length: {} bytes", length);
+    }
+
+    /// Validate a remote protocol-reported length against an already known
+    /// download length, matching aria2's `validateTotalLength`.
+    pub fn validate_total_length(
+        &self,
+        expected_total_length: u64,
+        actual_total_length: u64,
+    ) -> crate::error::Result<()> {
+        if expected_total_length != 0 && expected_total_length != actual_total_length {
+            return Err(crate::error::Aria2Error::FtpProtocol(format!(
+                "FTP remote size mismatch: expected {}, got {}",
+                expected_total_length, actual_total_length
+            )));
+        }
+        Ok(())
     }
 
     /// Completed bytes so far.

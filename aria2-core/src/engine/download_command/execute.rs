@@ -120,7 +120,16 @@ impl Command for DownloadCommand {
         let supports_range = if head_supports_range {
             true
         } else if total_length > constants::CONCURRENT_MIN_FILE_SIZE as u64 {
-            let prober = RangeProber::new(Arc::clone(&self.client), self.headers.clone());
+            let prober = RangeProber::new(Arc::clone(&self.client), self.headers.clone())
+                .with_cookie_header(
+                    url_for_head
+                        .as_ref()
+                        .map(|url| {
+                            self.create_cookie_helper()
+                                .build_cookie_header_from_url(url)
+                        })
+                        .filter(|header| !header.is_empty()),
+                );
             prober.probe_range_support(&uri, total_length).await
         } else {
             false
@@ -182,6 +191,7 @@ impl Command for DownloadCommand {
             // CheckIntegrityCommand). No-op when there is nothing to validate.
             if self.check_integrity && total_length > 0 {
                 use crate::checksum::check_integrity::man as ci_man;
+                ci_man::cut_trailing_garbage(&self.output_path, total_length).await?;
                 use crate::checksum::message_digest::HashType;
                 // Extract owned data first so the RwLock guard is dropped
                 // before any await (guard is not Send).
@@ -222,7 +232,21 @@ impl Command for DownloadCommand {
                             resume_state.start_offset = 0;
                             resume_state.is_complete = false;
                         } else {
-                            info!(gid, "Integrity check passed, proceeding with download");
+                            info!(gid, "Integrity check passed");
+                            // A successful pre-download integrity check proves
+                            // the complete existing file is already usable. Do
+                            // not issue a range request at EOF or reallocate it.
+                            if resume_state.existing_length >= total_length {
+                                self.completed_bytes = total_length;
+                                resume_state.start_offset = total_length;
+                                resume_state.is_complete = true;
+                                let mut group = self.group.recover_mut();
+                                group.set_completed_length(total_length);
+                                group.complete()?;
+                                self.completed = true;
+                                release_path(&self.output_path);
+                                return Ok(());
+                            }
                         }
                     }
                 }

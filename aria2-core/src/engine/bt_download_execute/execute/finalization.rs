@@ -49,6 +49,10 @@ impl BtDownloadCommand {
         DownloadEventHooks::shared().fire_event(DownloadEvent::BtComplete, &self.group.recover());
 
         {
+            let g = self.group.recover();
+            g.enable_seed_only();
+        }
+        {
             let mut g = self.group.recover_mut();
             g.complete()?;
         }

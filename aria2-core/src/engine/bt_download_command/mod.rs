@@ -64,6 +64,8 @@ pub struct BtDownloadCommand {
     /// `--check-integrity`: verify existing data against piece hashes before
     /// downloading (C++ `CheckIntegrityMan`).
     pub(crate) check_integrity: bool,
+    /// Only perform the piece hash check and terminate without peer discovery.
+    pub(crate) hash_check_only: bool,
 
     // P1/P2 integration fields (all use Option for backward compatibility)
     /// BT progress persistence manager

@@ -184,7 +184,9 @@ impl Command for MetalinkDownloadCommand {
                         Box::new(raw_writer)
                     };
                     writer.write(&data).await?;
-                    writer.finalize().await.ok();
+                    writer.finalize().await.map_err(|error| {
+                        Aria2Error::FileIo(format!("Failed to finalize Metalink file: {error}"))
+                    })?;
 
                     self.completed_bytes = data.len() as u64;
 

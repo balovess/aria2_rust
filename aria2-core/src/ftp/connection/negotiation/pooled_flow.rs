@@ -21,7 +21,7 @@ impl FtpNegotiator {
     /// tunneled through an HTTP proxy instead of connected directly.
     pub(super) async fn enter_passive_mode_pooled_get_port(
         ctrl: &mut PooledControl,
-        host: &str,
+        _host: &str,
         connect_timeout: Duration,
         caps: &ServerCapabilities,
     ) -> Result<PasvResult> {
@@ -34,17 +34,17 @@ impl FtpNegotiator {
                 Ok(resp) if resp.0 == 229 => {
                     if let Some(port) = parse_epsv_response(&resp.1) {
                         debug!("EPSV successful (pooled), port: {}", port);
-                        let data_stream =
-                            timeout(connect_timeout, TcpStream::connect((host, port)))
-                                .await
-                                .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
-                                .map_err(|e| {
-                                    Aria2Error::Recoverable(
-                                        RecoverableError::TemporaryNetworkFailure {
-                                            message: format!("EPSV data connection failed: {}", e),
-                                        },
-                                    )
-                                })?;
+                        let data_stream = timeout(
+                            connect_timeout,
+                            TcpStream::connect(std::net::SocketAddr::new(ctrl.peer_ip()?, port)),
+                        )
+                        .await
+                        .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
+                        .map_err(|e| {
+                            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                                message: format!("EPSV data connection failed: {}", e),
+                            })
+                        })?;
                         let _ = data_stream.set_nodelay(true);
                         return Ok(PasvResult {
                             port,
@@ -76,10 +76,15 @@ impl FtpNegotiator {
 
         match parse_pasv_response(&pasv_resp.1) {
             Some((data_host, data_port)) => {
-                debug!("PASV successful (pooled): {}:{}", data_host, data_port);
+                debug!(
+                    advertised_host = %data_host,
+                    control_peer = %ctrl.peer_ip()?,
+                    port = data_port,
+                    "PASV successful (pooled); using control peer address"
+                );
                 let data_stream = timeout(
                     connect_timeout,
-                    TcpStream::connect((data_host.as_str(), data_port)),
+                    TcpStream::connect(std::net::SocketAddr::new(ctrl.peer_ip()?, data_port)),
                 )
                 .await
                 .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?

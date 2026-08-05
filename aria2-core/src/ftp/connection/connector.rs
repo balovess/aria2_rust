@@ -42,11 +42,18 @@ impl FtpClient {
         .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
         .map_err(|e| Aria2Error::Network(format!("FTP connection failed: {}", e)))?;
 
+        let control_peer = stream
+            .peer_addr()
+            .map_err(|e| {
+                Aria2Error::Network(format!("FTP control peer address unavailable: {}", e))
+            })?
+            .ip();
         let mut client = Self {
             control_stream: tokio::io::BufReader::new(FtpControlStream::Plain(stream)),
             mode,
             binary_mode: false,
             host: host.to_string(),
+            control_peer,
             port,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             read_timeout: Self::DEFAULT_READ_TIMEOUT,
@@ -106,6 +113,12 @@ impl FtpClient {
         .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
         .map_err(|e| Aria2Error::Network(format!("FTPS connection failed: {}", e)))?;
 
+        let control_peer = stream
+            .peer_addr()
+            .map_err(|e| {
+                Aria2Error::Network(format!("FTPS control peer address unavailable: {}", e))
+            })?
+            .ip();
         // Wrap in BufReader to read the 220 greeting, then recover the stream
         let mut buf_reader = tokio::io::BufReader::new(stream);
         let greeting = read_single_response(&mut buf_reader, Self::DEFAULT_READ_TIMEOUT).await?;
@@ -131,6 +144,7 @@ impl FtpClient {
             mode,
             binary_mode: false,
             host: host.to_string(),
+            control_peer,
             port,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             read_timeout: Self::DEFAULT_READ_TIMEOUT,
@@ -180,6 +194,12 @@ impl FtpClient {
         .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
         .map_err(|e| Aria2Error::Network(format!("FTPS implicit connection failed: {}", e)))?;
 
+        let control_peer = stream
+            .peer_addr()
+            .map_err(|e| {
+                Aria2Error::Network(format!("FTPS control peer address unavailable: {}", e))
+            })?
+            .ip();
         let tls_stream = tls::perform_tls_handshake(stream, host, config)
             .await
             .map_err(|e| Aria2Error::Network(format!("FTPS implicit TLS failed: {}", e)))?;
@@ -189,6 +209,7 @@ impl FtpClient {
             mode,
             binary_mode: false,
             host: host.to_string(),
+            control_peer,
             port,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             read_timeout: Self::DEFAULT_READ_TIMEOUT,
@@ -350,7 +371,7 @@ impl FtpClient {
                 debug!("EPSV data channel port: {}", port);
                 let data_stream = timeout(
                     self.connect_timeout,
-                    TcpStream::connect((self.host.as_str(), port)),
+                    TcpStream::connect(std::net::SocketAddr::new(self.control_peer, port)),
                 )
                 .await
                 .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?
@@ -367,16 +388,23 @@ impl FtpClient {
 
         if pasv_resp.code != 227 {
             return Err(Aria2Error::Recoverable(
-                crate::error::RecoverableError::ServerError { code: 425 },
+                crate::error::RecoverableError::FtpProtocolError {
+                    message: format!("PASV failed: {} {}", pasv_resp.code, pasv_resp.message),
+                },
             ));
         }
 
         // Parse PASV response
-        let (data_host, data_port) = Self::parse_pasv_response(&pasv_resp.message)?;
-        debug!("PASV data channel: {}:{}", data_host, data_port);
+        let (advertised_host, data_port) = Self::parse_pasv_response(&pasv_resp.message)?;
+        debug!(
+            advertised_host = %advertised_host,
+            control_peer = %self.control_peer,
+            port = data_port,
+            "PASV data channel; using control peer address"
+        );
         let data_stream = timeout(
             self.connect_timeout,
-            TcpStream::connect((data_host.as_str(), data_port)),
+            TcpStream::connect(std::net::SocketAddr::new(self.control_peer, data_port)),
         )
         .await
         .map_err(|_| Aria2Error::Recoverable(crate::error::RecoverableError::Timeout))?

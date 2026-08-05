@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 use crate::error::{Aria2Error, Result};
@@ -41,6 +41,8 @@ pub struct JarCookie {
     pub http_only: bool,
     /// When this cookie was created
     pub creation_time: SystemTime,
+    /// SameSite policy carried by the canonical cookie model.
+    pub same_site: super::SameSite,
 }
 
 impl JarCookie {
@@ -61,6 +63,7 @@ impl JarCookie {
             secure: false,
             http_only: false,
             creation_time: SystemTime::now(),
+            same_site: super::SameSite::default(),
         }
     }
 
@@ -244,6 +247,13 @@ impl JarCookie {
                 "httponly" => {
                     cookie.http_only = true;
                 }
+                "samesite" if kv.len() > 1 => {
+                    cookie.same_site = match kv[1].trim().to_ascii_lowercase().as_str() {
+                        "strict" => super::SameSite::Strict,
+                        "lax" => super::SameSite::Lax,
+                        _ => super::SameSite::None,
+                    };
+                }
                 _ => {} // Ignore unknown attributes
             }
         }
@@ -254,7 +264,49 @@ impl JarCookie {
 
 impl PartialEq for JarCookie {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.domain == other.domain && self.path == other.path
+        self.name == other.name
+            && self.domain.eq_ignore_ascii_case(&other.domain)
+            && self.path == other.path
+    }
+}
+
+impl From<JarCookie> for super::Cookie {
+    fn from(cookie: JarCookie) -> Self {
+        cookie.into_cookie()
+    }
+}
+
+impl JarCookie {
+    /// Convert this persistence/API representation into the canonical storage cookie.
+    pub fn into_cookie(self) -> super::Cookie {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let expiry_time = self
+            .expires
+            .and_then(|expiry| expiry.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        super::Cookie {
+            name: self.name,
+            value: self.value,
+            domain: self.domain,
+            path: self.path,
+            expiry_time,
+            creation_time: self
+                .creation_time
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or(now),
+            last_access_time: now,
+            persistent: expiry_time != 0,
+            host_only: false,
+            secure: self.secure,
+            http_only: self.http_only,
+            same_site: self.same_site,
+        }
     }
 }
 
@@ -412,6 +464,7 @@ impl CookieJar {
                     secure,
                     http_only: false, // Netscape format doesn't track HttpOnly
                     creation_time: SystemTime::now(),
+                    same_site: super::SameSite::default(),
                 };
 
                 self.cookies.push(cookie);

@@ -50,15 +50,15 @@ impl FtpClient {
         let h4: u8 = parts[3].trim().parse().map_err(|_| {
             Aria2Error::FtpProtocol("PASV response: invalid IP byte h4".to_string())
         })?;
-        let p1: u16 = parts[4].trim().parse().map_err(|_| {
+        let p1: u8 = parts[4].trim().parse().map_err(|_| {
             Aria2Error::FtpProtocol("PASV response: invalid port byte p1".to_string())
         })?;
-        let p2: u16 = parts[5].trim().parse().map_err(|_| {
+        let p2: u8 = parts[5].trim().parse().map_err(|_| {
             Aria2Error::FtpProtocol("PASV response: invalid port byte p2".to_string())
         })?;
 
         let host = format!("{}.{}.{}.{}", h1, h2, h3, h4);
-        let port = p1 * 256 + p2;
+        let port = u16::from(p1) * 256 + u16::from(p2);
 
         Ok((host, port))
     }

@@ -212,6 +212,7 @@ impl BtDownloadCommand {
                 .unwrap_or_else(|| "none".to_string()),
             secure_falloc: options.secure_falloc,
             check_integrity: options.check_integrity,
+            hash_check_only: options.hash_check_only,
 
             // P1/P2 integration field defaults (all None, backward compatible)
             progress_manager: None,

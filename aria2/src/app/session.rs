@@ -6,7 +6,7 @@
 //! - Mapping session entries to download options
 
 use super::App;
-use aria2_core::request::request_group::DownloadOptions;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::session::active_session::ActiveSessionManager;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::path::PathBuf;
@@ -91,22 +91,25 @@ impl App {
             // Add group through RequestGroupMan
             {
                 let man = self.request_man.read().await;
-                match man.add_group(entry.uris.clone(), opts) {
-                    Ok(gid) => {
+                let gid = GroupId::new(entry.gid);
+                match man.add_group_with_gid(gid, entry.uris.clone(), opts) {
+                    Ok(()) => {
                         restored_count += 1;
                         info!("Successfully restored task #{}", gid.value());
 
                         // Store BT bitfield if present
-                        if entry.bitfield.is_some()
-                            && let Some(group_lock) = man.get_group(gid)
-                        {
+                        if let Some(group_lock) = man.get_group(gid) {
                             let group = group_lock.recover_mut();
-                            *group.bt_bitfield.recover_mut() = entry.bitfield.clone();
-                            debug!(
-                                "Set BT bitfield for GID={}, bits={}",
-                                gid.value(),
-                                entry.bitfield.as_ref().map(|b| b.len()).unwrap_or(0)
-                            );
+                            if entry.bitfield.is_some() {
+                                *group.bt_bitfield.recover_mut() = entry.bitfield.clone();
+                                debug!(
+                                    "Set BT bitfield for GID={}, bits={}",
+                                    gid.value(),
+                                    entry.bitfield.as_ref().map(|b| b.len()).unwrap_or(0)
+                                );
+                            }
+                            group.update_progress(entry.completed_length);
+                            group.set_total_length(entry.total_length);
                         }
                     }
                     Err(e) => {
@@ -282,6 +285,10 @@ impl App {
                 .get("bt-prioritize-piece")
                 .cloned()
                 .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_PRIORITY.to_string()),
+            bt_detach_seed_only: options
+                .get("bt-detach-seed-only")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             // uTP (UDP Transport Protocol - BEP 29)
             enable_utp: options
                 .get("enable-utp")
@@ -406,6 +413,7 @@ impl App {
                 .get("conditional-get")
                 .map(|v| v == "true")
                 .unwrap_or(false),
+            ..DownloadOptions::default()
         }
     }
 }

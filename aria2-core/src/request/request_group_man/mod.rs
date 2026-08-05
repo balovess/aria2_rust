@@ -129,6 +129,10 @@ impl RequestGroupMan {
                 gid.to_hex_string()
             )));
         }
+
+        // Keep automatically generated GIDs ahead of explicitly assigned ones.
+        self.next_gid
+            .fetch_max(gid.value().saturating_add(1), Ordering::SeqCst);
         let group = RequestGroup::new(gid, uris, options);
         self.reserved
             .push_back(Arc::new(std::sync::RwLock::new(group)));
@@ -176,7 +180,10 @@ impl RequestGroupMan {
         // C++ aria2 keeps an active group in requestGroups_ and only marks it
         // for halt; RequestGroupMan removes it after its last command exits.
         if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
-            group_lock.recover().request_halt(HaltReason::UserRequest);
+            let group = group_lock.recover();
+            group.request_halt(HaltReason::UserRequest);
+            group.remove_control_file();
+            let _ = group.process_remove_control_file();
             info!("Requested removal of active download task #{}", gid.value());
             return Ok(());
         }
@@ -200,6 +207,11 @@ impl RequestGroupMan {
             group_lock
                 .recover()
                 .request_force_halt(HaltReason::UserRequest);
+            if let Some(group) = self.active.get(&gid).map(|entry| entry.value().clone()) {
+                let group = group.recover();
+                group.remove_control_file();
+                let _ = group.process_remove_control_file();
+            }
             info!(
                 "Requested force removal of active download task #{}",
                 gid.value()
@@ -526,6 +538,16 @@ impl RequestGroupMan {
         self.stopped.remove_by_hex(hex)
     }
 
+    /// Purge all stopped results and return the number removed.
+    pub fn purge_stopped_results(&self) -> usize {
+        self.stopped.purge_all()
+    }
+
+    /// Number of stopped results currently retained.
+    pub fn stopped_results_len(&self) -> usize {
+        self.stopped.len()
+    }
+
     /// Prune excess stopped results, keeping at most `max` entries.
     /// Mirrors C++ `purgeDownloadResult()` triggered by a timer.
     /// Returns the number of pruned results.
@@ -593,6 +615,71 @@ mod tests {
         assert_eq!(man.count(), num_tasks);
     }
 
+    #[test]
+    fn test_add_group_with_gid_preserves_gid_and_advances_allocator() {
+        let man = RequestGroupMan::new();
+        let explicit_gid = GroupId::new(42);
+
+        man.add_group_with_gid(
+            explicit_gid,
+            vec!["http://example.com/file.bin".to_string()],
+            DownloadOptions::default(),
+        )
+        .unwrap();
+
+        assert!(man.find_group(explicit_gid).is_some());
+        let generated_gid = man
+            .add_group(
+                vec!["http://example.com/next.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        assert!(generated_gid.value() > explicit_gid.value());
+    }
+
+    #[test]
+    fn test_add_group_with_gid_accepts_zero_gid() {
+        let man = RequestGroupMan::new();
+        let zero_gid = GroupId::new(0);
+
+        man.add_group_with_gid(
+            zero_gid,
+            vec!["http://example.com/zero.bin".to_string()],
+            DownloadOptions::default(),
+        )
+        .unwrap();
+
+        assert!(man.find_group(zero_gid).is_some());
+        let generated_gid = man
+            .add_group(
+                vec!["http://example.com/next.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(generated_gid, GroupId::new(1));
+    }
+
+    #[test]
+    fn test_add_group_with_gid_rejects_duplicate_gid() {
+        let man = RequestGroupMan::new();
+        let gid = GroupId::new(42);
+        let options = DownloadOptions::default();
+        man.add_group_with_gid(
+            gid,
+            vec!["http://example.com/file.bin".to_string()],
+            options.clone(),
+        )
+        .unwrap();
+
+        let result = man.add_group_with_gid(
+            gid,
+            vec!["http://example.com/other.bin".to_string()],
+            options,
+        );
+        assert!(result.is_err());
+        assert_eq!(man.count(), 1);
+    }
+
     /// Test that groups go to reserved queue by default.
     #[test]
     fn test_add_group_goes_to_reserved() {
@@ -606,6 +693,24 @@ mod tests {
         assert_eq!(man.active.len(), 0, "No groups should be active yet");
         assert_eq!(man.reserved.len(), 1, "Group should be in reserved queue");
         assert_eq!(man.count(), 1);
+    }
+
+    #[test]
+    fn test_seed_only_groups_do_not_consume_active_limit() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["magnet:?xt=urn:btih:test".to_string()],
+                DownloadOptions {
+                    bt_detach_seed_only: true,
+                    ..DownloadOptions::default()
+                },
+            )
+            .unwrap();
+        man.fill_from_reserver();
+        let group = man.find_group(gid).unwrap();
+        group.recover().enable_seed_only();
+        assert_eq!(man.active_count(), 0);
     }
 
     /// Test max_concurrent default and setting.

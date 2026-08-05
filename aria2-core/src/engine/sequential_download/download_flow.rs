@@ -137,9 +137,11 @@ impl SequentialDownloader {
             if status.is_redirection() {
                 redirect_count += 1;
                 if redirect_count > MAX_REDIRECT_COUNT {
-                    return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                        format!("Too many redirects: count={}", redirect_count),
-                    )));
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::HttpTooManyRedirects {
+                            count: redirect_count,
+                        },
+                    ));
                 }
 
                 // Extract Location header
@@ -223,7 +225,10 @@ impl SequentialDownloader {
                 {
                     return auth_response;
                 }
-                // If try_auth_retry returned None, fall through to error handling
+                // If try_auth_retry returned None, fall through to error handling.
+                return Err(Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+                    message: format!("Authentication failed: HTTP {}", status_code),
+                }));
             }
 
             // --- 304 Not Modified handling (C++ HttpResponseCommand L180) ---
@@ -253,9 +258,11 @@ impl SequentialDownloader {
                         code: status_code,
                     }));
                 }
-                return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                    format!("HTTP error: {}", status),
-                )));
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::HttpProtocolError {
+                        message: format!("HTTP error: {}", status),
+                    },
+                ));
             }
 
             // Proceed with the response body download
@@ -380,6 +387,14 @@ impl SequentialDownloader {
             // `aria2.forceRemove` sets the RequestGroup status to `Removed`,
             // which `is_removed()` observes without blocking.
             if let Err(e) = self.check_cancelled() {
+                // Finalize before persisting progress so the control file never
+                // claims bytes that are still only buffered in the writer.
+                if let Err(finalize_err) = writer.finalize().await {
+                    tracing::warn!(
+                        "Sequential: finalize on cancellation failed: {}",
+                        finalize_err
+                    );
+                }
                 // ADR-0001: Save control file before exiting on pause/remove.
                 if let Some(ref mut cf) = ctrl_file {
                     cf.update_completed_length(completed_bytes);
@@ -429,7 +444,9 @@ impl SequentialDownloader {
             }
         }
 
-        writer.finalize().await.ok();
+        writer.finalize().await.map_err(|error| {
+            Aria2Error::FileIo(format!("Failed to finalize downloaded file: {error}"))
+        })?;
 
         let final_speed = {
             let g = self.group.recover();

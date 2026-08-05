@@ -18,7 +18,7 @@ use tokio::time::timeout;
 use url::Url;
 
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::http::cookie_storage::{CookieJar, JarCookie};
+use crate::http::cookie_storage::{CookieJar, CookieStorage};
 
 use super::active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
 use super::types::{HttpConfig, HttpResponse};
@@ -44,7 +44,9 @@ pub struct HttpConnectionManager {
     id_counter: AtomicU64,
     /// Maximum redirect hops
     max_redirects: u32,
-    /// Optional cookie jar for automatic cookie management
+    /// Shared canonical cookie storage used by production download paths.
+    cookie_storage: Option<std::sync::Arc<CookieStorage>>,
+    /// Legacy URL/API adapter retained for compatibility.
     cookie_jar: Option<CookieJar>,
 }
 
@@ -58,6 +60,7 @@ impl HttpConnectionManager {
             active_count: 0,
             id_counter: AtomicU64::new(1),
             max_redirects: crate::constants::HTTP_DEFAULT_MAX_REDIRECTS as u32,
+            cookie_storage: None,
             cookie_jar: None,
         }
     }
@@ -419,6 +422,18 @@ impl HttpConnectionManager {
 
     // ==================== Cookie Jar Integration ====================
 
+    /// Set the canonical shared cookie storage for automatic HTTP handling.
+    pub fn set_cookie_storage(&mut self, storage: Option<std::sync::Arc<CookieStorage>>) {
+        self.cookie_storage = storage;
+    }
+
+    /// Construct a manager already bound to the process-wide cookie storage.
+    pub fn with_shared_cookie_storage(config: &HttpConfig) -> Self {
+        let mut manager = Self::new(config);
+        manager.set_cookie_storage(Some(CookieStorage::shared()));
+        manager
+    }
+
     /// Set the cookie jar for automatic cookie management.
     pub fn set_cookie_jar(&mut self, jar: Option<CookieJar>) {
         self.cookie_jar = jar;
@@ -436,8 +451,15 @@ impl HttpConnectionManager {
 
     /// Attach matching cookies from the jar to an HTTP request.
     pub fn attach_cookies_to_request(&self, url: &Url) -> Option<String> {
-        let jar = self.cookie_jar.as_ref()?;
         let is_https = url.scheme() == "https";
+        if let Some(storage) = &self.cookie_storage {
+            let header =
+                storage.to_header_string(url.host_str().unwrap_or_default(), url.path(), is_https);
+            if !header.is_empty() {
+                return Some(header);
+            }
+        }
+        let jar = self.cookie_jar.as_ref()?;
         jar.cookie_header_for_url(url.as_str(), is_https)
     }
 
@@ -447,14 +469,28 @@ impl HttpConnectionManager {
         response_headers: &[(String, String)],
         _request_url: &Url,
     ) -> usize {
+        let mut stored = 0;
+        if let Some(storage) = &self.cookie_storage {
+            for (name, value) in response_headers {
+                if name.eq_ignore_ascii_case("set-cookie")
+                    && storage.parse_and_store(
+                        value,
+                        _request_url.host_str().unwrap_or_default(),
+                        _request_url.path(),
+                    )
+                {
+                    stored += 1;
+                }
+            }
+            return stored;
+        }
         let jar = match &mut self.cookie_jar {
             Some(j) => j,
             None => return 0,
         };
-        let mut stored = 0;
         for (name, value) in response_headers {
             if name.eq_ignore_ascii_case("set-cookie")
-                && let Some(cookie) = JarCookie::parse_set_cookie(value)
+                && let Some(cookie) = crate::http::cookie::JarCookie::parse_set_cookie(value)
             {
                 jar.store(cookie);
                 stored += 1;
@@ -684,6 +720,7 @@ impl std::fmt::Debug for HttpConnectionManager {
             .field("max_idle_per_host", &self.config.max_idle_per_host)
             .field("active_count", &self.active_count)
             .field("pool_size", &self.pool.len())
+            .field("cookie_storage_set", &self.cookie_storage.is_some())
             .field("cookie_jar_set", &self.cookie_jar.is_some())
             .finish()
     }

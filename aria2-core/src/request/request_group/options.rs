@@ -120,6 +120,7 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
+    "bt-detach-seed-only",
     "bt-remove-unselected-file",   // also in RUNTIME_CHANGEABLE_OPTIONS
     "bt-request-peer-speed-limit", // also in RUNTIME_CHANGEABLE_OPTIONS
     "bt-require-crypto",
@@ -195,6 +196,8 @@ pub struct DownloadOptions {
     /// before downloading (C++ `--check-integrity`). Only meaningful when
     /// piece hashes are available (BitTorrent / Metalink). Defaults to `false`.
     pub check_integrity: bool,
+    /// Only validate existing piece hashes; never allocate or download.
+    pub hash_check_only: bool,
     /// Seeding time in seconds. C++ aria2 stores this as a float (minutes x 60).
     pub seed_time: Option<f64>,
     /// Seeding ratio threshold. Default: 1.0 (matches C++ PREF_SEED_RATIO default).
@@ -244,6 +247,8 @@ pub struct DownloadOptions {
     /// Piece selection priority: "rarest" (default), "head" (sequential from start),
     /// "tail" (sequential from end).
     pub bt_prioritize_piece: String,
+    /// Detach completed BitTorrent seeders from the active-download budget.
+    pub bt_detach_seed_only: bool,
 
     // ------------------------------------------------------------------
     // uTP (UDP Transport Protocol - BEP 29)
@@ -444,6 +449,7 @@ impl Default for DownloadOptions {
             mmap_threshold: None,
             secure_falloc: false,
             check_integrity: false,
+            hash_check_only: false,
             seed_time: None,
             seed_ratio: Some(1.0),
             checksum: None,
@@ -470,6 +476,7 @@ impl Default for DownloadOptions {
             bt_optimistic_unchoke_interval: None,
             bt_snubbed_timeout: None,
             bt_prioritize_piece: String::new(),
+            bt_detach_seed_only: false,
             enable_utp: false,
             utp_listen_port: None,
             header: Vec::new(),

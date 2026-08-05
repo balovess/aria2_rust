@@ -50,6 +50,16 @@ pub struct SftpDownloadCommand {
 }
 
 impl SftpDownloadCommand {
+    pub(super) fn validate_resume_offset(existing_length: u64, total_length: u64) -> Result<u64> {
+        if existing_length > total_length {
+            return Err(Aria2Error::FileIo(format!(
+                "Local SFTP output is longer than the remote file: {} > {}",
+                existing_length, total_length
+            )));
+        }
+        Ok(existing_length)
+    }
+
     /// Create a new SFTP download command.
     ///
     /// # Arguments

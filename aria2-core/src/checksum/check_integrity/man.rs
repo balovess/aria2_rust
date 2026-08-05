@@ -67,6 +67,13 @@ fn cancelled_error() -> Aria2Error {
 /// a time and reports progress / completion / outcome. The worker drives it.
 /// `Send + Sync` so tasks can live in the process-wide shared manager and be
 /// driven across tokio worker threads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrityOutcome {
+    pub verified: bool,
+    pub failed_piece_indices: Vec<usize>,
+    pub verified_piece_indices: Vec<usize>,
+}
+
 #[async_trait]
 pub trait CheckIntegrityTask: Send + Sync {
     /// Total byte length of the data being validated.
@@ -80,6 +87,16 @@ pub trait CheckIntegrityTask: Send + Sync {
     /// Whether every validated chunk matched its expected digest.
     /// Only meaningful once `is_finished()` is true.
     fn passed(&self) -> bool;
+    /// Piece indexes that failed validation. Empty for validators that do not
+    /// expose piece-level outcomes.
+    fn failed_piece_indices(&self) -> Vec<usize> {
+        Vec::new()
+    }
+    /// Piece indexes that passed validation. Empty for validators that do not
+    /// expose piece-level outcomes.
+    fn verified_piece_indices(&self) -> Vec<usize> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +119,8 @@ pub struct FileChunkValidator {
     current_piece: usize,
     finished: bool,
     passed: bool,
+    failed_indices: Vec<usize>,
+    verified_indices: Vec<usize>,
 }
 
 impl FileChunkValidator {
@@ -135,6 +154,8 @@ impl FileChunkValidator {
             finished,
             // `passed` starts true and flips only on a mismatch.
             passed: true,
+            failed_indices: Vec::new(),
+            verified_indices: Vec::new(),
         })
     }
 
@@ -204,6 +225,9 @@ impl CheckIntegrityTask for FileChunkValidator {
                 "Integrity check mismatch on piece"
             );
             self.passed = false;
+            self.failed_indices.push(self.current_piece);
+        } else {
+            self.verified_indices.push(self.current_piece);
         }
 
         self.current_piece += 1;
@@ -215,6 +239,130 @@ impl CheckIntegrityTask for FileChunkValidator {
 
     fn passed(&self) -> bool {
         self.passed && self.finished
+    }
+}
+
+/// Validates the logical byte stream of a multi-file torrent.
+///
+/// Files are presented in torrent order and are treated as one contiguous
+/// stream, so a piece may be hashed from more than one physical file.
+pub struct MultiFileChunkValidator {
+    files: Vec<(PathBuf, u64)>,
+    piece_length: u64,
+    total_length: u64,
+    expected: Vec<Vec<u8>>,
+    algo: HashType,
+    current_piece: usize,
+    finished: bool,
+    passed: bool,
+    failed_indices: Vec<usize>,
+    verified_indices: Vec<usize>,
+}
+
+impl MultiFileChunkValidator {
+    pub fn new(
+        files: Vec<(PathBuf, u64)>,
+        piece_length: u64,
+        total_length: u64,
+        expected_hex: Vec<String>,
+        algo: HashType,
+    ) -> Result<Self> {
+        let expected = expected_hex
+            .iter()
+            .map(|h| hex::decode(h).map_err(|e| Aria2Error::Io(format!("bad digest hex: {e}"))))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            files,
+            piece_length: piece_length.max(1),
+            total_length,
+            finished: expected.is_empty(),
+            expected,
+            algo,
+            current_piece: 0,
+            passed: true,
+            failed_indices: Vec::new(),
+            verified_indices: Vec::new(),
+        })
+    }
+
+    async fn read_piece(&self, offset: u64, length: usize) -> Result<Vec<u8>> {
+        let piece_end = offset + length as u64;
+        let mut logical_start = 0u64;
+        let mut output = Vec::with_capacity(length);
+        for (path, file_length) in &self.files {
+            let file_start = logical_start;
+            let file_end = file_start + *file_length;
+            logical_start = file_end;
+            if file_end <= offset || file_start >= piece_end || *file_length == 0 {
+                continue;
+            }
+            let read_start = offset.max(file_start);
+            let read_end = piece_end.min(file_end);
+            let mut file = tokio::fs::File::open(path)
+                .await
+                .map_err(|e| Aria2Error::Io(format!("open {}: {}", path.display(), e)))?;
+            file.seek(std::io::SeekFrom::Start(read_start - file_start))
+                .await
+                .map_err(|e| Aria2Error::Io(format!("seek {}: {}", path.display(), e)))?;
+            let count = (read_end - read_start) as usize;
+            let mut buf = vec![0u8; count];
+            file.read_exact(&mut buf)
+                .await
+                .map_err(|e| Aria2Error::Io(format!("read {}: {}", path.display(), e)))?;
+            output.extend_from_slice(&buf);
+        }
+        if output.len() != length {
+            return Err(Aria2Error::Io(format!(
+                "multi-file data short read: expected {}, got {}",
+                length,
+                output.len()
+            )));
+        }
+        Ok(output)
+    }
+}
+
+#[async_trait]
+impl CheckIntegrityTask for MultiFileChunkValidator {
+    fn total_length(&self) -> u64 {
+        self.total_length
+    }
+    fn current_length(&self) -> u64 {
+        (self.current_piece as u64 * self.piece_length).min(self.total_length)
+    }
+    fn is_finished(&self) -> bool {
+        self.finished
+    }
+    async fn validate_chunk(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let offset = self.current_piece as u64 * self.piece_length;
+        let length = (self.total_length - offset).min(self.piece_length) as usize;
+        let data = self.read_piece(offset, length).await?;
+        let mut digest = MessageDigest::new(self.algo);
+        digest.update(&data);
+        let actual = digest.finalize();
+        if self.expected.get(self.current_piece) != Some(&actual) {
+            self.passed = false;
+            self.failed_indices.push(self.current_piece);
+        } else {
+            self.verified_indices.push(self.current_piece);
+        }
+        self.current_piece += 1;
+        self.finished = self.current_piece >= self.expected.len();
+        Ok(())
+    }
+    fn passed(&self) -> bool {
+        self.passed && self.finished
+    }
+
+    fn failed_piece_indices(&self) -> Vec<usize> {
+        self.failed_indices.clone()
+    }
+
+    fn verified_piece_indices(&self) -> Vec<usize> {
+        self.verified_indices.clone()
     }
 }
 
@@ -244,7 +392,7 @@ pub struct CheckIntegrityEntry {
     progress: Arc<std::sync::atomic::AtomicU64>,
     /// Completion notification: `Ok(true)` verified, `Ok(false)` mismatch,
     /// `Err` I/O failure or cancellation.
-    done_tx: Option<oneshot::Sender<Result<bool>>>,
+    done_tx: Option<oneshot::Sender<Result<IntegrityOutcome>>>,
 }
 
 impl CheckIntegrityEntry {
@@ -405,8 +553,8 @@ pub fn shared_with_concurrency(max: usize) -> SharedCheckIntegrityMan {
     man
 }
 
-/// Background worker: consume the queue, drive validation chunk-by-chunk,
-/// notify the waiter.
+/// Background worker: pick queued entries, drive validation chunk-by-chunk,
+/// then notify the waiter with the validation outcome.
 async fn worker_loop(man: SharedCheckIntegrityMan) {
     debug!("Check integrity worker started");
     loop {
@@ -433,7 +581,7 @@ async fn worker_loop(man: SharedCheckIntegrityMan) {
 }
 
 /// Drive one entry to completion.
-async fn run_validation(entry: &mut CheckIntegrityEntry) -> Result<bool> {
+async fn run_validation(entry: &mut CheckIntegrityEntry) -> Result<IntegrityOutcome> {
     let started = Instant::now();
     let gid = entry.gid;
 
@@ -441,7 +589,7 @@ async fn run_validation(entry: &mut CheckIntegrityEntry) -> Result<bool> {
         return Err(cancelled_error());
     }
 
-    let result: Result<bool> = async {
+    let result: Result<IntegrityOutcome> = async {
         while !entry.task.is_finished() {
             if entry.is_cancelled() {
                 return Err(cancelled_error());
@@ -454,17 +602,21 @@ async fn run_validation(entry: &mut CheckIntegrityEntry) -> Result<bool> {
             // Cooperative scheduling: never hog a worker thread on big files.
             tokio::task::yield_now().await;
         }
-        Ok(entry.task.passed())
+        Ok(IntegrityOutcome {
+            verified: entry.task.passed(),
+            failed_piece_indices: entry.task.failed_piece_indices(),
+            verified_piece_indices: entry.task.verified_piece_indices(),
+        })
     }
     .await;
 
     match &result {
-        Ok(true) => info!(
+        Ok(outcome) if outcome.verified => info!(
             gid,
             elapsed_secs = started.elapsed().as_secs_f64(),
             "Integrity check passed"
         ),
-        Ok(false) => warn!(
+        Ok(_) => warn!(
             gid,
             elapsed_secs = started.elapsed().as_secs_f64(),
             "Integrity check failed (piece mismatch)"
@@ -482,6 +634,25 @@ async fn run_validation(entry: &mut CheckIntegrityEntry) -> Result<bool> {
 ///
 /// Returns `Ok(true)` when the data verified, `Ok(false)` when a piece
 /// mismatched, and `Err` on I/O failure or cancellation.
+/// Queue an integrity check and wait for its detailed validation outcome.
+pub async fn enqueue_with_outcome(
+    man: &SharedCheckIntegrityMan,
+    gid: u64,
+    task: Box<dyn CheckIntegrityTask>,
+) -> Result<IntegrityOutcome> {
+    let (tx, rx) = oneshot::channel();
+    let entry = CheckIntegrityEntry {
+        gid,
+        task,
+        created_at: Instant::now(),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        done_tx: Some(tx),
+    };
+    man.write().await.push_entry(entry);
+    rx.await.map_err(|_| cancelled_error())?
+}
+
 pub async fn enqueue(
     man: &SharedCheckIntegrityMan,
     gid: u64,
@@ -497,13 +668,91 @@ pub async fn enqueue(
         done_tx: Some(tx),
     };
     man.write().await.push_entry(entry);
-    rx.await.map_err(|_| cancelled_error())?
+    let outcome = rx.await.map_err(|_| cancelled_error())??;
+    Ok(outcome.verified)
 }
 
 /// Build a [`FileChunkValidator`] task for a single file.
 ///
 /// Returns `None` when there is nothing to validate (no expected digests, a
 /// zero-length file, or the file does not exist yet).
+pub fn multi_file_task(
+    files: Vec<(PathBuf, u64)>,
+    piece_length: u64,
+    total_length: u64,
+    expected_hex: Vec<String>,
+    algo: HashType,
+) -> Result<Option<Box<dyn CheckIntegrityTask>>> {
+    if expected_hex.is_empty() || total_length == 0 || files.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(MultiFileChunkValidator::new(
+        files,
+        piece_length,
+        total_length,
+        expected_hex,
+        algo,
+    )?)))
+}
+
+/// Truncate an output file when it contains bytes beyond the declared length.
+pub async fn cut_trailing_garbage(path: &Path, expected_length: u64) -> Result<()> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Aria2Error::FileIo(format!("{}: {error}", path.display()))),
+    };
+    if metadata.len() > expected_length {
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .await
+            .map_err(|error| Aria2Error::FileOpen(format!("{}: {error}", path.display())))?;
+        file.set_len(expected_length)
+            .await
+            .map_err(|error| Aria2Error::FileIo(format!("{}: {error}", path.display())))?;
+    }
+    Ok(())
+}
+
+/// Truncate each physical file in a logical multi-file stream to its declared length.
+pub async fn cut_multi_file_trailing_garbage(files: &[(PathBuf, u64)]) -> Result<()> {
+    for (path, expected_length) in files {
+        cut_trailing_garbage(path, *expected_length).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod trailing_garbage_tests {
+    use super::{cut_multi_file_trailing_garbage, cut_trailing_garbage};
+
+    #[tokio::test]
+    async fn truncates_single_file_only_when_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("single.bin");
+        tokio::fs::write(&path, vec![0u8; 12]).await.unwrap();
+        cut_trailing_garbage(&path, 8).await.unwrap();
+        assert_eq!(tokio::fs::metadata(&path).await.unwrap().len(), 8);
+        cut_trailing_garbage(&path, 8).await.unwrap();
+        assert_eq!(tokio::fs::metadata(&path).await.unwrap().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn truncates_each_multi_file_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.bin");
+        let second = dir.path().join("second.bin");
+        tokio::fs::write(&first, vec![0u8; 13]).await.unwrap();
+        tokio::fs::write(&second, vec![0u8; 7]).await.unwrap();
+        cut_multi_file_trailing_garbage(&[(first.clone(), 5), (second.clone(), 3)])
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::metadata(first).await.unwrap().len(), 5);
+        assert_eq!(tokio::fs::metadata(second).await.unwrap().len(), 3);
+    }
+}
+
 pub fn file_task(
     path: &Path,
     piece_length: u64,
@@ -545,6 +794,57 @@ mod tests {
         let mut h = sha1::Sha1::new();
         h.update(data);
         format!("{:x}", h.finalize())
+    }
+
+    #[tokio::test]
+    async fn test_multi_file_task_piece_crosses_file_boundary() {
+        let dir = test_dir("multi_cross");
+        let first = dir.join("first");
+        let second = dir.join("second");
+        tokio::fs::write(&first, b"abcd").await.unwrap();
+        tokio::fs::write(&second, b"efghij").await.unwrap();
+        let expected = vec![sha1_hex(b"abcdef"), sha1_hex(b"ghij")];
+        let task = multi_file_task(
+            vec![(first, 4), (second, 6)],
+            6,
+            10,
+            expected,
+            HashType::Sha1,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            enqueue(&shared_with_concurrency(1), 90, task)
+                .await
+                .unwrap()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_multi_file_task_detects_late_file_corruption() {
+        let dir = test_dir("multi_bad");
+        let first = dir.join("first");
+        let second = dir.join("second");
+        tokio::fs::write(&first, b"abcd").await.unwrap();
+        tokio::fs::write(&second, b"efghij").await.unwrap();
+        let expected = vec![sha1_hex(b"abcdef"), sha1_hex(b"ghij")];
+        tokio::fs::write(&second, b"efgXij").await.unwrap();
+        let task = multi_file_task(
+            vec![(first, 4), (second, 6)],
+            6,
+            10,
+            expected,
+            HashType::Sha1,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !enqueue(&shared_with_concurrency(1), 91, task)
+                .await
+                .unwrap()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

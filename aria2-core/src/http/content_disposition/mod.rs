@@ -22,14 +22,9 @@
 //! following are **rejected outright** — the whole header fails and
 //! [`ContentDispositionResult::disposition_type`] comes back empty:
 //!
-//! - An empty parameter in the *middle* of the header:
-//!   `attachment; ;filename=foo` — the `BeforeParmName` state rejects a
-//!   non-token byte such as `;`. A *trailing* `;`
-//!   (`attachment; filename=foo.html ;`) is, however, **accepted**: RFC 6266
-//!   grammar is `*( ";" disposition-parm )`, so zero or more trailing empty
-//!   parameters are permitted. (Upstream C++ aria2 rejects a trailing `;` —
-//!   GitHub issue #1118 — which breaks S3 / CloudFront / nginx downloads;
-//!   aria2_rust deliberately diverges.)
+//! - An empty parameter, including a trailing `;`, is rejected. The C++
+//!   terminal-state behavior is preserved: `attachment; ;filename=foo` and
+//!   `attachment; filename=foo.html;` both fail parsing.
 //! - An empty unquoted value: `attachment; filename=` and
 //!   `attachment; filename=;` — a token may not be empty. An *empty quoted*
 //!   value (`filename=""`) is legal and simply yields no filename, as is an

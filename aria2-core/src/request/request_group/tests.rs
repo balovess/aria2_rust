@@ -11,6 +11,29 @@ use super::options::DownloadOptions;
 use crate::download::DownloadContext;
 
 #[test]
+fn test_followed_by_gids_are_idempotent() {
+    let group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file.zip".to_string()],
+        DownloadOptions::default(),
+    );
+    let child = GroupId::new(2);
+    group.add_followed_by_gid(child);
+    group.add_followed_by_gid(child);
+    assert_eq!(group.followed_by_gids(), vec![child]);
+}
+
+#[test]
+fn test_child_relationship_fields_are_preserved() {
+    let group = RequestGroup::new(GroupId::new(2), Vec::new(), DownloadOptions::default());
+    let parent = GroupId::new(1);
+    group.set_following_gid(parent);
+    group.set_belongs_to_gid(parent);
+    assert_eq!(group.following_gid(), Some(parent));
+    assert_eq!(group.belongs_to_gid(), Some(parent));
+}
+
+#[test]
 fn test_request_group_progress_fields_default() {
     // New RequestGroup should have all zeros/None defaults for progress fields
     let group = RequestGroup::new(
@@ -82,6 +105,18 @@ fn test_set_get_completed_length() {
     // Test zero
     group.set_completed_length(0);
     assert_eq!(group.get_completed_length(), 0, "Should handle 0");
+}
+
+#[test]
+fn test_validate_total_length() {
+    let group = RequestGroup::new(
+        GroupId(1),
+        vec!["ftp://example/file".into()],
+        DownloadOptions::default(),
+    );
+    assert!(group.validate_total_length(0, 1024).is_ok());
+    assert!(group.validate_total_length(1024, 1024).is_ok());
+    assert!(group.validate_total_length(1024, 2048).is_err());
 }
 
 #[test]

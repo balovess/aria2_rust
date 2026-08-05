@@ -147,15 +147,15 @@ impl super::RequestGroupMan {
         promoted
     }
 
-    /// Current number of active groups (status == Active).
-    /// This counts groups in the active DashMap that have `Active` status,
-    /// excluding seed-only groups when `detach_share_only` is set (TODO).
+    /// Current number of active groups that consume the concurrency budget.
+    /// Seed-only BitTorrent groups remain in the active map for seeding but are
+    /// excluded, matching C++ `isSeedOnlyEnabled()` handling.
     pub fn active_count(&self) -> usize {
         self.active
             .iter()
             .filter(|entry| {
                 let g = entry.recover();
-                matches!(g.status(), DownloadStatus::Active)
+                matches!(g.status(), DownloadStatus::Active) && !g.is_seed_only()
             })
             .count()
     }
@@ -201,7 +201,7 @@ impl super::RequestGroupMan {
             let mut g = entry.recover_mut();
             // Skip groups that are already seeding, halted, or paused
             // (mirrors C++ `isSeedOnlyEnabled() || isHaltRequested() || isPauseRequested()`)
-            if !matches!(g.status(), DownloadStatus::Active) {
+            if !matches!(g.status(), DownloadStatus::Active) || g.is_seed_only() {
                 continue;
             }
             // In C++, the group gets: haltRequested + pauseRequested + restartRequested

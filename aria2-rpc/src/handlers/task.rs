@@ -1027,6 +1027,9 @@ impl RpcEngine {
                 let g = group_lock.recover();
                 return Some(Self::build_status_from_group(&g, gid));
             }
+            if let Some(result) = man.find_stopped_result(gid) {
+                return Some(Self::build_status_from_result(&result));
+            }
         }
         // Fallback to tasks map (placeholder, for tests/no-engine mode)
         {
@@ -1118,6 +1121,7 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         mmap_threshold: get_u64("mmap-threshold"),
         secure_falloc: get_bool("secure-falloc"),
         check_integrity: get_bool("check-integrity"),
+        hash_check_only: get_bool("hash-check-only"),
         // Checksum
         checksum,
         // Cookies
@@ -1163,6 +1167,7 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         bt_optimistic_unchoke_interval: get_u64("bt-optimistic-unchoke-interval"),
         bt_snubbed_timeout: get_u64("bt-snubbed-timeout"),
         bt_prioritize_piece: get_str("bt-prioritize-piece").unwrap_or_default(),
+        bt_detach_seed_only: get_bool("bt-detach-seed-only"),
         enable_utp: get_bool("enable-utp"),
         utp_listen_port: get_u16("utp-listen-port"),
         // Retry

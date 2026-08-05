@@ -198,10 +198,54 @@ impl FtpDownloadCommand {
         // Step 4: Probe file size
         let file_size = ctrl.get_file_size(&self.remote_path).await?;
 
-        // Update total length in request group
-        {
-            let g = self.group.recover();
-            g.set_total_length(file_size.unwrap_or(0));
+        // Reconcile the local file with SIZE before allocation/REST/RETR.
+        // This mirrors FtpNegotiationCommand::onFileSizeDetermined(): a
+        // complete local file is terminal, while an oversized file must not
+        // be used as a resume prefix.
+        let local_size = std::fs::metadata(&self.output_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if let Some(actual_size) = file_size {
+            {
+                let g = self.group.recover();
+                g.validate_total_length(g.total_length(), actual_size)
+                    .map_err(FtpAttemptError::from)?;
+                g.set_total_length(actual_size);
+            }
+
+            if local_size == actual_size {
+                self.resume_offset = actual_size;
+                self.completed_bytes = actual_size;
+                {
+                    let g = self.group.recover();
+                    g.update_progress(actual_size);
+                }
+                self.group.recover_mut().complete()?;
+                info!(
+                    path = %self.output_path.display(),
+                    size = actual_size,
+                    "FTP target already matches remote SIZE"
+                );
+                ctrl.quit().await.ok();
+                return Ok(());
+            }
+
+            if local_size > actual_size {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.output_path)
+                    .and_then(|file| file.set_len(0))
+                    .map_err(|error| {
+                        FtpAttemptError::from(Aria2Error::FileIo(format!(
+                            "truncate oversized FTP target {}: {}",
+                            self.output_path.display(),
+                            error
+                        )))
+                    })?;
+                self.resume_offset = 0;
+            } else {
+                self.resume_offset = local_size;
+            }
         }
 
         // Step 5: Allocate the destination before RETR, matching the C++
@@ -237,7 +281,20 @@ impl FtpDownloadCommand {
             0
         };
         if !resume_accepted {
+            // REST rejection means RETR will send the complete object. Make
+            // the restart explicit so stale bytes cannot survive past EOF.
             self.resume_offset = 0;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.output_path)
+                .and_then(|file| file.set_len(0))
+                .map_err(|error| {
+                    FtpAttemptError::from(Aria2Error::FileIo(format!(
+                        "truncate FTP target after REST rejection {}: {}",
+                        self.output_path.display(),
+                        error
+                    )))
+                })?;
         }
 
         // Step 7: Negotiate the data connection mode before RETR.
@@ -356,7 +413,13 @@ impl FtpDownloadCommand {
             );
         }
 
-        // Step 10: Data receive loop with progress tracking
+        // Step 10: Data receive loop with progress tracking. Existing bytes
+        // are part of the logical completed length when resuming.
+        self.completed_bytes = write_offset;
+        {
+            let g = self.group.recover();
+            g.update_progress(write_offset);
+        }
         let mut buffer = vec![0u8; constants::FTP_BUFFER_SIZE];
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();

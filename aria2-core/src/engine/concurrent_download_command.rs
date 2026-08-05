@@ -200,6 +200,9 @@ impl Command for ConcurrentDownloadCommand {
 
         let num_pieces = manager.num_segments().max(1);
         let ctrl_path = control_file::ControlFile::control_path_for(&self.output_path);
+        self.group
+            .recover()
+            .set_control_file_path(ctrl_path.clone());
         let mut ctrl_file =
             control_file::ControlFile::open_or_create(&ctrl_path, total_len, num_pieces).await?;
         ctrl_file.save().await.ok();
