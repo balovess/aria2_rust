@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 
 use super::super::net_stat::NetStat;
 use super::super::types::{ContextAttributeType, Signature};
@@ -69,7 +70,7 @@ pub struct DownloadContext {
     pub(super) piece_length: u32,
 
     // -- Whether the whole-file checksum has already been verified --
-    pub(super) checksum_verified: bool,
+    pub(super) checksum_verified: AtomicBool,
 
     // -- Whether total length is known --
     pub(super) knows_total_length: bool,
@@ -92,7 +93,12 @@ impl std::fmt::Debug for DownloadContext {
             .field("piece_hash_type", &self.piece_hash_type)
             .field("base_path", &self.base_path)
             .field("piece_length", &self.piece_length)
-            .field("checksum_verified", &self.checksum_verified)
+            .field(
+                "checksum_verified",
+                &self
+                    .checksum_verified
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
             .field("knows_total_length", &self.knows_total_length)
             .field("accept_metalink", &self.accept_metalink)
             .field("info_hash", &self.info_hash)
@@ -129,7 +135,7 @@ impl DownloadContext {
             hash_type: String::new(),
             base_path: String::new(),
             piece_length: 0,
-            checksum_verified: false,
+            checksum_verified: AtomicBool::new(false),
             knows_total_length: true,
             accept_metalink: true,
             info_hash: String::new(),
@@ -162,7 +168,7 @@ impl DownloadContext {
             digest: String::new(),
             hash_type: String::new(),
             base_path: String::new(),
-            checksum_verified: false,
+            checksum_verified: AtomicBool::new(false),
             knows_total_length: true,
             accept_metalink: true,
             info_hash: String::new(),

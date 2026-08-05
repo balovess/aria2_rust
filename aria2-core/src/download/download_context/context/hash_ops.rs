@@ -109,7 +109,9 @@ impl DownloadContext {
         self.piece_hash_type.is_empty()
             && !self.digest.is_empty()
             && !self.hash_type.is_empty()
-            && !self.checksum_verified
+            && !self
+                .checksum_verified
+                .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether a whole-file checksum is available (digest + hash_type present).
@@ -135,12 +137,16 @@ impl DownloadContext {
     /// a whole-file hash is available and NOT verified, regardless of whether
     /// piece hash verification is also available.
     pub fn is_checksum_verification_pending(&self) -> bool {
-        self.is_checksum_verification_available() && !self.checksum_verified
+        self.is_checksum_verification_available()
+            && !self
+                .checksum_verified
+                .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Set whether the checksum has been verified.
-    pub fn set_checksum_verified(&mut self, verified: bool) {
-        self.checksum_verified = verified;
+    pub fn set_checksum_verified(&self, verified: bool) {
+        self.checksum_verified
+            .store(verified, std::sync::atomic::Ordering::Release);
         debug!(verified, "Checksum verified flag updated");
     }
 }

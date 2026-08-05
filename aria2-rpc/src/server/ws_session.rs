@@ -74,8 +74,16 @@ pub async fn handle_ws_socket(
                         // Process incoming text as a JSON-RPC request
                         process_ws_jsonrpc(&mut socket, &engine, &text).await;
                     }
-                    Some(Ok(axum::extract::ws::Message::Close(_))) | None => {
-                        break; // Client disconnected
+                    Some(Ok(axum::extract::ws::Message::Close(frame))) => {
+                        tracing::debug!(?frame, "WebSocket close frame received");
+                        let _ = socket
+                            .send(axum::extract::ws::Message::Close(frame))
+                            .await;
+                        break;
+                    }
+                    None => {
+                        tracing::debug!("WebSocket stream ended without a close frame");
+                        break;
                     }
                     Some(Ok(axum::extract::ws::Message::Ping(data))) => {
                         // Respond to ping with pong

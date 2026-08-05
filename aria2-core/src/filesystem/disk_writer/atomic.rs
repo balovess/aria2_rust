@@ -1,19 +1,19 @@
-﻿//! Atomic (non-buffered) disk writers.
+//! Atomic (non-buffered) disk writers.
 //!
 //! - [`DefaultDiskWriter`] - direct file writer (sequential writes to a file on disk)
 //! - [`ByteArrayDiskWriter`] - in-memory byte buffer writer (no I/O)
 
+use super::DiskWriter;
 use crate::error::Result;
 use async_trait::async_trait;
 use std::path::Path;
-
-use super::DiskWriter;
 
 // -- DefaultDiskWriter -------------------------------------------------------
 
 pub struct DefaultDiskWriter {
     path: std::path::PathBuf,
     file: Option<tokio::fs::File>,
+    write_offset: Option<u64>,
 }
 
 impl DefaultDiskWriter {
@@ -21,28 +21,52 @@ impl DefaultDiskWriter {
         DefaultDiskWriter {
             path: path.to_path_buf(),
             file: None,
+            write_offset: None,
         }
     }
 
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+
+    pub fn new_with_offset(path: &Path, offset: u64) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            file: None,
+            write_offset: Some(offset),
+        }
+    }
 }
 
 #[async_trait]
 impl DiskWriter for DefaultDiskWriter {
     async fn write(&mut self, data: &[u8]) -> Result<()> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
         if self.file.is_none() {
-            let f = tokio::fs::File::create(&self.path)
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            self.file = Some(f);
+            let file = if self.write_offset.is_some() {
+                tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(&self.path)
+                    .await
+            } else {
+                tokio::fs::File::create(&self.path).await
+            };
+            self.file = Some(file.map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?);
         }
         if let Some(ref mut file) = self.file {
-            use tokio::io::AsyncWriteExt;
+            if let Some(offset) = self.write_offset {
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .await
+                    .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            }
             file.write_all(data)
                 .await
                 .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            if let Some(offset) = &mut self.write_offset {
+                *offset = offset.saturating_add(data.len() as u64);
+            }
         }
         Ok(())
     }

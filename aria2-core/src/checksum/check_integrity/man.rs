@@ -227,6 +227,7 @@ impl CheckIntegrityTask for FileChunkValidator {
 struct PickedMeta {
     total_length: u64,
     cancelled: Arc<AtomicBool>,
+    progress: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A single integrity-check request in the queue.
@@ -239,6 +240,8 @@ pub struct CheckIntegrityEntry {
     pub created_at: Instant,
     /// Set when cancelled (engine halt); checked between chunks.
     cancelled: Arc<AtomicBool>,
+    /// Progress shared with the dispatcher while validation runs.
+    progress: Arc<std::sync::atomic::AtomicU64>,
     /// Completion notification: `Ok(true)` verified, `Ok(false)` mismatch,
     /// `Err` I/O failure or cancellation.
     done_tx: Option<oneshot::Sender<Result<bool>>>,
@@ -299,14 +302,16 @@ impl CheckIntegrityMan {
         if self.active_count >= self.max_concurrent {
             return None;
         }
-        let entry = self.queue.pop_front()?;
+        let mut entry = self.queue.pop_front()?;
         self.active_count += 1;
         debug!(gid = entry.gid, "Integrity check entry picked by worker");
         let total = entry.task.total_length();
         self.picked = Some(PickedMeta {
             total_length: total,
             cancelled: Arc::clone(&entry.cancelled),
+            progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
+        entry.progress = Arc::clone(&self.picked.as_ref().expect("picked metadata").progress);
         Some(entry)
     }
 
@@ -339,7 +344,14 @@ impl CheckIntegrityMan {
 
     /// Progress of the currently active validation, `(current, total)`.
     pub fn current_progress(&self) -> Option<(u64, u64)> {
-        self.picked.as_ref().map(|m| (0, m.total_length))
+        self.picked.as_ref().map(|m| {
+            (
+                m.progress
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .min(m.total_length),
+                m.total_length,
+            )
+        })
     }
 
     /// Cancel every queued entry (notify waiters) and mark the active one.
@@ -435,6 +447,10 @@ async fn run_validation(entry: &mut CheckIntegrityEntry) -> Result<bool> {
                 return Err(cancelled_error());
             }
             entry.task.validate_chunk().await?;
+            entry.progress.store(
+                entry.task.current_length().min(entry.task.total_length()),
+                Ordering::Relaxed,
+            );
             // Cooperative scheduling: never hog a worker thread on big files.
             tokio::task::yield_now().await;
         }
@@ -477,6 +493,7 @@ pub async fn enqueue(
         task,
         created_at: Instant::now(),
         cancelled: Arc::new(AtomicBool::new(false)),
+        progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         done_tx: Some(tx),
     };
     man.write().await.push_entry(entry);
@@ -618,6 +635,7 @@ mod tests {
             ),
             created_at: Instant::now(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             done_tx: Some(tx),
         });
         assert!(man.has_next());
@@ -653,6 +671,7 @@ mod tests {
                 ),
                 created_at: Instant::now(),
                 cancelled: Arc::new(AtomicBool::new(false)),
+                progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 done_tx: Some(tx1),
             });
         }

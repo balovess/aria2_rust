@@ -202,13 +202,20 @@ async fn create_command_for_uri(
     // Default: HTTP/HTTPS download command.
     let output_dir = options.dir.as_deref();
     let output_name = options.out.as_deref();
-    let mut cmd = crate::engine::download_command::DownloadCommand::new_with_group(
-        group,
-        uri,
-        options,
-        output_dir,
-        output_name,
-    )?;
+    let resolved_addresses = if let Some((hostname, port)) = direct_origin(uri) {
+        dns_cache.lock().await.resolve(&hostname, port).await.ok()
+    } else {
+        None
+    };
+    let mut cmd =
+        crate::engine::download_command::DownloadCommand::new_with_group_and_resolved_addresses(
+            group,
+            uri,
+            options,
+            output_dir,
+            output_name,
+            resolved_addresses,
+        )?;
     if let Some(limiter) = global_limiter {
         cmd.set_global_limiter(limiter);
     }

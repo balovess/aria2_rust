@@ -30,6 +30,13 @@ impl super::RequestGroup {
         self.download_context.recover().clone()
     }
 
+    /// Mark the owned download context as whole-file checksum verified.
+    pub fn set_checksum_verified(&self, verified: bool) {
+        if let Some(ctx) = self.download_context.recover().as_ref() {
+            ctx.set_checksum_verified(verified);
+        }
+    }
+
     /// Set the `DownloadContext` for this download and transfer initial URIs.
     ///
     /// When `DownloadContext` is set for the first time, the URIs from

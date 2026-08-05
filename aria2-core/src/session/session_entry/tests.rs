@@ -460,6 +460,9 @@ fn test_download_options_to_map_all_fields() {
         user_agent: Some("aria2-rust/1.0".to_string()),
         referer: Some("http://example.com".to_string()),
         // Metalink
+        metalink_version: None,
+        metalink_language: None,
+        metalink_os: None,
         metalink_location: None,
         metalink_preferred_protocol: None,
         select_file: None,

@@ -220,11 +220,9 @@ fn test_netrc_default_fallback_for_http() {
     let ac = factory.resolve(&url, false, &opts).unwrap();
     assert_eq!(ac.user(), "knownuser");
 
-    // Unknown host falls back to default
+    // HTTP resolver ignores the .netrc default entry, as C++ does.
     let url2 = Url::parse("http://unknown.example.com/file").unwrap();
-    let ac2 = factory.resolve(&url2, false, &opts).unwrap();
-    assert_eq!(ac2.user(), "defaultuser");
-    assert_eq!(ac2.password(), "defaultpass");
+    assert!(factory.resolve(&url2, false, &opts).is_none());
 }
 
 #[test]

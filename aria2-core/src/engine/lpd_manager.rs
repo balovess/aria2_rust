@@ -180,7 +180,19 @@ impl LpdManager {
 
     /// Create LpdManager with custom configuration
     pub fn with_interval(announce_interval_secs: u64) -> Result<Self, String> {
-        let announcer = LpdAnnouncer::with_config(announce_interval_secs)?;
+        Self::with_interval_and_interface(announce_interval_secs, None)
+    }
+
+    /// Create an LPD manager with an optional local IPv4 multicast interface.
+    pub fn with_interval_and_interface(
+        announce_interval_secs: u64,
+        interface: Option<std::net::Ipv4Addr>,
+    ) -> Result<Self, String> {
+        if announce_interval_secs == 0 {
+            return Err("LPD announce interval must be greater than zero".to_string());
+        }
+
+        let announcer = LpdAnnouncer::with_interface(announce_interval_secs, interface)?;
 
         Ok(Self {
             announcer: Arc::new(announcer),

@@ -246,18 +246,20 @@ impl RawFtpControl {
     }
 
     /// Set resume offset (REST command)
-    pub(super) async fn set_resume_offset(&mut self, offset: u64) -> Result<()> {
+    pub(super) async fn set_resume_offset(&mut self, offset: u64) -> Result<bool> {
         if offset == 0 {
-            return Ok(());
+            return Ok(true);
         }
         debug!("Setting resume offset: {} bytes", offset);
         let resp = self.command(&format!("REST {}", offset)).await?;
         if resp.0 != 350 {
             warn!("REST command not accepted by server: {} {}", resp.0, resp.1);
-            // Some servers don't support REST, continue without resume
-            return Ok(());
+            // Some servers do not support REST. Report this to the caller so
+            // it can restart from byte zero instead of appending at a stale
+            // local offset while the server sends the complete object.
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Get file size (SIZE command)

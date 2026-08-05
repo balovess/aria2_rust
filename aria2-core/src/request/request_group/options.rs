@@ -273,6 +273,12 @@ pub struct DownloadOptions {
     // ------------------------------------------------------------------
     // Metalink options (C++ PREF_METALINK_*)
     // ------------------------------------------------------------------
+    /// Preferred Metalink file version (for example, "3.0" or "4.0").
+    pub metalink_version: Option<String>,
+    /// Preferred Metalink file language (RFC 5646/BCP 47 language tag).
+    pub metalink_language: Option<String>,
+    /// Preferred Metalink file operating system identifier.
+    pub metalink_os: Option<String>,
     /// Preferred download location (e.g. "JP") from metalink:resources.
     /// Maps to C++ `PREF_METALINK_LOCATION`.
     pub metalink_location: Option<String>,
@@ -470,6 +476,9 @@ impl Default for DownloadOptions {
             user_agent: None,
             referer: None,
             // Metalink
+            metalink_version: None,
+            metalink_language: None,
+            metalink_os: None,
             metalink_location: None,
             metalink_preferred_protocol: None,
             select_file: None,

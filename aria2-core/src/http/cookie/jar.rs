@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+use url::Url;
 
 use crate::error::{Aria2Error, Result};
 use serde::{Deserialize, Serialize};
@@ -80,44 +81,48 @@ impl JarCookie {
     ///
     /// `true` if this cookie should be included in requests to the given URL.
     pub fn matches_url(&self, url: &str, is_secure: bool) -> bool {
-        // Secure flag check: secure cookies only over HTTPS
-        if self.secure && !is_secure {
+        let parsed = match Url::parse(url) {
+            Ok(url) => url,
+            Err(_) => return false,
+        };
+        let request_host = match parsed.host_str() {
+            Some(host) => host.trim_end_matches('.').to_ascii_lowercase(),
+            None => return false,
+        };
+        let cookie_domain = self
+            .domain
+            .trim()
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if cookie_domain.is_empty() {
             return false;
         }
 
-        // Domain matching: URL must contain the cookie's domain
-        let url_lower = url.to_lowercase();
-        let domain_lower = self.domain.to_lowercase();
-        if !url_lower.contains(&domain_lower) && !domain_lower.is_empty() {
+        if self.secure && (!is_secure || parsed.scheme() != "https") {
+            return false;
+        }
+        if request_host != cookie_domain && !request_host.ends_with(&format!(".{cookie_domain}")) {
             return false;
         }
 
-        // Path matching: if path is "/", it matches everything
-        if self.path != "/" {
-            // Strip leading slash from path for comparison against URL path portion
-            let path_clean = self.path.trim_start_matches('/');
-            if !url_lower.contains(&path_clean.to_lowercase()) {
-                // For non-root paths, require at least a partial match
-                // Allow if the domain already matched and path is a prefix of URL path
-                if let Some(after_domain) = url_lower.find(&domain_lower) {
-                    let rest = &url_lower[after_domain + domain_lower.len()..];
-                    if !rest.starts_with(&format!("/{}", path_clean.to_lowercase()))
-                        && !rest.starts_with(&format!("/{}", self.path.to_lowercase()))
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-
-        // Expiry check: remove expired cookies
-        if let Some(expires) = self.expires
-            && SystemTime::now() > expires
+        let request_path = parsed.path();
+        let cookie_path = if self.path.is_empty() || !self.path.starts_with('/') {
+            "/"
+        } else {
+            self.path.as_str()
+        };
+        if !request_path.starts_with(cookie_path)
+            || (cookie_path != "/"
+                && request_path.len() > cookie_path.len()
+                && !cookie_path.ends_with('/')
+                && request_path.as_bytes()[cookie_path.len()] != b'/')
         {
             return false;
         }
 
-        true
+        self.expires
+            .is_none_or(|expires| SystemTime::now() <= expires)
     }
 
     /// Format this cookie as a Set-Cookie header value string.
@@ -296,12 +301,15 @@ impl CookieJar {
 
     /// Store a cookie received from a Set-Cookie response header.
     ///
-    /// If a cookie with the same name and domain already exists, it is replaced.
+    /// If a cookie with the same name, domain, and path already exists, it is replaced.
     /// This implements the update semantics defined in RFC 6265 Section 5.3.
     pub fn store(&mut self, cookie: JarCookie) {
         // Remove existing cookie with same name+domain (update semantics)
-        self.cookies
-            .retain(|c| !(c.name == cookie.name && c.domain == cookie.domain));
+        self.cookies.retain(|c| {
+            !(c.name == cookie.name
+                && c.domain.eq_ignore_ascii_case(&cookie.domain)
+                && c.path == cookie.path)
+        });
         self.cookies.push(cookie);
     }
 
@@ -376,8 +384,7 @@ impl CookieJar {
             let fields: Vec<&str> = line.split('\t').collect();
             if fields.len() >= 7 {
                 // Parse the 7+ tab-separated fields
-                let domain = fields[0].trim();
-                // fields[1]: include_subdomains (TRUE/FALSE) — not used for matching here
+                let domain = fields[0].trim().to_ascii_lowercase();
                 let path = fields[2].trim();
                 let secure = fields[3] == "TRUE";
                 // fields[4]: expires timestamp (Unix epoch), 0 = session cookie

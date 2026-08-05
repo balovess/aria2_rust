@@ -15,8 +15,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Aria2Error, Result};
@@ -77,7 +77,13 @@ pub struct CookieStorage {
     lru_seq: AtomicU64,
 }
 
+static SHARED_COOKIE_STORAGE: OnceLock<Arc<CookieStorage>> = OnceLock::new();
+
 impl CookieStorage {
+    pub fn shared() -> Arc<Self> {
+        Arc::clone(SHARED_COOKIE_STORAGE.get_or_init(|| Arc::new(Self::new())))
+    }
+
     pub fn new() -> Self {
         Self {
             domains: RwLock::new(HashMap::new()),
@@ -555,6 +561,6 @@ impl CookieStorage {
 
 impl Default for CookieStorage {
     fn default() -> Self {
-        Self::new()
+        CookieStorage::new()
     }
 }

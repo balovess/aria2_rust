@@ -3,6 +3,9 @@
 use crate::json_rpc::JsonRpcError;
 use aria2_core::error::Aria2Error;
 use base64::Engine;
+use hmac::{Hmac, Mac};
+use rand::RngCore;
+use sha2::Sha256;
 
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
@@ -76,6 +79,14 @@ fn base64_decode(s: &str) -> Result<String, Aria2Error> {
 /// length of an `rpc-secret` is not high-value entropy, and an
 /// attacker-controlled length probe is mitigated by the constant per-byte
 /// cost. If length privacy is ever required, the secret must be hashed first.
+fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        diff |= usize::from(a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0));
+    }
+    diff == 0
+}
+
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
@@ -100,9 +111,14 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// disabled and all requests are accepted.
 ///
 /// The token is extracted from the `token` parameter in each request's params.
+type RpcHmac = Hmac<Sha256>;
+
 pub struct RpcAuthMiddleware {
     /// Secret token for authorization. Empty string = no auth required.
     secret: String,
+    /// Random HMAC key and digest of the configured secret, matching C++.
+    hmac_key: Option<Vec<u8>>,
+    expected: Option<Vec<u8>>,
 }
 
 impl RpcAuthMiddleware {
@@ -112,8 +128,20 @@ impl RpcAuthMiddleware {
     ///
     /// * `secret` - The RPC secret token. Pass empty string to disable auth.
     pub fn new(secret: &str) -> Self {
+        let (hmac_key, expected) = if secret.is_empty() {
+            (None, None)
+        } else {
+            let mut key = vec![0u8; 32];
+            rand::thread_rng().fill_bytes(&mut key);
+            let mut mac =
+                RpcHmac::new_from_slice(&key).expect("HMAC-SHA256 accepts keys of every length");
+            mac.update(secret.as_bytes());
+            (Some(key), Some(mac.finalize().into_bytes().to_vec()))
+        };
         Self {
             secret: secret.to_string(),
+            hmac_key,
+            expected,
         }
     }
 
@@ -133,12 +161,21 @@ impl RpcAuthMiddleware {
             return Ok(());
         }
         match token {
-            Some(t) if constant_time_eq(t, &self.secret) => Ok(()),
+            Some(t) if self.verify_hmac(t) => Ok(()),
             Some(_) => Err(JsonRpcError::Unauthorized("Invalid token".to_string())),
             None => Err(JsonRpcError::Unauthorized(
                 "Token required (set rpc-secret)".to_string(),
             )),
         }
+    }
+
+    fn verify_hmac(&self, token: &str) -> bool {
+        let (Some(key), Some(expected)) = (&self.hmac_key, &self.expected) else {
+            return false;
+        };
+        let mut mac = RpcHmac::new_from_slice(key).expect("valid HMAC key");
+        mac.update(token.as_bytes());
+        constant_time_eq_bytes(expected, mac.finalize().into_bytes().as_ref())
     }
 
     /// Returns true if authentication is enabled (non-empty secret).

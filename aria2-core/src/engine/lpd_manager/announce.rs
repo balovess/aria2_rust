@@ -34,6 +34,8 @@ pub struct LpdAnnouncer {
     multicast_addr: SocketAddr,
     /// Whether announcing is enabled
     enabled: bool,
+    /// Optional local IPv4 interface used for multicast membership.
+    interface: Option<Ipv4Addr>,
     /// Current announce interval
     announce_interval: Duration,
 }
@@ -56,6 +58,14 @@ impl LpdAnnouncer {
 
     /// Create with custom announce interval
     pub fn with_config(announce_interval_secs: u64) -> Result<Self, String> {
+        Self::with_interface(announce_interval_secs, None)
+    }
+
+    /// Create an announcer using a specific local IPv4 multicast interface.
+    pub fn with_interface(
+        announce_interval_secs: u64,
+        interface: Option<Ipv4Addr>,
+    ) -> Result<Self, String> {
         // Bind to ephemeral port on all interfaces
         let socket = UdpSocket::bind("0.0.0.0:0")
             .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
@@ -95,8 +105,9 @@ impl LpdAnnouncer {
             .parse()
             .map_err(|e| format!("Invalid LPD multicast IP: {}", e))?;
 
+        let local_interface = interface.unwrap_or(Ipv4Addr::UNSPECIFIED);
         socket
-            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
+            .join_multicast_v4(&multicast_ip, &local_interface)
             .map_err(|e| format!("Failed to join LPD multicast group: {}", e))?;
 
         debug!(
@@ -109,6 +120,7 @@ impl LpdAnnouncer {
             socket,
             multicast_addr,
             enabled: true,
+            interface,
             announce_interval: Duration::from_secs(announce_interval_secs),
         })
     }

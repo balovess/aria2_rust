@@ -227,8 +227,9 @@ fn test_three_patterns_cartesian() {
     let uri = "http://example.com/[1-2]-[a-d]-${01-02}.txt";
     let expanded = expand_parameterized_uri(uri);
 
-    assert_eq!(expanded.len(), 4);
-    assert!(expanded[0].contains("[a-d]"));
+    assert_eq!(expanded.len(), 16);
+    assert_eq!(expanded[0], "http://example.com/1-a-01.txt");
+    assert_eq!(expanded[15], "http://example.com/2-d-02.txt");
 }
 
 #[test]
@@ -245,7 +246,40 @@ fn test_mixed_brace_and_bracket() {
 }
 
 // ======================================================================
-// Test Group 9: No-pattern passthrough
+// Test Group 9: Choice and alphabetic ranges
+// ======================================================================
+
+#[test]
+fn test_choice_expansion() {
+    let expanded = expand_parameterized_uri("http://example.com/{a,b,c}.txt");
+    assert_eq!(expanded, vec![
+        "http://example.com/a.txt",
+        "http://example.com/b.txt",
+        "http://example.com/c.txt",
+    ]);
+}
+
+#[test]
+fn test_choice_cartesian_expansion() {
+    let expanded = expand_parameterized_uri("http://example.com/{a,b}/{1,2}.txt");
+    assert_eq!(expanded.len(), 4);
+    assert_eq!(expanded[0], "http://example.com/a/1.txt");
+    assert_eq!(expanded[3], "http://example.com/b/2.txt");
+}
+
+#[test]
+fn test_alphabetic_range() {
+    let expanded = expand_parameterized_uri("http://example.com/file[a-d].txt");
+    assert_eq!(expanded, vec![
+        "http://example.com/filea.txt",
+        "http://example.com/fileb.txt",
+        "http://example.com/filec.txt",
+        "http://example.com/filed.txt",
+    ]);
+}
+
+// ======================================================================
+// Test Group 10: No-pattern passthrough
 // ======================================================================
 
 #[test]
@@ -327,7 +361,7 @@ fn test_empty_uri() {
 
 #[test]
 fn test_invalid_bracket_content() {
-    let uri = "http://example.com/[abc-def].txt";
+    let uri = "http://example.com/[abc-DEF].txt";
     let expanded = expand_parameterized_uri(uri);
 
     assert_eq!(expanded.len(), 1);

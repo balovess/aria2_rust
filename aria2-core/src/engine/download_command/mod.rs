@@ -87,6 +87,10 @@ pub struct DownloadCommand {
     pub(super) lowest_speed_limit: u64,
 }
 
+fn uri_host(uri: &str) -> Option<String> {
+    reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
+}
+
 impl DownloadCommand {
     pub fn new(
         gid: GroupId,
@@ -110,6 +114,24 @@ impl DownloadCommand {
         output_dir: Option<&str>,
         output_name: Option<&str>,
     ) -> Result<Self> {
+        Self::new_with_group_and_resolved_addresses(
+            group,
+            uri,
+            options,
+            output_dir,
+            output_name,
+            None,
+        )
+    }
+
+    pub fn new_with_group_and_resolved_addresses(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        uri: &str,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+        resolved_addresses: Option<Vec<std::net::SocketAddr>>,
+    ) -> Result<Self> {
         let progress = group
             .try_read()
             .map(|g| g.progress.clone())
@@ -129,7 +151,35 @@ impl DownloadCommand {
 
         let no_proxy = options.http_proxy.is_none() && options.all_proxy.is_none();
         let client = if no_proxy {
-            crate::http::client_pool::get_global_client()
+            if let Some(addresses) = resolved_addresses.as_deref()
+                && !addresses.is_empty()
+            {
+                let host = uri_host(uri).ok_or_else(|| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(
+                        "Unable to extract HTTP hostname for DNS cache override".to_string(),
+                    ))
+                })?;
+                Arc::new(
+                    reqwest::Client::builder()
+                        .connect_timeout(Duration::from_secs(
+                            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                        ))
+                        .timeout(Duration::from_secs(
+                            constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                        ))
+                        .user_agent(constants::USER_AGENT)
+                        .redirect(reqwest::redirect::Policy::none())
+                        .resolve_to_addrs(&host, addresses)
+                        .build()
+                        .map_err(|e| {
+                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                                "Failed to build HTTP client with DNS cache: {e}"
+                            )))
+                        })?,
+                )
+            } else {
+                crate::http::client_pool::get_global_client()
+            }
         } else {
             let mut builder = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(
@@ -194,7 +244,7 @@ impl DownloadCommand {
         info!("DownloadCommand created: {} -> {}", uri, path.display());
 
         let cookie_file = options.cookie_file.clone();
-        let cookie_storage = Arc::new(CookieStorage::new());
+        let cookie_storage = CookieStorage::shared();
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 
@@ -322,7 +372,7 @@ impl DownloadCommand {
         );
 
         let cookie_file = options.cookie_file.clone();
-        let cookie_storage = Arc::new(CookieStorage::new());
+        let cookie_storage = CookieStorage::shared();
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 

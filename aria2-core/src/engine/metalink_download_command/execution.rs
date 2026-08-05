@@ -60,7 +60,7 @@ impl Command for MetalinkDownloadCommand {
                     .map(|u| (*u).clone())
                     .collect();
                 expected_size = file.size;
-                hash_entry_owned = file.hashes.first().cloned();
+                hash_entry_owned = file.strongest_hash().cloned();
                 pieces_owned = file.pieces.clone();
                 torrent_metaurls_owned = file
                     .meta_urls
@@ -386,7 +386,7 @@ impl MetalinkDownloadCommand {
         hash: &aria2_protocol::metalink::parser::HashEntry,
     ) -> Result<bool> {
         let digest = digest_hex(data, hash.algo);
-        Ok(digest == hash.value)
+        Ok(digest.eq_ignore_ascii_case(&hash.value))
     }
 
     /// Verify a whole-file download against Metalink `<pieces>` chunk hashes.

@@ -157,6 +157,57 @@ impl MetalinkToRequestGroup {
         metalink_data: &[u8],
         options: &DownloadOptions,
     ) -> Result<Vec<MetalinkDownloadCommand>> {
+        // DownloadOptions is the engine-level source of the C++ PREF_METALINK_*
+        // filters. Explicit builder values remain useful for library callers;
+        // options fill only fields that were not explicitly configured.
+        let configured = Self {
+            version: if self.version.is_empty() {
+                options.metalink_version.clone().unwrap_or_default()
+            } else {
+                self.version.clone()
+            },
+            language: if self.language.is_empty() {
+                options.metalink_language.clone().unwrap_or_default()
+            } else {
+                self.language.clone()
+            },
+            os: if self.os.is_empty() {
+                options.metalink_os.clone().unwrap_or_default()
+            } else {
+                self.os.clone()
+            },
+            locations: if self.locations.is_empty() {
+                options
+                    .metalink_location
+                    .as_deref()
+                    .map(|value| {
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(|value| value.to_ascii_lowercase())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                self.locations.clone()
+            },
+            preferred_protocol: self
+                .preferred_protocol
+                .clone()
+                .or_else(|| options.metalink_preferred_protocol.clone()),
+            select_files: self.select_files.clone(),
+            pause_requested: self.pause_requested,
+            base_uri: self.base_uri.clone(),
+        };
+        configured.generate_from_bytes_with_config(metalink_data, options)
+    }
+
+    fn generate_from_bytes_with_config(
+        &self,
+        metalink_data: &[u8],
+        options: &DownloadOptions,
+    ) -> Result<Vec<MetalinkDownloadCommand>> {
         // Parse with base URI if available
         let doc = if let Some(ref base) = self.base_uri {
             // The parser accepts base_uri via MetalinkDocument::parse_with_base
@@ -309,7 +360,7 @@ impl MetalinkToRequestGroup {
                 let file_infos = MetalinkDownloadCommand::create_multi_file_for_single(
                     &file_clone,
                     options,
-                    self.base_uri.as_deref(),
+                    filtered_doc.base_uri.as_deref(),
                     gid_start,
                 )?;
 
@@ -337,6 +388,29 @@ impl Default for MetalinkToRequestGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_location_is_applied_case_insensitively() {
+        let mut options = DownloadOptions::default();
+        options.metalink_location = Some(" US, jp ".to_string());
+        let converter = MetalinkToRequestGroup::new();
+        let configured = converter
+            .generate_from_bytes(
+                br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="x"><url location="us" priority="10">http://us/x</url><url location="de" priority="1">http://de/x</url></file></metalink>"#,
+                &options,
+            )
+            .unwrap();
+        assert_eq!(configured.len(), 1);
+
+        let doc = MetalinkDocument::parse(
+            br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="x"><url location="us" priority="10">http://us/x</url><url location="de" priority="1">http://de/x</url></file></metalink>"#,
+            None,
+        )
+        .unwrap();
+        let mut file = doc.files[0].clone();
+        file.set_location_priority(&["us"], -LOWEST_PRIORITY);
+        assert!(file.urls[0].priority < file.urls[1].priority);
+    }
 
     fn make_multi_file_metalink() -> Vec<u8> {
         r#"<?xml version="1.0" encoding="UTF-8"?>

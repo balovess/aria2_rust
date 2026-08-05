@@ -19,6 +19,19 @@ async fn test_default_disk_writer_write_and_finalize() {
 }
 
 #[tokio::test]
+async fn test_default_disk_writer_resume_writes_at_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("resume.bin");
+    tokio::fs::write(&path, b"prefix").await.unwrap();
+
+    let mut writer = DefaultDiskWriter::new_with_offset(&path, 6);
+    writer.write(b"suffix").await.unwrap();
+    writer.finalize().await.unwrap();
+
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"prefixsuffix");
+}
+
+#[tokio::test]
 async fn test_byte_array_disk_writer() {
     let mut writer = ByteArrayDiskWriter::with_capacity(10);
     writer.write(b"abc").await.unwrap();

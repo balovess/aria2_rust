@@ -204,12 +204,43 @@ impl FtpDownloadCommand {
             g.set_total_length(file_size.unwrap_or(0));
         }
 
-        // Step 5: Set resume offset if applicable
-        if self.resume_offset > 0 {
-            ctrl.set_resume_offset(self.resume_offset).await?;
+        // Step 5: Allocate the destination before RETR, matching the C++
+        // FileAllocationEntry command chain used by FTP downloads.
+        let allocation =
+            crate::filesystem::file_allocation::AllocationStrategy::from_str(&self.file_allocation);
+        if allocation != crate::filesystem::file_allocation::AllocationStrategy::None
+            && file_size.unwrap_or(0) > 0
+        {
+            let gid = { self.group.recover().gid().value() };
+            crate::filesystem::file_allocation_man::enqueue_path(
+                &crate::filesystem::file_allocation_man::shared(),
+                &self.output_path,
+                file_size.unwrap_or(0),
+                allocation,
+                self.secure_falloc,
+                gid,
+            )
+            .await
+            .map_err(FtpAttemptError::from)?;
         }
 
-        // Step 6: Negotiate the data connection mode before RETR.
+        // Step 6: Set resume offset if applicable. If the server rejects REST,
+        // restart from zero and truncate the stale local partial file.
+        let resume_accepted = if self.resume_offset > 0 {
+            ctrl.set_resume_offset(self.resume_offset).await?
+        } else {
+            true
+        };
+        let write_offset = if resume_accepted {
+            self.resume_offset
+        } else {
+            0
+        };
+        if !resume_accepted {
+            self.resume_offset = 0;
+        }
+
+        // Step 7: Negotiate the data connection mode before RETR.
         let passive_target = if self.passive_mode {
             Some(ctrl.enter_passive_mode().await?)
         } else {
@@ -281,7 +312,11 @@ impl FtpDownloadCommand {
         let _ = data_stream.set_nodelay(true); // Ignore error if not supported
 
         // Step 9: Setup disk writer with optional rate limiting
-        let raw_writer = DefaultDiskWriter::new(&self.output_path);
+        let raw_writer = if write_offset > 0 {
+            DefaultDiskWriter::new_with_offset(&self.output_path, write_offset)
+        } else {
+            DefaultDiskWriter::new(&self.output_path)
+        };
         let rate_limit = {
             let g = self.group.recover();
             g.options().max_download_limit
@@ -314,10 +349,10 @@ impl FtpDownloadCommand {
         // Note: DiskWriter trait doesn't support seek, so for resume we rely on
         // the FTP REST command to tell server to start from the offset,
         // and data will be appended to existing file if it exists
-        if self.resume_offset > 0 {
+        if write_offset > 0 {
             debug!(
                 "Resume offset: {} bytes (using FTP REST command)",
-                self.resume_offset
+                write_offset
             );
         }
 

@@ -34,11 +34,23 @@ impl DhtEngine {
 
         let entry_points = self.config.entry_points.clone();
 
+        let mut resolved_entries = 0usize;
         for entry in &entry_points {
-            // Resolve the entry point hostname
+            // Resolve the entry point hostname. Restrict results to the
+            // configured address family, matching C++ NameResolver's family
+            // filter instead of accidentally probing both families.
             match tokio::net::lookup_host(format!("{}:{}", entry.host, entry.port)).await {
                 Ok(addrs) => {
+                    let mut resolved = false;
                     for addr in addrs {
+                        let family_matches = match self.config.family {
+                            AddressFamily::Ipv4 => addr.is_ipv4(),
+                            AddressFamily::Ipv6 => addr.is_ipv6(),
+                        };
+                        if !family_matches {
+                            continue;
+                        }
+                        resolved = true;
                         info!(addr = %addr, "Pinging DHT entry point before adding");
 
                         // C++: DHTEntryPointNameResolveCommand::addPingTask()
@@ -52,6 +64,16 @@ impl DhtEngine {
                         // Send the ping message immediately
                         self.send_ping(addr);
                     }
+                    if resolved {
+                        resolved_entries += 1;
+                    } else {
+                        warn!(
+                            host = %entry.host,
+                            port = entry.port,
+                            family = ?self.config.family,
+                            "DHT entry point returned no address in configured family"
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!(
@@ -62,6 +84,12 @@ impl DhtEngine {
                     );
                 }
             }
+        }
+
+        if resolved_entries == 0 {
+            warn!("No DHT entry points resolved in the configured address family");
+            self.bootstrapped = true;
+            return;
         }
 
         // Also trigger a bucket refresh to populate the routing table.

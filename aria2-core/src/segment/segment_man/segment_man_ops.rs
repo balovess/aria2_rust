@@ -46,7 +46,7 @@ impl SegmentMan {
     ///
     /// If the index is out of range, returns `None`.
     pub fn get_segment_with_index(&mut self, cuid: u64, index: usize) -> Option<SegmentKind> {
-        if index > 0 && self.num_pieces() <= index {
+        if index >= self.num_pieces() {
             return None;
         }
 
@@ -69,7 +69,7 @@ impl SegmentMan {
         cuid: u64,
         index: usize,
     ) -> Option<SegmentKind> {
-        if index > 0 && self.num_pieces() <= index {
+        if index >= self.num_pieces() {
             return None;
         }
 

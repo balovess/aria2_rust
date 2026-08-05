@@ -119,17 +119,17 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | `SocketPool` (multimap) | Architectural difference | Rust uses `reqwest` connection pool instead of manual socket pooling; `FtpConnectionPool` for FTP |
 | `CookieStorage` | Present | Owned by engine in C++; separate `CookieStorage` in Rust HTTP module |
 | `BtRegistry` | Complete | `Arc<RwLock<BtRegistry>>` owned by engine, accessible via `bt_registry()` |
-| `DNSCache` | Partial | Engine-owned `Arc<Mutex<DnsCache>>`; positive and negative entries are keyed by `(hostname, port)`, and candidates retain Good/Bad state. HTTP production connector integration and full exhausted-set refresh policy remain incomplete |
-| `AuthConfigFactory` | Partial | C++ has factory with resolver hierarchy. Rust has auth modules but no centralized factory |
+| `DNSCache` | Fixed | Engine-owned `Arc<Mutex<DnsCache>>`; positive/negative entries are keyed by `(hostname, port)`, candidates retain Good/Bad state, FTP and HTTP command creation resolve through the shared cache, and HTTP clients apply cached addresses with `resolve_to_addrs`. Exhausted-set refresh remains explicit via cache invalidation. |
+| `AuthConfigFactory` | Fixed | Centralized Rust `AuthConfigFactory` now covers HTTP/HTTPS, FTP/SFTP, URL credentials, activated BasicCred cache, Netrc/CLI precedence, HTTP `default`-entry exclusion, FTP anonymous defaults, and challenge activation. |
 | `CUIDCounter` | Architectural difference | Rust uses `GroupId` (auto-incrementing atomic) instead of C++'s `cuid_t` |
-| `CheckIntegrityMan` | Missing | C++ has integrity check queue + `CheckIntegrityDispatcherCommand`. Rust has validators but no queue |
+| `CheckIntegrityMan` | Partial | Rust has a process-wide sequential async queue, chunked worker, cancellation, completion channels, live atomic current/total progress, and HTTP whole-file verification now marks `DownloadContext` as verified atomically before completion results are emitted. HTTP/stream download preflight routes failed validation back into a clean download path instead of terminating the request; remaining difference is full engine-level dispatcher/post-validation command wiring for every protocol. |
 | `StatCalc` | Partial | C++ has `ConsoleStatCalc` for terminal stats. Rust has `PerformanceMonitor` + `AtomicMetrics` |
 | `EventPoll` | N/A (architectural) | Rust uses tokio runtime instead of `select()`/`epoll`/`kqueue` |
 | `WebSocketSessionMan` | N/A | Handled by axum in RPC crate |
 | `RequestGroupMan` | Complete | `Arc<RwLock<RequestGroupMan>>` with DashMap active + VecDeque reserved + Vec stopped |
 | `FileAllocationMan` | Complete | Async queue/worker, sequential dispatch, cancellation, disk-space checks, resume-safe allocation and live current/total progress are implemented; this is the Rust async equivalent of C++ `FileAllocationMan` plus `FileAllocationCommand`. |
 | `poolSocket()`/`popPooledSocket()` | Partial | Raw HTTP manager has keyed LRU pooling, timeout cleanup, `discard`, and context-based idle peer eviction; reqwest download paths still use the library-managed pool |
-| `validateToken()` | Missing | C++ HMAC-based RPC token validation. Rust has separate auth middleware |
+| `validateToken()` | Fixed | `RpcAuthMiddleware` now creates one random HMAC-SHA256 key per middleware, caches the expected digest of `rpc-secret`, and compares token digests in constant time, matching C++ `DownloadEngine::validateToken()`. |
 
 ### 2. BitTorrent Core
 
@@ -189,7 +189,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | HttpDownloadCommand | Complete | Tail reclaim, stream filters, cookie management, proxy, checksum all working |
 | StreamFilter | Complete | GZipDecoder, BZip2Decoder, DeflateDecoder, ChunkedDecoder, NullSinkFilter with streaming |
 | AuthConfig/Auth | Partial | Has Basic, Digest, Netrc auth; missing centralized `AuthConfigFactory` |
-| CookieStorage | Partial | Flat `Vec<Cookie>` instead of DomainNode tree; no LRU eviction; no SQLite parser |
+| CookieStorage | Partial | Rust now uses domain buckets plus a monotonic LRU tracker, SQLite/Netscape loading, per-domain/global eviction, and RFC matching; storage is process-shared across HTTP commands. Remaining difference is the C++ label tree and engine-level cookie lifecycle integration. |
 | Content-Disposition | Complete | RFC 6266 state-machine parser; accepts trailing `;` (diverges from C++ bug #1118); 110 tests |
 | Conditional GET | Complete | `conditional_get.rs` with If-Modified-Since / ETag |
 | SOCKS Connector | Complete | SOCKS4, SOCKS5, no-proxy matcher |
@@ -208,7 +208,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | FTP-over-HTTP-proxy | Complete | CONNECT method tunneling with 407 proxy auth |
 | FTP Connection Pool | Complete | Operations, stats, max connections |
 | FtpFinishDownload | Complete | 226 response + connection pooling |
-| FtpDownloadCommand | Partial | Pre-allocation integration could be improved |
+| FtpDownloadCommand | Partial | FTP queues the shared FileAllocationMan before REST/RETR, honors `file-allocation` and `secure-falloc`, resumes through an offset-preserving writer, and falls back to truncating/restarting when REST is rejected; full FTP allocation/resume integration tests and nuanced C++ command-chain lifecycle remain. |
 | Active mode (PORT/EPRT) | Partial | `FtpDownloadCommand` now reads `ftp-pasv`, advertises EPRT with IPv4 PORT fallback, waits for the server-side data connection after RETR, and preserves passive mode separately. Proxy/NAT external-address configuration and full active-mode integration tests remain. |
 
 #### C++ FTP Command Chain Status
@@ -239,10 +239,10 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
 | 4 | Chunk-level piece hash missing | P1 | FIXED | `verify_pieces()` in `metalink_download_command/execution.rs` checks every `<pieces>` chunk after download; parser fixed for v4 `<hash>` children + v3 concatenated text |
-| 5 | Version/language/OS filtering missing | P1 | TODO | C++ filters by v3 `vos`/`language` attributes |
-| 6 | Metalink v3 `verification` element | P1 | TODO | C++ parses v3 `<verification>` with `<hash>` and `<pieces>` |
+| 5 | Version/language/OS filtering missing | P1 | FIXED | `DownloadOptions` now carries `metalink-version`, `metalink-language`, and `metalink-os`; `MetalinkToRequestGroup::generate_from_bytes()` injects them into the C++-equivalent `query_entries()` filter. |
+| 6 | Metalink v3 `verification` element | FIXED | Parser consumes v3 `<verification><hash>` and `<pieces>`; the production command verifies the strongest whole-file hash and piece hashes before accepting a mirror. Remaining difference is streamed/RequestGroup-wide post-download verification. |
 | 7 | Torrent metaurl handling | P1 | FIXED | metaurl-only files now resolve via BtDependency fallback in `MetalinkDownloadCommand` (bittorrent-gated) |
-| 8 | Location preference not configurable | P2 | TODO | Not wired to `--metalink-location` option |
+| 8 | Location preference not configurable | FIXED | `--metalink-location` is parsed into `DownloadOptions`, injected into `MetalinkToRequestGroup`, split on commas, normalized to lowercase, and applied through `set_location_priority()`; this matches C++ `PREF_METALINK_LOCATION`. |
 
 ### 5. FileAllocation
 
@@ -291,7 +291,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
-| 1 | Multicast interface config missing | P2 | TODO | C++ binds to specific interface via `--lpd-interface` |
+| 1 | Multicast interface config | P2 | Fixed | `LpdManager::with_interval_and_interface()` and `LpdAnnouncer::with_interface()` select the requested IPv4 interface for multicast membership; default construction preserves all-interface behavior. |
 
 ### 7. RPC
 
@@ -343,9 +343,9 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
-| 1 | Notification format differs from C++ | P1 | TODO | C++ notifications include `[{"gid": "..."}]` as params |
-| 2 | Extra `onBtCacheChanged` event type | P2 | Present | Rust has 7 notifications vs C++'s 6 |
-| 3 | WebSocket close handling | P2 | Partial | C++ has explicit close tracking |
+| 1 | Notification format differs from C++ | P1 | FIXED | `DownloadEvent` serializes the exact C++ shape: `jsonrpc`, event method, and `params: [{"gid": "..."}]`. |
+| 2 | Extra `onBtCacheChanged` event type | P2 | FIXED | Production `EventType` exposes exactly the six C++ events; non-standard cache/error/resume variants are excluded from `system.listNotifications` and event dispatch. |
+| 3 | WebSocket close handling | P2 | FIXED | The Axum session now distinguishes received close frames from EOF, logs the close state, echoes the close frame, and terminates the session cleanly. |
 
 ### 8. Cookie / HTTP Auth
 
@@ -356,12 +356,12 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
-| 1 | CookieStorage domain tree missing | P1 | TODO | C++ uses `DomainNode` tree for O(log n); Rust uses O(n) Vec |
-| 2 | LRU tracker missing | P1 | TODO | C++ evicts domain nodes via LRU tracker |
-| 3 | Per-domain cookie limit | P2 | TODO | C++ enforces `MAX_COOKIE_PER_DOMAIN` (50) |
+| 1 | CookieStorage domain tree missing | P1 | PARTIAL | Rust replaced the flat Vec with O(1) domain buckets and a monotonic LRU tracker; it intentionally uses HashMap rather than reproducing pointer-linked label nodes. |
+| 2 | LRU tracker missing | P1 | FIXED | `CookieStorage` maintains a monotonic `(sequence, domain)` BTreeSet and evicts least-recently-used domains at the C++ trigger/rate thresholds. |
+| 3 | Per-domain cookie limit | P2 | FIXED | Rust enforces `MAX_COOKIE_PER_DOMAIN` (50), removes expired entries first, then replaces the least-recently-accessed cookie. |
 | 4 | SQLite cookie parser | P2 | FIXED | `http/sqlite_cookie_parser.rs` implements `Sqlite3CookieParser` with Firefox `moz_cookies` / Chromium `Cookies` schemas (rusqlite bundled); `CookieStorage::load_file` routes by `SQLite format 3` magic. 14 tests |
-| 5 | Duplicate Cookie/JarCookie structures | P2 | TODO | Consolidation needed |
-| 6 | `eraseConfidentialInfo()` | P2 | TODO | No log sanitization |
+| 5 | Duplicate Cookie/JarCookie structures | P2 | PARTIAL | `JarCookie` now uses RFC host/domain/path boundary semantics, secure-scheme enforcement, and update identity (name + domain + path); the process-shared `CookieStorage` remains the production owner while `CookieJar` is retained as a persistence/API adapter. |
+| 6 | `eraseConfidentialInfo()` | P2 | FIXED | `erase_confidential_info()` masks Authorization, Proxy-Authorization, Cookie, and Set-Cookie headers with the same case-insensitive field-prefix semantics as C++. HTTP request/response logging uses this sanitizer. |
 
 ### 9. Checksum / Integrity
 
@@ -372,7 +372,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
-| 1 | `Adler32` streaming | P2 | Partial | `WholeFileHashState` does not include Adler32 variant |
+| 1 | `Adler32` streaming | P2 | FIXED | `MessageDigest` supports incremental Adler32 updates/finalization; `ChecksumValidator` provides streaming verification with case-insensitive digest comparison. |
 
 ### 10. Segment / Piece Storage
 
@@ -383,11 +383,11 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
-| 1 | `SegmentMan::advertisePiece()` not wired | P1 | TODO | `DefaultPieceStorage::advertise_piece()` exists but not delegated |
-| 2 | `SegmentMan::getSegment(FileEntry)` missing | P1 | TODO | Multi-file segment lookup |
+| 1 | `SegmentMan::advertisePiece()` not wired | P1 | FIXED | `SegmentMan::advertise_piece()` delegates to `PieceStorage::advertise_piece()` and `complete_segment()` invokes it on completion. |
+| 2 | `SegmentMan::getSegment(FileEntry)` missing | P1 | FIXED | `get_segments_for_file_entry()` builds the C++-equivalent range filter, checks write positions, and cancels out-of-range temporary segments. |
 | 3 | `initStorage()` auto-initialization | P1 | N/A | SegmentMan unused by download paths (orphan); see P1 #16 |
 | 4 | `setupFileFilter()` / `clearFileFilter()` | P1 | Partial | Placeholder exists; real file entry iteration by engine |
-| 5 | `createFastIndexBitfield()` | P2 | TODO | BEP 6 Fast Extension |
+| 5 | `createFastIndexBitfield()` | P2 | FIXED | `DefaultPieceStorage::get_missing_fast_pieces()` builds the equivalent temporary eligible bitfield by intersecting peer availability, local missing/unused state, and AllowedFast indexes. |
 
 ### 11. DHT
 
@@ -421,7 +421,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
 | 1 | DHT announce/lookup not wired into BtDownloadCommand | P1 | DONE | `peer_management.rs` `discover_peers` calls `engine.find_peers()` — see also P1 #17 |
-| 2 | DHT entry point DNS resolution | P2 | Partial | C++ resolves hostnames asynchronously; Rust needs resolution in bootstrap |
+| 2 | DHT entry point DNS resolution | P2 | FIXED | Rust bootstrap asynchronously resolves each host with Tokio, filters results to the configured IPv4/IPv6 family, pings every resolved address, and safely skips failed/no-family matches. Remaining difference is the C++ event-poll resolver manager rather than behavior. |
 | 3 | DHT MessageFactory dynamic dispatch | P2 | N/A | Rust uses direct function calls -- simpler but less extensible |
 
 ### 12. Option / Config
@@ -489,7 +489,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | `parse_size_str()` | Complete | Already supports `f64` + suffix |
-| `paramed_string` decimal support | Missing | Parameter string parsing |
+| `paramed_string` expansion | Fixed | Rust selector expander now supports C++-compatible numeric ranges, alphabetic ranges, choice expansion, step values, padding, and Cartesian products. |
 
 #### Other aria2-next Items
 
@@ -501,7 +501,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | Content-Disposition parser edge cases | Missing |
 | `isChecksumVerificationPending()` | Missing |
 | `SeedCheckCommand` without btRuntime | DONE |
-| Hostname-based socket pooling | Missing |
+| Hostname-based socket pooling | Fixed | HTTP pool keys now include scheme, hostname, port, and proxy identity; acquisition resolves all DNS addresses and tries candidates in order, matching C++ multi-address fallback. |
 | Control file removal on user halt | Missing |
 
 ---
@@ -535,7 +535,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | 5 | Metalink | Chunk-level piece hash verification | FIXED | `verify_pieces()` chunk-checks downloaded data against `<pieces>`; parser fixed to support v4 `<hash>` children AND v3 concatenated text (previously `split_whitespace` produced one bogus entry), `piece_count()` corrected |
 | 6 | Metalink | Version/language/OS filtering | DONE | `parser.rs` query_entries + `metalink_to_request_group.rs` builder filters |
 | 7 | Metalink | Torrent metaurl handling | FIXED | `MetalinkDownloadCommand` accepts torrent-metaurl-only files (C++ BtDependency) and falls back to downloading the `.torrent` + running `BtDownloadCommand` when no HTTP mirror succeeds (by priority, `metalink_download_command/execution.rs::try_torrent_metaurl`, gated on `bittorrent` feature). `FileDownloadInfo.torrent_metaurls` populated in both single and multi-file modes |
-| 8 | Metalink | Metalink v3 `verification` element | DONE | `parser.rs` parses `<verification><hash>` with tests |
+| 8 | Metalink | Metalink v3 `verification` element | DONE | Parser and production Metalink command consume v3 `<verification>` hashes/pieces, select the strongest whole-file hash, and fail over mirrors on verification mismatch |
 | 9 | FileAllocation | BtFileAllocationEntry missing | FIXED | BT downloads pre-allocate through `FileAllocationMan` (single + multi-file) |
 | 10 | FileAllocation | HttpFileAllocationEntry missing | FIXED | HTTP `DownloadCommand` pre-allocates through `FileAllocationMan` |
 | 11 | WebSocket | Notification format differs from C++ | DONE | `websocket.rs` `new_with_gid` emits `params:[{"gid":...}]`, test-verified against C++ format |
@@ -563,22 +563,22 @@ Missing options include: various SFTP options, some advanced logging options, a 
 
 | # | Module | Issue | Status |
 |---|--------|-------|--------|
-| 1 | BT | Zero-copy Piece optimization | TODO |
-| 2 | BT | addAllowedFastMessageToQueue() always empty | TODO |
-| 3 | BT | createFastIndexBitfield() | TODO |
+| 1 | BT | Zero-copy Piece optimization | PARTIAL | Completed piece payloads use `Bytes` through the disk-writer/cache boundary; protocol block aggregation still uses mutable buffers. |
+| 2 | BT | addAllowedFastMessageToQueue() always empty | FIXED | BEP6 `send_allowed_fast_for_torrent()` computes the canonical address/info-hash fast set, queues messages, records peer state, and flushes after handshake. |
+| 3 | BT | createFastIndexBitfield() | FIXED | `DefaultPieceStorage::get_missing_fast_pieces()` intersects the peer bitfield with local missing/unused pieces and the peer AllowedFast set before selection. |
 | 4 | Checksum | Adler32 streaming | Partial |
-| 5 | Cookie | Per-domain cookie limit | TODO |
+| 5 | Cookie | Per-domain cookie limit | FIXED | `CookieStorage` enforces the C++ 50-cookie domain limit, expires stale entries first, then replaces the least-recently-accessed cookie. |
 | 6 | Cookie | SQLite cookie parser | FIXED | `Sqlite3CookieParser` + Mozilla/Chromium schemas implemented in `http/sqlite_cookie_parser.rs` (rusqlite bundled); `CookieStorage::load_file` auto-detects SQLite magic vs Netscape |
 | 7 | Cookie | Duplicate Cookie/JarCookie structures | TODO |
 | 8 | Cookie | eraseConfidentialInfo() | TODO |
-| 9 | LPD | Multicast interface config | TODO |
+| 9 | LPD | Multicast interface config | Fixed |
 | 10 | WebSocket | Extra onBtCacheChanged event type | Present |
 | 11 | FileAllocation | Allocation progress events | FIXED |
 | 12 | aria2-next | ED2K/eDonkey protocol | Missing |
 | 13 | aria2-next | Peer rename | NOT Adopted |
 | 14 | aria2-next | --detach-share-only rename | NOT Adopted |
 | 15 | aria2-next | isChecksumVerificationPending() | Missing |
-| 16 | aria2-next | Hostname-based socket pooling | Missing |
+| 16 | aria2-next | Hostname-based socket pooling | Fixed | HTTP key includes scheme/host/port/proxy and resolver iterates all candidate addresses with fallback. |
 | 17 | DHT | Entry point DNS resolution | Partial |
 
 ---

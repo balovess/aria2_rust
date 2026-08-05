@@ -21,13 +21,22 @@ enum ParamPattern {
         step: u64,
         width: usize,
     },
-    /// [START-END[:STEP]] range syntax
+    /// Bracket `[START-END[:STEP]]` numeric range syntax.
     Bracket {
         start: u64,
         end: u64,
         step: u64,
         width: usize,
     },
+    /// [START-END[:STEP]] alphabetic range syntax.
+    AlphaBracket {
+        start: String,
+        end: String,
+        step: u64,
+        width: usize,
+    },
+    /// {CHOICE1,CHOICE2,...} choice expansion.
+    Choice { values: Vec<String> },
 }
 
 /// Parse a URI string to detect parameterized patterns.
@@ -62,22 +71,33 @@ fn find_param_patterns(uri: &str) -> Vec<(usize, ParamPattern)> {
         patterns.push((start, ParamPattern::Simple { value }));
     }
 
-    // Pattern 2: ${...} brace form
-    // Can be: ${N}, ${START-END}, or ${START-END:STEP}
+    // Pattern 2: {choice,choice} expansion.
+    let choice_re = Regex::new(r"\{([^{}]+,[^{}]+)\}").unwrap();
+    for cap in choice_re.captures_iter(uri) {
+        patterns.push((
+            cap.get(0).unwrap().start(),
+            ParamPattern::Choice {
+                values: cap[1].split(',').map(str::to_owned).collect(),
+            },
+        ));
+    }
+
+    // Pattern 3: ${...} numeric form.
     let braced_re = Regex::new(r"\$\{([^}]+)\}").unwrap();
     for cap in braced_re.captures_iter(uri) {
         let full_match = cap.get(0).unwrap();
         let inner = cap.get(1).unwrap().as_str();
 
-        if let Some(pattern) = parse_braced_pattern(inner) {
-            patterns.push((full_match.start(), pattern));
-        }
+        let pattern = match parse_braced_pattern(inner) {
+            Some(pattern) => pattern,
+            None => continue,
+        };
+        patterns.push((full_match.start(), pattern));
     }
 
-    // Pattern 3: [...] bracket form (range syntax)
-    // Must be [START-END] or [START-END:STEP]
-    // Need to be careful not to match IPv6 addresses or other bracket usages
-    let bracket_re = Regex::new(r"\[(\d+)-(\d+)(?::(\d+))?\]").unwrap();
+    // Pattern 4: [...] bracket form (numeric or alphabetic range syntax).
+    // Need to be careful not to match IPv6 addresses or other bracket usages.
+    let bracket_re = Regex::new(r"\[([A-Za-z0-9]+)-([A-Za-z0-9]+)(?::([0-9]+))?\]").unwrap();
     for cap in bracket_re.captures_iter(uri) {
         let full_match = cap.get(0).unwrap();
 
@@ -90,29 +110,35 @@ fn find_param_patterns(uri: &str) -> Vec<(usize, ParamPattern)> {
         let start_str = cap.get(1).unwrap().as_str();
         let end_str = cap.get(2).unwrap().as_str();
         let step_str = cap.get(3).map(|m| m.as_str());
+        let step = step_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+        if step == 0 {
+            continue;
+        }
 
         if let (Ok(start), Ok(end)) = (start_str.parse::<u64>(), end_str.parse::<u64>()) {
-            let step = step_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
-            if step == 0 {
-                continue; // Invalid step
-            }
-
-            // Determine width from the larger number's digit count
-            let width = max(start_str.len(), end_str.len());
-
             patterns.push((
                 full_match.start(),
                 ParamPattern::Bracket {
                     start,
                     end,
                     step,
-                    width,
+                    width: max(start_str.len(), end_str.len()),
+                },
+            ));
+        } else if is_alpha_range(start_str, end_str) {
+            patterns.push((
+                full_match.start(),
+                ParamPattern::AlphaBracket {
+                    start: start_str.to_string(),
+                    end: end_str.to_string(),
+                    step,
+                    width: start_str.len(),
                 },
             ));
         }
     }
 
-    // Sort by position to maintain left-to-right order
+    // Sort by position to maintain left-to-right order.
     patterns.sort_by_key(|(pos, _)| *pos);
     patterns
 }
@@ -174,6 +200,59 @@ fn parse_braced_pattern(inner: &str) -> Option<ParamPattern> {
     None
 }
 
+fn is_alpha_range(start: &str, end: &str) -> bool {
+    !start.is_empty()
+        && start.len() == end.len()
+        && ((start.bytes().all(|b| b.is_ascii_lowercase())
+            && end.bytes().all(|b| b.is_ascii_lowercase()))
+            || (start.bytes().all(|b| b.is_ascii_uppercase())
+                && end.bytes().all(|b| b.is_ascii_uppercase())))
+}
+
+fn alpha_value(value: &str) -> u32 {
+    value.bytes().fold(0, |acc, byte| {
+        acc * 26 + u32::from(byte.to_ascii_lowercase() - b'a' + 1)
+    })
+}
+
+fn alpha_string(mut value: u32, uppercase: bool, width: usize) -> String {
+    let mut bytes = Vec::new();
+    while value > 0 {
+        value -= 1;
+        bytes.push((b'a' + (value % 26) as u8) as char);
+        value /= 26;
+    }
+    while bytes.len() < width {
+        bytes.push('a');
+    }
+    bytes.reverse();
+    let result: String = bytes.into_iter().collect();
+    if uppercase {
+        result.to_ascii_uppercase()
+    } else {
+        result
+    }
+}
+
+fn generate_alpha_range(start: &str, end: &str, step: u64, width: usize) -> Vec<String> {
+    if step == 0 {
+        return Vec::new();
+    }
+    let start_value = alpha_value(start);
+    let end_value = alpha_value(end);
+    let uppercase = start.bytes().next().is_some_and(|b| b.is_ascii_uppercase());
+    let mut value = start_value;
+    let mut result = Vec::new();
+    while value <= end_value {
+        result.push(alpha_string(value, uppercase, width));
+        value = match value.checked_add(step as u32) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    result
+}
+
 /// Format a number with zero-padding to the specified width
 fn format_with_width(n: u64, width: usize) -> String {
     format!("{:0width$}", n, width = width)
@@ -199,6 +278,15 @@ fn expand_pattern(pattern: &ParamPattern) -> Vec<String> {
             step,
             width,
         } => generate_range(*start, *end, *step, *width),
+        ParamPattern::AlphaBracket {
+            start,
+            end,
+            step,
+            width,
+        } => generate_alpha_range(start, end, *step, *width),
+        ParamPattern::Choice { values } => {
+            values.iter().map(|value| value.trim().to_owned()).collect()
+        }
     }
 }
 
@@ -246,7 +334,8 @@ fn generate_range(start: u64, end: u64, step: u64, width: usize) -> Vec<String> 
 /// - **Simple `$num`**: Expands starting from 1, with the number of expansions determined
 ///   by the digit count (e.g., `$3` → 3 values: 1, 2, 3)
 /// - **Braced `${...}`**: Supports ranges and zero-padding
-/// - **Bracket `[...]`**: Range syntax with optional step
+/// - **Bracket `[...]`**: Numeric or alphabetic range with optional step
+/// - **Choice `{a,b}`**: Expands each choice, with Cartesian product across multiple patterns
 /// - **Multiple patterns**: Generates Cartesian product of all pattern combinations
 ///
 /// If no patterns are detected or if parsing fails, returns a vector containing only the original URI.
@@ -283,43 +372,47 @@ pub fn expand_parameterized_uri(uri: &str) -> Vec<String> {
         return vec![uri.to_string()];
     }
 
-    // Generate Cartesian product of all expansions
-    cartesian_product_replace(uri, &patterns, &all_expansions)
+    let mut template = uri.to_string();
+    for (index, (position, pattern)) in patterns.iter().enumerate().rev() {
+        let start = *position;
+        let end = start + pattern_source_len(&uri[start..], pattern);
+        template.replace_range(start..end, &format!("\u{1f}{index}\u{1f}"));
+    }
+    cartesian_product_replace(&template, &all_expansions)
 }
 
-/// Replace all patterns in URI with combinations from expansions (Cartesian product)
-fn cartesian_product_replace(
-    uri: &str,
-    _patterns: &[(usize, ParamPattern)],
-    expansions: &[Vec<String>],
-) -> Vec<String> {
-    if expansions.is_empty() {
-        return vec![uri.to_string()];
-    }
-
-    // Start with the base URI
+/// Replace marked pattern occurrences with the Cartesian product of expansions.
+fn cartesian_product_replace(uri: &str, expansions: &[Vec<String>]) -> Vec<String> {
     let mut results = vec![uri.to_string()];
-
-    // For each expansion set, replace the corresponding pattern
-    // We need to track which pattern we're replacing
-    for expansion_set in expansions {
-        let mut new_results = Vec::new();
-
+    for (index, expansion_set) in expansions.iter().enumerate() {
+        let marker = format!("\u{1f}{index}\u{1f}");
+        let mut next = Vec::with_capacity(results.len() * expansion_set.len());
         for result in &results {
             for value in expansion_set {
-                // Find and replace the next unresolved pattern
-                let replaced = replace_next_pattern(result, value);
-                new_results.push(replaced);
+                next.push(result.replacen(&marker, value, 1));
             }
         }
-
-        results = new_results;
+        results = next;
     }
-
     results
 }
 
-/// Replace the first (leftmost) unresolved parameterized pattern with the given value
+fn pattern_source_len(source: &str, pattern: &ParamPattern) -> usize {
+    match pattern {
+        ParamPattern::Simple { .. } => {
+            1 + source[1..].bytes().take_while(u8::is_ascii_digit).count()
+        }
+        ParamPattern::Braced { .. } | ParamPattern::Choice { .. } => {
+            source.find('}').map_or(0, |end| end + 1)
+        }
+        ParamPattern::Bracket { .. } | ParamPattern::AlphaBracket { .. } => {
+            source.find(']').map_or(0, |end| end + 1)
+        }
+    }
+}
+
+/// Replace the first (leftmost) unresolved parameterized pattern with the given value.
+#[allow(dead_code)]
 fn replace_next_pattern(uri: &str, replacement: &str) -> String {
     // Try to replace $N pattern first (simple)
     if let Some(pos) = find_simple_pattern_pos(uri) {
@@ -334,8 +427,8 @@ fn replace_next_pattern(uri: &str, replacement: &str) -> String {
         return format!("{}{}{}", before, replacement, after);
     }
 
-    // Try to replace ${...} pattern
-    if let Some(pos) = uri.find("${")
+    // Try to replace a `${...}` or `{...}` pattern.
+    if let Some(pos) = uri.find("${").or_else(|| uri.find('{'))
         && let Some(end) = uri[pos..].find('}')
     {
         let end_pos = pos + end + 1;
@@ -358,7 +451,8 @@ fn replace_next_pattern(uri: &str, replacement: &str) -> String {
     uri.to_string()
 }
 
-/// Find the position of a simple $N pattern (not preceded by {)
+/// Find the position of a simple $N pattern (not preceded by `{`).
+#[allow(dead_code)]
 fn find_simple_pattern_pos(uri: &str) -> Option<usize> {
     // Note: regex crate does not support lookbehind, so we use manual filtering
     let re = Regex::new(r"\$(\d+)").unwrap();
@@ -375,13 +469,14 @@ fn find_simple_pattern_pos(uri: &str) -> Option<usize> {
     None
 }
 
-/// Find the position of a bracket pattern [N-M] that is NOT part of an IPv6 address
+/// Find the position of a bracket pattern `[N-M]` that is NOT part of an IPv6 address.
+#[allow(dead_code)]
 fn find_bracket_pattern_pos(uri: &str) -> Option<usize> {
-    let re = Regex::new(r"\[(\d+-\d+(?::\d+)?)\]").unwrap();
+    let re = Regex::new(r"\[[A-Za-z0-9]+-[A-Za-z0-9]+(?::[0-9]+)?\]").unwrap();
 
     for m in re.find_iter(uri) {
         let before = &uri[..m.start()];
-        // Skip if this looks like it could be part of an IPv6 address
+        // Skip if this looks like it could be part of an IPv6 address.
         if !before.ends_with(':') || !before.contains("::") {
             return Some(m.start());
         }

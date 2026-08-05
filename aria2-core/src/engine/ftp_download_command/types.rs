@@ -43,6 +43,9 @@ pub struct FtpDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for this download.
     pub(super) global_limiter: Option<RateLimiter>,
+    /// File allocation strategy selected by the request options.
+    pub(super) file_allocation: String,
+    pub(super) secure_falloc: bool,
 }
 
 impl FtpDownloadCommand {
@@ -134,6 +137,11 @@ impl FtpDownloadCommand {
             resolved_addresses: Vec::new(),
             dns_cache: None,
             global_limiter: None,
+            file_allocation: options
+                .file_allocation
+                .clone()
+                .unwrap_or_else(|| "prealloc".to_string()),
+            secure_falloc: options.secure_falloc,
         })
     }
 

@@ -127,7 +127,7 @@ impl Command for DownloadCommand {
         };
 
         let resume_helper = ResumeHelper::new(&self.output_path, true);
-        let resume_state = resume_helper.detect(total_length).await?;
+        let mut resume_state = resume_helper.detect(total_length).await?;
 
         // When resuming from a paused state, never short-circuit as "complete" --
         // the file on disk may be a preallocated sparse file that matches
@@ -137,7 +137,7 @@ impl Command for DownloadCommand {
         // ranges still need fetching.
         let was_paused = self.group.recover().is_paused_flag();
 
-        if resume_state.is_complete && !was_paused {
+        if resume_state.is_complete && !was_paused && !self.check_integrity {
             info!(
                 "File already exists completely, skipping download: {} ({} bytes)",
                 self.output_path.display(),
@@ -210,12 +210,20 @@ impl Command for DownloadCommand {
                         info!(gid, "Checking integrity of existing data against piece hashes");
                         let ok = ci_man::enqueue(&ci_man::shared(), gid, task).await?;
                         if !ok {
-                            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                                "Integrity check failed: existing file does not match piece hashes"
-                                    .to_string(),
-                            )));
+                            warn!(
+                                gid,
+                                "Integrity check failed; discarding resume state and re-downloading"
+                            );
+                            // C++ StreamCheckIntegrityEntry::onDownloadIncomplete()
+                            // sends the request back through allocation/download rather
+                            // than terminating the request. Do not reuse offsets derived
+                            // from data that failed validation.
+                            resume_state.should_resume = false;
+                            resume_state.start_offset = 0;
+                            resume_state.is_complete = false;
+                        } else {
+                            info!(gid, "Integrity check passed, proceeding with download");
                         }
-                        info!(gid, "Integrity check passed, proceeding with download");
                     }
                 }
             }
@@ -379,6 +387,10 @@ impl Command for DownloadCommand {
                     path = %self.output_path.display(),
                     "Checksum verified successfully"
                 );
+                {
+                    let group = self.group.recover();
+                    group.set_checksum_verified(true);
+                }
             }
             self.completed = true;
             let g = self.group.recover();

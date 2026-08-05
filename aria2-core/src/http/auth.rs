@@ -417,10 +417,11 @@ impl AuthConfigFactory {
 
     /// Resolve HTTP auth via Netrc / CLI-option chain (non-challenge mode).
     fn resolve_http_via_chain(&self, host: &str, opts: &AuthResolveOptions) -> Option<AuthConfig> {
-        // Netrc lookup with default fallback (unless disabled)
+        // HTTP auth intentionally ignores the .netrc `default` entry, matching
+        // C++ createHttpAuthResolver()->ignoreDefault().
         if !opts.no_netrc
             && let Some(ref netrc) = self.netrc
-            && let Some(entry) = netrc.find_with_fallback(host)
+            && let Some(entry) = netrc.find(host)
         {
             debug!(
                 "Resolved HTTP auth for {} from Netrc (user={})",
@@ -639,14 +640,13 @@ impl Default for AuthConfigFactory {
 pub fn erase_confidential_info(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
     for line in raw.lines() {
-        let lower = line.to_lowercase();
-        if lower.starts_with("authorization:") {
+        if line.len() >= 15 && line[..15].eq_ignore_ascii_case("authorization: ") {
             result.push_str("Authorization: <snip>\n");
-        } else if lower.starts_with("proxy-authorization:") {
+        } else if line.len() >= 21 && line[..21].eq_ignore_ascii_case("proxy-authorization: ") {
             result.push_str("Proxy-Authorization: <snip>\n");
-        } else if lower.starts_with("cookie:") {
+        } else if line.len() >= 8 && line[..8].eq_ignore_ascii_case("cookie: ") {
             result.push_str("Cookie: <snip>\n");
-        } else if lower.starts_with("set-cookie:") {
+        } else if line.len() >= 12 && line[..12].eq_ignore_ascii_case("set-cookie: ") {
             result.push_str("Set-Cookie: <snip>\n");
         } else {
             result.push_str(line);

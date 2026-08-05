@@ -59,15 +59,13 @@ pub struct ActiveConnection {
 }
 
 impl ActiveConnection {
-    /// Check if the connection is still valid for reuse.
+    /// Check whether the socket is a reusable live connection.
     ///
-    /// Uses a non-blocking probe via `peer_addr()` to catch clearly
-    /// broken sockets.  For a more thorough check (detecting half-closed
-    /// connections where the peer sent FIN), the caller should attempt
-    /// a `read_with_timeout` with a zero-length deadline after acquiring
-    /// from the pool — matching the C++ `socket->isReadable(0)` pattern.
+    /// The endpoint check catches locally detached sockets without consuming
+    /// application bytes. A full half-close probe remains the responsibility
+    /// of the next protocol read, just as C++ `isReadable(0)` is advisory.
     pub fn is_valid(&self) -> bool {
-        self.stream.peer_addr().is_ok()
+        self.stream.peer_addr().is_ok() && self.stream.local_addr().is_ok()
     }
 
     /// Update last used time

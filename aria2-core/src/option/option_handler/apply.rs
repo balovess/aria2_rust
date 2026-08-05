@@ -1,4 +1,4 @@
-﻿//! Applying options to download contexts.
+//! Applying options to download contexts.
 //!
 //! Implements [`OptionHandlerApply`] — a trait that extends [`OptionHandler`]
 //! with methods for loading config files, applying CLI argument overrides,
@@ -264,6 +264,9 @@ impl OptionHandlerApply for OptionHandler {
             secure_falloc: self.get("secure-falloc").as_bool().unwrap_or(false),
             check_integrity: self.get("check-integrity").as_bool().unwrap_or(false),
             // Metalink
+            metalink_version: get_str("metalink-version"),
+            metalink_language: get_str("metalink-language"),
+            metalink_os: get_str("metalink-os"),
             metalink_location: get_str("metalink-location"),
             metalink_preferred_protocol: get_str("metalink-preferred-protocol"),
             select_file: get_str("select-file"),

@@ -39,6 +39,8 @@ reqwest = { version = "0.13", default-features = false }
 tokio-tungstenite = "0.21"
 base64 = "0.21"
 hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
 rand = "0.8"
 tempfile = "3.8"
 rustls = { version = "0.23", default-features = false }

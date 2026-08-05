@@ -102,7 +102,12 @@ impl HttpConnectionManager {
     ) -> Result<ActiveConnection> {
         let host = Self::extract_host(url);
         let pool_key = ConnectionPoolKey {
-            target: host.clone(),
+            target: format!(
+                "{scheme}://{host}:{port}",
+                scheme = url.scheme(),
+                host = host,
+                port = url.port_or_known_default().unwrap_or(80)
+            ),
             proxy: proxy.cloned(),
         };
 
@@ -538,16 +543,28 @@ impl HttpConnectionManager {
         host: &str,
         pool_key: ConnectionPoolKey,
     ) -> Result<ActiveConnection> {
-        let addr = Self::resolve_address(url)?;
-
-        let stream = timeout(self.config.connect_timeout, TcpStream::connect(&addr))
-            .await
-            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("TCP connection failed ({}): {}", addr, e),
-                })
-            })?;
+        let addresses = Self::resolve_addresses(url).await?;
+        let mut last_error = None;
+        let mut connected = None;
+        for addr in &addresses {
+            match timeout(self.config.connect_timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => {
+                    connected = Some((stream, *addr));
+                    break;
+                }
+                Ok(Err(error)) => last_error = Some(format!("{}: {}", addr, error)),
+                Err(_) => last_error = Some(format!("{}: connection timeout", addr)),
+            }
+        }
+        let (stream, _addr) = connected.ok_or_else(|| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!(
+                    "TCP connection failed for {}: {}",
+                    host,
+                    last_error.unwrap_or_else(|| "no addresses".to_string())
+                ),
+            })
+        })?;
 
         if let Err(e) = stream.set_nodelay(true) {
             tracing::warn!("Failed to set nodelay: {}", e);
@@ -587,20 +604,19 @@ impl HttpConnectionManager {
         Ok(conn)
     }
 
-    /// Resolve URL to SocketAddr
-    fn resolve_address(url: &Url) -> Result<SocketAddr> {
+    /// Resolve a URL to all currently available socket addresses.
+    async fn resolve_addresses(url: &Url) -> Result<Vec<SocketAddr>> {
         let host = url
             .host_str()
             .ok_or_else(|| Aria2Error::Parse("URL missing hostname".to_string()))?;
-
         let port = url
             .port_or_known_default()
             .ok_or_else(|| Aria2Error::Parse("Unable to determine port number".to_string()))?;
-
-        let addr_str = format!("{}:{}", host, port);
-        addr_str
-            .parse::<SocketAddr>()
-            .map_err(|e| Aria2Error::Parse(format!("Failed to resolve address: {}", e)))
+        let host_port = format!("{}:{}", host, port);
+        tokio::net::lookup_host(&host_port)
+            .await
+            .map(|addresses| addresses.collect())
+            .map_err(|error| Aria2Error::Parse(format!("Failed to resolve address: {}", error)))
     }
 
     /// Enforce per-key idle limit by evicting oldest (front of deque).

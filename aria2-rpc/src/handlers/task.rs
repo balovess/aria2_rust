@@ -1183,6 +1183,9 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         user_agent: get_str("user-agent"),
         referer: get_str("referer"),
         // Metalink
+        metalink_version: get_str("metalink-version"),
+        metalink_language: get_str("metalink-language"),
+        metalink_os: get_str("metalink-os"),
         metalink_location: get_str("metalink-location"),
         metalink_preferred_protocol: get_str("metalink-preferred-protocol"),
         select_file: get_str("select-file"),
