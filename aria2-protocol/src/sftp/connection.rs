@@ -17,12 +17,49 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+use md5::Md5;
 use russh::client;
 use russh::keys;
+use russh::keys::ssh_key::HashAlg;
+use sha1::Digest as Sha1Digest;
+use sha1::Sha1;
 
 // Re-export packet constants for test access and internal use
 #[cfg(test)]
 use crate::sftp::packet::{SSH_FXP_INIT, SSH_FXP_VERSION};
+
+fn matches_fingerprint(key: &russh::keys::ssh_key::PublicKey, expected: &str) -> bool {
+    let Some((algorithm, digest)) = expected.split_once('=') else {
+        return key.fingerprint(HashAlg::Sha256).to_string() == expected;
+    };
+    let Ok(bytes) = key.to_bytes() else {
+        return false;
+    };
+
+    let algorithm = algorithm.to_ascii_lowercase();
+    let digest = digest.trim();
+    match algorithm.as_str() {
+        "md5" => hex::encode(Md5::digest(&bytes)).eq_ignore_ascii_case(&digest.replace(':', "")),
+        "sha-1" | "sha1" => {
+            hex::encode(Sha1::digest(&bytes)).eq_ignore_ascii_case(&digest.replace(':', ""))
+        }
+        "sha-256" | "sha256" => {
+            let actual = key.fingerprint(HashAlg::Sha256).to_string();
+            actual.eq_ignore_ascii_case(digest)
+                || actual
+                    .strip_prefix("SHA256:")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(digest))
+        }
+        "sha-512" | "sha512" => {
+            let actual = key.fingerprint(HashAlg::Sha512).to_string();
+            actual.eq_ignore_ascii_case(digest)
+                || actual
+                    .strip_prefix("SHA512:")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(digest))
+        }
+        _ => false,
+    }
+}
 
 /// Host key verification modes for SSH connections
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -67,6 +104,8 @@ pub struct SshOptions {
     pub read_timeout: Duration,
     /// Host key verification mode
     pub host_key_mode: HostKeyCheckingMode,
+    /// Expected fingerprint in `hashType=digest` form.
+    pub host_key_fingerprint: Option<String>,
     /// Compression setting (not all servers support this)
     pub compression: bool,
     /// Keep-alive interval (None to disable)
@@ -87,6 +126,7 @@ impl Default for SshOptions {
             connect_timeout: Duration::from_secs(15),
             read_timeout: Duration::from_secs(30),
             host_key_mode: HostKeyCheckingMode::default(),
+            host_key_fingerprint: None,
             compression: false,
             keepalive_interval: Some(Duration::from_secs(60)),
             preferred_ciphers: Vec::new(),
@@ -126,6 +166,12 @@ impl SshOptions {
     /// Set a passphrase for an encrypted private key
     pub fn with_passphrase(mut self, passphrase: &str) -> Self {
         self.private_key_passphrase = Some(passphrase.to_string());
+        self
+    }
+
+    /// Set the expected host-key fingerprint.
+    pub fn with_host_key_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.host_key_fingerprint = Some(fingerprint.into());
         self
     }
 
@@ -231,8 +277,18 @@ impl client::Handler for SshClientHandler {
         _server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         let mode = self.state.host_key_mode.clone();
+        let expected = self.state.options.host_key_fingerprint.clone();
+        let server_key = _server_public_key.clone();
         async move {
             debug!("[SFTP] Checking server key (mode={})", mode);
+            if let Some(expected) = expected {
+                if !matches_fingerprint(&server_key, &expected) {
+                    return Err(SshError::Handshake {
+                        message: format!("SSH host-key fingerprint mismatch: expected {expected}"),
+                    });
+                }
+                return Ok(true);
+            }
 
             match mode {
                 HostKeyCheckingMode::Strict => {

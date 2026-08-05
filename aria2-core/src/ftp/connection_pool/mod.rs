@@ -294,6 +294,13 @@ pub struct FtpConnectionPool {
 }
 
 impl FtpConnectionPool {
+    /// Remove stale idle connections and return the number removed.
+    pub async fn cleanup_stale_count(&self) -> usize {
+        let before = self.size().await;
+        self.cleanup_stale().await;
+        before.saturating_sub(self.size().await)
+    }
+
     /// Create a new connection pool with default configuration
     pub fn new(max_connections: usize) -> Self {
         let config = PoolConfig {

@@ -149,6 +149,8 @@ impl MetalinkDownloadCommand {
     /// This is the Rust equivalent of C++ `Metalink2RequestGroup::createRequestGroup()`
     /// which creates one `RequestGroup` per `MetalinkEntry`. Each command
     /// downloads exactly one file from the Metalink using its own mirror list.
+    /// Torrent metaurls are retained in `FileDownloadInfo` for the execution
+    /// fallback when no direct mirror succeeds.
     ///
     /// # Arguments
     ///
@@ -159,8 +161,8 @@ impl MetalinkDownloadCommand {
     ///
     /// # Returns
     ///
-    /// A vector of `MetalinkFileInfo`, one per file with URLs in the Metalink.
-    /// Files with no download URLs are skipped.
+    /// A vector of `MetalinkFileInfo`, one per file with HTTP/FTP resources or
+    /// a BitTorrent metaurl. Files with no supported resource are skipped.
     ///
     /// # Example
     ///
@@ -199,11 +201,14 @@ impl MetalinkDownloadCommand {
         let mut commands = Vec::with_capacity(doc.files.len());
 
         for (i, file) in doc.files.iter().enumerate() {
-            if file.urls.is_empty() {
+            let has_torrent_metaurl = file.meta_urls.iter().any(|metaurl| {
+                metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+            });
+            if file.urls.is_empty() && !has_torrent_metaurl {
                 tracing::debug!(
                     index = i,
                     name = %file.name,
-                    "Skipping Metalink file with no URLs"
+                    "Skipping Metalink file with no downloadable resources"
                 );
                 continue;
             }
@@ -216,7 +221,11 @@ impl MetalinkDownloadCommand {
                 .iter()
                 .map(|u| (*u).clone())
                 .collect();
-            let urls: Vec<String> = sorted_urls.iter().map(|u| u.url.clone()).collect();
+            let urls: Vec<String> = sorted_urls
+                .iter()
+                .filter(|u| u.is_non_p2p())
+                .map(|u| u.url.clone())
+                .collect();
             let group = RequestGroup::new(gid, urls, options.clone());
 
             let file_info = FileDownloadInfo {
@@ -356,6 +365,51 @@ impl MetalinkDownloadCommand {
             },
             file_index: 0,
         }])
+    }
+
+    /// Create a manager-owned Metalink command for one parsed file entry.
+    #[cfg(feature = "metalink")]
+    pub(crate) fn new_with_group_source(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        metalink_bytes: &[u8],
+        file_index: usize,
+        options: &DownloadOptions,
+    ) -> Result<Self> {
+        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
+            .map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {e}")))
+        })?;
+        let file = doc.files.get(file_index).ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::Config(
+                "Metalink file index out of range".to_string(),
+            ))
+        })?;
+        let dir = options.dir.as_deref().unwrap_or(".");
+        let path = std::path::PathBuf::from(dir).join(&file.name);
+        let sorted_urls: Vec<UrlEntry> = file.get_sorted_urls().into_iter().cloned().collect();
+        let file_info = FileDownloadInfo {
+            expected_size: file.size,
+            hash_entry: file.strongest_hash().cloned(),
+            pieces: file.pieces.clone(),
+            torrent_metaurls: file
+                .meta_urls
+                .iter()
+                .filter(|m| m.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent)
+                .cloned()
+                .collect(),
+            sorted_urls,
+        };
+        Ok(Self {
+            group,
+            client: build_http_client()?,
+            output_path: path,
+            started: false,
+            completed: false,
+            completed_bytes: 0,
+            metalink_data: Vec::new(),
+            file_info: Some(file_info),
+            global_limiter: None,
+        })
     }
 
     /// Get the output path for this download.

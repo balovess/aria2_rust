@@ -155,6 +155,11 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert("no-proxy".to_string(), v.clone());
     }
 
+    // --- SSH / SFTP ---
+    if let Some(ref v) = opts.ssh_host_key_md {
+        map.insert("ssh-host-key-md".to_string(), v.clone());
+    }
+
     // --- HTTP headers ---
     if !opts.header.is_empty() {
         map.insert("header".to_string(), opts.header.join(","));

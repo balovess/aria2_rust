@@ -21,11 +21,16 @@
 //! | `generate_from_bytes()` | `generate(groups, binaryStream, option, baseUri)` |
 //! | `create_request_groups()` | `createRequestGroup(groups, entries, option)` |
 
+use std::sync::{Arc, RwLock};
+
 use tracing::{debug, info};
 
 use crate::engine::metalink_download_command::MetalinkDownloadCommand;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use crate::engine::metalink_request_graph::MetalinkRequestGraph;
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadOptions;
+use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::metalink::parser::{
     MetalinkDocument, MetalinkFile, group_entry_by_metaurl_name,
 };
@@ -152,6 +157,187 @@ impl MetalinkToRequestGroup {
     /// following the full C++ algorithm.
     ///
     /// Mirrors C++ `Metalink2RequestGroup::generate(groups, binaryStream, option, baseUri)`.
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    pub fn create_torrent_graph(
+        &self,
+        file: &MetalinkFile,
+        options: &DownloadOptions,
+        metadata_gid: crate::request::request_group::GroupId,
+        payload_gid: crate::request::request_group::GroupId,
+    ) -> Result<MetalinkRequestGraph> {
+        let metadata_uri = file
+            .meta_urls
+            .iter()
+            .find(|metaurl| {
+                metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+                    && !metaurl.url.is_empty()
+            })
+            .map(|metaurl| metaurl.url.as_str())
+            .ok_or_else(|| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(
+                    "Metalink file has no torrent metaurl".to_string(),
+                ))
+            })?;
+
+        MetalinkRequestGraph::new(metadata_uri, &file.name, options, metadata_gid, payload_gid)
+    }
+
+    /// Return whether a selected file mixes direct resources with torrent metaurls.
+    #[cfg(feature = "metalink")]
+    pub fn has_mixed_resource_torrent_entries(
+        &self,
+        metalink_data: &[u8],
+        options: &DownloadOptions,
+    ) -> Result<bool> {
+        let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
+            .map_err(Aria2Error::MetalinkParse)?;
+        let version = if self.version.is_empty() {
+            options.metalink_version.as_deref().unwrap_or("")
+        } else {
+            &self.version
+        };
+        let language = if self.language.is_empty() {
+            options.metalink_language.as_deref().unwrap_or("")
+        } else {
+            &self.language
+        };
+        let os = if self.os.is_empty() {
+            options.metalink_os.as_deref().unwrap_or("")
+        } else {
+            &self.os
+        };
+        Ok(doc
+            .query_entries(version, language, os)
+            .into_iter()
+            .any(|index| {
+                let file = &doc.files[index];
+                let has_direct = !file
+                    .get_sorted_urls()
+                    .into_iter()
+                    .filter(|url| url.is_non_p2p())
+                    .collect::<Vec<_>>()
+                    .is_empty();
+                let has_torrent = file.meta_urls.iter().any(|metaurl| {
+                    metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+                });
+                has_direct && has_torrent
+            }))
+    }
+
+    /// Build manager-owned groups for Metalink files that contain direct resources.
+    #[cfg(feature = "metalink")]
+    pub fn create_resource_groups_from_bytes(
+        &self,
+        metalink_data: &[u8],
+        options: &DownloadOptions,
+        gids: &mut impl Iterator<Item = crate::request::request_group::GroupId>,
+    ) -> Result<Vec<Arc<RwLock<crate::request::request_group::RequestGroup>>>> {
+        let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
+            .map_err(Aria2Error::MetalinkParse)?;
+        let version = if self.version.is_empty() {
+            options.metalink_version.as_deref().unwrap_or("")
+        } else {
+            &self.version
+        };
+        let language = if self.language.is_empty() {
+            options.metalink_language.as_deref().unwrap_or("")
+        } else {
+            &self.language
+        };
+        let os = if self.os.is_empty() {
+            options.metalink_os.as_deref().unwrap_or("")
+        } else {
+            &self.os
+        };
+        let mut groups = Vec::new();
+        for index in doc.query_entries(version, language, os) {
+            let Some(file) = doc.files.get(index) else {
+                continue;
+            };
+            let urls: Vec<String> = file
+                .get_sorted_urls()
+                .into_iter()
+                .filter(|url| url.is_non_p2p())
+                .map(|url| url.url.clone())
+                .collect();
+            if urls.is_empty() {
+                // Torrent-only entries are handled by the torrent graph path.
+                continue;
+            }
+            let gid = gids.next().ok_or_else(|| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(
+                    "Metalink resource GID allocator exhausted".to_string(),
+                ))
+            })?;
+            let group = Arc::new(RwLock::new(
+                crate::request::request_group::RequestGroup::new(gid, urls, options.clone()),
+            ));
+            group
+                .recover()
+                .set_metalink_source(metalink_data.to_vec(), index);
+            group.recover().set_output_name(file.name.clone());
+            groups.push(group);
+        }
+        Ok(groups)
+    }
+
+    /// Build one metadata/payload graph for every filtered torrent-metaurl file.
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    pub fn create_torrent_graphs_from_bytes(
+        &self,
+        metalink_data: &[u8],
+        options: &DownloadOptions,
+        gids: &mut impl Iterator<Item = crate::request::request_group::GroupId>,
+    ) -> Result<Vec<MetalinkRequestGraph>> {
+        let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
+            .map_err(Aria2Error::MetalinkParse)?;
+        let version = if self.version.is_empty() {
+            options.metalink_version.as_deref().unwrap_or("")
+        } else {
+            self.version.as_str()
+        };
+        let language = if self.language.is_empty() {
+            options.metalink_language.as_deref().unwrap_or("")
+        } else {
+            self.language.as_str()
+        };
+        let os = if self.os.is_empty() {
+            options.metalink_os.as_deref().unwrap_or("")
+        } else {
+            self.os.as_str()
+        };
+        let indices = doc.query_entries(version, language, os);
+        let files: Vec<MetalinkFile> = indices
+            .into_iter()
+            .filter_map(|index| doc.files.get(index).cloned())
+            .filter(|file| {
+                !file.meta_urls.is_empty()
+                    && file.meta_urls.iter().all(|metaurl| {
+                        metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+                    })
+            })
+            .collect();
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        files
+            .into_iter()
+            .map(|file| {
+                let metadata_gid = gids.next().ok_or_else(|| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(
+                        "Metalink graph GID allocator exhausted".to_string(),
+                    ))
+                })?;
+                let payload_gid = gids.next().ok_or_else(|| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(
+                        "Metalink graph GID allocator exhausted".to_string(),
+                    ))
+                })?;
+                self.create_torrent_graph(&file, options, metadata_gid, payload_gid)
+            })
+            .collect()
+    }
+
     pub fn generate_from_bytes(
         &self,
         metalink_data: &[u8],
@@ -380,6 +566,8 @@ impl Default for MetalinkToRequestGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::request_group::DownloadOptions;
+    use crate::util::rwlock_ext::RwLockRecover;
 
     #[test]
     fn options_location_is_applied_case_insensitively() {
@@ -476,6 +664,74 @@ mod tests {
             .generate_from_bytes(&make_multi_file_metalink(), &options)
             .unwrap();
         assert!(commands.is_empty());
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn create_torrent_graphs_allocates_metadata_and_payload_pairs() {
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="one.bin"><metaurl mediatype="torrent">https://example.test/one.torrent</metaurl></file><file name="two.bin"><metaurl mediatype="torrent">https://example.test/two.torrent</metaurl></file></metalink>"#;
+        let converter = MetalinkToRequestGroup::new();
+        let options = DownloadOptions::default();
+        let mut gids = [
+            crate::request::request_group::GroupId::new(40),
+            crate::request::request_group::GroupId::new(41),
+            crate::request::request_group::GroupId::new(42),
+            crate::request::request_group::GroupId::new(43),
+        ]
+        .into_iter();
+        let graphs = converter
+            .create_torrent_graphs_from_bytes(data, &options, &mut gids)
+            .expect("torrent-only Metalink should create graphs");
+        assert_eq!(graphs.len(), 2);
+        assert_eq!(
+            graphs[0].metadata.recover().gid(),
+            crate::request::request_group::GroupId::new(40)
+        );
+        assert_eq!(
+            graphs[0].payload.recover().gid(),
+            crate::request::request_group::GroupId::new(41)
+        );
+        assert_eq!(
+            graphs[1].metadata.recover().gid(),
+            crate::request::request_group::GroupId::new(42)
+        );
+        assert_eq!(
+            graphs[1].payload.recover().gid(),
+            crate::request::request_group::GroupId::new(43)
+        );
+    }
+
+    #[cfg(feature = "metalink")]
+    #[test]
+    fn mixed_resource_group_keeps_one_fallback_source() {
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://example.test/payload.bin</url><metaurl mediatype="torrent">https://example.test/payload.torrent</metaurl></file></metalink>"#;
+        let converter = MetalinkToRequestGroup::new();
+        let mut gids = [crate::request::request_group::GroupId::new(90)].into_iter();
+        let groups = converter
+            .create_resource_groups_from_bytes(data, &DownloadOptions::default(), &mut gids)
+            .expect("mixed Metalink should create one fallback group");
+        assert_eq!(groups.len(), 1);
+        let source = groups[0]
+            .recover()
+            .metalink_source()
+            .expect("fallback source should be attached");
+        assert_eq!(source.1, 0);
+        assert_eq!(
+            groups[0].recover().uris(),
+            &["https://example.test/payload.bin"]
+        );
+    }
+
+    #[cfg(feature = "metalink")]
+    #[test]
+    fn mixed_resource_and_torrent_entry_is_detected() {
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://example.test/payload.bin</url><metaurl mediatype="torrent">https://example.test/payload.torrent</metaurl></file></metalink>"#;
+        let converter = MetalinkToRequestGroup::new();
+        assert!(
+            converter
+                .has_mixed_resource_torrent_entries(data, &DownloadOptions::default())
+                .expect("Metalink should parse")
+        );
     }
 
     #[test]

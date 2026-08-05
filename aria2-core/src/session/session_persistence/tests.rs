@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine::resume_data::ResumeData;
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{DownloadOptions, GroupId, MetadataInfo, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Helper to create a temporary directory for tests
@@ -100,6 +100,31 @@ async fn test_session_save_creates_files() {
 }
 
 #[tokio::test]
+async fn test_generated_children_are_excluded_from_json_persistence() {
+    let session_dir = create_test_session_dir();
+    let persistence = SessionPersistence::new(&session_dir);
+
+    let parent = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2001),
+        vec!["http://example.com/metadata.torrent".to_string()],
+        DownloadOptions::default(),
+    )));
+    let child = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2002),
+        vec!["http://example.com/payload.bin".to_string()],
+        DownloadOptions::default(),
+    )));
+    child.recover().set_belongs_to_gid(GroupId::new(2001));
+
+    let saved = persistence.save_state(&[parent, child]).await.unwrap();
+    assert_eq!(saved, 1);
+    assert!(session_dir.join("00000000000007d1.aria2").exists());
+    assert!(!session_dir.join("00000000000007d2.aria2").exists());
+
+    let _ = fs::remove_dir_all(&session_dir);
+}
+
+#[tokio::test]
 async fn test_session_load_restores_commands() {
     let session_dir = create_test_session_dir();
     let mut persistence = SessionPersistence::new(&session_dir);
@@ -169,6 +194,7 @@ async fn test_session_save_empty_no_error() {
 #[tokio::test]
 async fn test_session_corrupted_file_skipped_gracefully() {
     let session_dir = create_test_session_dir();
+    fs::create_dir_all(&session_dir).expect("Session directory should exist");
 
     // Create a corrupted .aria2 file
     let corrupt_file = session_dir.join("corrupt-gid.aria2");
@@ -177,7 +203,7 @@ async fn test_session_corrupted_file_skipped_gracefully() {
     // Also create a valid .aria2 file
     let valid_file = session_dir.join("valid-gid.aria2");
     let valid_resume_data = ResumeData {
-        gid: "valid-gid-12345".to_string(),
+        gid: "abc123".to_string(),
         uris: vec![crate::engine::resume_data::UriState {
             uri: "http://example.com/valid-file.bin".to_string(),
             tried: true,
@@ -201,6 +227,8 @@ async fn test_session_corrupted_file_skipped_gracefully() {
         resume_offset: Some(512),
         bt_info_hash: None,
         bt_saved_metadata_path: None,
+        metalink_data: None,
+        metalink_file_index: None,
     };
     valid_resume_data
         .save_to_file(&valid_file)
@@ -223,6 +251,81 @@ async fn test_session_corrupted_file_skipped_gracefully() {
     assert_eq!(loaded_groups.len(), 1, "Should have 1 restored group");
 
     // Clean up
+    let _ = fs::remove_dir_all(&session_dir);
+}
+
+#[tokio::test]
+async fn test_session_load_rejects_duplicate_gid() {
+    let session_dir = create_test_session_dir();
+    let first = ResumeData {
+        gid: "2a".to_string(),
+        uris: vec![crate::engine::resume_data::UriState {
+            uri: "http://example.com/first.bin".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let second = ResumeData {
+        gid: "2a".to_string(),
+        uris: vec![crate::engine::resume_data::UriState {
+            uri: "http://example.com/second.bin".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    first
+        .save_to_file(&session_dir.join("first.aria2"))
+        .unwrap();
+    second
+        .save_to_file(&session_dir.join("second.aria2"))
+        .unwrap();
+
+    let mut persistence = SessionPersistence::new(&session_dir);
+    let mut groups = Vec::new();
+    assert_eq!(persistence.load_state(&mut groups).await.unwrap(), 1);
+    assert_eq!(groups[0].recover().gid(), GroupId::new(0x2a));
+
+    let _ = fs::remove_dir_all(&session_dir);
+}
+
+#[tokio::test]
+async fn test_metadata_provenance_roundtrip_via_json_persistence() {
+    let session_dir = create_test_session_dir();
+    let persistence = SessionPersistence::new(&session_dir);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(0xabc),
+        vec!["bt://payload".to_string()],
+        DownloadOptions::default(),
+    )));
+    group.recover().set_metadata_info(
+        MetadataInfo::new(GroupId::new(0xabc), "https://example.test/meta.torrent")
+            .with_metadata_path(session_dir.join("payload.torrent").to_string_lossy()),
+    );
+
+    assert_eq!(
+        persistence.save_state(&[Arc::clone(&group)]).await.unwrap(),
+        1
+    );
+    let mut restored = Vec::new();
+    assert_eq!(
+        SessionPersistence::new(&session_dir)
+            .load_state(&mut restored)
+            .await
+            .unwrap(),
+        1
+    );
+    let restored_info = restored[0].recover().metadata_info();
+    assert!(restored_info.is_some());
+    assert_eq!(
+        restored_info.as_ref().and_then(|info| info.metadata_path()),
+        Some(
+            session_dir
+                .join("payload.torrent")
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
+
     let _ = fs::remove_dir_all(&session_dir);
 }
 

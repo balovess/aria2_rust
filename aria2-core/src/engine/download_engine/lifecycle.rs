@@ -47,6 +47,9 @@ impl DownloadEngine {
             // `FileAllocationMan` lives on the DownloadEngine singleton.
             file_alloc_man: super::super::super::filesystem::file_allocation_man::shared(),
             keep_alive: self.keep_alive,
+            server_stat_man: super::super::super::selector::server_stat_man::ServerStatMan::shared(
+            )
+            .clone(),
             global_limiter: self.global_limiter.clone(),
         };
 

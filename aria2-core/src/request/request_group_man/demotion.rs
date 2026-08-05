@@ -159,6 +159,9 @@ impl super::RequestGroupMan {
 
             {
                 let mut g = group.recover_mut();
+                if was_restart_requested {
+                    g.apply_pending_options();
+                }
                 if matches!(g.status(), DownloadStatus::Paused) {
                     if g.is_restart_requested() {
                         // C++ `releaseRuntimeResource()` clears the pause
@@ -371,7 +374,8 @@ impl super::RequestGroupMan {
             let g = group.recover();
             let dep_guard = g.dependency.recover();
             if let Some(ref dep) = *dep_guard {
-                // Check if this is a CompletionDependency waiting on our GID.
+                // Resolve generic completion dependencies when the
+                // prerequisite group reaches stopped/completed state.
                 if let Some(completion_dep) =
                     dep.as_any()
                         .downcast_ref::<crate::request::request_group::CompletionDependency>()
@@ -382,6 +386,22 @@ impl super::RequestGroupMan {
                         gid = g.gid().value(),
                         depends_on = completed_gid.value(),
                         "Resolved completion dependency"
+                    );
+                }
+
+                #[cfg(feature = "bittorrent")]
+                if let Some(bt_dep) = dep
+                    .as_any()
+                    .downcast_ref::<crate::request::request_group::BtDependency>()
+                    && bt_dep.depends_on_gid() == completed_gid
+                    && let Some(metadata_path) = bt_dep.metadata_path()
+                    && let Err(error) = bt_dep.resolve_metadata_file(metadata_path)
+                {
+                    warn!(
+                        gid = g.gid().value(),
+                        depends_on = completed_gid.value(),
+                        error = %error,
+                        "Failed to resolve torrent metadata dependency"
                     );
                 }
             }

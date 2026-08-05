@@ -394,6 +394,8 @@ pub struct DownloadOptions {
     pub ftp_user: Option<String>,
     /// FTP authentication password. Maps to C++ `PREF_FTP_PASSWD`.
     pub ftp_passwd: Option<String>,
+    /// SSH host-key fingerprint in aria2's `hashType=digest` format.
+    pub ssh_host_key_md: Option<String>,
     /// Whether to disable Netrc lookups. Maps to C++ `PREF_NO_NETRC`.
     pub no_netrc: bool,
     /// Path to the .netrc file for credential lookup.
@@ -519,6 +521,7 @@ impl Default for DownloadOptions {
             http_passwd: None,
             ftp_user: None,
             ftp_passwd: None,
+            ssh_host_key_md: None,
             no_netrc: false,
             netrc_path: None,
             // Conditional GET

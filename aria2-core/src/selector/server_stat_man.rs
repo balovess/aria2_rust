@@ -163,6 +163,27 @@ impl ServerStatMan {
         map.len()
     }
 
+    /// Remove statistics that have not been updated within `max_age`.
+    /// This mirrors aria2_original `removeStaleServerStat` and prevents
+    /// long-running RPC processes from retaining obsolete mirror entries.
+    pub fn remove_stale(&self, max_age: std::time::Duration) -> usize {
+        let now = std::time::SystemTime::now();
+        let mut map = self.stats.recover_mut();
+        let before = map.len();
+        map.retain(|_, stat| {
+            let updated = stat.get_last_updated();
+            if updated == 0 {
+                return false;
+            }
+            let timestamp =
+                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(updated));
+            timestamp
+                .and_then(|time| now.duration_since(time).ok())
+                .is_none_or(|age| age <= max_age)
+        });
+        before.saturating_sub(map.len())
+    }
+
     pub fn hosts(&self) -> Vec<String> {
         let map = self.stats.recover();
         let mut hosts: Vec<String> = map.keys().map(|(h, _)| h.clone()).collect();
@@ -466,6 +487,23 @@ mod tests {
     // ======================================================================
     // Tests for mark_failure
     // ======================================================================
+
+    #[test]
+    fn test_remove_stale_removes_never_updated_and_old_entries() {
+        let man = ServerStatMan::new();
+        man.get_or_create_with_protocol("never.example", "http");
+        let recent = man.get_or_create_with_protocol("recent.example", "http");
+        recent.update_speed(1000, false);
+        assert_eq!(
+            man.remove_stale(std::time::Duration::from_secs(24 * 60 * 60)),
+            1
+        );
+        assert!(man.find_stat_by_protocol("never.example", "http").is_none());
+        assert!(
+            man.find_stat_by_protocol("recent.example", "http")
+                .is_some()
+        );
+    }
 
     #[test]
     fn test_mark_failure_updates_stats() {

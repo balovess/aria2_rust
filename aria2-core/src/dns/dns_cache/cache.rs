@@ -269,6 +269,13 @@ impl DnsCache {
         }
     }
 
+    /// Return whether at least one good cached address remains.
+    pub fn has_good_address(&self, endpoint: &EndpointKey) -> bool {
+        self.cache
+            .get(endpoint)
+            .is_some_and(|entry| !entry.all_addresses().is_empty())
+    }
+
     /// Remove every cached address for a hostname and port.
     ///
     /// This mirrors C++ `DownloadEngine::removeCachedIPAddress` and also

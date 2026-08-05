@@ -54,6 +54,8 @@ fn test_integration_crash_restart_recovery_flow() {
         resume_offset: Some(1073741824),
         bt_info_hash: None,
         bt_saved_metadata_path: None,
+        metalink_data: None,
+        metalink_file_index: None,
     };
 
     // --- Phase 2: Simulate crash - save state to disk ---

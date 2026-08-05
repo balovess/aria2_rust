@@ -10,10 +10,82 @@ use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 use super::BtDownloadCommand;
 
+/// Build the protocol-specific context that aria2 installs after torrent
+/// metadata has been resolved.
+///
+/// Keeping this separate from command construction lets a dependency resolve
+/// torrent metadata into an existing payload RequestGroup.
+pub(crate) fn build_download_context_from_meta(
+    meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+    path: String,
+) -> crate::error::Result<crate::download::DownloadContext> {
+    use crate::download::DownloadContext;
+    use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+
+    let mut ctx = DownloadContext::new(meta.info.piece_length, meta.total_size(), path);
+    let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
+    ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
+
+    let torrent_attr = TorrentAttribute {
+        name: meta.info.name.clone(),
+        mode: if meta.is_single_file() {
+            BtFileMode::Single
+        } else {
+            BtFileMode::Multi
+        },
+        announce_list: meta.announce_list.clone(),
+        nodes: Vec::new(),
+        info_hash: meta.info_hash.as_hex(),
+        metadata: Vec::new(),
+        metadata_size: 0,
+        private_torrent: meta.is_private(),
+        creation_date: meta.creation_date.unwrap_or(0),
+        comment: meta.comment.clone().unwrap_or_default(),
+        created_by: meta.created_by.clone().unwrap_or_default(),
+        url_list: meta.web_seeds.clone(),
+    };
+    ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
+    Ok(ctx)
+}
+
 impl BtDownloadCommand {
+    /// Construct a BitTorrent command while retaining an externally managed
+    /// RequestGroup owned by RequestGroupMan.
+    pub fn new_with_group(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+    ) -> Result<Self> {
+        let gid = group.recover().gid();
+        let mut command = Self::new(gid, torrent_bytes, options, output_dir)?;
+        let parsed_context = command.group.recover().get_download_context();
+        let (piece_count, piece_length, info_hash) = {
+            let temporary = command.group.recover();
+            (
+                temporary.get_bt_num_pieces(),
+                temporary.get_bt_piece_length(),
+                temporary.get_bt_info_hash_hex(),
+            )
+        };
+        {
+            let external = group.recover();
+            if let Some(context) = parsed_context {
+                external.set_download_context(context);
+            }
+            if let Some(info_hash) = info_hash {
+                external.set_bt_metadata(piece_count, piece_length, info_hash);
+            }
+        }
+        command.group = group;
+        command.progress = command.group.recover().progress.clone();
+        Ok(command)
+    }
+
     pub fn new(
         gid: GroupId,
         torrent_bytes: &[u8],
@@ -60,48 +132,8 @@ impl BtDownloadCommand {
         // In C++ aria2, this is done by bittorrent_helper::processRootDictionary()
         // which calls ctx->setAttribute(CTX_ATTR_BT, torrent) with all torrent
         // metadata fields. We replicate this here.
-        {
-            use crate::download::DownloadContext;
-            use crate::download::download_context::{
-                BtFileMode, ContextAttributeType, TorrentAttribute,
-            };
-
-            let total_size = meta.total_size();
-            let piece_length = meta.info.piece_length;
-            let file_path_str = path.to_string_lossy().to_string();
-
-            // Create DownloadContext with piece length, total size, and output path
-            let mut ctx = DownloadContext::new(piece_length, total_size, file_path_str);
-
-            // Set piece hashes from torrent info dict (sha-1 hashes in hex format)
-            let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
-            ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
-
-            // Build TorrentAttribute from torrent metadata (C++ TorrentAttribute fields)
-            let bt_file_mode = if meta.is_single_file() {
-                BtFileMode::Single
-            } else {
-                BtFileMode::Multi
-            };
-            let torrent_attr = TorrentAttribute {
-                name: meta.info.name.clone(),
-                mode: bt_file_mode,
-                announce_list: meta.announce_list.clone(),
-                nodes: Vec::new(), // DHT nodes not parsed from TorrentMeta yet
-                info_hash: meta.info_hash.as_hex(),
-                metadata: Vec::new(), // Regular torrent has metadata on disk, not via ut_metadata
-                metadata_size: 0,
-                private_torrent: meta.is_private(),
-                creation_date: meta.creation_date.unwrap_or(0),
-                comment: meta.comment.clone().unwrap_or_default(),
-                created_by: meta.created_by.clone().unwrap_or_default(),
-                url_list: meta.web_seeds.clone(),
-            };
-
-            ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
-
-            group.set_download_context(std::sync::Arc::new(ctx));
-        }
+        let ctx = build_download_context_from_meta(&meta, path.to_string_lossy().to_string())?;
+        group.set_download_context(std::sync::Arc::new(ctx));
 
         let seed_time = options.seed_time.and_then(|t| {
             if t == 0.0 {

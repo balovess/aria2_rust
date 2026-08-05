@@ -264,6 +264,7 @@ version = "0.2.8"
 dependencies = [
  "anyhow",
  "aria2-core",
+ "aria2-protocol",
  "async-trait",
  "axum",
  "base64 0.21.7",

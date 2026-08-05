@@ -24,6 +24,7 @@ pub struct WriteChunk {
 
 pub struct HttpSegmentDownloader {
     pub client: reqwest::Client,
+    last_peer_addr: std::sync::Mutex<Option<std::net::SocketAddr>>,
 }
 
 /// Validates that a partial response covers exactly the requested byte range.
@@ -59,6 +60,7 @@ impl HttpSegmentDownloader {
         ensure_rustls_provider();
         Self {
             client: client.clone(),
+            last_peer_addr: std::sync::Mutex::new(None),
         }
     }
 
@@ -103,6 +105,20 @@ impl HttpSegmentDownloader {
     /// Downloads the specified byte range from the given URL. If `progress_tx` is
     /// provided, periodic progress updates (segment-relative bytes downloaded) will
     /// be sent through the channel, enabling smooth progress reporting for RPC clients.
+    pub fn remote_addr(response: &reqwest::Response) -> Option<std::net::SocketAddr> {
+        response.remote_addr()
+    }
+
+    pub fn last_peer_addr(&self) -> Option<std::net::SocketAddr> {
+        self.last_peer_addr.lock().ok().and_then(|peer| *peer)
+    }
+
+    fn remember_peer(&self, peer: Option<std::net::SocketAddr>) {
+        if let Ok(mut slot) = self.last_peer_addr.lock() {
+            *slot = peer;
+        }
+    }
+
     pub async fn download_range(
         &self,
         url: &str,
@@ -139,6 +155,7 @@ impl HttpSegmentDownloader {
             })
         })?;
 
+        self.remember_peer(response.remote_addr());
         let status = response.status();
         match status.as_u16() {
             206 => {
@@ -278,6 +295,7 @@ impl HttpSegmentDownloader {
             })
         })?;
 
+        self.remember_peer(response.remote_addr());
         let status = response.status();
         match status.as_u16() {
             206 => {

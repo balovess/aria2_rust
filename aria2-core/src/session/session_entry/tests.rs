@@ -505,6 +505,7 @@ fn test_download_options_to_map_all_fields() {
         http_passwd: None,
         ftp_user: None,
         ftp_passwd: None,
+        ssh_host_key_md: None,
         no_netrc: false,
         netrc_path: None,
         // Conditional GET

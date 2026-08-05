@@ -324,28 +324,38 @@ impl RpcEngine {
 
         let mut results = Vec::with_capacity(calls.len());
 
-        for (index, call_obj) in calls.iter().enumerate() {
-            let method_name = call_obj
-                .get("methodName")
-                .or_else(|| call_obj.get("method_name"))
-                .or_else(|| call_obj.get("method"))
-                .ok_or_else(|| {
-                    JsonRpcError::InvalidParams(format!(
-                        "Call #{} missing 'methodName' field",
-                        index
-                    ))
-                })?
-                .as_str()
-                .ok_or_else(|| {
-                    JsonRpcError::InvalidParams(format!(
-                        "Call #{} 'methodName' must be a string",
-                        index
-                    ))
-                })?;
+        for call_obj in &calls {
+            let Some(call_obj) = call_obj.as_object() else {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "system.multicall expected struct."
+                }));
+                continue;
+            };
+            let Some(method_name) = call_obj.get("methodName") else {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "Missing methodName."
+                }));
+                continue;
+            };
+            let Some(method_name) = method_name.as_str() else {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "methodName must be a string."
+                }));
+                continue;
+            };
+            if method_name == "system.multicall" {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "Recursive system.multicall forbidden."
+                }));
+                continue;
+            }
 
             let call_params = call_obj
                 .get("params")
-                .or_else(|| call_obj.get("parameters"))
                 .cloned()
                 .unwrap_or(serde_json::json!([]));
 

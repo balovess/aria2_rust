@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
+#[cfg(feature = "metalink")]
+use base64::Engine;
+
 impl ResumeDataExt for ResumeData {
     fn from_request_group(group: &RequestGroup) -> Result<Self, String> {
         // Extract identity
@@ -111,11 +114,15 @@ impl ResumeDataExt for ResumeData {
 
         // Extract BT-specific fields
         let bt_bitfield = group.get_bt_bitfield();
+        let metadata_info = group.metadata_info();
+        #[cfg(feature = "metalink")]
+        let metalink_source = group.metalink_source();
 
-        // Determine if this is a BT download from URI pattern
-        let is_bt = raw_uris
-            .iter()
-            .any(|u| u.starts_with("magnet:?") || u.ends_with(".torrent"));
+        // Determine if this is a BT download from URI pattern or resolved
+        // metadata provenance.
+        let is_bt = raw_uris.iter().any(|u| {
+            u.starts_with("magnet:?") || u.ends_with(".torrent") || u.starts_with("bt://")
+        }) || metadata_info.is_some();
 
         let (bitfield, bt_info_hash, bt_saved_metadata_path) = if is_bt {
             let bf = bt_bitfield.unwrap_or_default();
@@ -124,7 +131,10 @@ impl ResumeDataExt for ResumeData {
                 .iter()
                 .find(|u| u.starts_with("magnet:?"))
                 .and_then(|u| Self::extract_info_hash_from_magnet(u));
-            (bf, info_hash, None)
+            let metadata_path = metadata_info
+                .as_ref()
+                .and_then(|info| info.metadata_path().map(str::to_owned));
+            (bf, info_hash, metadata_path)
         } else {
             (vec![], None, None)
         };
@@ -163,6 +173,16 @@ impl ResumeDataExt for ResumeData {
             resume_offset,
             bt_info_hash,
             bt_saved_metadata_path,
+            #[cfg(feature = "metalink")]
+            metalink_data: metalink_source
+                .as_ref()
+                .map(|(data, _)| base64::engine::general_purpose::STANDARD.encode(data)),
+            #[cfg(not(feature = "metalink"))]
+            metalink_data: None,
+            #[cfg(feature = "metalink")]
+            metalink_file_index: metalink_source.map(|(_, index)| index),
+            #[cfg(not(feature = "metalink"))]
+            metalink_file_index: None,
         })
     }
 

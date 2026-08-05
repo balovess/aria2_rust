@@ -123,6 +123,7 @@ impl SequentialDownloader {
                     message: format!("HTTP request failed: {}", e),
                 })
             })?;
+            self.publish_connection_context(&current_uri, response.remote_addr());
 
             self.cookie_helper
                 .extract_and_store_cookies(&current_uri, &response);

@@ -11,8 +11,10 @@ use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::network::ConnectionContext;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -69,6 +71,21 @@ impl SequentialDownloader {
     /// outer group lock so it is safe to call from the hot download loop;
     /// a contended lock is treated as "not cancelled" and the caller will
     /// re-check on the next iteration.
+    pub(crate) fn publish_connection_context(&self, uri: &str, peer: Option<std::net::SocketAddr>) {
+        let Some(peer) = peer else { return };
+        let Ok(url) = reqwest::Url::parse(uri) else {
+            return;
+        };
+        let Some(host) = url.host_str() else { return };
+        self.group
+            .recover()
+            .set_connection_context(ConnectionContext::new(
+                host,
+                url.port_or_known_default().unwrap_or(80),
+                peer,
+            ));
+    }
+
     pub(crate) fn check_cancelled(&self) -> Result<()> {
         match self.group.try_read() {
             Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(

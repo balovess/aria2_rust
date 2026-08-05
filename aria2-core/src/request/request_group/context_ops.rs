@@ -188,6 +188,30 @@ impl super::RequestGroup {
     ///
     /// Mirrors C++ `FileEntry::addURIResult()`. Called by download commands
     /// when a URI attempt completes (success or failure).
+    /// Publish a real protocol connection for timeout/error handling.
+    pub fn set_connection_context(&self, context: crate::network::ConnectionContext) {
+        if let Ok(mut contexts) = self.connection_contexts.write()
+            && !contexts.iter().any(|existing| existing == &context)
+        {
+            contexts.push(context);
+        }
+    }
+
+    /// Clear connection snapshots before a new command generation starts.
+    pub fn clear_connection_contexts(&self) {
+        if let Ok(mut contexts) = self.connection_contexts.write() {
+            contexts.clear();
+        }
+    }
+
+    /// Read all real protocol connections observed by this group.
+    pub fn connection_contexts(&self) -> Vec<crate::network::ConnectionContext> {
+        self.connection_contexts
+            .read()
+            .map(|contexts| contexts.clone())
+            .unwrap_or_default()
+    }
+
     pub fn add_uri_result(&self, uri: String, result_code: u16) {
         let mut guard = self.download_context.recover_mut();
         if let Some(ref mut ctx) = *guard

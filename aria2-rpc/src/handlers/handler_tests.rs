@@ -616,6 +616,35 @@ async fn test_multicall_preserves_order() {
 }
 
 #[tokio::test]
+async fn test_multicall_invalid_entries_match_cpp_errors_and_continue() {
+    let engine = RpcEngine::new();
+    let req = JsonRpcRequest::new(
+        "system.multicall",
+        serde_json::json!([[null, {"methodName": "system.multicall"}, {"methodName": "aria2.getVersion"}]]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success());
+    let results = resp.result.unwrap().as_array().unwrap().clone();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["code"], "1");
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected struct")
+    );
+    assert_eq!(results[1]["code"], "1");
+    assert!(
+        results[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Recursive")
+    );
+    assert!(results[2].as_array().unwrap()[0].get("version").is_some());
+}
+
+#[tokio::test]
 async fn test_multicall_empty_calls_returns_empty_array() {
     let engine = RpcEngine::new();
 

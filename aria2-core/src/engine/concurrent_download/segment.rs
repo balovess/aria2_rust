@@ -26,8 +26,13 @@ use super::{ConcurrentDownloadResult, ConcurrentDownloader};
 
 type SegmentFetchFuture = std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = (u32, std::result::Result<u64, crate::error::Aria2Error>)>
-            + Send,
+        dyn std::future::Future<
+                Output = (
+                    u32,
+                    std::result::Result<u64, crate::error::Aria2Error>,
+                    Option<std::net::SocketAddr>,
+                ),
+            > + Send,
     >,
 >;
 
@@ -231,7 +236,7 @@ pub async fn execute(
                     seg_reported.insert(seg_idx, seg_reported_arc);
 
                     let fut = Box::pin(async move {
-                        let result = seg_dl
+                        let result: std::result::Result<u64, Aria2Error> = seg_dl
                             .download_range_streaming(
                                 &url,
                                 offset,
@@ -245,7 +250,7 @@ pub async fn execute(
                             .await;
                         // Drop sender to signal progress listener to stop
                         drop(seg_progress_tx);
-                        (seg_idx, result)
+                        (seg_idx, result, seg_dl.last_peer_addr())
                     });
                     active.push(fut);
                     tracing::debug!(
@@ -317,7 +322,20 @@ pub async fn execute(
         // channel while other segments are still downloading.
         tokio::select! {
             // A segment completed
-            Some((seg_idx, result)) = active.next() => {
+            Some((seg_idx, result, peer_addr)) = active.next() => {
+                if let Some(peer_addr) = peer_addr {
+                    if let Ok(url) = reqwest::Url::parse(uri)
+                        && let Some(host) = url.host_str()
+                    {
+                        dl.group.recover().set_connection_context(
+                            crate::network::ConnectionContext::new(
+                                host,
+                                url.port_or_known_default().unwrap_or(80),
+                                peer_addr,
+                            ),
+                        );
+                    }
+                }
                 // Drain writes again after a segment completes
                 while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
                     if let Some(ref lim) = limiter {

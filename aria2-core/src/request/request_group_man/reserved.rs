@@ -54,6 +54,16 @@ impl ReservedQueue {
         }
     }
 
+    /// Append multiple groups while holding the queue lock once.
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    pub fn push_back_batch(
+        &self,
+        groups: impl IntoIterator<Item = Arc<std::sync::RwLock<RequestGroup>>>,
+    ) {
+        let mut queue = self.groups.recover_mut();
+        queue.extend(groups);
+    }
+
     /// Pop the front group from the reserved queue.
     /// Returns `None` if the queue is empty.
     pub fn pop_front(&self) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {

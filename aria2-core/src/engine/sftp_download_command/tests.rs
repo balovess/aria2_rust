@@ -50,6 +50,7 @@ fn test_build_ssh_options_without_password() {
         output_path: std::path::PathBuf::from("/tmp/out"),
         started: false,
         completed_bytes: 0,
+        host_key_fingerprint: None,
         host: "host".to_string(),
         port: 22,
         username: "user".to_string(),
@@ -157,6 +158,30 @@ fn test_constants() {
 }
 
 /// Helper to create a test command instance
+#[test]
+fn engine_owned_group_constructor_preserves_gid_and_options() {
+    let gid = GroupId::new(77);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec!["sftp://user:pass@example.com:2222/path/file.bin".to_string()],
+        DownloadOptions::default(),
+    )));
+    let cmd = SftpDownloadCommand::new_with_group(
+        Arc::clone(&group),
+        "sftp://user:pass@example.com:2222/path/file.bin",
+        &DownloadOptions::default(),
+        Some("/tmp"),
+        None,
+    )
+    .expect("group constructor should parse SFTP URI");
+    assert_eq!(cmd.group().gid(), gid);
+    assert_eq!(
+        cmd.group().uris()[0],
+        "sftp://user:pass@example.com:2222/path/file.bin"
+    );
+    drop(cmd);
+}
+
 fn create_test_cmd() -> SftpDownloadCommand {
     SftpDownloadCommand {
         group: Arc::new(std::sync::RwLock::new(RequestGroup::new(
@@ -167,6 +192,7 @@ fn create_test_cmd() -> SftpDownloadCommand {
         output_path: std::path::PathBuf::from("/tmp/download/file.zip"),
         started: false,
         completed_bytes: 0,
+        host_key_fingerprint: None,
         host: "example.com".to_string(),
         port: 2222,
         username: "testuser".to_string(),

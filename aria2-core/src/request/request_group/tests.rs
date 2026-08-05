@@ -11,6 +11,26 @@ use super::options::DownloadOptions;
 use crate::download::DownloadContext;
 
 #[test]
+fn test_connection_contexts_are_deduplicated_and_reset() {
+    use std::net::SocketAddr;
+
+    let group = RequestGroup::new(GroupId::new(99), Vec::new(), DownloadOptions::default());
+    let first: SocketAddr = "192.0.2.1:80".parse().unwrap();
+    let second: SocketAddr = "192.0.2.2:80".parse().unwrap();
+    let first_context = crate::network::ConnectionContext::new("example.test", 80, first);
+    group.set_connection_context(first_context.clone());
+    group.set_connection_context(first_context);
+    group.set_connection_context(crate::network::ConnectionContext::new(
+        "example.test",
+        80,
+        second,
+    ));
+    assert_eq!(group.connection_contexts().len(), 2);
+    group.clear_connection_contexts();
+    assert!(group.connection_contexts().is_empty());
+}
+
+#[test]
 fn test_followed_by_gids_are_idempotent() {
     let group = RequestGroup::new(
         GroupId::new(1),
@@ -31,6 +51,22 @@ fn test_child_relationship_fields_are_preserved() {
     group.set_belongs_to_gid(parent);
     assert_eq!(group.following_gid(), Some(parent));
     assert_eq!(group.belongs_to_gid(), Some(parent));
+}
+
+#[test]
+fn test_metadata_info_is_preserved_independently_of_parent_link() {
+    let group = RequestGroup::new(GroupId::new(2), Vec::new(), DownloadOptions::default());
+    group.set_metadata_info(super::metadata_info::MetadataInfo::new(
+        GroupId::new(9),
+        "https://example.test/metadata.torrent",
+    ));
+
+    let info = group
+        .metadata_info()
+        .expect("metadata info should be attached");
+    assert_eq!(info.gid(), Some(GroupId::new(9)));
+    assert_eq!(info.uri(), "https://example.test/metadata.torrent");
+    assert!(group.belongs_to_gid().is_none());
 }
 
 #[test]

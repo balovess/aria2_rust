@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use futures::StreamExt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -8,7 +9,7 @@ use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::request::request_group::GroupId;
+use crate::request::request_group::{GroupId, MetadataInfo};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::MetalinkDownloadCommand;
@@ -276,22 +277,45 @@ impl MetalinkDownloadCommand {
             info!(url = %mu.url, "Downloading torrent from Metalink metaurl");
             match self.try_download_url(&mu.url, None).await {
                 Ok(torrent_bytes) => {
-                    // Grab owned options/gid before any await (the group
-                    // guard is not Send).
+                    // Persist metadata beside the payload so the dependency
+                    // can be reconstructed by the manager and after restart.
+                    let metadata_path = self.output_path.with_extension("torrent");
+                    tokio::fs::write(&metadata_path, &torrent_bytes)
+                        .await
+                        .map_err(|error| {
+                            Aria2Error::FileIo(format!(
+                                "Failed to persist torrent metadata '{}': {error}",
+                                metadata_path.display()
+                            ))
+                        })?;
+
                     let options = self.group.recover().options().clone();
                     let gid = self.group.recover().gid();
                     let dir = self.output_path.parent().and_then(|p| p.to_str());
-                    let mut bt_cmd = crate::engine::bt_download_command::BtDownloadCommand::new(
-                        gid,
-                        &torrent_bytes,
-                        &options,
-                        dir,
-                    )?;
+                    {
+                        let group = self.group.recover_mut();
+                        group.set_metadata_info(
+                            MetadataInfo::new(gid, &mu.url)
+                                .with_metadata_path(metadata_path.to_string_lossy()),
+                        );
+                    }
+                    let mut bt_cmd =
+                        crate::engine::bt_download_command::BtDownloadCommand::new_with_group(
+                            Arc::clone(&self.group),
+                            &torrent_bytes,
+                            &options,
+                            dir,
+                        )?;
                     if let Some(gl) = self.global_limiter.clone() {
                         bt_cmd.set_global_limiter(gl);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().total_length();
+                    {
+                        let mut group = self.group.recover_mut();
+                        group.update_progress(self.completed_bytes);
+                        group.complete()?;
+                    }
                     self.completed = true;
                     info!(
                         "Metalink torrent metaurl download done: {}",

@@ -115,6 +115,8 @@ pub mod bt_integration_tests;
 pub mod metalink_download_command;
 #[cfg(feature = "metalink")]
 pub mod metalink_post_download_handler;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+pub mod metalink_request_graph;
 #[cfg(feature = "metalink")]
 pub mod metalink_to_request_group;
 

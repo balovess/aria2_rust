@@ -29,7 +29,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::error::Aria2Error;
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{DownloadOptions, GroupId, MetadataInfo, RequestGroup};
 
 /// Metadata extracted from a completed download for handler matching.
 ///
@@ -132,8 +132,15 @@ pub fn run_post_download_processing(
                         groups.iter().map(|g| g.recover().gid()).collect();
 
                     for child in &groups {
-                        child.recover().set_following_gid(info.gid);
-                        child.recover().set_belongs_to_gid(info.gid);
+                        let child_group = child.recover();
+                        child_group.set_following_gid(info.gid);
+                        child_group.set_belongs_to_gid(info.gid);
+                        let metadata_info = info
+                            .base_uri
+                            .as_deref()
+                            .map(|uri| MetadataInfo::new(info.gid, uri))
+                            .unwrap_or_else(MetadataInfo::data_only);
+                        child_group.set_metadata_info(metadata_info);
                     }
 
                     info!(

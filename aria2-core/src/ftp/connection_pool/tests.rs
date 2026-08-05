@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
@@ -136,4 +136,10 @@ async fn test_try_get_relaxed_returns_none_when_empty() {
         .try_get_relaxed("example.com", 21, "user", "pass")
         .await;
     assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn test_cleanup_stale_count_on_empty_pool() {
+    let pool = FtpConnectionPool::new(2);
+    assert_eq!(pool.cleanup_stale_count().await, 0);
 }

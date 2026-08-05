@@ -5,6 +5,7 @@
 //! split across sub-modules for cohesion and to respect the 600-line
 //! file size limit.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
@@ -56,8 +57,12 @@ pub struct RequestGroup {
     /// is still available for RPC queries that need the original URI list,
     /// but URI lifecycle operations should go through `DownloadContext`.
     pub(super) uris: Vec<String>,
+    /// Metalink file name override, independent of the global `out` option.
+    pub(super) output_name: std::sync::RwLock<Option<String>>,
     /// Download options — shared via `Arc` for cheap cloning.
     pub(super) options: Arc<DownloadOptions>,
+    /// Options deferred until the current command generation is restarted.
+    pub pending_options: std::sync::RwLock<HashMap<String, serde_json::Value>>,
     /// Current download status.
     pub(super) status: std::sync::RwLock<super::status::DownloadStatus>,
     /// Allocated download segments.
@@ -110,6 +115,10 @@ pub struct RequestGroup {
     /// Last error message recorded for this download.
     pub last_error_message: std::sync::RwLock<String>,
 
+    /// Last real peer connection observed by an HTTP/FTP command.
+    /// This is a snapshot only; protocol tasks remain the owners of sockets.
+    pub connection_contexts: std::sync::RwLock<Vec<crate::network::ConnectionContext>>,
+
     /// Whether any command in the current command generation failed.
     pub command_failure: AtomicBool,
 
@@ -149,6 +158,23 @@ pub struct RequestGroup {
     /// Mirrors C++ `RequestGroup::belongsToGID_`, used for child downloads
     /// such as Metalink/torrent follow-up groups.
     pub belongs_to_gid: std::sync::RwLock<Option<GroupId>>,
+
+    /// Provenance of the metadata that created this group.
+    ///
+    /// Mirrors C++ `RequestGroup::metadataInfo_`. It is intentionally kept
+    /// separate from parent/child GIDs because metadata provenance can be
+    /// data-only and does not itself imply a generated child.
+    pub metadata_info: std::sync::RwLock<Option<super::metadata_info::MetadataInfo>>,
+
+    /// In-memory torrent metadata supplied by a CLI/RPC caller.
+    #[cfg(feature = "bittorrent")]
+    pub bt_metadata_data: std::sync::RwLock<Option<Vec<u8>>>,
+
+    /// Raw Metalink document and selected file index for manager-owned fallback execution.
+    #[cfg(feature = "metalink")]
+    pub metalink_data: std::sync::RwLock<Option<Vec<u8>>>,
+    #[cfg(feature = "metalink")]
+    pub metalink_file_index: std::sync::RwLock<Option<usize>>,
 }
 
 impl RequestGroup {
@@ -163,7 +189,9 @@ impl RequestGroup {
         RequestGroup {
             gid,
             uris,
+            output_name: std::sync::RwLock::new(None),
             options: Arc::new(options),
+            pending_options: std::sync::RwLock::new(HashMap::new()),
             status: std::sync::RwLock::new(super::status::DownloadStatus::Waiting),
             segments: std::sync::RwLock::new(Vec::new()),
             start_time: std::sync::RwLock::new(None),
@@ -181,6 +209,7 @@ impl RequestGroup {
             halt_reason: std::sync::RwLock::new(HaltReason::None),
             last_error_code: std::sync::RwLock::new(DownloadResultCode::UnknownError),
             last_error_message: std::sync::RwLock::new(String::new()),
+            connection_contexts: std::sync::RwLock::new(Vec::new()),
             command_failure: AtomicBool::new(false),
             save_control_file_enabled: std::sync::RwLock::new(std::sync::atomic::AtomicBool::new(
                 true,
@@ -191,6 +220,13 @@ impl RequestGroup {
             following_gid: std::sync::RwLock::new(None),
             followed_by_gids: std::sync::RwLock::new(Vec::new()),
             belongs_to_gid: std::sync::RwLock::new(None),
+            metadata_info: std::sync::RwLock::new(None),
+            #[cfg(feature = "bittorrent")]
+            bt_metadata_data: std::sync::RwLock::new(None),
+            #[cfg(feature = "metalink")]
+            metalink_data: std::sync::RwLock::new(None),
+            #[cfg(feature = "metalink")]
+            metalink_file_index: std::sync::RwLock::new(None),
         }
     }
 }

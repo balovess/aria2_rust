@@ -191,6 +191,40 @@ impl RpcEngine {
             ));
         }
 
+        #[cfg(all(feature = "bittorrent", feature = "metalink"))]
+        if let Some(group_man) = &self.group_man {
+            let options = rpc_options_to_download_options(&opts);
+            let document =
+                aria2_protocol::metalink::parser::MetalinkDocument::parse(&decoded_bytes, None)
+                    .map_err(|error| JsonRpcError::InvalidParams(error.to_string()))?;
+            let converter =
+                aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
+            let mut gids = Vec::new();
+            let man = group_man.read().await;
+            for file in document.files.iter().filter(|file| {
+                file.meta_urls.iter().any(|metaurl| {
+                    metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+                })
+            }) {
+                let metadata_gid = man.next_available_gid();
+                let payload_gid = man.next_available_gid();
+                let graph = converter
+                    .create_torrent_graph(file, &options, metadata_gid, payload_gid)
+                    .map_err(|error| JsonRpcError::InvalidParams(error.to_string()))?;
+                let (metadata_gid, payload_gid) = man
+                    .add_metalink_graph(graph)
+                    .map_err(|error| JsonRpcError::InternalError(error.to_string()))?;
+                let _ = metadata_gid;
+                gids.push(payload_gid.to_hex_string());
+            }
+            if !gids.is_empty() {
+                return Ok(JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    gids,
+                ));
+            }
+        }
+
         let gid = self
             .add_task(vec!["metalink://download".to_string()], opts)
             .await?;
@@ -1261,6 +1295,7 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         http_passwd: get_str("http-passwd"),
         ftp_user: get_str("ftp-user"),
         ftp_passwd: get_str("ftp-passwd"),
+        ssh_host_key_md: get_str("ssh-host-key-md"),
         no_netrc: opts
             .get("no-netrc")
             .and_then(|v| v.as_bool())

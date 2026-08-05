@@ -27,6 +27,16 @@ impl super::RequestGroup {
         &self.uris
     }
 
+    /// Set a per-group output filename, used by Metalink entries.
+    pub fn set_output_name(&self, name: impl Into<String>) {
+        *self.output_name.recover_mut() = Some(name.into());
+    }
+
+    /// Return the per-group output filename, if configured.
+    pub fn output_name(&self) -> Option<String> {
+        self.output_name.recover().clone()
+    }
+
     /// Return a reference to the download options.
     pub fn options(&self) -> &super::DownloadOptions {
         &self.options
@@ -44,6 +54,35 @@ impl super::RequestGroup {
     /// updates (e.g. via `aria2.changeOption`) can dynamically adjust the rate.
     pub fn set_rate_limiter(&self, limiter: RateLimiter) {
         *self.rate_limiter.recover_mut() = Some(limiter);
+    }
+
+    /// Store options that take effect when the next command generation starts.
+    pub fn set_pending_options(
+        &self,
+        changes: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        if let Ok(mut pending) = self.pending_options.write() {
+            pending.extend(changes);
+        }
+    }
+
+    /// Apply and clear options deferred by `changeOption`.
+    pub fn apply_pending_options(&mut self) {
+        let changes = self
+            .pending_options
+            .write()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default();
+        for (key, value) in changes {
+            self.update_option(&key, value);
+        }
+    }
+
+    pub fn pending_options(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        self.pending_options
+            .read()
+            .map(|pending| pending.clone())
+            .unwrap_or_default()
     }
 
     // ── Runtime Option Updates ──────────────────────────────────────────

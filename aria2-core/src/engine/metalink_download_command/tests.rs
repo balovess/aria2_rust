@@ -310,6 +310,22 @@ fn test_create_multi_file_assigns_incrementing_gids() {
 }
 
 #[test]
+fn test_create_multi_file_keeps_torrent_metaurl_only_files() {
+    let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="payload.bin">
+    <metaurl mediatype="application/x-bittorrent">http://mirror.example.com/payload.torrent</metaurl>
+  </file>
+</metalink>"#;
+    let result =
+        MetalinkDownloadCommand::create_multi_file(xml, &DownloadOptions::default(), None, 1)
+            .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert!(result[0].command.group().uris().is_empty());
+}
+
+#[test]
 fn test_create_multi_file_skips_files_without_urls() {
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <metalink xmlns="urn:ietf:params:xml:ns:metalink">

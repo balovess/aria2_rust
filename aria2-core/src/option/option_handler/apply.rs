@@ -315,6 +315,7 @@ impl OptionHandlerApply for OptionHandler {
             http_passwd: get_str("http-passwd"),
             ftp_user: get_str("ftp-user"),
             ftp_passwd: get_str("ftp-passwd"),
+            ssh_host_key_md: get_str("ssh-host-key-md"),
             no_netrc: self.get("no-netrc").as_bool().unwrap_or(false),
             netrc_path: get_str("netrc-path"),
             // Conditional GET

@@ -76,6 +76,8 @@ pub(super) fn create_sample_resume_data() -> ResumeData {
         resume_offset: Some(2352892928),
         bt_info_hash: None,
         bt_saved_metadata_path: None,
+        metalink_data: None,
+        metalink_file_index: None,
     }
 }
 
@@ -112,6 +114,8 @@ pub(super) fn create_bt_resume_data() -> ResumeData {
         resume_offset: None,
         bt_info_hash: Some("abcdef1234567890abcdef1234567890abcdef12".to_string()),
         bt_saved_metadata_path: Some("/downloads/.cache/test.torrent".to_string()),
+        metalink_data: None,
+        metalink_file_index: None,
     }
 }
 
@@ -173,5 +177,7 @@ pub(super) fn create_metalink_resume_data() -> ResumeData {
         resume_offset: Some(262144000),
         bt_info_hash: None,
         bt_saved_metadata_path: None,
+        metalink_data: None,
+        metalink_file_index: None,
     }
 }

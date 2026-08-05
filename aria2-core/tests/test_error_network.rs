@@ -248,7 +248,7 @@ fn test_dns_negative_cache_blocks_immediate_retry() {
     let result = cache.resolve_no_network("nonexistent.invalid", 80);
     assert!(result.is_err(), "Should be blocked by negative cache");
 
-    let err_msg = result.unwrap_err();
+    let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("recently failed"),
         "Error should mention recent failure: {}",
@@ -270,7 +270,7 @@ fn test_dns_negative_cache_expiration_allows_retry() {
     // Now retry should not be blocked by negative cache
     let result = cache.resolve_no_network("expired.invalid", 80);
     // Should still fail because no actual DNS resolution, but not due to negative cache
-    let err_msg = result.unwrap_err();
+    let err_msg = result.unwrap_err().to_string();
     assert!(
         !err_msg.contains("recently failed"),
         "Error should not mention recent failure after expiration: {}",
@@ -295,7 +295,7 @@ async fn test_dns_resolution_invalid_hostname() {
             retry_result.is_err(),
             "Retry should be blocked by negative cache"
         );
-        let err_msg = retry_result.unwrap_err();
+        let err_msg = retry_result.unwrap_err().to_string();
         assert!(
             err_msg.contains("recently failed"),
             "Error should mention recent failure due to negative cache: {}",

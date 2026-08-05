@@ -13,6 +13,8 @@ mod context_ops;
 mod control_ops;
 mod file_lifecycle;
 mod lifecycle_ops;
+mod metadata_info;
+mod metadata_ops;
 mod options_ops;
 mod progress_ops;
 mod result_ops;
@@ -21,11 +23,14 @@ mod tests;
 
 // Re-export all public types so the external API remains unchanged.
 // Import paths like `crate::request::request_group::RequestGroup` still work.
+#[cfg(feature = "bittorrent")]
+pub use dependency::BtDependency;
 pub use dependency::{CompletionDependency, Dependency, NoDependency};
 pub use download_result::{DownloadResult, FileEntry, UriEntry};
 pub use group::RequestGroup;
 pub use group_id::GroupId;
 pub use halt_reason::{DownloadControlFlags, HaltReason};
+pub use metadata_info::MetadataInfo;
 pub use options::{
     ChangeableKind, DownloadOptions, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
     RUNTIME_CHANGEABLE_OPTIONS, is_option_changeable,

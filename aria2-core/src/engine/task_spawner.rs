@@ -57,6 +57,37 @@ pub async fn spawn_download_task(
         }
     };
 
+    // Metalink owns mirror ordering and torrent fallback. Dispatch it before
+    // resolving the first mirror: one unavailable mirror must not prevent the
+    // command from trying the remaining mirrors or the torrent fallback.
+    #[cfg(feature = "metalink")]
+    if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
+        let mut cmd = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source(
+            Arc::clone(&group), &metalink_data, file_index, &options,
+        );
+        if let Ok(ref mut command) = cmd {
+            if let Some(limiter) = global_limiter.clone() {
+                command.set_global_limiter(limiter);
+            }
+        }
+        let mut cmd: Box<dyn Command> = match cmd {
+            Ok(command) => Box::new(command),
+            Err(error) => {
+                warn!(gid = gid.value(), error = %error, "Failed to create Metalink command");
+                group.recover().dec_commands();
+                return None;
+            }
+        };
+        let completion_tx = completion_tx.clone();
+        return Some(tokio::spawn(async move {
+            let task_result = match cmd.execute().await {
+                Ok(()) => TaskResult::Success,
+                Err(error) => TaskResult::Failed(error),
+            };
+            let _ = completion_tx.send((gid, generation, task_result));
+        }));
+    }
+
     // Resolve the origin before constructing the command. This keeps DNS failures
     // on the same structured completion path as other command failures and lets
     // the engine apply NameResolveError consistently.
@@ -164,6 +195,54 @@ async fn create_command_for_uri(
 ) -> crate::error::Result<Box<dyn Command>> {
     let uri_lower = uri.to_lowercase();
 
+    // SFTP downloads use the engine-owned group, matching other v2 protocols.
+    #[cfg(feature = "sftp")]
+    if uri_lower.starts_with("sftp://") {
+        let mut cmd = crate::engine::sftp_download_command::SftpDownloadCommand::new_with_group(
+            Arc::clone(&group),
+            uri,
+            options,
+            options.dir.as_deref(),
+            options.out.as_deref(),
+        )?;
+        if let Some(limiter) = global_limiter {
+            cmd.set_global_limiter(limiter);
+        }
+        return Ok(Box::new(cmd));
+    }
+
+    // BitTorrent torrent payloads. The group must already have a resolved
+    // DownloadContext, which is installed by BtDependency before promotion.
+    #[cfg(feature = "bittorrent")]
+    if uri_lower.starts_with("bt://") {
+        let output_dir = options.dir.as_deref();
+        let torrent_bytes = group
+            .recover()
+            .bt_metadata_data()
+            .or_else(|| {
+                group
+                    .recover()
+                    .metadata_info()
+                    .and_then(|info| info.metadata_path().map(std::path::PathBuf::from))
+                    .and_then(|path| std::fs::read(path).ok())
+            })
+            .ok_or_else(|| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(
+                    "Resolved BitTorrent payload has no metadata source".to_string(),
+                ))
+            })?;
+        let mut cmd = crate::engine::bt_download_command::BtDownloadCommand::new_with_group(
+            group,
+            &torrent_bytes,
+            options,
+            output_dir,
+        )?;
+        if let Some(limiter) = global_limiter {
+            cmd.set_global_limiter(limiter);
+        }
+        return Ok(Box::new(cmd));
+    }
+
     // BitTorrent magnet links.
     #[cfg(feature = "bittorrent")]
     if uri_lower.starts_with("magnet:") {
@@ -201,7 +280,8 @@ async fn create_command_for_uri(
 
     // Default: HTTP/HTTPS download command.
     let output_dir = options.dir.as_deref();
-    let output_name = options.out.as_deref();
+    let group_output_name = group.recover().output_name();
+    let output_name = group_output_name.as_deref().or(options.out.as_deref());
     let resolved_addresses = if let Some((hostname, port)) = direct_origin(uri) {
         dns_cache.lock().await.resolve(&hostname, port).await.ok()
     } else {

@@ -22,6 +22,8 @@ use reserved::ReservedQueue;
 use stopped::StoppedResults;
 
 use super::request_group::{DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup};
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use crate::engine::metalink_request_graph;
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -49,6 +51,10 @@ pub struct RequestGroupMan {
     /// Next GID for auto-generated group IDs.
     next_gid: AtomicU64,
 
+    /// Serializes multi-group graph insertion across RPC callers.
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    graph_insert_lock: std::sync::Mutex<()>,
+
     /// Global download speed limit (bytes/sec).
     global_download_limit: std::sync::RwLock<Option<u64>>,
 
@@ -66,6 +72,8 @@ impl RequestGroupMan {
             stopped: StoppedResults::new(),
             max_concurrent: AtomicU32::new(5), // Default matching aria2
             next_gid: AtomicU64::new(1),
+            #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+            graph_insert_lock: std::sync::Mutex::new(()),
             global_download_limit: std::sync::RwLock::new(None),
             global_upload_limit: std::sync::RwLock::new(None),
         }
@@ -97,11 +105,37 @@ impl RequestGroupMan {
     /// creates the group externally (e.g. from an RPC `addUri` call).
     pub fn add_group_arc(&self, group: Arc<std::sync::RwLock<RequestGroup>>) {
         let gid = group.recover().gid();
+        if self.find_group(gid).is_some() {
+            warn!(gid = gid.value(), "Ignoring duplicate request group");
+            return;
+        }
+        self.next_gid
+            .fetch_max(gid.value().saturating_add(1), Ordering::SeqCst);
         self.reserved.push_back(group);
         info!(
             "Adding download task #{} (reserved, pre-constructed)",
             gid.value()
         );
+    }
+
+    /// Add a fully restored group while preserving its GID and state.
+    ///
+    /// Unlike `add_group_arc`, this path validates identity and advances the
+    /// automatic allocator before queueing the group.
+    pub fn add_restored_group(&self, group: Arc<std::sync::RwLock<RequestGroup>>) -> Result<()> {
+        let gid = group.recover().gid();
+        if self.find_group(gid).is_some() {
+            return Err(crate::error::Aria2Error::DownloadFailed(format!(
+                "GID {} already exists",
+                gid.to_hex_string()
+            )));
+        }
+
+        self.next_gid
+            .fetch_max(gid.value().saturating_add(1), Ordering::SeqCst);
+        self.reserved.push_back(group);
+        info!("Restored download task #{} (reserved)", gid.to_hex_string());
+        Ok(())
     }
 
     /// Insert a batch of groups at the front of the reserved queue.
@@ -113,6 +147,47 @@ impl RequestGroupMan {
         let count = groups.len();
         self.reserved.insert_front_batch(groups);
         debug!("Inserted {} groups at front of reserved queue", count);
+    }
+
+    /// Insert a metadata/payload graph atomically into the reserved queue.
+    /// Metadata is queued first so the payload dependency can only resolve
+    /// after the prerequisite has been promoted and completed.
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    /// Add a Metalink metadata/payload request graph atomically.
+    pub fn add_metalink_graph(
+        &self,
+        graph: metalink_request_graph::MetalinkRequestGraph,
+    ) -> Result<(GroupId, GroupId)> {
+        let _insert_guard = self.graph_insert_lock.lock().map_err(|_| {
+            crate::error::Aria2Error::DownloadFailed("graph insertion lock poisoned".to_string())
+        })?;
+        let metadata_gid = graph.metadata.recover().gid();
+        let payload_gid = graph.payload.recover().gid();
+        if metadata_gid == payload_gid {
+            return Err(crate::error::Aria2Error::DownloadFailed(
+                "Metalink graph metadata and payload must have distinct GIDs".to_string(),
+            ));
+        }
+        if self.find_group(metadata_gid).is_some() || self.find_group(payload_gid).is_some() {
+            return Err(crate::error::Aria2Error::DownloadFailed(
+                "Metalink graph contains a duplicate GID".to_string(),
+            ));
+        }
+        self.next_gid.fetch_max(
+            metadata_gid
+                .value()
+                .max(payload_gid.value())
+                .saturating_add(1),
+            Ordering::SeqCst,
+        );
+        self.reserved
+            .push_back_batch([graph.metadata, graph.payload]);
+        info!(
+            metadata_gid = metadata_gid.value(),
+            payload_gid = payload_gid.value(),
+            "Added Metalink request graph"
+        );
+        Ok((metadata_gid, payload_gid))
     }
 
     /// Insert a download group under a caller-chosen GID (used by RPC).
@@ -561,6 +636,11 @@ impl RequestGroupMan {
         }
     }
 
+    /// Reserve the next automatically allocated GID.
+    pub fn next_available_gid(&self) -> GroupId {
+        self.generate_gid()
+    }
+
     // ── Internal ────────────────────────────────────────────────────────
 
     fn generate_gid(&self) -> GroupId {
@@ -615,6 +695,56 @@ mod tests {
         assert_eq!(man.count(), num_tasks);
     }
 
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn test_add_metalink_graph_is_metadata_first_and_dependency_gated() {
+        let man = RequestGroupMan::new();
+        let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+            "https://example.test/file.torrent",
+            "file.bin",
+            &DownloadOptions::default(),
+            GroupId::new(42),
+            GroupId::new(43),
+        )
+        .unwrap();
+        let (metadata_gid, payload_gid) = man.add_metalink_graph(graph).unwrap();
+        assert_eq!(metadata_gid, GroupId::new(42));
+        assert_eq!(payload_gid, GroupId::new(43));
+        assert_eq!(
+            man.reserved.iter_snapshot()[0].recover().gid(),
+            metadata_gid
+        );
+        assert_eq!(man.reserved.iter_snapshot()[1].recover().gid(), payload_gid);
+        assert!(
+            !man.find_group(payload_gid)
+                .unwrap()
+                .recover()
+                .is_dependency_resolved()
+        );
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn test_add_metalink_graph_rejects_duplicate_without_insertion() {
+        let man = RequestGroupMan::new();
+        man.add_group_with_gid(
+            GroupId::new(42),
+            vec!["https://example.test/existing".to_string()],
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+            "https://example.test/file.torrent",
+            "file.bin",
+            &DownloadOptions::default(),
+            GroupId::new(42),
+            GroupId::new(43),
+        )
+        .unwrap();
+        assert!(man.add_metalink_graph(graph).is_err());
+        assert!(man.find_group(GroupId::new(43)).is_none());
+    }
+
     #[test]
     fn test_add_group_with_gid_preserves_gid_and_advances_allocator() {
         let man = RequestGroupMan::new();
@@ -635,6 +765,72 @@ mod tests {
             )
             .unwrap();
         assert!(generated_gid.value() > explicit_gid.value());
+    }
+
+    #[test]
+    fn test_add_restored_group_preserves_gid_and_advances_allocator() {
+        let man = RequestGroupMan::new();
+        let gid = GroupId::new(0x2a);
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            vec!["http://example.com/restored.bin".to_string()],
+            DownloadOptions::default(),
+        )));
+
+        man.add_restored_group(group).unwrap();
+        assert!(man.find_group(gid).is_some());
+        assert!(man.generate_gid().value() > gid.value());
+    }
+
+    #[test]
+    fn test_add_restored_group_rejects_duplicate_gid() {
+        let man = RequestGroupMan::new();
+        let gid = GroupId::new(0x2a);
+        let group = || {
+            Arc::new(std::sync::RwLock::new(RequestGroup::new(
+                gid,
+                vec!["http://example.com/restored.bin".to_string()],
+                DownloadOptions::default(),
+            )))
+        };
+
+        man.add_restored_group(group()).unwrap();
+        assert!(man.add_restored_group(group()).is_err());
+    }
+
+    #[test]
+    fn test_dependency_blocks_promotion_until_metadata_completes() {
+        let man = RequestGroupMan::new();
+        let metadata_gid = GroupId::new(10);
+        let payload_gid = GroupId::new(11);
+        let metadata = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            metadata_gid,
+            vec!["https://example.test/file.torrent".to_string()],
+            DownloadOptions::default(),
+        )));
+        let payload = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            payload_gid,
+            vec!["bt://payload".to_string()],
+            DownloadOptions::default(),
+        )));
+        payload.recover().set_dependency(Box::new(
+            crate::request::request_group::CompletionDependency::new(metadata_gid),
+        ));
+        payload.recover().set_belongs_to_gid(metadata_gid);
+
+        man.add_restored_group(Arc::clone(&metadata)).unwrap();
+        man.add_restored_group(Arc::clone(&payload)).unwrap();
+
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].recover().gid(), metadata_gid);
+        assert!(man.find_group(payload_gid).is_some());
+        assert!(!payload.recover().is_dependency_resolved());
+
+        man.resolve_dependencies_for(metadata_gid);
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].recover().gid(), payload_gid);
     }
 
     #[test]

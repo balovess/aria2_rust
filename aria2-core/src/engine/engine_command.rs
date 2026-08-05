@@ -10,6 +10,8 @@
 
 use std::sync::Arc;
 
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use crate::engine::metalink_request_graph::MetalinkRequestGraph;
 use crate::error::Aria2Error;
 use crate::request::request_group::{GroupId, HaltReason, RequestGroup};
 
@@ -24,6 +26,9 @@ pub enum EngineCommand {
     AddDownload {
         group: Arc<std::sync::RwLock<RequestGroup>>,
     },
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    AddMetalinkGraph { graph: MetalinkRequestGraph },
 
     /// Gracefully remove a download group by GID.
     RemoveDownload { gid: GroupId },

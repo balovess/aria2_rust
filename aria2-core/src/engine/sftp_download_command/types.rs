@@ -42,6 +42,8 @@ pub struct SftpDownloadCommand {
     pub(super) username: String,
     /// Password for authentication (optional if using key-based auth)
     pub(super) password: Option<String>,
+    /// Expected SSH host-key fingerprint from `--ssh-host-key-md`.
+    pub(super) host_key_fingerprint: Option<String>,
     /// Path to the file on the remote SFTP server
     pub(super) remote_path: String,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
@@ -125,6 +127,40 @@ impl SftpDownloadCommand {
             port,
             username,
             password,
+            host_key_fingerprint: options.ssh_host_key_md.clone(),
+            remote_path,
+            global_limiter: None,
+        })
+    }
+
+    /// Construct an SFTP command while preserving the engine-owned group.
+    #[cfg(feature = "sftp")]
+    pub fn new_with_group(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        uri: &str,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+    ) -> Result<Self> {
+        let (host, port, username, password, remote_path) = Self::parse_uri(uri)?;
+        let dir = output_dir
+            .map(str::to_owned)
+            .or_else(|| options.dir.clone())
+            .unwrap_or_else(|| constants::DEFAULT_OUTPUT_DIR.to_string());
+        let filename = output_name
+            .map(str::to_owned)
+            .or_else(|| Self::extract_filename(&remote_path))
+            .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
+        Ok(Self {
+            group,
+            output_path: std::path::PathBuf::from(dir).join(filename),
+            started: false,
+            completed_bytes: 0,
+            host,
+            port,
+            username,
+            password,
+            host_key_fingerprint: options.ssh_host_key_md.clone(),
             remote_path,
             global_limiter: None,
         })
@@ -216,7 +252,14 @@ impl SftpDownloadCommand {
                 Duration::from_secs(constants::SFTP_CONNECT_TIMEOUT_SECS),
                 Duration::from_secs(constants::SFTP_READ_TIMEOUT_SECS),
             )
-            .with_host_key_mode(HostKeyCheckingMode::AcceptNew);
+            .with_host_key_mode(if self.host_key_fingerprint.is_some() {
+                HostKeyCheckingMode::Strict
+            } else {
+                HostKeyCheckingMode::AcceptNew
+            });
+        if let Some(fingerprint) = self.host_key_fingerprint.as_deref() {
+            opts = opts.with_host_key_fingerprint(fingerprint);
+        }
 
         if let Some(ref pwd) = self.password {
             opts = opts.with_password(pwd);

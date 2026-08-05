@@ -146,6 +146,10 @@ impl DownloadEngine {
         self.global_limiter.take()
     }
 
+    pub fn set_request_group_man(&mut self, man: Arc<RwLock<RequestGroupMan>>) {
+        self.request_group_man = Some(man);
+    }
+
     pub fn set_save_session(
         &mut self,
         path: PathBuf,

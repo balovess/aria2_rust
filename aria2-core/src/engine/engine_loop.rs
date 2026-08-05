@@ -27,6 +27,7 @@ use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId};
 use crate::request::request_group_man::RequestGroupMan;
+use crate::selector::server_stat_man::ServerStatMan;
 use crate::session::auto_save_session::AutoSaveSession;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -67,6 +68,9 @@ pub struct EngineLoopContext {
     /// Whether the engine should stay alive even with no active downloads
     /// (used for RPC listen mode). Mirrors C++ `keepRunning_`.
     pub keep_alive: bool,
+
+    /// Shared server statistics used by URI selectors and housekeeping.
+    pub server_stat_man: Arc<ServerStatMan>,
 
     /// Process-wide rate limiter shared across all downloads.
     /// When `Some`, passed to each spawned `DownloadCommand` so that
@@ -165,6 +169,7 @@ pub async fn run_engine_loop(
 
         for group in &promoted {
             let gid = group.recover().gid();
+            group.recover().clear_connection_contexts();
             let generation = next_generation;
             next_generation = next_generation.wrapping_add(1);
             match spawn_download_task(
@@ -324,6 +329,18 @@ async fn process_engine_commands(
                 // Add to reserved queue — promotion happens on next tick.
                 man.add_group_arc(group);
                 info!(gid = gid.value(), "Added download to reserved queue");
+            }
+            #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+            EngineCommand::AddMetalinkGraph { graph } => {
+                let man = ctx.group_man.read().await;
+                match man.add_metalink_graph(graph) {
+                    Ok((metadata_gid, payload_gid)) => info!(
+                        metadata_gid = metadata_gid.value(),
+                        payload_gid = payload_gid.value(),
+                        "Added Metalink graph to reserved queue"
+                    ),
+                    Err(error) => warn!(%error, "Failed to add Metalink graph"),
+                }
             }
 
             EngineCommand::RemoveDownload { gid } => {
@@ -695,8 +712,8 @@ async fn process_task_completions(
 ///
 /// Mirrors the C++ refresh-interval-based tasks:
 /// - Session auto-save
-/// - Socket pool eviction (TODO)
-/// - Stats calculation (TODO)
+/// - Socket pool eviction
+/// - Server statistics pruning
 /// - Prune excess stopped results
 async fn run_housekeeping(
     ctx: &EngineLoopContext,
@@ -719,6 +736,30 @@ async fn run_housekeeping(
     if !timed_out.is_empty() {
         let man = ctx.group_man.read().await;
         for gid in timed_out {
+            if let Some(group) = man.get_group(gid) {
+                let request_contexts = group.recover().connection_contexts();
+                let uris = group.recover().get_all_uris();
+                if let Some(uri) = uris.first()
+                    && let Ok(parsed) = reqwest::Url::parse(uri)
+                    && let Some(host) = parsed.host_str()
+                {
+                    let protocol = parsed.scheme().to_ascii_lowercase();
+                    ctx.server_stat_man
+                        .mark_failure_with_protocol(host, &protocol, 408);
+                    if !request_contexts.is_empty() {
+                        let mut dns = ctx.dns_cache.lock().await;
+                        for context in request_contexts {
+                            dns.mark_bad_context(&context);
+                            if !dns.has_good_address(&context.endpoint) {
+                                dns.remove_cached(
+                                    context.endpoint.hostname(),
+                                    context.endpoint.port(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             if man.timeout_group(gid) {
                 // Timeout is a graceful halt: the command observes the halt
                 // flag, flushes its writer, saves resumable progress, and
@@ -754,8 +795,24 @@ async fn run_housekeeping(
         }
     }
 
+    // ── Server statistics housekeeping ────────────────────────────────────
+    // aria2_original removes statistics older than the configured freshness
+    // window from the long-lived ServerStatMan.
+    let stale_stats = ctx
+        .server_stat_man
+        .remove_stale(Duration::from_secs(24 * 60 * 60));
+    if stale_stats > 0 {
+        debug!("Removed {} stale server statistics", stale_stats);
+    }
+
     // ── Socket pool eviction ─────────────────────────────────────────────
-    // TODO: Implement socket pool eviction like C++ `evictSocketPool()`.
+    // reqwest owns the HTTP/TLS pool and enforces its idle timeout internally.
+    // The FTP pool is engine-owned, so it must be explicitly swept here to
+    // mirror C++ `evictSocketPool()` and release stale FTP sessions.
+    let evicted = ctx.ftp_pool.cleanup_stale_count().await;
+    if evicted > 0 {
+        debug!("Evicted {} stale FTP connections", evicted);
+    }
 }
 
 /// Cleanup on engine exit.
@@ -810,6 +867,7 @@ mod tests {
             event_hooks: Arc::new(DownloadEventHooks::new()),
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive,
+            server_stat_man: ServerStatMan::shared().clone(),
             global_limiter: None,
         }
     }
@@ -925,6 +983,7 @@ mod tests {
             event_hooks: Arc::new(DownloadEventHooks::new()),
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive: false,
+            server_stat_man: Arc::new(ServerStatMan::new()),
             global_limiter: None,
         };
 

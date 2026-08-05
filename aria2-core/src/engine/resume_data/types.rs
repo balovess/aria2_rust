@@ -112,6 +112,14 @@ pub struct ResumeData {
 
     /// Path to saved .torrent metadata file
     pub bt_saved_metadata_path: Option<String>,
+
+    /// Raw Metalink document for restoring per-file mirror/fallback semantics.
+    #[serde(default)]
+    pub metalink_data: Option<String>,
+
+    /// Selected file index in the persisted Metalink document.
+    #[serde(default)]
+    pub metalink_file_index: Option<usize>,
 }
 
 /// Per-URI state tracking for mirror management
@@ -169,6 +177,8 @@ impl Default for ResumeData {
             resume_offset: None,
             bt_info_hash: None,
             bt_saved_metadata_path: None,
+            metalink_data: None,
+            metalink_file_index: None,
         }
     }
 }

@@ -31,6 +31,9 @@ impl SessionPersistence {
         let mut count = 0;
         for group in groups {
             let g = group.recover();
+            if !Self::should_persist_group(&g) {
+                continue;
+            }
             let status = g.status();
 
             // Only save if actively downloading or waiting
@@ -88,6 +91,9 @@ impl SessionPersistence {
         let mut count = 0;
         for group in groups {
             let g = group.recover();
+            if !Self::should_persist_group(&g) {
+                continue;
+            }
             let status = g.status();
 
             if status.is_completed() || matches!(status, DownloadStatus::Complete) {

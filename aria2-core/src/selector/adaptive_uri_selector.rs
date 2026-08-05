@@ -57,6 +57,7 @@ const BEST_MIRROR_RANGE_PCT: f64 = 0.25;
 // URI parsing helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn extract_host(uri: &str) -> Option<String> {
     crate::selector::feedback_uri_selector::extract_host_and_protocol(uri).map(|(h, _)| h)
 }
@@ -432,10 +433,11 @@ impl AdaptiveUriSelector {
     /// Report a successful download from a specific URI.
     pub fn report_success(&self, uri_idx: usize, speed: u64, is_multi: bool) {
         if let Some(uri) = self.uris.get(uri_idx)
-            && let Some(host) = extract_host(uri)
+            && let Some((host, protocol)) = extract_host_and_protocol(uri)
         {
-            self.stat_man.update(&host, speed, is_multi);
-            if let Some(stat) = self.stat_man.find_stat(&host) {
+            self.stat_man
+                .update_with_protocol(&host, &protocol, speed, is_multi);
+            if let Some(stat) = self.stat_man.find_stat_by_protocol(&host, &protocol) {
                 stat.reset_status();
             }
         }
@@ -444,10 +446,11 @@ impl AdaptiveUriSelector {
     /// Report a failed download with error code.
     pub fn report_failure_with_code(&self, uri_idx: usize, error_code: u16) {
         if let Some(uri) = self.uris.get(uri_idx)
-            && let Some(host) = extract_host(uri)
+            && let Some((host, protocol)) = extract_host_and_protocol(uri)
         {
-            self.stat_man.get_or_create(&host);
-            self.stat_man.mark_failure(&host, error_code);
+            self.stat_man.get_or_create_with_protocol(&host, &protocol);
+            self.stat_man
+                .mark_failure_with_protocol(&host, &protocol, error_code);
         }
     }
 

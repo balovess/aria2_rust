@@ -11,15 +11,20 @@ use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 #[cfg(feature = "bittorrent")]
 use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
 #[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
 #[cfg(feature = "sftp")]
 use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
-use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
+use std::sync::Arc;
 use tracing::info;
 
 impl App {
@@ -50,6 +55,7 @@ impl App {
             engine.set_save_session(path, save_session_interval, self.request_man.clone());
         }
 
+        engine.set_request_group_man(self.request_man.clone());
         *self.engine.lock().await = Some(engine);
         info!("Engine initialization complete");
     }
@@ -224,7 +230,135 @@ impl App {
             engine.set_global_rate_limiter(RateLimiterConfig::new(global_dl, global_ul));
         }
 
+        #[cfg(feature = "metalink")]
+        let mut metalink_resource_groups = Vec::new();
+        #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+        let mut metalink_graphs = Vec::new();
+        #[cfg(feature = "metalink")]
+        let all_metalink_inputs = !self.detected_inputs.is_empty()
+            && self
+                .detected_inputs
+                .iter()
+                .all(|input| matches!(input.input_type, InputType::MetalinkFile));
+        #[cfg(feature = "metalink")]
+        if all_metalink_inputs {
+            let mut gid_iter = {
+                let man = self.request_man.read().await;
+                (0..).map(move |_| man.next_available_gid())
+            };
+            for input in &self.detected_inputs {
+                let data = input
+                    .file_data
+                    .as_deref()
+                    .ok_or_else(|| "Metalink file data not available".to_string())?;
+                let converter = MetalinkToRequestGroup::new();
+                #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+                {
+                    let graphs = converter
+                        .create_torrent_graphs_from_bytes(data, &options, &mut gid_iter)
+                        .map_err(|e| format!("Metalink graph construction failed: {}", e))?;
+                    metalink_graphs.extend(graphs);
+                }
+                #[cfg(feature = "metalink")]
+                {
+                    let groups = converter
+                        .create_resource_groups_from_bytes(data, &options, &mut gid_iter)
+                        .map_err(|e| format!("Metalink resource construction failed: {}", e))?;
+                    metalink_resource_groups.extend(groups);
+                }
+            }
+        }
+        let use_v2 = self.detected_inputs.iter().all(|input| {
+            matches!(
+                input.input_type,
+                InputType::HttpUrl
+                    | InputType::FtpUrl
+                    | InputType::MagnetLink
+                    | InputType::TorrentFile
+                    | InputType::SftpUrl
+            )
+        }) && !self.detected_inputs.is_empty();
+        let command_tx = engine.engine_command_sender();
         let mut gids = Vec::new();
+        #[cfg(feature = "metalink")]
+        let submitted_resource_groups = !metalink_resource_groups.is_empty();
+        #[cfg(feature = "metalink")]
+        if submitted_resource_groups {
+            self.use_v2_engine
+                .store(true, std::sync::atomic::Ordering::Release);
+            for group in std::mem::take(&mut metalink_resource_groups) {
+                let gid = group.recover().gid();
+                command_tx
+                    .send(EngineCommand::AddDownload { group })
+                    .map_err(|e| format!("Failed to submit Metalink resource: {}", e))?;
+                gids.push(gid.value());
+            }
+        }
+        #[cfg(feature = "metalink")]
+        if submitted_resource_groups && {
+            #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+            {
+                metalink_graphs.is_empty()
+            }
+            #[cfg(not(all(feature = "metalink", feature = "bittorrent")))]
+            {
+                true
+            }
+        } {
+            return Ok(gids);
+        }
+        #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+        if !metalink_graphs.is_empty() {
+            self.use_v2_engine
+                .store(true, std::sync::atomic::Ordering::Release);
+            for graph in metalink_graphs {
+                let payload_gid = graph.payload.recover().gid();
+                command_tx
+                    .send(EngineCommand::AddMetalinkGraph { graph })
+                    .map_err(|e| format!("Failed to submit Metalink graph: {}", e))?;
+                gids.push(payload_gid.value());
+            }
+            return Ok(gids);
+        }
+
+        if use_v2 {
+            self.use_v2_engine
+                .store(true, std::sync::atomic::Ordering::Release);
+            for (i, input) in self.detected_inputs.iter().enumerate() {
+                #[cfg(not(feature = "bittorrent"))]
+                if matches!(input.input_type, InputType::MagnetLink) {
+                    return Err(
+                        "BitTorrent support not enabled (compile with --features bittorrent)"
+                            .to_string(),
+                    );
+                }
+
+                let gid = GroupId::new(i as u64 + 1);
+                let mut initial_uri = input.raw.clone();
+                #[cfg(feature = "bittorrent")]
+                if matches!(input.input_type, InputType::TorrentFile) {
+                    initial_uri = format!("bt://{}", gid.value());
+                }
+                let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+                    gid,
+                    vec![initial_uri],
+                    options.clone(),
+                )));
+                #[cfg(feature = "bittorrent")]
+                if matches!(input.input_type, InputType::TorrentFile) {
+                    let data = input
+                        .file_data
+                        .clone()
+                        .ok_or_else(|| "Torrent file data not available".to_string())?;
+                    group.recover().set_bt_metadata_data(data);
+                }
+                command_tx
+                    .send(EngineCommand::AddDownload { group })
+                    .map_err(|e| format!("Failed to submit download group: {}", e))?;
+                gids.push(gid.value());
+            }
+            return Ok(gids);
+        }
 
         for (i, input) in self.detected_inputs.iter().enumerate() {
             let gid = GroupId::new(i as u64 + 1);
@@ -438,7 +572,16 @@ impl App {
 
             // Spawn the engine in a background task so we can run the progress
             // reporter concurrently.
-            let engine_handle = tokio::spawn(async move { engine.run().await });
+            let use_v2_engine = self
+                .use_v2_engine
+                .load(std::sync::atomic::Ordering::Acquire);
+            let engine_handle = tokio::spawn(async move {
+                if use_v2_engine {
+                    engine.run_v2().await
+                } else {
+                    engine.run().await
+                }
+            });
 
             // Spawn the progress reporter if requested.
             let (_reporter_stop_tx, reporter_handle) = if show_progress {

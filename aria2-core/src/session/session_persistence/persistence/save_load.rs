@@ -6,12 +6,16 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::engine::resume_data::{ResumeData, ResumeDataExt};
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{DownloadOptions, GroupId, MetadataInfo, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::types::SessionPersistence;
 
 impl SessionPersistence {
+    pub(super) fn should_persist_group(group: &RequestGroup) -> bool {
+        group.belongs_to_gid().is_none()
+    }
+
     /// Save all active/paused/stopped command states to the session directory
     ///
     /// Iterates through all RequestGroups, converts each to ResumeData,
@@ -49,6 +53,10 @@ impl SessionPersistence {
 
         for group_lock in groups.iter() {
             let group = group_lock.recover();
+            if !Self::should_persist_group(&group) {
+                debug!(gid = %group.gid().value(), "Skipping generated child group");
+                continue;
+            }
 
             // Convert RequestGroup to ResumeData
             match ResumeData::from_request_group(&group) {
@@ -129,6 +137,23 @@ impl SessionPersistence {
     /// - Missing session directory returns Ok(0) (not an error)
     /// - Corrupt/malformed .aria2 files are skipped with a warning
     /// - Partial restoration is allowed (some files may fail)
+    pub async fn load_state_into_manager(
+        &mut self,
+        manager: &crate::request::request_group_man::RequestGroupMan,
+    ) -> Result<usize, String> {
+        let mut restored = Vec::new();
+        self.load_state(&mut restored).await?;
+
+        let mut loaded = 0;
+        for group in restored {
+            match manager.add_restored_group(group) {
+                Ok(()) => loaded += 1,
+                Err(error) => warn!(error = %error, "Skipping conflicting restored group"),
+            }
+        }
+        Ok(loaded)
+    }
+
     pub async fn load_state(
         &mut self,
         groups: &mut Vec<Arc<std::sync::RwLock<RequestGroup>>>,
@@ -165,6 +190,18 @@ impl SessionPersistence {
                     // Restore command from resume data
                     match Self::restore_command(&resume_data) {
                         Ok(group) => {
+                            let gid = group.gid();
+                            if groups
+                                .iter()
+                                .any(|existing| existing.recover().gid() == gid)
+                            {
+                                warn!(
+                                    gid = %resume_data.gid,
+                                    "Duplicate persisted GID, skipping restore"
+                                );
+                                continue;
+                            }
+
                             groups.push(Arc::new(std::sync::RwLock::new(group)));
                             loaded += 1;
                             info!(
@@ -249,6 +286,9 @@ impl SessionPersistence {
 
         // Build DownloadOptions from stored state
         let mut options = DownloadOptions::default();
+        if let Some(value) = resume_data.options.get("ssh-host-key-md") {
+            options.ssh_host_key_md = Some(value.clone());
+        }
 
         // Set output path if available
         if let Some(ref output_path) = resume_data.output_path {
@@ -260,14 +300,36 @@ impl SessionPersistence {
             }
         }
 
-        // Generate GID from stored value (try to parse hex, or create new)
-        let gid = if !resume_data.gid.is_empty() {
-            GroupId::from_hex_string(&resume_data.gid).unwrap_or_else(GroupId::new_random)
-        } else {
-            GroupId::new_random()
-        };
+        let gid = GroupId::from_hex_string(&resume_data.gid).ok_or_else(|| {
+            format!(
+                "Invalid persisted GID '{}': not a hexadecimal u64",
+                resume_data.gid
+            )
+        })?;
 
         let group = RequestGroup::new(gid, uris, options);
+
+        if let Some(metadata_path) = resume_data.bt_saved_metadata_path.as_deref() {
+            let metadata_uri = resume_data
+                .uris
+                .first()
+                .map(|uri| uri.uri.as_str())
+                .unwrap_or_default();
+            group.set_metadata_info(
+                MetadataInfo::new(gid, metadata_uri).with_metadata_path(metadata_path.to_owned()),
+            );
+        }
+        #[cfg(feature = "metalink")]
+        if let (Some(encoded), Some(file_index)) = (
+            resume_data.metalink_data.as_deref(),
+            resume_data.metalink_file_index,
+        ) {
+            use base64::Engine;
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| format!("Invalid persisted Metalink data: {error}"))?;
+            group.set_metalink_source(data, file_index);
+        }
 
         // Mark as paused if status indicates so
         if resume_data.status == "paused" || resume_data.status == "waiting" {

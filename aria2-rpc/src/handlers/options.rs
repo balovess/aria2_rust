@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use aria2_core::request::request_group::{ChangeableKind, is_option_changeable};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
@@ -265,15 +266,19 @@ impl RpcEngine {
         let gid: String = req.get_param(0)?;
         let changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
 
-        // Determine whether the download is active. If we can't find it in
-        // group_man, assume it's reserved (not yet started) — this is safe
-        // because options for reserved downloads are a superset.
-        let is_active = if let Some(ref group_man) = self.group_man {
-            let gm = group_man.read().await;
-            gm.is_group_active(&gid).unwrap_or(false)
-        } else {
-            false
-        };
+        let group =
+            if let Some(group_man) = self.group_man.as_ref() {
+                Some(
+                    group_man.read().await.group_by_hex(&gid).ok_or_else(|| {
+                        JsonRpcError::RpcExecution(format!("GID {} not found", gid))
+                    })?,
+                )
+            } else {
+                None
+            };
+        let is_active = group
+            .as_ref()
+            .is_some_and(|group| group.recover().status().is_active());
 
         // Classify each option key and partition into immediate/pending.
         let mut immediate = HashMap::new();
@@ -320,11 +325,15 @@ impl RpcEngine {
                 pending.len(),
                 pending.keys().collect::<Vec<_>>()
             );
-            // TODO: Implement pause + restart mechanism matching C++:
-            //   group->setPendingOption(pendingOption);
-            //   if (pauseRequestGroup(group, false, false)) {
-            //       group->setRestartRequested(true);
-            //   }
+            if let Some(group) = group.as_ref() {
+                group.recover().set_pending_options(pending);
+                if is_active {
+                    let gm = self.group_man.as_ref().unwrap().read().await;
+                    gm.pause_group(group.recover().gid())
+                        .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
+                    group.recover().request_restart();
+                }
+            }
         }
 
         // Persist all changes in task_opts for getOption retrieval and

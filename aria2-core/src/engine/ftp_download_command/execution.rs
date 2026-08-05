@@ -188,6 +188,9 @@ impl FtpDownloadCommand {
             }
         };
         self.last_connection_context = Some(ctrl.connection_context().clone());
+        self.group
+            .recover()
+            .set_connection_context(ctrl.connection_context().clone());
 
         // Step 2: Authenticate
         ctrl.authenticate(&self.username, &self.password).await?;

@@ -282,7 +282,7 @@ fn test_report_failure_with_code() {
 
     sel.report_failure_with_code(0, 503);
 
-    let stat = man.find_stat("failing.mirror.com").unwrap();
+    let stat = man.find_stat_by_protocol("failing.mirror.com", "http").unwrap();
     assert_eq!(stat.get_consecutive_failures(), 1);
     assert_eq!(stat.get_last_error_code(), 503);
 }
@@ -295,7 +295,7 @@ fn test_report_failure_default_code() {
 
     sel.report_failure_default(0);
 
-    let stat = man.find_stat("error.mirror.com").unwrap();
+    let stat = man.find_stat_by_protocol("error.mirror.com", "http").unwrap();
     assert_eq!(stat.get_last_error_code(), 500);
 }
 
@@ -307,7 +307,7 @@ fn test_report_success_updates_speed() {
 
     sel.report_success(0, 1_000_000, false);
 
-    let stat = man.find_stat("fast.mirror.com").unwrap();
+    let stat = man.find_stat_by_protocol("fast.mirror.com", "http").unwrap();
     assert!(stat.get_download_speed() > 0);
 }
 
