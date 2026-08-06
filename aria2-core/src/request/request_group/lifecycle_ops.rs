@@ -17,14 +17,10 @@ use super::status::DownloadStatus;
 impl super::RequestGroup {
     /// Publish a terminal lifecycle event to the process-wide observer bus.
     ///
-    /// The status transition itself is the only choke point that *every*
-    /// engine flavour passes through: the v1 `DownloadEngine::run()` loop that
-    /// production uses dispatches opaque `Box<dyn Command>` tasks and never
-    /// inspects group state, so the demotion-time hook site in
-    /// `RequestGroupMan::remove_stopped_groups()` (v2 only) is not reachable
-    /// there. Emitting here guarantees `aria2.onDownloadComplete` /
-    /// `aria2.onDownloadError` reach RPC clients on both paths; the bus
-    /// de-duplicates one-shot events so the v2 path does not double-fire.
+    /// The status transition itself is the only choke point that every
+    /// download command passes through. Emitting here guarantees terminal
+    /// lifecycle notifications reach RPC clients; the event bus de-duplicates
+    /// one-shot events when the engine loop also observes the transition.
     ///
     /// Only observers are notified — **not** the `--on-download-*` shell
     /// hooks. Spawning a child process requires a Tokio runtime, and these
@@ -180,6 +176,7 @@ impl super::RequestGroup {
 
     /// Transition to `Error` status with an error message.
     pub fn error(&mut self, err: impl Into<String>) -> Result<()> {
+        self.clear_bt_peer_snapshots();
         let message = err.into();
         {
             let mut status = self.status.recover_mut();
@@ -229,6 +226,7 @@ impl super::RequestGroup {
 
     /// Mark a timeout as a terminal error while retaining its structured code.
     pub fn mark_timeout(&self) {
+        self.clear_bt_peer_snapshots();
         *self.last_error_message.recover_mut() = "Download timed out".to_string();
         *self.last_error_code.recover_mut() = DownloadResultCode::TimeOut;
         *self.status.recover_mut() = DownloadStatus::Error("Download timed out".to_string());

@@ -164,6 +164,84 @@ impl super::RequestGroup {
         }
     }
 
+    /// Return a snapshot of all URI entries and their current lifecycle state.
+    pub fn uri_entries(&self) -> Vec<super::UriEntry> {
+        let guard = self.download_context.recover();
+        if let Some(ref ctx) = *guard {
+            ctx.get_file_entries()
+                .iter()
+                .filter(|fe| fe.is_requested())
+                .flat_map(|fe| {
+                    fe.uris().into_iter().map(|uri| {
+                        let status = if fe.remaining_uris().iter().any(|value| value == &uri) {
+                            "waiting"
+                        } else if fe.spent_uris().iter().any(|value| value == &uri) {
+                            "used"
+                        } else {
+                            "spent"
+                        };
+                        super::UriEntry {
+                            uri,
+                            status: status.to_string(),
+                        }
+                    })
+                })
+                .collect()
+        } else {
+            self.uris
+                .iter()
+                .cloned()
+                .map(|uri| super::UriEntry {
+                    uri,
+                    status: "waiting".to_string(),
+                })
+                .collect()
+        }
+    }
+
+    /// Remove the requested URIs and append new URIs to the first requested file entry.
+    pub fn change_uris(
+        &mut self,
+        del_uris: &[String],
+        add_uris: &[String],
+    ) -> crate::error::Result<(usize, usize)> {
+        let mut guard = self.download_context.recover_mut();
+        if let Some(ctx) = guard.as_mut() {
+            let ctx_inner = Arc::get_mut(ctx).ok_or_else(|| {
+                crate::error::Aria2Error::InvalidArgument(
+                    "download context is shared and cannot be changed".to_string(),
+                )
+            })?;
+            let entry = ctx_inner
+                .get_file_entries_mut()
+                .iter_mut()
+                .find(|fe| fe.is_requested())
+                .ok_or_else(|| {
+                    crate::error::Aria2Error::InvalidArgument(
+                        "download context has no requested file entry".to_string(),
+                    )
+                })?;
+            let mut deleted = 0;
+            for uri in del_uris {
+                deleted += entry.remove_uri(uri) as usize;
+            }
+            let added = entry.add_uris(add_uris);
+            return Ok((deleted, added));
+        }
+
+        let mut deleted = 0;
+        self.uris.retain(|uri| {
+            if del_uris.iter().any(|deleted_uri| deleted_uri == uri) {
+                deleted += 1;
+                false
+            } else {
+                true
+            }
+        });
+        self.uris.extend(add_uris.iter().cloned());
+        Ok((deleted, add_uris.len()))
+    }
+
     /// Return URI attempt results across all requested file entries.
     ///
     /// Delegates to `FileEntry::uri_results()` when `DownloadContext`

@@ -1,6 +1,5 @@
 mod lifecycle;
 mod progress;
-mod scheduler;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,40 +12,14 @@ use super::bt_registry::BtRegistry;
 use super::engine_command::EngineCommand;
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
-use crate::error::{Aria2Error, Result};
 use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
 
-/// Bookkeeping the engine retains for each spawned command task so it can
-/// enforce per-command timeouts and abort stalled tasks individually.
-///
-/// The command object itself is moved into the spawned task (it owns the
-/// `Box<dyn Command>` for the duration of `execute()`); v1 does NOT recover
-/// commands for retry on timeout/failure, so the engine only needs the abort
-/// handle and timing metadata.
-pub(crate) struct RunningTask {
-    /// Handle used to cancel the task when its timeout elapses or on shutdown.
-    pub(crate) handle: tokio::task::AbortHandle,
-    /// Instant the task was spawned.
-    pub(crate) started: std::time::Instant,
-    /// Per-command timeout. `None` means the command never times out.
-    pub(crate) timeout: Option<Duration>,
-    /// Group this command belongs to, when the command exposes one.
-    ///
-    /// Retained so the engine can record a terminal `Error` status if the task
-    /// is aborted on timeout — the spawned future is cancelled at an await
-    /// point and therefore cannot report the failure itself.
-    pub(crate) group: Option<Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>,
-}
-
 pub struct DownloadEngine {
-    pub(crate) command_tx: mpsc::UnboundedSender<Box<dyn super::command::Command>>,
-    pub(crate) command_rx: mpsc::UnboundedReceiver<Box<dyn super::command::Command>>,
-    /// EngineCommand channel for structured RPC -> engine communication.
-    /// Replaces the `Box<dyn Command>` channel for download lifecycle ops.
+    /// Sender for structured engine communication commands.
     pub(crate) engine_cmd_tx: mpsc::UnboundedSender<EngineCommand>,
     pub(crate) engine_cmd_rx: Option<mpsc::UnboundedReceiver<EngineCommand>>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
@@ -79,7 +52,7 @@ pub struct DownloadEngine {
     ///
     /// Defaults to the process-wide instance returned by
     /// [`DownloadEventHooks::shared`], so a listener registered by the binary
-    /// crate before `run()` is observed by *both* engine loops as well as by
+    /// crate before `run()` is observed by the engine loop as well as by
     /// the group state transitions inside individual commands.
     pub(crate) event_hooks: Arc<super::download_event_hooks::DownloadEventHooks>,
 }
@@ -90,15 +63,12 @@ impl DownloadEngine {
     }
 
     pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let max_tries = policy.max_tries();
 
         let engine = DownloadEngine {
-            command_tx,
-            command_rx,
             engine_cmd_tx,
             engine_cmd_rx: Some(engine_cmd_rx),
             shutdown_tx: Some(shutdown_tx),
@@ -186,15 +156,6 @@ impl DownloadEngine {
         self.save_session_path.as_ref()
     }
 
-    pub fn add_command(&self, command: Box<dyn super::command::Command>) -> Result<()> {
-        // A newly-added download changes session state; mark it dirty so the
-        // periodic auto-save persists it.
-        self.mark_session_dirty();
-        self.command_tx
-            .send(command)
-            .map_err(|e| Aria2Error::DownloadFailed(format!("Failed to add command: {}", e)))
-    }
-
     pub fn retry_stats(&self) -> &RetryStats {
         &self.retry_stats
     }
@@ -243,18 +204,11 @@ impl DownloadEngine {
         self.keep_alive = v;
     }
 
-    /// Clone the command sender so external callers (e.g., RPC) can submit
-    /// download commands to the engine loop.
-    pub fn command_sender(&self) -> mpsc::UnboundedSender<Box<dyn super::command::Command>> {
-        self.command_tx.clone()
-    }
-
     /// Clone the EngineCommand sender so external callers (e.g., RPC) can
     /// submit structured download lifecycle commands.
     ///
-    /// This is the v2 API that replaces `command_sender()` for download
-    /// management (add/remove/pause/unpause/halt). The old `Box<dyn Command>`
-    /// channel is retained for backward compatibility with existing code.
+    /// This is the engine interface for download management
+    /// (add/remove/pause/unpause/halt).
     pub fn engine_command_sender(&self) -> mpsc::UnboundedSender<EngineCommand> {
         self.engine_cmd_tx.clone()
     }
@@ -275,7 +229,7 @@ impl DownloadEngine {
     ///
     /// Layers above `aria2-core` use this to install a
     /// [`DownloadEventListener`](super::download_event_hooks::DownloadEventListener)
-    /// **before** `run()` / `run_v2()` consumes the engine — for example the
+    /// **before** `run()` consumes the engine — for example the
     /// adapter in the `aria2` binary that republishes lifecycle events as
     /// JSON-RPC WebSocket notifications.
     pub fn event_hooks(&self) -> &Arc<super::download_event_hooks::DownloadEventHooks> {

@@ -342,11 +342,13 @@ async fn test_dht_engine_find_peers_mocked() {
     let info_hash = [0xEFu8; 20];
     let _result = engine.find_peers(&info_hash).await;
 
-    // Stats should reflect bootstrap nodes were added
+    // `DhtEngineConfig::local()` intentionally disables public bootstrap.
+    // The mock server is not configured as an entry point, so startup must
+    // remain local and must not depend on external DNS or network access.
     let stats = engine.stats().await;
-    assert!(
-        stats.total_nodes >= 4,
-        "engine should have at least bootstrap nodes (got {})",
+    assert_eq!(
+        stats.total_nodes, 0,
+        "local engine must not add public bootstrap nodes (got {})",
         stats.total_nodes
     );
 
@@ -545,11 +547,12 @@ async fn test_dht_engine_lifecycle() {
         .await
         .expect("engine should start with persistence path");
 
-    // Bootstrap nodes should be populated (may be fewer if DNS unavailable)
+    // The local test configuration disables public bootstrap, so startup is
+    // deterministic and independent of DNS availability.
     let stats = engine.stats().await;
-    assert!(
-        stats.total_nodes >= 1,
-        "after start, engine should have >= 1 bootstrap node (got {}, DNS may be limited)",
+    assert_eq!(
+        stats.total_nodes, 0,
+        "local engine must start without public bootstrap nodes (got {})",
         stats.total_nodes
     );
 

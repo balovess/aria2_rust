@@ -15,9 +15,42 @@ use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as Progress
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::request::request_group::BtPeerSnapshot;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::types::{EndgameState, PeerKey};
+
+fn sync_peer_snapshots(
+    group: &crate::request::request_group::RequestGroup,
+    active_connections: &[BtPeerConn],
+) {
+    let snapshots = active_connections
+        .iter()
+        .filter_map(|conn| {
+            Some(BtPeerSnapshot {
+                peer_id: conn.peer_id.unwrap_or(conn.stats.peer_id),
+                addr: format!("{}:{}", conn.ip_addr, conn.port).parse().ok()?,
+                uploaded_bytes: conn.stats.uploaded_bytes,
+                downloaded_bytes: conn.stats.downloaded_bytes,
+                upload_speed: conn.stats.upload_speed,
+                download_speed: conn.stats.download_speed,
+                avg_upload_speed: conn.stats.avg_upload_speed,
+                avg_download_speed: conn.stats.avg_download_speed,
+                am_choking: conn.stats.am_choking,
+                peer_choking: conn.stats.peer_choking,
+                seeder: Some(conn.seeder),
+                connection_duration_secs: conn.stats.connection_duration_secs(),
+                last_data_age_secs: conn
+                    .stats
+                    .last_data_time
+                    .map_or(conn.stats.age().as_secs(), |time| time.elapsed().as_secs()),
+                is_snubbed: conn.stats.is_snubbed,
+                is_banned: conn.stats.is_banned,
+            })
+        })
+        .collect();
+    group.set_bt_peer_snapshots(snapshots);
+}
 
 fn unique_source_peer(
     source_peers: impl IntoIterator<Item = std::net::SocketAddr>,
@@ -341,6 +374,10 @@ impl BtDownloadCommand {
                 &peer_last_data_time,
                 active_connections,
             );
+            {
+                let group = self.group.recover();
+                sync_peer_snapshots(&group, active_connections);
+            }
 
             // PEX Integration: Periodic PEX message sending (BEP 11)
             super::pex::send_periodic_pex(
@@ -548,18 +585,32 @@ impl BtDownloadCommand {
                     let piece_data = piece_result.data;
                     let piece_data_len = piece_data.len();
 
-                    // G1: Update last-data-time for all active peers on successful receive
-                    for peer_addr in piece_result.source_peers.iter().copied() {
-                        if let Some(peer_key) = active_connections.iter().find_map(|conn| {
-                            (format!("{}:{}", conn.ip_addr, conn.port)
-                                .parse::<std::net::SocketAddr>()
-                                .ok()
-                                == Some(peer_addr))
-                            .then(|| PeerKey::from_peer(&conn.ip_addr, conn.port))
-                            .flatten()
-                        }) {
+                    // Update statistics with the exact bytes supplied by each peer.
+                    for peer_download in &piece_result.peer_bytes {
+                        if let Some((index, peer_key)) = active_connections
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, conn)| {
+                                (format!("{}:{}", conn.ip_addr, conn.port)
+                                    .parse::<std::net::SocketAddr>()
+                                    .ok()
+                                    == Some(peer_download.peer))
+                                .then(|| {
+                                    Some((index, PeerKey::from_peer(&conn.ip_addr, conn.port)))
+                                })
+                                .flatten()
+                            })
+                        {
+                            active_connections[index]
+                                .stats
+                                .on_data_received(peer_download.bytes);
+                            self.on_data_received_from_peer(index, peer_download.bytes);
                             peer_last_data_time.insert(peer_key, Instant::now());
                         }
+                    }
+                    {
+                        let group = self.group.recover();
+                        sync_peer_snapshots(&group, active_connections);
                     }
 
                     tracing::info!(

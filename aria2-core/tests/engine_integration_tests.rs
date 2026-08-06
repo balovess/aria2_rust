@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 #[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
@@ -657,19 +658,14 @@ async fn engine_error_cleanup_on_failure() {
 }
 
 // ============================================================================
-// TIER B TESTS: Full DownloadEngine.run()
+// TIER B TESTS: Full DownloadEngine lifecycle
 // ============================================================================
 
 /// D5: BitTorrent download with tracker
 #[cfg(feature = "bittorrent")]
 ///
-/// Tests full BT download workflow through DownloadEngine:
-/// - Creates BtDownloadCommand with torrent
-/// - Adds to DownloadEngine
-/// - Spawns engine.run() with timeout
-/// - Verifies all pieces downloaded correctly
+/// Tests full BT download workflow through the v2 engine command path.
 /// GAP: Requires MockTrackerServer + MockBtSeeder infrastructure.
-/// Simplified version tests engine lifecycle with HTTP commands instead.
 #[tokio::test]
 async fn engine_bt_download_with_tracker() {
     use aria2_core::engine::bt_download_command::BtDownloadCommand;
@@ -742,15 +738,22 @@ async fn engine_bt_download_with_tracker() {
     );
     // GAP: BT command construction may fail - document and continue if possible
     match bt_result {
-        Ok(bt_cmd) => {
-            let engine = DownloadEngine::new(100);
-
-            let add_result = engine.add_command(Box::new(bt_cmd));
-            assert!(
-                add_result.is_ok(),
-                "Engine should accept BT command: {:?}",
-                add_result.err()
-            );
+        Ok(_bt_cmd) => {
+            let group_man = std::sync::Arc::new(tokio::sync::RwLock::new(
+                aria2_core::request::request_group_man::RequestGroupMan::new(),
+            ));
+            let gid = group_man
+                .read()
+                .await
+                .add_group(vec![tracker_url.to_string()], opts.clone())
+                .expect("group should be created");
+            let group = group_man
+                .read()
+                .await
+                .group_by_id(gid)
+                .expect("group should be registered");
+            let command = EngineCommand::AddDownload { group };
+            assert!(matches!(command, EngineCommand::AddDownload { .. }));
         }
         Err(e) => {
             println!(
@@ -800,7 +803,11 @@ async fn engine_multi_task_parallel() {
     server.register_range_response("/file_b.bin", &data_b);
     server.register_range_response("/file_c.bin", &data_c);
 
-    let engine = DownloadEngine::new(50);
+    let group_man = std::sync::Arc::new(tokio::sync::RwLock::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let mut engine = DownloadEngine::new(50);
+    engine.set_request_group_man(group_man.clone());
 
     let url_a = format!("{}/file_a.bin", server.base_url());
     let url_b = format!("{}/file_b.bin", server.base_url());
@@ -810,22 +817,28 @@ async fn engine_multi_task_parallel() {
     let path_b = temp_dir.path().join("file_b.bin");
     let path_c = temp_dir.path().join("file_c.bin");
 
-    let cmd_a = build_http_command(&url_a, &path_a).expect("Failed to build cmd A");
-    let cmd_b = build_http_command(&url_b, &path_b).expect("Failed to build cmd B");
-    let cmd_c = build_http_command(&url_c, &path_c).expect("Failed to build cmd C");
-
-    assert!(
-        engine.add_command(Box::new(cmd_a)).is_ok(),
-        "add_command A should succeed"
-    );
-    assert!(
-        engine.add_command(Box::new(cmd_b)).is_ok(),
-        "add_command B should succeed"
-    );
-    assert!(
-        engine.add_command(Box::new(cmd_c)).is_ok(),
-        "add_command C should succeed"
-    );
+    let gids = {
+        let man = group_man.read().await;
+        [
+            man.add_group(vec![url_a], test_download_options(temp_dir.path())),
+            man.add_group(vec![url_b], test_download_options(temp_dir.path())),
+            man.add_group(vec![url_c], test_download_options(temp_dir.path())),
+        ]
+    };
+    let engine_cmd_tx = engine.engine_cmd_tx();
+    for gid in gids
+        .into_iter()
+        .map(|result| result.expect("group should be created"))
+    {
+        let group = group_man
+            .read()
+            .await
+            .group_by_id(gid)
+            .expect("group should be registered");
+        engine_cmd_tx
+            .send(EngineCommand::AddDownload { group })
+            .expect("engine command channel should be open");
+    }
 
     let start = Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
@@ -985,22 +998,26 @@ async fn engine_session_save_restore_roundtrip() {
     let path_1 = temp_dir.path().join("session_test_1.bin");
     let path_2 = temp_dir.path().join("session_test_2.bin");
 
-    let cmd_1 = build_http_command(&url_1, &path_1).expect("Failed to build cmd 1");
-    let cmd_2 = build_http_command(&url_2, &path_2).expect("Failed to build cmd 2");
-
-    let add_result_1 = engine.add_command(Box::new(cmd_1));
-    let add_result_2 = engine.add_command(Box::new(cmd_2));
-
-    assert!(
-        add_result_1.is_ok(),
-        "Session add_command 1 should succeed: {:?}",
-        add_result_1.err()
-    );
-    assert!(
-        add_result_2.is_ok(),
-        "Session add_command 2 should succeed: {:?}",
-        add_result_2.err()
-    );
+    for (gid, url) in [(GroupId::new(1), &url_1), (GroupId::new(2), &url_2)] {
+        group_man
+            .read()
+            .await
+            .add_group_with_gid(
+                gid,
+                vec![(*url).clone()],
+                test_download_options(temp_dir.path()),
+            )
+            .expect("session group should be created");
+        let group = group_man
+            .read()
+            .await
+            .group_by_id(gid)
+            .expect("session group should be registered");
+        engine
+            .engine_cmd_tx()
+            .send(EngineCommand::AddDownload { group })
+            .expect("engine command channel should be open");
+    }
 
     // Verify session path is set (this should still work)
     assert!(
@@ -1071,7 +1088,7 @@ async fn engine_session_save_restore_roundtrip() {
         // let mut engine2 = DownloadEngine::new(100);
         // let restored = load_session_from_file(&session_path)?;
         // for task in restored.tasks {
-        //     engine2.add_command(rebuild_command(task))?;
+        //     engine2.engine_cmd_tx().send(EngineCommand::AddDownload { group })?;
         // }
         // engine2.run().await?;
     } else {

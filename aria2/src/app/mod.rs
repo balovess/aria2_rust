@@ -26,7 +26,6 @@ use colored::Colorize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, RwLock};
 
 use aria2_core::config::ConfigManager;
@@ -56,7 +55,6 @@ pub struct App {
     engine: Arc<Mutex<Option<aria2_core::engine::download_engine::DownloadEngine>>>,
     request_man: Arc<RwLock<RequestGroupMan>>,
     detected_inputs: Vec<DetectedInput>,
-    use_v2_engine: Arc<AtomicBool>,
 }
 
 impl App {
@@ -70,7 +68,6 @@ impl App {
             engine: Arc::new(Mutex::new(None)),
             request_man,
             detected_inputs: Vec::new(),
-            use_v2_engine: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -324,12 +321,12 @@ impl App {
         // Step 6: Start RPC server (if enabled)
         let rpc_handle = if rpc_enabled {
             // Extract shared state from the engine before run() consumes it
-            let (group_man, cmd_tx) = {
+            let (group_man, engine_cmd_tx) = {
                 let engine_lock = self.engine.lock().await;
                 let engine_ref = engine_lock.as_ref().expect("engine should be initialized");
-                (self.request_man.clone(), engine_ref.command_sender())
+                (self.request_man.clone(), engine_ref.engine_command_sender())
             };
-            match self.start_rpc_server(group_man, cmd_tx).await {
+            match self.start_rpc_server(group_man, engine_cmd_tx).await {
                 Ok(handle) => Some(handle),
                 Err(e) => {
                     warn!("RPC server failed to start: {}", e);

@@ -11,6 +11,32 @@ use super::options::DownloadOptions;
 use crate::download::DownloadContext;
 
 #[test]
+fn test_bt_peer_snapshots_roundtrip() {
+    let group = RequestGroup::new(GroupId::new(99), Vec::new(), DownloadOptions::default());
+    let snapshot = super::BtPeerSnapshot {
+        peer_id: [1; 20],
+        addr: "127.0.0.1:6881".parse().expect("valid test address"),
+        uploaded_bytes: 1,
+        downloaded_bytes: 2,
+        upload_speed: 3.0,
+        download_speed: 4.0,
+        avg_upload_speed: 5,
+        avg_download_speed: 6,
+        am_choking: true,
+        peer_choking: false,
+        seeder: Some(true),
+        connection_duration_secs: 7,
+        last_data_age_secs: 8,
+        is_snubbed: false,
+        is_banned: false,
+    };
+    group.set_bt_peer_snapshots(vec![snapshot.clone()]);
+    assert_eq!(group.bt_peer_snapshots(), vec![snapshot]);
+    group.clear_bt_peer_snapshots();
+    assert!(group.bt_peer_snapshots().is_empty());
+}
+
+#[test]
 fn test_connection_contexts_are_deduplicated_and_reset() {
     use std::net::SocketAddr;
 

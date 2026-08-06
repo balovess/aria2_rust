@@ -1,174 +1,44 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use tokio::sync::{RwLock, mpsc};
-use tokio_util::sync::CancellationToken;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use super::rpc_helpers::{split_auth_token, to_aria2_wire_format};
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
-use super::types::{GlobalOptions, PeerInfo, SessionInfo, StatusInfo, TaskOptions};
+use super::types::{GlobalOptions, SessionInfo, TaskOptions};
 use super::websocket::EventPublisher;
-#[cfg(feature = "bittorrent")]
-use aria2_core::TorrentFileEntry;
 use aria2_core::config::OptionRegistry;
-use aria2_core::engine::command::Command;
 use aria2_core::request::request_group_man::RequestGroupMan;
 
-/// Core RPC engine that manages download tasks and handles aria2 protocol requests.
-///
-/// This is the main orchestrator that:
-/// - Maintains task state (active downloads, stopped tasks)
-/// - Routes incoming RPC requests to appropriate handlers
-/// - Provides progress tracking and status queries
-/// - Publishes events via WebSocket for real-time notifications
-///
-/// Handler implementations are in the [`handlers`](crate::handlers) module.
+/// Core RPC engine. Download state lives exclusively in `RequestGroupMan` and
+/// lifecycle changes are submitted to the core engine command channel.
 pub struct RpcEngine {
-    /// Active download tasks keyed by GID
-    pub(crate) tasks: Arc<RwLock<HashMap<String, TaskState>>>,
-    /// Global configuration options (registry defaults + user changes,
-    /// surfaced by aria2.getGlobalOption)
     pub(crate) global_opts: GlobalOptions,
-    /// Options explicitly set by the user via `aria2.changeGlobalOption`.
-    /// These are merged into every subsequent download's options (task opts
-    /// win). Kept separate from `global_opts` so registry-default values
-    /// seeded at startup never override per-download defaults.
     pub(crate) user_global_opts: Arc<RwLock<HashMap<String, serde_json::Value>>>,
-    /// Per-task configuration options
     pub(crate) task_opts: TaskOptions,
-    /// Completed/stopped task results
-    pub(crate) stopped_tasks: Arc<RwLock<Vec<StatusInfo>>>,
-    /// Event publisher for WebSocket notifications
     pub event_publisher: Arc<EventPublisher>,
-    /// Authentication middleware for token-based RPC auth
     pub(crate) auth_middleware: RpcAuthMiddleware,
-    /// Shared download group manager (for live progress queries and task tracking).
-    /// When set, RPC handlers read progress directly from RequestGroupMan
-    /// instead of the placeholder `tasks` map.
     pub(crate) group_man: Option<Arc<RwLock<RequestGroupMan>>>,
-    /// Channel sender to submit download commands to the DownloadEngine loop.
-    /// When set, `aria2.addUri` starts real downloads by sending a
-    /// `DownloadCommand` through this channel.
-    pub(crate) cmd_tx: Option<mpsc::UnboundedSender<Box<dyn Command>>>,
-    /// EngineCommand channel for structured download lifecycle commands.
-    /// When set, RPC handlers send `EngineCommand` variants (AddDownload,
-    /// RemoveDownload, Pause, etc.) to the v2 engine loop.
     pub(crate) engine_cmd_tx:
         Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
-    /// Cumulative count of stopped downloads since session start (atomic).
-    pub(crate) num_stopped_total: AtomicUsize,
-    /// Session information generated once at engine construction.
-    /// C++ aria2 generates sessionId_ once and returns it consistently;
-    /// we match that by storing it here rather than creating a new one per request.
     pub(crate) session_info: SessionInfo,
-    /// Configured `--save-session` file path (if any). Used by
-    /// `aria2.saveSession` when the caller does not supply an explicit path,
-    /// mirroring C++ which reads the `PREF_SAVE_SESSION` option.
     pub(crate) save_session_path: Option<std::path::PathBuf>,
 }
 
-/// Internal state for an active download task.
-///
-/// Contains both static metadata (GID, URIs, options) and dynamic
-/// progress fields (speeds, lengths, connections) that are updated
-/// by the download engine during execution.
-pub(crate) struct TaskState {
-    /// Current status information with metadata
-    pub(crate) status: StatusInfo,
-    /// Configuration options specific to this task
-    #[allow(dead_code)] // Stored for future RPC tellActive/tellStopped option reporting
-    pub(crate) options: HashMap<String, serde_json::Value>,
-    /// URI list for this download
-    #[allow(dead_code)] // Stored for future RPC getUris option reporting
-    pub(crate) uris: Vec<String>,
-    /// Torrent file entries (for BitTorrent downloads)
-    #[cfg(feature = "bittorrent")]
-    pub(crate) torrent_files: Option<Vec<TorrentFileEntry>>,
-    // === Dynamic progress fields (updated by download engine) ===
-    pub(crate) total_length: u64,
-    pub(crate) completed_length: u64,
-    pub(crate) upload_length: u64,
-    pub(crate) download_speed: u64,
-    pub(crate) upload_speed: u64,
-    pub(crate) connections: u16,
-    /// Peer list for BitTorrent downloads
-    pub(crate) peers: Vec<PeerInfo>,
-    /// Cancellation token for forceful interruption of active downloads
-    pub(crate) cancel_token: Option<CancellationToken>,
-}
-
-impl TaskState {
-    pub(crate) fn new(
-        status: StatusInfo,
-        options: HashMap<String, serde_json::Value>,
-        uris: Vec<String>,
-    ) -> Self {
-        Self {
-            status,
-            options,
-            uris,
-            #[cfg(feature = "bittorrent")]
-            torrent_files: None,
-            total_length: 0,
-            completed_length: 0,
-            upload_length: 0,
-            download_speed: 0,
-            upload_speed: 0,
-            connections: 0,
-            peers: vec![],
-            cancel_token: Some(CancellationToken::new()),
-        }
-    }
-
-    /// Update the StatusInfo snapshot from current internal state.
-    ///
-    /// Called before returning status to ensure all progress fields
-    /// are reflected in the response.
-    pub(crate) fn update_status_info(&mut self) {
-        let status = StatusInfo::new(&self.status.gid)
-            .with_status(self.status.status.clone())
-            .with_total_length(self.total_length)
-            .with_completed_length(self.completed_length)
-            .with_upload_length(self.upload_length)
-            .with_download_speed(self.download_speed)
-            .with_upload_speed(self.upload_speed)
-            .with_connections(self.connections)
-            .with_dir(self.status.dir.clone().unwrap_or_default())
-            .with_files(self.status.files.clone().unwrap_or_default());
-        // TODO: Construct BittorrentInfo from self.torrent_files (Task 19)
-        self.status = status;
-    }
-
-    /// Update progress fields (typically called by download engine).
-    pub fn update_progress(
-        &mut self,
-        total: u64,
-        completed: u64,
-        uploaded: u64,
-        dl_speed: u64,
-        ul_speed: u64,
-        connections: u16,
-    ) {
-        self.total_length = total;
-        self.completed_length = completed;
-        self.upload_length = uploaded;
-        self.download_speed = dl_speed;
-        self.upload_speed = ul_speed;
-        self.connections = connections;
-    }
-}
-
 impl RpcEngine {
-    /// Create a new RpcEngine instance with default global options seeded
-    /// from the `OptionRegistry`.
-    ///
-    /// The `global_opts` map is pre-populated with all registered option
-    /// defaults (e.g. `file-allocation=falloc`, `secure-falloc=false`,
-    /// `mmap-threshold=268435456`) so that `aria2.getGlobalOption` returns
-    /// meaningful values immediately, without requiring the client to first
-    /// call `aria2.changeGlobalOption`.
+    /// Create a new RpcEngine test fixture with private core dependencies.
+    /// Production callers should wire shared dependencies with the builder methods.
     pub fn new() -> Self {
+        let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
+        std::mem::forget(engine_cmd_rx);
+        Self::wired(Arc::new(RwLock::new(RequestGroupMan::new())), engine_cmd_tx)
+    }
+
+    pub fn wired(
+        group_man: Arc<RwLock<RequestGroupMan>>,
+        engine_cmd_tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
+    ) -> Self {
+        // Initialize global options from the registry.
         let registry = OptionRegistry::new();
         let mut defaults = HashMap::new();
         for (name, def) in registry.all() {
@@ -185,17 +55,14 @@ impl RpcEngine {
         }
 
         Self {
-            tasks: Arc::new(RwLock::new(HashMap::new())),
             global_opts: Arc::new(RwLock::new(defaults)),
+            // Keep user-provided global options separate from registry defaults.
             user_global_opts: Arc::new(RwLock::new(HashMap::new())),
             task_opts: Arc::new(RwLock::new(HashMap::new())),
-            stopped_tasks: Arc::new(RwLock::new(Vec::new())),
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),
-            group_man: None,
-            cmd_tx: None,
-            engine_cmd_tx: None,
-            num_stopped_total: AtomicUsize::new(0),
+            group_man: Some(group_man),
+            engine_cmd_tx: Some(engine_cmd_tx),
             session_info: SessionInfo::new(),
             save_session_path: None,
         }
@@ -229,16 +96,9 @@ impl RpcEngine {
         self
     }
 
-    /// Chainable builder method to set the command channel sender.
-    /// When set, `aria2.addUri` sends real `DownloadCommand`s to the engine.
-    pub fn with_cmd_tx(mut self, tx: mpsc::UnboundedSender<Box<dyn Command>>) -> Self {
-        self.cmd_tx = Some(tx);
-        self
-    }
-
     /// Chainable builder method to set the EngineCommand channel sender.
     /// When set, RPC handlers send structured lifecycle commands (AddDownload,
-    /// RemoveDownload, Pause, etc.) to the v2 engine loop.
+    /// RemoveDownload, Pause, etc.) to the engine loop.
     pub fn with_engine_cmd_tx(
         mut self,
         tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
@@ -289,52 +149,9 @@ impl RpcEngine {
 
     /// Get current number of active tasks.
     pub async fn task_count(&self) -> usize {
-        self.tasks.read().await.len()
-    }
-
-    /// Update progress for a specific task (called by download engine).
-    ///
-    /// Returns `true` if the task was found and updated, `false` otherwise.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_task_progress(
-        &self,
-        gid: &str,
-        total: u64,
-        completed: u64,
-        uploaded: u64,
-        dl_speed: u64,
-        ul_speed: u64,
-        connections: u16,
-    ) -> bool {
-        let mut tasks = self.tasks.write().await;
-        if let Some(state) = tasks.get_mut(gid) {
-            state.update_progress(total, completed, uploaded, dl_speed, ul_speed, connections);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Set torrent file entries for a BitTorrent download task.
-    #[cfg(feature = "bittorrent")]
-    pub async fn set_task_torrent_files(&self, gid: &str, files: Vec<TorrentFileEntry>) -> bool {
-        let mut tasks = self.tasks.write().await;
-        if let Some(state) = tasks.get_mut(gid) {
-            state.torrent_files = Some(files);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Set peer list for a BitTorrent download task.
-    pub async fn set_task_peers(&self, gid: &str, peers: Vec<PeerInfo>) -> bool {
-        let mut tasks = self.tasks.write().await;
-        if let Some(state) = tasks.get_mut(gid) {
-            state.peers = peers;
-            true
-        } else {
-            false
+        match self.group_man.as_ref() {
+            Some(man) => man.read().await.count(),
+            None => 0,
         }
     }
 
@@ -626,86 +443,6 @@ mod tests {
             JsonRpcRequest::new("aria2.remove", serde_json::json!(["nonexistent-gid"])).with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_error());
-    }
-
-    /// Verify that `aria2.remove` cancels the task's `CancellationToken`.
-    ///
-    /// Before the fix, `handle_remove` removed the task from the map but
-    /// never called `cancel_token.cancel()`, so the running `DownloadCommand`
-    /// had no way to know it should stop. The download kept running in the
-    /// background until it finished.
-    #[tokio::test]
-    async fn test_handle_remove_cancels_token() {
-        let engine = RpcEngine::new();
-
-        let add_req =
-            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
-        let add_resp = engine.handle_request(&add_req).await;
-        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-        // Clone the CancellationToken before remove so we can inspect it
-        // afterwards (the task is removed from the map by handle_remove).
-        let cancel_token = {
-            let tasks = engine.tasks.read().await;
-            tasks
-                .get(&gid)
-                .and_then(|s| s.cancel_token.clone())
-                .expect("TaskState should have a cancel_token")
-        };
-        assert!(
-            !cancel_token.is_cancelled(),
-            "token should not be cancelled before remove"
-        );
-
-        let remove_req = JsonRpcRequest::new("aria2.remove", serde_json::json!([gid])).with_id(2);
-        let remove_resp = engine.handle_request(&remove_req).await;
-        assert!(remove_resp.is_success(), "aria2.remove should succeed");
-
-        assert!(
-            cancel_token.is_cancelled(),
-            "CancellationToken must be cancelled after aria2.remove so the running DownloadCommand can stop"
-        );
-        assert_eq!(
-            engine.task_count().await,
-            0,
-            "task should be removed from the map"
-        );
-    }
-
-    /// Verify that `aria2.forceRemove` cancels the task's `CancellationToken`.
-    ///
-    /// Before the fix, `handle_force_remove` set the status to `Removed` but
-    /// never called `cancel_token.cancel()`.
-    #[tokio::test]
-    async fn test_handle_force_remove_cancels_token() {
-        let engine = RpcEngine::new();
-
-        let add_req =
-            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
-        let add_resp = engine.handle_request(&add_req).await;
-        let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-        let cancel_token = {
-            let tasks = engine.tasks.read().await;
-            tasks
-                .get(&gid)
-                .and_then(|s| s.cancel_token.clone())
-                .expect("TaskState should have a cancel_token")
-        };
-        assert!(
-            !cancel_token.is_cancelled(),
-            "token should not be cancelled before forceRemove"
-        );
-
-        let remove_req =
-            JsonRpcRequest::new("aria2.forceRemove", serde_json::json!([gid])).with_id(2);
-        let remove_resp = engine.handle_request(&remove_req).await;
-        assert!(remove_resp.is_success(), "aria2.forceRemove should succeed");
-
-        assert!(
-            cancel_token.is_cancelled(),
-            "CancellationToken must be cancelled after aria2.forceRemove so the running DownloadCommand can stop"
-        );
     }
 
     #[tokio::test]

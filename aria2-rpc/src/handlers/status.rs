@@ -2,8 +2,6 @@
 //!
 //! Handlers for querying download status and global statistics.
 
-use std::sync::atomic::Ordering;
-
 use aria2_core::util::rwlock_ext::RwLockRecover;
 
 use crate::engine::RpcEngine;
@@ -41,14 +39,12 @@ impl RpcEngine {
 
     /// Handle `aria2.tellActive` - List all active/running downloads.
     ///
-    /// When `RequestGroupMan` is available, iterates all registered groups and
-    /// reads live progress from their atomic fields. Otherwise falls back to
-    /// the placeholder `tasks` map.
+    /// Iterates all registered groups and reads live progress from their atomic fields.
     pub async fn handle_tell_active(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let active: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
+        let active: Vec<StatusInfo> = if let Some(group_man) = self.group_man.as_ref() {
             let man = group_man.read().await;
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
@@ -60,12 +56,9 @@ impl RpcEngine {
             }
             result
         } else {
-            let tasks = self.tasks.read().await;
-            tasks
-                .values()
-                .filter(|s| s.status.status.is_active())
-                .map(|s| s.status.clone())
-                .collect()
+            return Err(JsonRpcError::InternalError(
+                "RequestGroupMan is not wired".into(),
+            ));
         };
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -102,17 +95,9 @@ impl RpcEngine {
             }
             result.into_iter().skip(offset).take(num).collect()
         } else {
-            let tasks = self.tasks.read().await;
-            tasks
-                .values()
-                .filter(|s| {
-                    s.status.status == DownloadStatus::Waiting
-                        || s.status.status == DownloadStatus::Paused
-                })
-                .skip(offset.min(tasks.len()))
-                .take(num)
-                .map(|s| s.status.clone())
-                .collect()
+            return Err(JsonRpcError::InternalError(
+                "RequestGroupMan is not wired".into(),
+            ));
         };
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -123,9 +108,7 @@ impl RpcEngine {
 
     /// Handle `aria2.tellStopped` - List stopped/completed downloads with pagination.
     ///
-    /// When `RequestGroupMan` is available, iterates all groups and filters for
-    /// completed, errored, or removed downloads using live `build_status_from_group`.
-    /// Otherwise falls back to the `stopped_tasks` placeholder.
+    /// Iterates stopped download results and builds their status from core state.
     pub async fn handle_tell_stopped(
         &self,
         req: &JsonRpcRequest,
@@ -139,13 +122,9 @@ impl RpcEngine {
                 .map(Self::build_status_from_result)
                 .collect()
         } else {
-            let stopped = self.stopped_tasks.read().await;
-            stopped
-                .iter()
-                .skip(offset.min(stopped.len()))
-                .take(num)
-                .cloned()
-                .collect()
+            return Err(JsonRpcError::InternalError(
+                "RequestGroupMan is not wired".into(),
+            ));
         };
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -159,7 +138,7 @@ impl RpcEngine {
     /// Aggregates live speeds and counts from `RequestGroupMan` when available.
     pub async fn handle_global_stat(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let (dl_speed, ul_speed, active, waiting, stopped) =
-            if let Some(group_man) = &self.group_man {
+            if let Some(group_man) = self.group_man.as_ref() {
                 let man = group_man.read().await;
                 let mut dl = 0u64;
                 let mut ul = 0u64;
@@ -180,10 +159,7 @@ impl RpcEngine {
                 }
                 (dl, ul, active_n, waiting_n, stopped_n)
             } else {
-                let tasks = self.tasks.read().await;
-                let (a, w): (Vec<_>, Vec<_>) =
-                    tasks.values().partition(|s| s.status.status.is_active());
-                (0, 0, a.len(), w.len(), 0)
+                (0, 0, 0, 0, 0)
             };
         let stat = GlobalStat {
             download_speed: dl_speed,
@@ -191,7 +167,7 @@ impl RpcEngine {
             num_active: active,
             num_waiting: waiting,
             num_stopped: stopped,
-            num_stopped_total: self.num_stopped_total.load(Ordering::Relaxed),
+            num_stopped_total: stopped,
         };
         JsonRpcResponse::success(req.id.clone().unwrap_or_default(), stat.to_json_value())
     }

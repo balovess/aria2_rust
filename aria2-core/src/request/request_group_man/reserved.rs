@@ -127,18 +127,17 @@ impl ReservedQueue {
         let mut groups = self.groups.recover_mut();
         let current = groups.iter().position(|g| g.recover().gid() == gid)?;
 
+        let last = groups.len().saturating_sub(1) as i64;
+        let current = current as i64;
         let new_pos = match how {
-            PositionMode::SetFromStart => pos as usize,
-            PositionMode::MoveFromStart => (current as i32 + pos).max(0) as usize,
-            PositionMode::SetFromEnd => groups.len().saturating_sub(pos as usize + 1),
-            PositionMode::MoveFromEnd => {
-                let from_end = groups.len() as i32 - current as i32 - 1;
-                (groups.len() as i32 - from_end - pos - 1).max(0) as usize
-            }
-        };
-        let new_pos = new_pos.min(groups.len() - 1);
+            PositionMode::SetFromStart => pos as i64,
+            PositionMode::MoveFromStart => current.saturating_add(pos as i64),
+            PositionMode::SetFromEnd => last.saturating_sub(pos as i64),
+            PositionMode::MoveFromEnd => current.saturating_sub(pos as i64),
+        }
+        .clamp(0, last) as usize;
 
-        let item = groups.remove(current)?;
+        let item = groups.remove(current as usize)?;
         groups.insert(new_pos, item);
         Some(new_pos)
     }

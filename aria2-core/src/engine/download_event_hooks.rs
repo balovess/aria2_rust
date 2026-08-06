@@ -235,10 +235,9 @@ impl DownloadEventHooks {
     /// Return the process-wide hook bus.
     ///
     /// Download lifecycle transitions happen deep inside individual
-    /// `Command` implementations that have no reference to the engine, and the
-    /// engine itself exists in two flavours (the v1 `run()` command-dispatch
-    /// loop that production uses today and the v2 `run_v2()` group-management
-    /// loop). A process-wide bus is what lets a single listener registration
+    /// `Command` implementations that have no reference to the engine, while
+    /// the engine loop remains the central group-management path. A process-wide
+    /// bus is what lets a single listener registration
     /// observe *all* of them, and mirrors C++ where `Notifier` is a
     /// `SingletonHolder`. The same pattern is already used in this crate for
     /// `filesystem::file_allocation_man::shared()` and

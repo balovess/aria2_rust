@@ -6,21 +6,10 @@
 //! - Running the engine event loop
 
 use super::App;
-#[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_download_command::BtDownloadCommand;
-use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
-#[cfg(feature = "bittorrent")]
-use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
-#[cfg(feature = "metalink")]
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
-#[cfg(feature = "sftp")]
-use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
@@ -268,24 +257,12 @@ impl App {
                 }
             }
         }
-        let use_v2 = self.detected_inputs.iter().all(|input| {
-            matches!(
-                input.input_type,
-                InputType::HttpUrl
-                    | InputType::FtpUrl
-                    | InputType::MagnetLink
-                    | InputType::TorrentFile
-                    | InputType::SftpUrl
-            )
-        }) && !self.detected_inputs.is_empty();
         let command_tx = engine.engine_command_sender();
         let mut gids = Vec::new();
         #[cfg(feature = "metalink")]
         let submitted_resource_groups = !metalink_resource_groups.is_empty();
         #[cfg(feature = "metalink")]
         if submitted_resource_groups {
-            self.use_v2_engine
-                .store(true, std::sync::atomic::Ordering::Release);
             for group in std::mem::take(&mut metalink_resource_groups) {
                 let gid = group.recover().gid();
                 command_tx
@@ -309,8 +286,6 @@ impl App {
         }
         #[cfg(all(feature = "metalink", feature = "bittorrent"))]
         if !metalink_graphs.is_empty() {
-            self.use_v2_engine
-                .store(true, std::sync::atomic::Ordering::Release);
             for graph in metalink_graphs {
                 let payload_gid = graph.payload.recover().gid();
                 command_tx
@@ -321,153 +296,50 @@ impl App {
             return Ok(gids);
         }
 
-        if use_v2 {
-            self.use_v2_engine
-                .store(true, std::sync::atomic::Ordering::Release);
-            for (i, input) in self.detected_inputs.iter().enumerate() {
-                #[cfg(not(feature = "bittorrent"))]
-                if matches!(input.input_type, InputType::MagnetLink) {
-                    return Err(
-                        "BitTorrent support not enabled (compile with --features bittorrent)"
-                            .to_string(),
-                    );
-                }
-
-                let gid = GroupId::new(i as u64 + 1);
-                let mut initial_uri = input.raw.clone();
-                #[cfg(feature = "bittorrent")]
-                if matches!(input.input_type, InputType::TorrentFile) {
-                    initial_uri = format!("bt://{}", gid.value());
-                }
-                let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-                    gid,
-                    vec![initial_uri],
-                    options.clone(),
-                )));
-                #[cfg(feature = "bittorrent")]
-                if matches!(input.input_type, InputType::TorrentFile) {
-                    let data = input
-                        .file_data
-                        .clone()
-                        .ok_or_else(|| "Torrent file data not available".to_string())?;
-                    group.recover().set_bt_metadata_data(data);
-                }
-                command_tx
-                    .send(EngineCommand::AddDownload { group })
-                    .map_err(|e| format!("Failed to submit download group: {}", e))?;
-                gids.push(gid.value());
-            }
-            return Ok(gids);
-        }
-
         for (i, input) in self.detected_inputs.iter().enumerate() {
+            #[cfg(not(feature = "bittorrent"))]
+            if matches!(input.input_type, InputType::MagnetLink) {
+                return Err(
+                    "BitTorrent support not enabled (compile with --features bittorrent)"
+                        .to_string(),
+                );
+            }
+            #[cfg(not(feature = "sftp"))]
+            if matches!(input.input_type, InputType::SftpUrl) {
+                return Err("SFTP support not enabled (compile with --features sftp)".to_string());
+            }
+            #[cfg(not(feature = "metalink"))]
+            if matches!(input.input_type, InputType::MetalinkFile) {
+                return Err(
+                    "Metalink support not enabled (compile with --features metalink)".to_string(),
+                );
+            }
+            if matches!(input.input_type, InputType::MetalinkFile) {
+                return Err("Metalink inputs must be submitted as a complete set".to_string());
+            }
+
             let gid = GroupId::new(i as u64 + 1);
-
-            let cmd: Box<dyn Command> = match &input.input_type {
-                InputType::HttpUrl => {
-                    let mut cmd = DownloadCommand::new(
-                        gid,
-                        &input.raw,
-                        &options,
-                        dir.as_deref(),
-                        out.as_deref(),
-                    )
-                    .map_err(|e| format!("HTTP download command failed: {}", e))?;
-                    if let Some(gl) = engine.global_rate_limiter().cloned() {
-                        cmd.set_global_limiter(gl);
-                    }
-                    Box::new(cmd)
-                }
-                InputType::FtpUrl => {
-                    let mut cmd = FtpDownloadCommand::new(
-                        gid,
-                        &input.raw,
-                        &options,
-                        dir.as_deref(),
-                        out.as_deref(),
-                    )
-                    .map_err(|e| format!("FTP download command failed: {}", e))?;
-                    if let Some(gl) = engine.global_rate_limiter().cloned() {
-                        cmd.set_global_limiter(gl);
-                    }
-                    Box::new(cmd)
-                }
-                #[cfg(feature = "sftp")]
-                InputType::SftpUrl => {
-                    let mut cmd = SftpDownloadCommand::new(
-                        gid,
-                        &input.raw,
-                        &options,
-                        dir.as_deref(),
-                        out.as_deref(),
-                    )
-                    .map_err(|e| format!("SFTP download command failed: {}", e))?;
-                    if let Some(gl) = engine.global_rate_limiter().cloned() {
-                        cmd.set_global_limiter(gl);
-                    }
-                    Box::new(cmd)
-                }
-                #[cfg(feature = "bittorrent")]
-                InputType::TorrentFile => {
-                    let data = input
-                        .file_data
-                        .as_ref()
-                        .ok_or_else(|| "Torrent file data not available".to_string())?;
-                    let mut cmd = BtDownloadCommand::new(gid, data, &options, dir.as_deref())
-                        .map_err(|e| format!("BT download command failed: {}", e))?;
-                    if let Some(gl) = engine.global_rate_limiter().cloned() {
-                        cmd.set_global_limiter(gl);
-                    }
-                    Box::new(cmd)
-                }
-                #[cfg(feature = "metalink")]
-                InputType::MetalinkFile => {
-                    let data = input
-                        .file_data
-                        .as_ref()
-                        .ok_or_else(|| "Metalink file data not available".to_string())?;
-                    let mut cmd = MetalinkDownloadCommand::new(gid, data, &options, dir.as_deref())
-                        .map_err(|e| format!("Metalink download command failed: {}", e))?;
-                    if let Some(gl) = engine.global_rate_limiter().cloned() {
-                        cmd.set_global_limiter(gl);
-                    }
-                    Box::new(cmd)
-                }
-                #[cfg(feature = "bittorrent")]
-                InputType::MagnetLink => {
-                    let mut cmd =
-                        MagnetDownloadCommand::new(gid, &input.raw, &options, dir.as_deref())
-                            .map_err(|e| format!("Magnet download command failed: {}", e))?;
-                    if let Some(gl) = engine.global_rate_limiter().cloned() {
-                        cmd.set_global_limiter(gl);
-                    }
-                    Box::new(cmd)
-                }
-                #[cfg(not(feature = "sftp"))]
-                InputType::SftpUrl => {
-                    return Err(
-                        "SFTP support not enabled (compile with --features sftp)".to_string()
-                    );
-                }
-                #[cfg(not(feature = "bittorrent"))]
-                InputType::TorrentFile | InputType::MagnetLink => {
-                    return Err(
-                        "BitTorrent support not enabled (compile with --features bittorrent)"
-                            .to_string(),
-                    );
-                }
-                #[cfg(not(feature = "metalink"))]
-                InputType::MetalinkFile => {
-                    return Err(
-                        "Metalink support not enabled (compile with --features metalink)"
-                            .to_string(),
-                    );
-                }
-            };
-
-            engine
-                .add_command(cmd)
-                .map_err(|e| format!("Failed to add command to engine: {}", e))?;
+            let mut initial_uri = input.raw.clone();
+            #[cfg(feature = "bittorrent")]
+            if matches!(input.input_type, InputType::TorrentFile) {
+                initial_uri = format!("bt://{}", gid.value());
+            }
+            let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+                gid,
+                vec![initial_uri],
+                options.clone(),
+            )));
+            #[cfg(feature = "bittorrent")]
+            if matches!(input.input_type, InputType::TorrentFile) {
+                let data = input
+                    .file_data
+                    .clone()
+                    .ok_or_else(|| "Torrent file data not available".to_string())?;
+                group.recover().set_bt_metadata_data(data);
+            }
+            command_tx
+                .send(EngineCommand::AddDownload { group })
+                .map_err(|e| format!("Failed to submit download group: {}", e))?;
             gids.push(gid.value());
         }
 
@@ -572,16 +444,7 @@ impl App {
 
             // Spawn the engine in a background task so we can run the progress
             // reporter concurrently.
-            let use_v2_engine = self
-                .use_v2_engine
-                .load(std::sync::atomic::Ordering::Acquire);
-            let engine_handle = tokio::spawn(async move {
-                if use_v2_engine {
-                    engine.run_v2().await
-                } else {
-                    engine.run().await
-                }
-            });
+            let engine_handle = tokio::spawn(async move { engine.run().await });
 
             // Spawn the progress reporter if requested.
             let (_reporter_stop_tx, reporter_handle) = if show_progress {

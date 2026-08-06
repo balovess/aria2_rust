@@ -2,24 +2,19 @@
 //!
 //! Handlers for creating, removing, pausing, and resuming download tasks.
 
-use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-
 use crate::engine::RpcEngine;
-use crate::engine::TaskState;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, FileInfo, StatusInfo, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::checksum::checksum::Checksum;
 use aria2_core::constants as core_constants;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group_man::ChangePositionMode;
 use aria2_core::session::save_session_command::SaveSessionCommand;
-use aria2_core::session::session_entry::SessionEntry;
-use aria2_core::session::session_serializer::save_to_file_with_entries;
 use aria2_core::util::rwlock_ext::RwLockRecover;
-use tokio_util::sync::CancellationToken;
+use std::collections::HashMap;
 
 /// Delay between answering a shutdown RPC and actually halting the engine.
 ///
@@ -257,53 +252,22 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
-        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-                use aria2_core::engine::engine_command::EngineCommand;
-                let _ = engine_cmd_tx.send(EngineCommand::RemoveDownload { gid: gid_parsed });
-            } else if let Some(group_man) = &self.group_man {
-                let man = group_man.read().await;
-                let _ = man.remove_group(gid_parsed);
-            }
-        }
-
-        let mut tasks = self.tasks.write().await;
-        match tasks.remove(&gid) {
-            Some(mut state) => {
-                // Cancel the CancellationToken so any running DownloadCommand
-                // is signalled to stop. The DownloadCommand also independently
-                // polls the RequestGroup status (set to `Removed` by
-                // `man.remove_group` above) as the primary cancellation signal,
-                // so cancelling the token here keeps behaviour consistent with
-                // `handle_force_pause` / `handle_force_shutdown`.
-                if let Some(cancel_token) = &state.cancel_token {
-                    cancel_token.cancel();
-                }
-
-                // Set status to Removed before pushing to stopped_tasks so
-                // tellStopped returns the correct status (matching aria2c).
-                state.status.status = DownloadStatus::Removed;
-                // Original aria2c sets errorCode=31 (REMOVED) for removed downloads
-                state.status.error_code = Some(31);
-
-                self.num_stopped_total.fetch_add(1, Ordering::Relaxed);
-
-                // Push removed task into stopped_tasks so it shows up in tellStopped
-                // and can be removed via removeDownloadResult/purgeDownloadResult.
-                let mut stopped = self.stopped_tasks.write().await;
-                stopped.push(state.status.clone());
-
-                let _ = self
-                    .event_publisher
-                    .publish(EventType::DownloadStop, DownloadEvent::download_stop(&gid));
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::json!(gid),
-                ))
-            }
-            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
-        }
+        let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.remove is not supported by the core state model".into(),
+            )
+        })?;
+        let gid_parsed = GroupId::from_hex_string(&gid)
+            .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        engine_cmd_tx
+            .send(EngineCommand::RemoveDownload { gid: gid_parsed })
+            .map_err(|e| {
+                JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+            })?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::json!(gid),
+        ))
     }
 
     /// Handle `aria2.pause` / `aria2.forcePause` - Pause a download task.
@@ -313,37 +277,22 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
-        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-                use aria2_core::engine::engine_command::EngineCommand;
-                let _ = engine_cmd_tx.send(EngineCommand::Pause { gid: gid_parsed });
-            } else if let Some(group_man) = &self.group_man {
-                let man = group_man.read().await;
-                let _ = man.pause_group(gid_parsed);
-            }
-        }
-
-        let mut tasks = self.tasks.write().await;
-        match tasks.get_mut(&gid) {
-            Some(state) => {
-                state.status.status = DownloadStatus::Paused;
-                // Cancel the running task's token so the download loop
-                // detects the pause on its next check_cancelled() call.
-                if let Some(cancel_token) = &state.cancel_token {
-                    cancel_token.cancel();
-                }
-                let _ = self.event_publisher.publish(
-                    EventType::DownloadPause,
-                    DownloadEvent::download_pause(&gid),
-                );
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::json!(gid),
-                ))
-            }
-            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
-        }
+        let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.pause is not supported by the core state model".into(),
+            )
+        })?;
+        let gid_parsed = GroupId::from_hex_string(&gid)
+            .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        engine_cmd_tx
+            .send(EngineCommand::Pause { gid: gid_parsed })
+            .map_err(|e| {
+                JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+            })?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::json!(gid),
+        ))
     }
 
     /// Handle `aria2.forcePause` - Force pause a download task.
@@ -353,35 +302,22 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
-        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-                use aria2_core::engine::engine_command::EngineCommand;
-                let _ = engine_cmd_tx.send(EngineCommand::ForcePause { gid: gid_parsed });
-            } else if let Some(group_man) = &self.group_man {
-                let man = group_man.read().await;
-                let _ = man.force_pause_group(gid_parsed);
-            }
-        }
-
-        let mut tasks_map = self.tasks.write().await;
-        match tasks_map.get_mut(&gid) {
-            Some(task_state) => {
-                task_state.status.status = DownloadStatus::Paused;
-                if let Some(cancel_token) = &task_state.cancel_token {
-                    cancel_token.cancel();
-                }
-                let _ = self.event_publisher.publish(
-                    EventType::DownloadPause,
-                    DownloadEvent::download_pause(&gid),
-                );
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::json!(gid),
-                ))
-            }
-            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
-        }
+        let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.forcePause is not supported by the core state model".into(),
+            )
+        })?;
+        let gid_parsed = GroupId::from_hex_string(&gid)
+            .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        engine_cmd_tx
+            .send(EngineCommand::ForcePause { gid: gid_parsed })
+            .map_err(|e| {
+                JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+            })?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::json!(gid),
+        ))
     }
 
     /// Handle `aria2.unpause` / `aria2.forceUnpause` - Resume a paused task.
@@ -391,78 +327,22 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Propagate to EngineCommand (v2) or RequestGroupMan (v1) when available
-        if let Some(gid_parsed) = GroupId::from_hex_string(&gid) {
-            if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-                use aria2_core::engine::engine_command::EngineCommand;
-                let _ = engine_cmd_tx.send(EngineCommand::Unpause { gid: gid_parsed });
-            } else if let Some(group_man) = &self.group_man {
-                let man = group_man.read().await;
-                let _ = man.unpause_group(gid_parsed);
-            }
-        }
-
-        let mut tasks = self.tasks.write().await;
-        match tasks.get_mut(&gid) {
-            Some(state) => {
-                state.status.status = DownloadStatus::Active;
-
-                // Replace the cancelled CancellationToken with a fresh one so
-                // the resumed download does not immediately abort. The old token
-                // was cancelled during handle_pause / handle_force_pause and
-                // would otherwise cause the download loop to exit on its first
-                // check_cancelled() call.
-                state.cancel_token = Some(CancellationToken::new());
-
-                // When the RPC server is wired to a running DownloadEngine,
-                // create a new DownloadCommand for the paused group and submit
-                // it so the download actually resumes. Without this, the status
-                // changes to Active but no download task runs.
-                if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
-                    let man = group_man.read().await;
-                    if let Some(gid_parsed) = GroupId::from_hex_string(&gid)
-                        && let Some(group) = man.group_by_id(gid_parsed)
-                    {
-                        let group_guard = group.recover();
-                        let options = group_guard.options_arc();
-                        let uris = group_guard.uris().to_vec();
-                        let first_uri = uris.first().map(|s| s.as_str()).unwrap_or("");
-                        drop(group_guard);
-
-                        if !first_uri.is_empty() {
-                            match DownloadCommand::new_with_group(
-                                group,
-                                first_uri,
-                                &options,
-                                options.dir.as_deref(),
-                                options.out.as_deref(),
-                            ) {
-                                Ok(cmd) => {
-                                    if let Err(e) = cmd_tx.send(Box::new(cmd)) {
-                                        tracing::warn!("Failed to send resume command: {}", e);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to create resume command: {}", e);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // C++ aria2 fires onDownloadStart (not a separate onDownloadResume)
-                // when a download is unpaused. Match that behavior for compatibility.
-                let _ = self.event_publisher.publish(
-                    EventType::DownloadStart,
-                    DownloadEvent::download_start(&gid),
-                );
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::json!(gid),
-                ))
-            }
-            None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
-        }
+        let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.unpause is not supported by the core state model".into(),
+            )
+        })?;
+        let gid_parsed = GroupId::from_hex_string(&gid)
+            .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        engine_cmd_tx
+            .send(EngineCommand::Unpause { gid: gid_parsed })
+            .map_err(|e| {
+                JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+            })?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::json!(gid),
+        ))
     }
 
     /// Handle `aria2.tellStatus` - Get detailed status of a specific download.
@@ -493,63 +373,20 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gids = super::parse_gids(req, 0)?;
 
-        // Propagate force-remove intent to the core engine when available.
-        if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-            use aria2_core::engine::engine_command::EngineCommand;
-            for gid in &gids {
-                if let Some(gid_parsed) = GroupId::from_hex_string(gid) {
-                    let _ =
-                        engine_cmd_tx.send(EngineCommand::ForceRemoveDownload { gid: gid_parsed });
-                }
-            }
-        } else if let Some(group_man) = &self.group_man {
-            let man = group_man.read().await;
-            for gid in &gids {
-                if let Some(gid_parsed) = GroupId::from_hex_string(gid) {
-                    let _ = man.force_remove_group(gid_parsed);
-                }
-            }
-        }
-
-        let mut tasks = self.tasks.write().await;
-        let mut actually_removed = 0usize;
-        let mut removed_statuses: Vec<(String, StatusInfo, Vec<String>)> = Vec::new();
-
+        let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.forceRemove is not supported by the core state model".into(),
+            )
+        })?;
         for gid in &gids {
-            if let Some(mut state) = tasks.remove(gid) {
-                // Cancel the CancellationToken to interrupt any running
-                // DownloadCommand. `man.remove_group` above already set the
-                // RequestGroup status to `Removed` (the primary signal the
-                // download loop polls), but cancelling the token keeps this
-                // handler consistent with `handle_remove`.
-                if let Some(cancel_token) = &state.cancel_token {
-                    cancel_token.cancel();
-                }
-
-                // Set status to Removed before pushing to stopped_tasks.
-                state.status.status = DownloadStatus::Removed;
-                // Original aria2c sets errorCode=31 (REMOVED) for removed downloads
-                state.status.error_code = Some(31);
-                actually_removed += 1;
-                removed_statuses.push((gid.clone(), state.status.clone(), state.uris.clone()));
-            }
+            let gid_parsed = GroupId::from_hex_string(gid)
+                .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+            engine_cmd_tx
+                .send(EngineCommand::ForceRemoveDownload { gid: gid_parsed })
+                .map_err(|e| {
+                    JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+                })?;
         }
-
-        self.num_stopped_total
-            .fetch_add(actually_removed, Ordering::Relaxed);
-
-        // Push removed tasks into stopped_tasks and publish events
-        {
-            let mut stopped = self.stopped_tasks.write().await;
-            for (gid, status, _uris) in &removed_statuses {
-                stopped.push(status.clone());
-                let _ = self
-                    .event_publisher
-                    .publish(EventType::DownloadStop, DownloadEvent::download_stop(gid));
-            }
-        }
-
-        // Original aria2 returns the GID for single-GID calls.
         let result_gid = gids.last().cloned().unwrap_or_default();
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -565,41 +402,24 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let _file_index: usize = req.get_param_or_default(1);
-        let del_uris: Option<Vec<String>> = req
-            .get_param::<serde_json::Value>(2)
-            .ok()
-            .and_then(|v| serde_json::from_value(v).ok());
-        let add_uris: Option<Vec<String>> = req
-            .get_param::<serde_json::Value>(3)
-            .ok()
-            .and_then(|v| serde_json::from_value(v).ok());
-
-        let mut tasks = self.tasks.write().await;
-        let state = tasks
-            .get_mut(&gid)
+        let del_uris: Vec<String> = req.get_param(1)?;
+        let add_uris: Vec<String> = req.get_param(2)?;
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let man = group_man.read().await;
+        let group = man
+            .group_by_hex(&gid)
             .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
-
-        // Count deletions before modifying
-        let del_count = if let Some(ref to_remove) = del_uris {
-            let before = state.uris.len();
-            state.uris.retain(|u| !to_remove.contains(u));
-            before - state.uris.len()
-        } else {
-            0
-        };
-
-        let add_count = if let Some(to_add) = add_uris {
-            let count = to_add.len();
-            state.uris.extend(to_add);
-            count
-        } else {
-            0
-        };
-
+        let result = group
+            .write()
+            .map_err(|_| JsonRpcError::InternalError("Failed to lock request group".into()))?
+            .change_uris(&del_uris, &add_uris)
+            .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::json!([del_count, add_count]),
+            serde_json::json!([result.0, result.1]),
         ))
     }
 
@@ -610,9 +430,7 @@ impl RpcEngine {
     ///
     /// - Optional `param[0]`: session file path. When omitted or empty, the
     ///   engine's configured `--save-session` path is used.
-    /// - When the engine is wired with a `RequestGroupMan`, the real
-    ///   `RequestGroup` state is serialized. Otherwise the RPC-side task map
-    ///   is serialized (kept for standalone / test engines).
+    /// - The real `RequestGroup` state is serialized through the core manager.
     pub async fn handle_save_session(
         &self,
         req: &JsonRpcRequest,
@@ -643,23 +461,8 @@ impl RpcEngine {
             ));
         }
 
-        // Fallback (no RequestGroupMan, e.g. unit-test engines): serialize the
-        // RPC-side task states into a C++-compatible session file.
-        let tasks = self.tasks.read().await;
-        let entries: Vec<SessionEntry> = tasks
-            .values()
-            .filter_map(session_entry_from_task_state)
-            .collect();
-        let count = entries.len();
-        drop(tasks);
-
-        save_to_file_with_entries(&path, &entries)
-            .await
-            .map_err(|e| JsonRpcError::InternalError(format!("Failed to save session: {}", e)))?;
-
-        Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
-            format!("OK. Saved {} downloads.", count),
+        Err(JsonRpcError::InternalError(
+            "RequestGroupMan is not wired".into(),
         ))
     }
 
@@ -675,40 +478,27 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let pos: i64 = req.get_param(1)?;
-        let how: String = req.get_param_or_default(2);
-
-        let mut tasks = self.tasks.write().await;
-        let state = tasks
-            .get_mut(&gid)
-            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
-
-        let len = state.uris.len() as i64;
-        let current_pos = 0i64;
-
-        let new_pos = match how.as_str() {
-            "POS_SET" => pos,
-            "POS_CUR" => current_pos + pos,
-            "POS_END" => (len + pos).max(0),
-            _ => {
-                return Err(JsonRpcError::InvalidParams(format!(
-                    "Invalid 'how' value: {}. Must be POS_SET, POS_CUR, or POS_END",
-                    how
-                )));
-            }
+        let pos: i32 = req.get_param(1)?;
+        let how: String = req.get_param(2)?;
+        let mode = match how.as_str() {
+            "POS_SET" => ChangePositionMode::SetFromStart,
+            "POS_CUR" => ChangePositionMode::MoveFromStart,
+            "POS_END" => ChangePositionMode::SetFromEnd,
+            _ => return Err(JsonRpcError::InvalidParams("Invalid position mode".into())),
         };
-
-        let new_pos = new_pos.max(0).min((len - 1).max(0)) as usize;
-
-        // Move the URI at index 0 (first URI) to new_pos
-        if !state.uris.is_empty() && new_pos < state.uris.len() {
-            let uri = state.uris.remove(0);
-            state.uris.insert(new_pos, uri);
-        }
-
+        let gid = GroupId::from_hex_string(&gid)
+            .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let man = group_man.read().await;
+        let position = man
+            .change_position(gid, pos, mode)
+            .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::json!(new_pos as i64),
+            position,
         ))
     }
 
@@ -724,34 +514,28 @@ impl RpcEngine {
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        // Pause all active downloads
-        let tasks = self.tasks.read().await;
-        let mut active_count = 0;
-        for state in tasks.values() {
-            if state.status.status == DownloadStatus::Active {
-                active_count += 1;
-                let _ = self.event_publisher.publish(
-                    EventType::DownloadPause,
-                    DownloadEvent::download_pause(&state.status.gid),
-                );
-            }
-        }
-        drop(tasks);
-
-        // Propagate HaltAll to the engine loop so it stops running — but only
-        // after RPC_SHUTDOWN_GRACE. Sending it inline would race the response
-        // below: the engine tears down the runtime that owns this connection,
-        // so the client can observe a dropped socket instead of the `OK`.
-        // C++ solves this the same way, quoting `RpcMethodImpl::goingShutdown`:
-        // "Schedule shutdown after 3seconds to give time to client to receive
-        // RPC response."
-        if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-            aria2_core::engine::halt_watchers::spawn_timed_halt(
-                engine_cmd_tx.clone(),
-                RPC_SHUTDOWN_GRACE,
-                false,
-            );
-        }
+        let group_man = self.group_man.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.shutdown is not supported by the core state model".into(),
+            )
+        })?;
+        let active_count = group_man
+            .read()
+            .await
+            .all_groups()
+            .into_iter()
+            .filter(|(_, group)| group.recover().status() == DownloadStatus::Active)
+            .count();
+        let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.shutdown is not supported by the core state model".into(),
+            )
+        })?;
+        aria2_core::engine::halt_watchers::spawn_timed_halt(
+            engine_cmd_tx.clone(),
+            RPC_SHUTDOWN_GRACE,
+            false,
+        );
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -761,41 +545,28 @@ impl RpcEngine {
 
     /// Handle `aria2.forceShutdown` - Force shutdown (immediate termination).
     ///
-    /// This method performs an immediate shutdown:
-    /// 1. Cancels all active downloads via CancellationToken
-    /// 2. Clears all task state
-    /// 3. Sends `EngineCommand::ForceHaltAll` to the engine loop so it
-    ///    terminates immediately
-    /// 4. Returns "OK" to indicate shutdown completed
+    /// This method sends `EngineCommand::ForceHaltAll` to the engine loop so
+    /// it terminates immediately and returns the number of core-managed groups.
     pub async fn handle_force_shutdown(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        // Cancel all active downloads
-        let mut tasks = self.tasks.write().await;
-        for state in tasks.values_mut() {
-            // Cancel the download if it has a cancellation token
-            if let Some(cancel_token) = &state.cancel_token {
-                cancel_token.cancel();
-            }
-            // Mark as removed
-            state.status.status = DownloadStatus::Removed;
-        }
-        let cancelled_count = tasks.len();
-        tasks.clear();
-
-        // Downloads are already cancelled above, so the engine has nothing
-        // left to do; the delay here exists purely so the client receives this
-        // response before the engine tears the process down. C++ routes
-        // `aria2.forceShutdown` through the same 3-second `TimedHaltCommand`,
-        // differing only in the `forceHalt` flag.
-        if let Some(engine_cmd_tx) = &self.engine_cmd_tx {
-            aria2_core::engine::halt_watchers::spawn_timed_halt(
-                engine_cmd_tx.clone(),
-                RPC_SHUTDOWN_GRACE,
-                true,
-            );
-        }
+        let group_man = self.group_man.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.forceShutdown is not supported by the core state model".into(),
+            )
+        })?;
+        let cancelled_count = group_man.read().await.count();
+        let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.forceShutdown is not supported by the core state model".into(),
+            )
+        })?;
+        aria2_core::engine::halt_watchers::spawn_timed_halt(
+            engine_cmd_tx.clone(),
+            RPC_SHUTDOWN_GRACE,
+            true,
+        );
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -808,14 +579,8 @@ impl RpcEngine {
 
     /// Internal helper to add a new download task.
     ///
-    /// When `group_man` and `cmd_tx` are configured (i.e., the RPC server is
-    /// wired to a running DownloadEngine), this creates a real download:
-    /// 1. Registers a `RequestGroup` in `RequestGroupMan` under the generated GID.
-    /// 2. Creates a `DownloadCommand` sharing that group.
-    /// 3. Sends the command to the engine via `cmd_tx`.
-    ///
-    /// When shared state is not available (e.g., in unit tests), it falls back
-    /// to creating a placeholder `TaskState` only.
+    /// Registers a `RequestGroup` and sends `EngineCommand::AddDownload` to the
+    /// single core download engine.
     async fn add_task(
         &self,
         uris: Vec<String>,
@@ -844,8 +609,7 @@ impl RpcEngine {
                 .map_err(|e| JsonRpcError::InvalidParams(format!("Invalid checksum: {}", e)))?;
         }
 
-        // Start a real download if we have shared engine state
-        // Prefer EngineCommand (v2) over Box<dyn Command> (v1).
+        // Start a real download only through the structured engine command path.
         let mut registered_in_group_man = false;
         if let (Some(group_man), Some(engine_cmd_tx)) = (&self.group_man, &self.engine_cmd_tx) {
             let man = group_man.read().await;
@@ -856,7 +620,7 @@ impl RpcEngine {
                 JsonRpcError::InternalError("Group not found after insert".into())
             })?;
 
-            // Send EngineCommand::AddDownload to the v2 engine loop.
+            // Send EngineCommand::AddDownload to the engine loop.
             // The loop will promote the group from reserved to active on the
             // next tick, create the appropriate Command, and spawn it.
             use aria2_core::engine::engine_command::EngineCommand;
@@ -866,61 +630,15 @@ impl RpcEngine {
                     JsonRpcError::InternalError(format!("Failed to send engine command: {}", e))
                 })?;
             registered_in_group_man = true;
-        } else if let (Some(group_man), Some(cmd_tx)) = (&self.group_man, &self.cmd_tx) {
-            // Fallback: v1 path using Box<dyn Command>.
-            let man = group_man.read().await;
-            man.add_group_with_gid(gid, uris.clone(), dl_options.clone())
-                .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
-
-            let group = man.group_by_id(gid).ok_or_else(|| {
-                JsonRpcError::InternalError("Group not found after insert".into())
-            })?;
-
-            let first_uri = uris.first().ok_or_else(|| {
-                JsonRpcError::InvalidParams("At least one URI is required".into())
-            })?;
-
-            let cmd = DownloadCommand::new_with_group(
-                group,
-                first_uri,
-                &dl_options,
-                dl_options.dir.as_deref(),
-                dl_options.out.as_deref(),
-            )
-            .map_err(|e| JsonRpcError::InternalError(format!("DownloadCommand failed: {}", e)))?;
-
-            cmd_tx.send(Box::new(cmd)).map_err(|e| {
-                JsonRpcError::InternalError(format!("Failed to send command: {}", e))
-            })?;
-            registered_in_group_man = true;
         }
 
-        // Track in RPC tasks map (for cancel_token, options metadata)
-        let dir = options
-            .get("dir")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".")
-            .to_string();
-        let status = StatusInfo::new(&gid_str)
-            .with_status(DownloadStatus::Active)
-            .with_dir(dir)
-            .with_total_length(0)
-            .with_completed_length(0)
-            .with_files(vec![FileInfo::new("", 0)]);
-        let state = TaskState::new(status, options, uris.clone());
-        {
-            let mut tasks = self.tasks.write().await;
-            tasks.insert(gid_str.clone(), state);
-        }
-        // Persist the merged per-task options so `aria2.getOption` can resolve
-        // them even when the engine has no shared RequestGroupMan (bare-engine
-        // mode). Wired engines resolve getOption through the live
-        // RequestGroupMan global options, so writing here would shadow that
-        // fallback with a stale add-time snapshot.
         if !registered_in_group_man {
-            let mut task_opts = self.task_opts.write().await;
-            task_opts.insert(gid_str.clone(), merged_options);
+            return Err(JsonRpcError::InternalError(
+                "RequestGroupMan and engine command channel are required".into(),
+            ));
         }
+        let mut task_opts = self.task_opts.write().await;
+        task_opts.insert(gid_str.clone(), merged_options);
         // C++ aria2 notification only includes gid (no files field)
         let _ = self.event_publisher.publish(
             EventType::DownloadStart,
@@ -1049,10 +767,8 @@ impl RpcEngine {
     /// Internal helper to get current status info for a task.
     ///
     /// Prefers live progress from `RequestGroupMan` (atomic fields updated by
-    /// the download engine). Falls back to the placeholder `tasks` map when
-    /// shared state is unavailable (e.g., unit tests). Finally checks
-    /// `stopped_tasks` so that `tellStatus` can return removed/completed
-    /// downloads (matching original aria2c behaviour).
+    /// the download engine. It also checks core stopped results so removed,
+    /// completed, and failed downloads remain queryable until purged.
     async fn get_status(&self, gid: &str) -> Option<StatusInfo> {
         // Try RequestGroupMan first (live progress)
         if let Some(group_man) = &self.group_man {
@@ -1065,40 +781,8 @@ impl RpcEngine {
                 return Some(Self::build_status_from_result(&result));
             }
         }
-        // Fallback to tasks map (placeholder, for tests/no-engine mode)
-        {
-            let mut tasks = self.tasks.write().await;
-            if let Some(state) = tasks.get_mut(gid) {
-                state.update_status_info();
-                return Some(state.status.clone());
-            }
-        }
-        // Check stopped_tasks (removed/completed downloads that are still
-        // queryable via tellStatus until purged, matching original aria2c).
-        let stopped = self.stopped_tasks.read().await;
-        stopped.iter().find(|s| s.gid == *gid).cloned()
+        None
     }
-}
-
-/// Convert a placeholder RPC `TaskState` into a C++-compatible [`SessionEntry`].
-///
-/// Used by `aria2.saveSession` when the engine is NOT wired with a
-/// `RequestGroupMan` (e.g. standalone/test engines), so the RPC-side task map
-/// can still be persisted. The GID is stored as u64; serialization
-/// zero-pads it to 16 hex digits, matching C++ `SessionSerializer`.
-fn session_entry_from_task_state(state: &TaskState) -> Option<SessionEntry> {
-    let gid = u64::from_str_radix(state.status.gid.trim_start_matches("0x"), 16).ok()?;
-    let mut entry = SessionEntry::new(gid, state.uris.clone());
-    entry.paused = state.status.status == DownloadStatus::Paused;
-    entry.total_length = state.total_length;
-    entry.completed_length = state.completed_length;
-    entry.upload_length = state.upload_length;
-    entry.download_speed = state.download_speed;
-    entry.status = state.status.status.as_str().to_string();
-    if state.completed_length > 0 {
-        entry.resume_offset = Some(state.completed_length);
-    }
-    Some(entry)
 }
 
 /// Convert RPC option map (from `aria2.addUri` params) to `DownloadOptions`.

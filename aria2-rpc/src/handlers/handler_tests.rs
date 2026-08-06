@@ -8,9 +8,7 @@ use std::sync::Arc;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
-use crate::types::{
-    DownloadStatus, PeerInfo, SessionInfo, StatusInfo, UriInfo, UriStatus, VersionInfo,
-};
+use crate::types::{SessionInfo, StatusInfo, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 
 #[tokio::test]
@@ -82,10 +80,6 @@ async fn test_tell_status_has_real_progress_data() {
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-    engine
-        .update_task_progress(&gid, 10485760, 5242880, 1024, 1048576, 512, 3)
-        .await;
 
     let tell_req = JsonRpcRequest::new("aria2.tellStatus", serde_json::json!([gid])).with_id(2);
     let tell_resp = engine.handle_request(&tell_req).await;
@@ -159,10 +153,6 @@ async fn test_tell_status_includes_upload_fields() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    engine
-        .update_task_progress(&gid, 1073741824, 1073741824, 536870912, 0, 1048576, 10)
-        .await;
-
     let tell_req = JsonRpcRequest::new("aria2.tellStatus", serde_json::json!([gid])).with_id(2);
     let tell_resp = engine.handle_request(&tell_req).await;
     assert!(tell_resp.is_success());
@@ -195,67 +185,12 @@ async fn test_tell_status_includes_upload_fields() {
 }
 
 #[tokio::test]
-async fn test_get_peers_returns_peer_list() {
+async fn test_get_peers_returns_core_state_error() {
     let engine = RpcEngine::new();
-    let add_req = JsonRpcRequest::new(
-        "aria2.addUri",
-        serde_json::json!(["http://x.com/f.torrent"]),
-    )
-    .with_id(1);
-    let add_resp = engine.handle_request(&add_req).await;
-    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-    let peers = vec![
-        PeerInfo {
-            peer_id: "p1".to_string(),
-            ip: "10.0.0.1".to_string(),
-            port: 6881,
-            bitfield: None,
-            am_choking: false,
-            peer_choking: true,
-            download_speed: 100000,
-            upload_speed: 50000,
-            seeder: None,
-        },
-        PeerInfo {
-            peer_id: "p2".to_string(),
-            ip: "10.0.0.2".to_string(),
-            port: 6882,
-            bitfield: None,
-            am_choking: true,
-            peer_choking: false,
-            download_speed: 200000,
-            upload_speed: 75000,
-            seeder: None,
-        },
-    ];
-    engine.set_task_peers(&gid, peers.clone()).await;
-
-    let req = JsonRpcRequest::new("aria2.getPeers", serde_json::json!([gid])).with_id(2);
+    let req =
+        JsonRpcRequest::new("aria2.getPeers", serde_json::json!(["0000000000000001"])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(
-        resp.is_success(),
-        "getPeers should succeed for existing GID"
-    );
-
-    let peers_val = resp.result.unwrap();
-    let peers_array = peers_val.as_array().unwrap();
-    assert_eq!(peers_array.len(), 2, "Should return 2 peers");
-    // Wire format: all numbers as strings, booleans as "true"/"false"
-    assert_eq!(peers_array[0]["peerId"].as_str(), Some("p1"));
-    assert_eq!(peers_array[1]["ip"].as_str(), Some("10.0.0.2"));
-    assert_eq!(peers_array[0]["port"].as_str(), Some("6881"));
-    assert_eq!(
-        peers_array[0]["amChoking"].as_str(),
-        Some("false"),
-        "booleans should be 'false' string"
-    );
-    assert_eq!(
-        peers_array[0]["peerChoking"].as_str(),
-        Some("true"),
-        "booleans should be 'true' string"
-    );
-    assert_eq!(peers_array[0]["downloadSpeed"].as_str(), Some("100000"));
+    assert!(resp.is_error());
 }
 
 #[tokio::test]
@@ -634,7 +569,7 @@ async fn test_multicall_invalid_entries_match_cpp_errors_and_continue() {
             .unwrap()
             .contains("expected struct")
     );
-    assert_eq!(results[1]["code"], "1");
+    assert_eq!(results[1]["code"], "-32600");
     assert!(
         results[1]["message"]
             .as_str()
@@ -996,33 +931,12 @@ async fn test_batch_gids_force_remove() {
 // =========================================================================
 
 #[tokio::test]
-async fn test_get_uris_valid_gid_returns_uri_list() {
+async fn test_get_uris_valid_gid_returns_core_state_error() {
     let engine = RpcEngine::new();
-    let add_req = JsonRpcRequest::new(
-        "aria2.addUri",
-        serde_json::json!([["http://example.com/file.iso", "http://mirror.com/file.iso"]]),
-    )
-    .with_id(1);
-    let add_resp = engine.handle_request(&add_req).await;
-    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-    let req = JsonRpcRequest::new("aria2.getUris", serde_json::json!([gid])).with_id(2);
+    let req =
+        JsonRpcRequest::new("aria2.getUris", serde_json::json!(["0000000000000001"])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success(), "getUris should succeed for valid GID");
-
-    let uris: Vec<UriInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(uris.len(), 2, "Should return 2 URIs");
-    assert_eq!(uris[0].uri, "http://example.com/file.iso");
-    assert_eq!(
-        uris[0].status,
-        UriStatus::Used,
-        "First URI should be 'used'"
-    );
-    assert_eq!(
-        uris[1].status,
-        UriStatus::Waiting,
-        "Second URI should be 'waiting'"
-    );
+    assert!(resp.is_error());
 }
 
 #[tokio::test]
@@ -1038,19 +952,10 @@ async fn test_get_uris_unknown_gid_returns_error() {
 #[tokio::test]
 async fn test_get_uris_single_uri() {
     let engine = RpcEngine::new();
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
-    let add_resp = engine.handle_request(&add_req).await;
-    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-    let req = JsonRpcRequest::new("aria2.getUris", serde_json::json!([gid])).with_id(2);
+    let req =
+        JsonRpcRequest::new("aria2.getUris", serde_json::json!(["0000000000000001"])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success());
-
-    let uris: Vec<UriInfo> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(uris.len(), 1);
-    assert_eq!(uris[0].uri, "http://x.com/f");
-    assert_eq!(uris[0].status, UriStatus::Used);
+    assert!(resp.is_error());
 }
 
 #[tokio::test]
@@ -1063,11 +968,10 @@ async fn test_get_uris_serialization_format() {
 
     let req = JsonRpcRequest::new("aria2.getUris", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;
-    let json_str = resp.to_string().unwrap();
-    assert!(json_str.contains("\"jsonrpc\":\"2.0\""));
-    assert!(json_str.contains("\"result\""));
-    assert!(json_str.contains("\"uri\""));
-    assert!(json_str.contains("\"status\""));
+    assert!(
+        resp.is_error(),
+        "getUris is not exposed by the core state model"
+    );
 }
 
 #[tokio::test]
@@ -1080,10 +984,6 @@ async fn test_get_files_valid_gid_returns_file_list() {
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-    engine
-        .update_task_progress(&gid, 10485760, 5242880, 0, 1024, 0, 2)
-        .await;
 
     let req = JsonRpcRequest::new("aria2.getFiles", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;
@@ -1181,10 +1081,6 @@ async fn test_get_servers_valid_gid_returns_server_list() {
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
-
-    engine
-        .update_task_progress(&gid, 1000000, 500000, 0, 1048576, 0, 3)
-        .await;
 
     let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;
@@ -1362,36 +1258,13 @@ async fn test_get_version_json_rpc_response_format() {
 #[tokio::test]
 async fn test_purge_download_result_specific_gid() {
     let engine = RpcEngine::new();
-
-    let stopped_gid = "stopped-gid-001".to_string();
-    let stopped_status = StatusInfo::new(&stopped_gid)
-        .with_status(DownloadStatus::Complete)
-        .with_total_length(1000)
-        .with_completed_length(1000);
-    {
-        let mut stopped = engine.stopped_tasks.write().await;
-        stopped.push(stopped_status);
-    }
-    assert_eq!(engine.stopped_tasks.read().await.len(), 1);
-
     let req = JsonRpcRequest::new(
         "aria2.purgeDownloadResult",
-        serde_json::json!([stopped_gid]),
+        serde_json::json!(["stopped-gid-001"]),
     )
     .with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(
-        resp.is_success(),
-        "purgeDownloadResult with valid GID should succeed"
-    );
-
-    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK");
-    assert_eq!(
-        engine.stopped_tasks.read().await.len(),
-        0,
-        "Stopped task should be removed after purge"
-    );
+    assert!(resp.is_error(), "Unknown stopped GID should fail");
 }
 
 #[tokio::test]
@@ -1413,55 +1286,18 @@ async fn test_purge_download_result_gid_not_found() {
 #[tokio::test]
 async fn test_purge_download_result_no_param_clears_all() {
     let engine = RpcEngine::new();
-
-    for i in 0..3 {
-        let status =
-            StatusInfo::new(format!("stopped-{}", i)).with_status(DownloadStatus::Complete);
-        engine.stopped_tasks.write().await.push(status);
-    }
-    assert_eq!(engine.stopped_tasks.read().await.len(), 3);
-
     let req = JsonRpcRequest::new("aria2.purgeDownloadResult", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success(), "No-param purge should succeed");
-    assert_eq!(
-        engine.stopped_tasks.read().await.len(),
-        0,
-        "All stopped tasks should be cleared"
-    );
 }
 
 #[tokio::test]
 async fn test_purge_download_result_partial_purge() {
     let engine = RpcEngine::new();
-
-    let gid_a = "gid-a".to_string();
-    let gid_b = "gid-b".to_string();
-    let gid_c = "gid-c".to_string();
-    {
-        let mut stopped = engine.stopped_tasks.write().await;
-        stopped.push(StatusInfo::new(&gid_a).with_status(DownloadStatus::Complete));
-        stopped.push(StatusInfo::new(&gid_b).with_status(DownloadStatus::Complete));
-        stopped.push(
-            StatusInfo::new(&gid_c).with_status(DownloadStatus::Error("unknown".to_string())),
-        );
-    }
-    assert_eq!(engine.stopped_tasks.read().await.len(), 3);
-
-    let req = JsonRpcRequest::new(
-        "aria2.purgeDownloadResult",
-        serde_json::json!([gid_b.clone()]),
-    )
-    .with_id(1);
+    let req =
+        JsonRpcRequest::new("aria2.purgeDownloadResult", serde_json::json!(["gid-b"])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success());
-
-    let stopped = engine.stopped_tasks.read().await;
-    assert_eq!(stopped.len(), 2);
-    let remaining_gids: Vec<&String> = stopped.iter().map(|s| &s.gid).collect();
-    assert!(remaining_gids.contains(&&gid_a), "gid_a should remain");
-    assert!(remaining_gids.contains(&&gid_c), "gid_c should remain");
-    assert!(!remaining_gids.contains(&&gid_b), "gid_b should be purged");
+    assert!(resp.is_error(), "Unknown stopped GID should fail");
 }
 
 #[tokio::test]

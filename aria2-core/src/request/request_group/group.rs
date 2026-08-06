@@ -15,6 +15,7 @@ use crate::download::DownloadContext;
 use crate::rate_limiter::RateLimiter;
 use crate::segment::Segment;
 
+use super::bt_peer_snapshot::BtPeerSnapshot;
 use super::group_id::GroupId;
 use super::halt_reason::{DownloadControlFlags, HaltReason};
 use super::options::DownloadOptions;
@@ -79,6 +80,8 @@ pub struct RequestGroup {
     pub uploaded_length: AtomicU64,
     /// BT piece bitfield.
     pub bt_bitfield: std::sync::RwLock<Option<Vec<u8>>>,
+    /// Current active BT peer snapshots for read-only consumers.
+    pub bt_peer_snapshots: std::sync::RwLock<Vec<BtPeerSnapshot>>,
 
     /// Download context — central metadata (file entries, piece hashes, attributes).
     /// In C++ aria2, `RequestGroup` owns `shared_ptr<DownloadContext> dctx_`.
@@ -199,6 +202,7 @@ impl RequestGroup {
             progress: Arc::new(AtomicProgress::new()),
             uploaded_length: AtomicU64::new(0),
             bt_bitfield: std::sync::RwLock::new(None),
+            bt_peer_snapshots: std::sync::RwLock::new(Vec::new()),
             download_context: std::sync::RwLock::new(None),
             bt_num_pieces: AtomicU32::new(0),
             bt_piece_length: AtomicU32::new(0),

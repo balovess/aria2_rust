@@ -1,3 +1,4 @@
+mod bt_peer_snapshot;
 mod dependency;
 pub mod download_result;
 mod group;
@@ -23,6 +24,7 @@ mod tests;
 
 // Re-export all public types so the external API remains unchanged.
 // Import paths like `crate::request::request_group::RequestGroup` still work.
+pub use bt_peer_snapshot::BtPeerSnapshot;
 #[cfg(feature = "bittorrent")]
 pub use dependency::BtDependency;
 pub use dependency::{CompletionDependency, Dependency, NoDependency};

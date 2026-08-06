@@ -10,10 +10,10 @@
 
 use super::App;
 use aria2_core::config::OptionValue;
-use aria2_core::engine::command::Command;
 use aria2_core::engine::download_event_hooks::{
     DownloadEvent as CoreDownloadEvent, DownloadEventHooks, DownloadEventListener,
 };
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::server::{
@@ -173,7 +173,7 @@ impl App {
     pub async fn start_rpc_server(
         &self,
         group_man: Arc<RwLock<RequestGroupMan>>,
-        cmd_tx: mpsc::UnboundedSender<Box<dyn Command>>,
+        engine_cmd_tx: mpsc::UnboundedSender<EngineCommand>,
     ) -> std::result::Result<tokio::task::JoinHandle<()>, String> {
         // Read RPC configuration
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
@@ -237,7 +237,7 @@ impl App {
         let rpc_engine = RpcEngine::new()
             .with_auth_middleware(RpcAuthMiddleware::new(&secret))
             .with_group_man(group_man)
-            .with_cmd_tx(cmd_tx)
+            .with_engine_cmd_tx(engine_cmd_tx)
             .with_global_opts(user_opts_json);
 
         // Pass the configured --save-session path through so the RPC

@@ -8,7 +8,7 @@
 //! 3. `aria2.getGlobalStat` / `aria2.tellActive` aggregate live data from
 //!    all registered groups.
 
-use aria2_core::engine::command::Command;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
@@ -20,19 +20,19 @@ use tokio::sync::{RwLock, mpsc};
 // Test Helpers
 // =========================================================================
 
-/// Create an `RpcEngine` wired to a real `RequestGroupMan` + command channel,
+/// Create an `RpcEngine` wired to a real `RequestGroupMan` + engine command channel,
 /// simulating the shared-state setup that the app uses in RPC mode.
 fn create_engine_with_shared_state() -> (
     RpcEngine,
     Arc<RwLock<RequestGroupMan>>,
-    mpsc::UnboundedReceiver<Box<dyn Command>>,
+    mpsc::UnboundedReceiver<EngineCommand>,
 ) {
     let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Box<dyn Command>>();
+    let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
     let engine = RpcEngine::new()
         .with_group_man(group_man.clone())
-        .with_cmd_tx(cmd_tx);
-    (engine, group_man, cmd_rx)
+        .with_engine_cmd_tx(engine_cmd_tx);
+    (engine, group_man, engine_cmd_rx)
 }
 
 // =========================================================================
@@ -66,12 +66,12 @@ async fn test_add_uri_with_array_headers_stored_in_group() {
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(gid.len(), 16, "GID should be 16 hex chars");
 
-    // Verify a DownloadCommand was dispatched to the engine channel
-    let cmd = tokio::time::timeout(std::time::Duration::from_millis(500), cmd_rx.recv())
+    // Verify an EngineCommand::AddDownload was dispatched to the v2 engine channel
+    let command = tokio::time::timeout(std::time::Duration::from_millis(500), cmd_rx.recv())
         .await
-        .expect("DownloadCommand should have been sent to cmd_tx")
+        .expect("EngineCommand should have been sent to engine_cmd_tx")
         .expect("channel should not be closed");
-    drop(cmd); // We don't execute it; just verifying it was sent
+    assert!(matches!(command, EngineCommand::AddDownload { .. }));
 
     // Verify the RequestGroup has the correct options stored
     let man = group_man.read().await;

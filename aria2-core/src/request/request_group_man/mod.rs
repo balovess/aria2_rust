@@ -18,8 +18,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
-use reserved::ReservedQueue;
+use reserved::{PositionMode, ReservedQueue};
 use stopped::StoppedResults;
+
+pub use reserved::PositionMode as ChangePositionMode;
 
 use super::request_group::{DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup};
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -238,6 +240,32 @@ impl RequestGroupMan {
     /// Look up a group by numeric GID.
     pub fn group_by_id(&self, gid: GroupId) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
         self.find_group(gid)
+    }
+
+    /// Change a reserved group's queue position and return its new index.
+    pub fn change_position(
+        &self,
+        gid: GroupId,
+        pos: i32,
+        mode: ChangePositionMode,
+    ) -> Result<usize> {
+        if self.reserved.is_empty() {
+            return Err(crate::error::Aria2Error::InvalidArgument(
+                "reserved queue is empty".to_string(),
+            ));
+        }
+        if pos < 0 && matches!(mode, PositionMode::SetFromStart | PositionMode::SetFromEnd) {
+            return Err(crate::error::Aria2Error::InvalidArgument(
+                "position must not be negative for absolute modes".to_string(),
+            ));
+        }
+        self.reserved
+            .change_position(gid, pos, mode)
+            .ok_or_else(|| {
+                crate::error::Aria2Error::InvalidArgument(
+                    "group is not in the reserved queue".to_string(),
+                )
+            })
     }
 
     // ── Group Removal ───────────────────────────────────────────────────

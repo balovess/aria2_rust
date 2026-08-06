@@ -343,19 +343,22 @@ impl Command for BtDownloadCommand {
         }
 
         // Download pieces from the connected peers, using web seeds and PEX as configured.
-        self.download_pieces_loop(
-            &mut active_connections,
-            &meta,
-            piece_length,
-            total_size,
-            num_pieces,
-            web_seed_manager.as_ref(),
-            &mut pex_enabled_peers,
-            &mut last_pex_send,
-            PEX_SEND_INTERVAL_SECS,
-            &verified_piece_indices,
-        )
-        .await?;
+        let piece_result = self
+            .download_pieces_loop(
+                &mut active_connections,
+                &meta,
+                piece_length,
+                total_size,
+                num_pieces,
+                web_seed_manager.as_ref(),
+                &mut pex_enabled_peers,
+                &mut last_pex_send,
+                PEX_SEND_INTERVAL_SECS,
+                &verified_piece_indices,
+            )
+            .await;
+        self.group.recover().clear_bt_peer_snapshots();
+        piece_result?;
 
         if self.seed_enabled && !active_connections.is_empty() {
             info!(

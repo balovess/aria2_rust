@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 
 use super::super::types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_BLOCK_READ_MESSAGES,
-    MAX_RETRIES, PieceDownloadResult,
+    MAX_RETRIES, PeerDownloadBytes, PieceDownloadResult,
 };
 use super::BtMessageHandler;
 
@@ -38,6 +38,7 @@ impl BtMessageHandler {
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<PieceDownloadResult> {
+        let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
         let mut source_peers = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_endgame_inner(
@@ -47,12 +48,14 @@ impl BtMessageHandler {
             num_blocks,
             endgame_state,
             dht_engine,
+            &mut peer_bytes,
             &mut source_peers,
             &mut failed_peers,
         )
         .await?;
         Ok(PieceDownloadResult {
             data,
+            peer_bytes,
             source_peers,
             failed_peers,
         })
@@ -85,11 +88,13 @@ impl BtMessageHandler {
         num_blocks: u32,
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        peer_bytes: &mut Vec<PeerDownloadBytes>,
         source_peers: &mut Vec<std::net::SocketAddr>,
         failed_peers: &mut Vec<std::net::SocketAddr>,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
         for _retry in 0..MAX_RETRIES {
+            peer_bytes.clear();
             source_peers.clear();
             failed_peers.clear();
             info!(
@@ -138,7 +143,19 @@ impl BtMessageHandler {
                             if let Some(peer_index) = result.peer_index {
                                 if let Some(peer) = connections.get(peer_index) {
                                     if let Ok(ip) = peer.ip_addr.parse() {
-                                        source_peers.push(std::net::SocketAddr::new(ip, peer.port));
+                                        let address = std::net::SocketAddr::new(ip, peer.port);
+                                        source_peers.push(address);
+                                        let bytes = result.bytes_received;
+                                        if let Some(entry) =
+                                            peer_bytes.iter_mut().find(|item| item.peer == address)
+                                        {
+                                            entry.bytes += bytes;
+                                        } else {
+                                            peer_bytes.push(PeerDownloadBytes {
+                                                peer: address,
+                                                bytes,
+                                            });
+                                        }
                                     }
                                 }
                             }

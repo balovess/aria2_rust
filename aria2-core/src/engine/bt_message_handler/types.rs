@@ -1,6 +1,7 @@
 //! Types, constants, and enums for BT message handling.
 
 use crate::constants;
+use std::net::SocketAddr;
 
 /// Block size for each piece block request (16 KB)
 pub const BLOCK_SIZE: u32 = constants::BT_BLOCK_SIZE as u32;
@@ -84,12 +85,21 @@ pub struct BlockDownloadResult {
     pub failed_peers: Vec<std::net::SocketAddr>,
 }
 
+/// Bytes supplied by a peer during a piece download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerDownloadBytes {
+    pub peer: SocketAddr,
+    pub bytes: u64,
+}
+
 /// Data for a complete piece and the peers that supplied its blocks.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PieceDownloadResult {
     pub data: Vec<u8>,
+    /// Per-peer bytes supplied in this piece attempt.
+    pub peer_bytes: Vec<PeerDownloadBytes>,
     /// Concrete peers that supplied blocks in this piece attempt.
-    pub source_peers: Vec<std::net::SocketAddr>,
+    pub source_peers: Vec<SocketAddr>,
     /// Concrete peers that failed while this piece was being downloaded.
-    pub failed_peers: Vec<std::net::SocketAddr>,
+    pub failed_peers: Vec<SocketAddr>,
 }

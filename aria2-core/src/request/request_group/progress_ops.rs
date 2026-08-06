@@ -188,6 +188,21 @@ impl super::RequestGroup {
         self.bt_bitfield.recover().clone()
     }
 
+    // ── BT Peer Snapshots ──────────────────────────────────────────────
+
+    /// Replace the current active BitTorrent peer snapshots.
+    pub fn set_bt_peer_snapshots(&self, snapshots: Vec<super::BtPeerSnapshot>) {
+        *self.bt_peer_snapshots.recover_mut() = snapshots;
+    }
+
+    pub fn bt_peer_snapshots(&self) -> Vec<super::BtPeerSnapshot> {
+        self.bt_peer_snapshots.recover().clone()
+    }
+
+    pub fn clear_bt_peer_snapshots(&self) {
+        self.bt_peer_snapshots.recover_mut().clear();
+    }
+
     // ── BT Metadata ─────────────────────────────────────────────────────
 
     /// Set BT metadata fields (num_pieces, piece_length, info_hash_hex).

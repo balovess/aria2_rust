@@ -218,7 +218,9 @@ impl RpcEngine {
 
         // Step 1: per-task overrides.
         let task_opts = self.task_opts.read().await;
-        if let Some(opts) = task_opts.get(&gid) {
+        if let Some(opts) = task_opts.get(&gid)
+            && !opts.is_empty()
+        {
             return Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
                 serde_json::to_value(opts).map_err(|e| {
