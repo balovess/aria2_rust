@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -9,7 +8,7 @@ use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::request::request_group::{GroupId, MetadataInfo};
+use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::MetalinkDownloadCommand;
@@ -301,7 +300,7 @@ impl MetalinkDownloadCommand {
                     }
                     let mut bt_cmd =
                         crate::engine::bt_download_command::BtDownloadCommand::new_with_group(
-                            Arc::clone(&self.group),
+                            std::sync::Arc::clone(&self.group),
                             &torrent_bytes,
                             &options,
                             dir,

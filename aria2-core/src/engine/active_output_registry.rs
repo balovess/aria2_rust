@@ -3,7 +3,7 @@
 //! When multiple `DownloadCommand` instances target the same output directory with the same
 //! inferred filename, the last writer would silently overwrite previous results. This module
 //! provides a process-wide registry that detects such collisions and automatically appends
-//! a `(N)` suffix (Windows/Mac style) to produce unique filenames.
+//! a `.N` suffix (aria2-compatible style) to produce unique filenames.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ impl ActiveOutputRegistry {
     /// Resolve the final output path for a download, registering it to prevent collisions.
     ///
     /// If `desired` is not currently claimed by another active download, it is registered
-    /// and returned as-is.  If a collision is detected, the method appends ` (1)`, ` (2)`,
+    /// and returned as-is. If a collision is detected, the method appends `.1`, `.2`,
     /// etc. (before the file extension) until an unused name is found.
     ///
     /// # Returns
@@ -71,7 +71,7 @@ impl ActiveOutputRegistry {
 
         let mut counter: u32 = 1;
         loop {
-            let candidate = parent.join(format!("{} ({}){}", stem, counter, ext));
+            let candidate = parent.join(format!("{}.{}{}", stem, counter, ext));
 
             // Check both the in-progress registry AND the filesystem to avoid conflicts
             // with previously completed downloads that happened to use the same suffix.
@@ -89,7 +89,7 @@ impl ActiveOutputRegistry {
 
             // Safety upper bound to prevent unbounded looping in pathological cases.
             if counter > 10_000 {
-                let fallback = parent.join(format!("{}_collision_{}", stem, counter));
+                let fallback = parent.join(format!("{}.{}", stem, counter));
                 registry.insert(fallback.clone());
                 warn!(
                     "Exhausted normal suffix range for '{}', using fallback '{}'",
@@ -161,7 +161,7 @@ mod tests {
         let p2 = reg.resolve(Path::new("/tmp/file.txt")).await;
 
         assert_eq!(p1, PathBuf::from("/tmp/file.txt"));
-        assert_eq!(p2, PathBuf::from("/tmp/file (1).txt"));
+        assert_eq!(p2, PathBuf::from("/tmp/file.1.txt"));
         assert_eq!(reg.len().await, 2);
     }
 
@@ -173,7 +173,7 @@ mod tests {
         let _p2 = reg.resolve(Path::new("/tmp/data.bin")).await;
         let p3 = reg.resolve(Path::new("/tmp/data.bin")).await;
 
-        assert_eq!(p3, PathBuf::from("/tmp/data (2).bin"));
+        assert_eq!(p3, PathBuf::from("/tmp/data.2.bin"));
     }
 
     #[tokio::test]
@@ -198,7 +198,7 @@ mod tests {
 
         assert_eq!(p1, PathBuf::from("/tmp/Makefile"));
         // Files without extension should still get suffixed correctly.
-        assert_eq!(p2, PathBuf::from("/tmp/Makefile (1)"));
+        assert_eq!(p2, PathBuf::from("/tmp/Makefile.1"));
     }
 
     #[tokio::test]

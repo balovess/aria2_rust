@@ -25,14 +25,14 @@
 - **BitTorrent 完整支持**:
   - ✅ DHT 网络（KRPC + 路由表 + bootstrap 节点）
   - ✅ Tracker 通信（UDP/HTTP）
-  - ✅ Peer 交换（PEX）
+  - ✅ Peer 交换（PEX，按 peer 进行 BEP 10 扩展 ID 协商）
   - ✅ MSE/PE 加密（BEP14 握手）
   - ✅ 阻塞算法 + seed-time/ratio 支持
   - ✅ RarestFirst Piece 选择
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（34 个方法 + 7 种事件，94% 覆盖率）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（`system.listMethods` 返回 37 个方法，`system.listNotifications` 返回 6 个通知；兼容性覆盖率单独跟踪）
 - **配置系统**: \~95 个核心选项，支持命令行 / 配置文件 / 环境变量四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
@@ -117,8 +117,8 @@ aria2c -i uris.txt
 
 ## 项目架构
 
-总代码量：\~14,500+ 行 Rust/TS\
-测试套件：\~300+ 测试通过
+总代码量：以当前 workspace 源码为准（持续统计中）\
+测试套件：按 Cargo 测试目标和 feature 分层统计，未使用单一总数冒充全量覆盖
 
 本项目组织为 Cargo workspace，包含 4 个子项目：
 
@@ -338,9 +338,9 @@ cargo bench --bench config_bench
 | CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
 | 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
 | 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
-| JSON-RPC API        | ✅     | 25 个方法兼容                        |
+| JSON-RPC API        | ✅     | `system.listMethods` 返回 37 个方法 |
 | XML-RPC API         | ✅     | 完整 methodCall/response/fault 支持 |
-| WebSocket 事件        | ✅     | 7 种事件类型                         |
+| WebSocket 通知        | ✅     | `system.listNotifications` 返回 6 个通知 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
 | NetRC 认证            | ✅     | machine/default/macdef 解析       |
 | 会话保存/加载             | ✅     | 往返一致                            |
@@ -359,13 +359,12 @@ cargo bench --bench config_bench
 | LPD                 | ✅ 完整 | 本地 Peer 发现                      |
 | 做种模式             | ✅ 完整 | 上传支持                           |
 
-**尚未实现**（计划中）：
+**已知缺口与验证状态**：
 
-- `aria2.forceShutdown` RPC 方法
-- `system.listMethods/listNotifications`
-- HTTPS RPC 支持
-- IPv6 DHT
-- 更多 CLI 选项（约 132 个缺失）
+- `aria2.forceShutdown`、`system.listMethods` 和 `system.listNotifications` 已实现，并有 handler/集成测试覆盖。
+- HTTPS RPC 已有 TLS 配置、服务器实现和专门测试；更广泛的客户端/服务器互操作测试仍在跟踪。
+- IPv6 DHT 已有 CLI 和协议层支持；完整网络互操作覆盖仍在跟踪。
+- 仍需逐项对照 `aria2_original` 验证更多 CLI/运行时选项行为。
 
 ## 许可证
 

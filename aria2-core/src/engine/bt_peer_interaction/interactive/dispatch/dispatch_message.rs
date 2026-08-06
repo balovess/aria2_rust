@@ -225,7 +225,16 @@ impl BtPeerInteractive {
                 if let Some(ref update) = ext_update {
                     match update {
                         ExtensionUpdate::HandshakeReceived { .. } => {
-                            // Enable PEX if both sides support it
+                            // Keep the per-connection registry synchronized with the
+                            // negotiated IDs used by outbound extension messages.
+                            if let Some(id) = self.extension_registry.peer_ut_pex_id() {
+                                conn.register_peer_extension("ut_pex", id);
+                            }
+                            if let Some(id) = self.extension_registry.peer_ut_metadata_id() {
+                                conn.register_peer_extension("ut_metadata", id);
+                            }
+
+                            // Enable PEX only when the peer advertised it.
                             if self.extension_registry.supports_ut_pex() {
                                 self.ut_pex_enabled = true;
                                 debug!("ut_pex enabled after extension handshake");

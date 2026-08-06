@@ -139,7 +139,7 @@ impl BtPeerConn {
         match &self.inner {
             InnerConnection::Plain(conn) => conn.remote_peer_id,
             InnerConnection::Encrypted(conn) => conn.remote_peer_id().copied(),
-            InnerConnection::Utp(_) => self.peer_id,
+            InnerConnection::Utp(conn) => conn.remote_peer_id(),
         }
     }
 
@@ -148,6 +148,15 @@ impl BtPeerConn {
         if let Some(peer_id) = self.remote_peer_id() {
             self.peer_id = Some(peer_id);
             self.stats.peer_id = peer_id;
+        }
+    }
+
+    pub fn remote_endpoint(&self) -> Option<std::net::SocketAddr> {
+        match &self.inner {
+            InnerConnection::Utp(conn) => conn.remote_addr(),
+            InnerConnection::Plain(_) | InnerConnection::Encrypted(_) => {
+                format!("{}:{}", self.ip_addr, self.port).parse().ok()
+            }
         }
     }
 }

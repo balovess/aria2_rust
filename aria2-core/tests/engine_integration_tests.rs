@@ -1008,15 +1008,6 @@ async fn engine_session_save_restore_roundtrip() {
                 test_download_options(temp_dir.path()),
             )
             .expect("session group should be created");
-        let group = group_man
-            .read()
-            .await
-            .group_by_id(gid)
-            .expect("session group should be registered");
-        engine
-            .engine_cmd_tx()
-            .send(EngineCommand::AddDownload { group })
-            .expect("engine command channel should be open");
     }
 
     // Verify session path is set (this should still work)
@@ -1033,72 +1024,44 @@ async fn engine_session_save_restore_roundtrip() {
     // Mark session dirty to trigger save
     engine.mark_session_dirty();
 
-    // Execute downloads first so RequestGroups have URIs to serialize
-    // (session saves active task metadata)
-    let mut cmd_1 = build_http_command(&url_1, &path_1).expect("Rebuild cmd 1");
-    let mut cmd_2 = build_http_command(&url_2, &path_2).expect("Rebuild cmd 2");
+    let shutdown_tx = engine
+        .take_shutdown_sender()
+        .expect("engine should provide a shutdown sender");
+    let engine_task = tokio::spawn(engine.run());
+    let engine_result = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let group_state = group_man.read().await;
+            let downloads_complete = [GroupId::new(1), GroupId::new(2)].iter().all(|gid| {
+                group_state.group_by_id(*gid).is_some_and(|group| {
+                    matches!(
+                        group.recover().status(),
+                        aria2_core::request::request_group::DownloadStatus::Complete
+                            | aria2_core::request::request_group::DownloadStatus::Error(_)
+                    )
+                })
+            });
+            drop(group_state);
+            if downloads_complete {
+                shutdown_tx
+                    .send(())
+                    .expect("shutdown channel should be open");
+                break engine_task.await.expect("engine task panicked");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("engine run did not terminate within 15 seconds")
+    .expect("engine run failed");
+    assert_eq!(engine_result, ());
 
-    // Manually add groups to manager (simulating what engine does internally)
-    {
-        let _man = group_man.write().await;
-        // Groups are typically added during command dispatch
-        // For testing, we verify the session infrastructure is wired up
-    }
-
-    // Execute downloads to populate state
-    let r1: Result<(), _> = cmd_1.execute().await;
-    let r2: Result<(), _> = cmd_2.execute().await;
-
-    assert!(r1.is_ok(), "Cmd 1 should succeed: {:?}", r1.err());
-    assert!(r2.is_ok(), "Cmd 2 should succeed: {:?}", r2.err());
-
-    // Trigger manual session save via shutdown path
-    let shutdown_result: Result<(), _> = engine.shutdown_engine().await;
+    let session_content = std::fs::read_to_string(&session_path)
+        .expect("final engine save should create session file");
     assert!(
-        shutdown_result.is_ok(),
-        "Shutdown should succeed: {:?}",
-        shutdown_result.err()
+        session_content.is_empty(),
+        "Completed downloads should not remain in the session file"
     );
 
-    // Give async save time to complete
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Verify session file was created
-    // GAP: Session file format and exact timing depend on auto-save implementation
-    // The file may or may not exist depending on whether auto-save fired
-    if session_path.exists() {
-        let session_content =
-            std::fs::read_to_string(&session_path).expect("Failed to read session file");
-
-        println!("Session file content:\n{}", session_content);
-
-        // Verify session contains task information
-        assert!(
-            session_content.contains("session_test_1") || !session_content.is_empty(),
-            "Session file should contain task info or be non-empty"
-        );
-
-        // GAP: Session restore would require:
-        // 1. Parse session file format
-        // 2. Reconstruct DownloadCommands from serialized state
-        // 3. Add restored commands to new engine
-        // 4. Verify recovered tasks can resume/complete
-        //
-        // Example:
-        // let mut engine2 = DownloadEngine::new(100);
-        // let restored = load_session_from_file(&session_path)?;
-        // for task in restored.tasks {
-        //     engine2.engine_cmd_tx().send(EngineCommand::AddDownload { group })?;
-        // }
-        // engine2.run().await?;
-    } else {
-        println!(
-            "Note: Session file not yet created (auto-save may not have fired). \
-             This is acceptable if manual save wasn't triggered."
-        );
-    }
-
-    // Verify original downloads completed successfully
     assert_file_contents(&path_1, &data_1);
     assert_file_contents(&path_2, &data_2);
 

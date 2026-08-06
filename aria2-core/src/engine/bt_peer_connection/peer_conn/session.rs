@@ -109,6 +109,24 @@ impl BtPeerConn {
     }
 
     // -----------------------------------------------------------------------
+    // Extension negotiation delegation
+    // -----------------------------------------------------------------------
+
+    /// Return the extension ID assigned by this peer to `name`.
+    pub fn peer_extension_id(&self, name: &str) -> Option<u8> {
+        self.session_resource
+            .as_ref()
+            .and_then(|resource| resource.get_extension_message_id(name))
+    }
+
+    /// Record an extension ID assigned by this peer during BEP 10 negotiation.
+    pub fn register_peer_extension(&mut self, name: &str, id: u8) {
+        if let Some(resource) = &mut self.session_resource {
+            resource.add_extension(name, id);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Bitfield delegation (convenience methods)
     // -----------------------------------------------------------------------
 

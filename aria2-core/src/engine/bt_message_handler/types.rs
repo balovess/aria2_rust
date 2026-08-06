@@ -88,6 +88,7 @@ pub struct BlockDownloadResult {
 /// Bytes supplied by a peer during a piece download.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerDownloadBytes {
+    pub peer_index: usize,
     pub peer: SocketAddr,
     pub bytes: u64,
 }
@@ -98,8 +99,6 @@ pub struct PieceDownloadResult {
     pub data: Vec<u8>,
     /// Per-peer bytes supplied in this piece attempt.
     pub peer_bytes: Vec<PeerDownloadBytes>,
-    /// Concrete peers that supplied blocks in this piece attempt.
-    pub source_peers: Vec<SocketAddr>,
     /// Concrete peers that failed while this piece was being downloaded.
     pub failed_peers: Vec<SocketAddr>,
 }

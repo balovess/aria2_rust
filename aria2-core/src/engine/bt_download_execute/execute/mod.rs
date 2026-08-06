@@ -284,27 +284,24 @@ impl Command for BtDownloadCommand {
             None
         };
 
-        // PEX Integration: Initialize PEX state tracking for active connections
-        // Each peer may support ut_pex extension (BEP 11) for peer discovery.
-        // BEP 0027 (Private Torrent): leave pex_enabled_peers empty so no PEX
-        // messages are ever sent.
+        // Initialize PEX state only for peers whose BEP 10 handshake advertised
+        // ut_pex. Private torrents keep this set empty per BEP 0027.
         let mut pex_enabled_peers: HashSet<PeerKey> = HashSet::new();
         let mut last_pex_send = Instant::now();
         const PEX_SEND_INTERVAL_SECS: u64 = 60;
 
         if !self.is_private {
-            // Assume all peers support PEX by default. When the full
-            // BtPeerInteractive handshake flow is wired, this will be
-            // refined to check extension handshake results (ut_pex in
-            // the m dict). For now, enable PEX for all connections as
-            // the PEX layer gracefully handles peers that don't respond.
+            // PEX is enabled only after the remote BEP 10 handshake advertises
+            // ut_pex. Each peer has an independent extension-ID namespace.
             for conn in active_connections.iter() {
-                if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
+                if conn.peer_extension_id("ut_pex").is_some()
+                    && let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port)
+                {
                     pex_enabled_peers.insert(peer_key);
                 }
             }
             info!(
-                "[PEX] Initialized PEX tracking for {} peers (assuming ut_pex support)",
+                "[PEX] Initialized PEX tracking for {} negotiated peers",
                 pex_enabled_peers.len()
             );
         }

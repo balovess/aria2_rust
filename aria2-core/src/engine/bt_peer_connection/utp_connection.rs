@@ -23,6 +23,9 @@ pub struct UtpPeerConnection {
     info_hash: [u8; 20],
     /// Whether handshake is complete
     handshake_complete: bool,
+    /// Remote peer ID learned during the handshake
+    remote_peer_id: Option<[u8; 20]>,
+    remote_endpoint: Option<std::net::SocketAddr>,
     /// Receive buffer for partial messages
     recv_buffer: Vec<u8>,
 }
@@ -39,6 +42,8 @@ impl UtpPeerConnection {
             conn_id,
             info_hash,
             handshake_complete: false,
+            remote_peer_id: None,
+            remote_endpoint: None,
             recv_buffer: Vec::new(),
         }
     }
@@ -61,8 +66,19 @@ impl UtpPeerConnection {
             conn_id,
             info_hash: *info_hash,
             handshake_complete: false,
+            remote_peer_id: None,
+            remote_endpoint: Some(addr),
             recv_buffer: Vec::new(),
         })
+    }
+
+    /// Return the remote peer ID learned during the handshake.
+    pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
+        self.remote_peer_id
+    }
+
+    pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
+        self.remote_endpoint
     }
 
     /// Get the connection ID.
@@ -118,6 +134,7 @@ impl UtpPeerConnection {
             )));
         }
 
+        self.remote_peer_id = Some(response.peer_id);
         self.handshake_complete = true;
         Ok(())
     }

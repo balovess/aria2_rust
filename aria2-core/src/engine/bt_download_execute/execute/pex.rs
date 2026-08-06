@@ -8,7 +8,7 @@
 //!
 //! Wire format (BEP 10/11):
 //! ```text
-//! <len><0x14><local_ut_pex_id><bencoded dict>
+//! <4-byte length><0x14><remote_ut_pex_id><bencoded dict>
 //!   d
 //!     5:added   <compact IPv4 peer bytes>
 //!     7:added.f <flags bytes>
@@ -39,7 +39,7 @@ use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 // ---------------------------------------------------------------------------
 
 impl BtDownloadCommand {
-    /// Build a serialized BEP 10 Extended message carrying ut_pex payload.
+    /// Build a complete wire-format PEX extended message for one remote peer.
     ///
     /// Returns `None` when PEX should not be sent (private torrent, interval
     /// not elapsed, or no peers to advertise).
@@ -47,12 +47,12 @@ impl BtDownloadCommand {
     /// # Arguments
     /// * `remote_peer_addr` — The remote peer's address, used to exclude it
     ///   from the "added" list per BEP 11.
-    /// * `local_ut_pex_id` — Our local ext_id for ut_pex (negotiated via
-    ///   BEP 10 handshake, typically 2).
+    /// * `remote_ut_pex_id` — The remote peer's negotiated ext_id for
+    ///   `ut_pex`; BEP 10 assigns this ID independently per connection.
     pub fn build_pex_extended_message(
         &mut self,
         remote_peer_addr: &PeerAddr,
-        local_ut_pex_id: u8,
+        remote_ut_pex_id: u8,
     ) -> Option<Vec<u8>> {
         // BEP 0027 (Private Torrent): PEX must never be sent.
         if self.is_private {
@@ -74,15 +74,15 @@ impl BtDownloadCommand {
             PexHandler::DEFAULT_MAX_PEERS,
         );
         let payload = pex_bencode.encode();
-        let wire_bytes = serialize_extended(local_ut_pex_id, payload);
+        let wire_bytes = serialize_extended(remote_ut_pex_id, payload);
 
         self.update_pex_last_send();
 
         debug!(
             size = wire_bytes.len(),
             known_peers = self.pex_known_peers.len(),
-            "[PEX] Built Extended message (ext_id={})",
-            local_ut_pex_id
+            "[PEX] Built Extended message (remote ext_id={})",
+            remote_ut_pex_id
         );
 
         Some(wire_bytes)
@@ -224,12 +224,10 @@ impl BtDownloadCommand {
             return Vec::new();
         }
 
-        // Build a set of already-connected (ip, port) tuples.
         let already_connected: HashSet<(String, u16)> = active_connections
             .iter()
             .map(|conn| (conn.ip_addr.clone(), conn.port))
             .collect();
-
         let peers_to_connect: Vec<PeerAddr> = new_peers
             .iter()
             .filter(|peer| !already_connected.contains(&(peer.ip.clone(), peer.port)))
@@ -327,14 +325,18 @@ pub(super) async fn send_periodic_pex(
             // Get the remote peer's address to exclude it from the added list.
             let remote_addr = PeerAddr::new(&conn.ip_addr, conn.port);
 
-            // Our local ut_pex ext_id is always 2 (default per BEP 10),
-            // but we should ideally look it up from the per-peer registry.
-            // For now, use the standard default. The BtPeerConn doesn't
-            // expose the registry, so we use the constant.
-            const LOCAL_UT_PEX_ID: u8 = 2;
+            // BEP 10 assigns extension IDs independently on every peer. The
+            // wire message must use the ID advertised by this remote peer.
+            let Some(remote_ut_pex_id) = conn.peer_extension_id("ut_pex") else {
+                trace!(
+                    "[PEX] Skipping peer {}: ut_pex was not negotiated",
+                    peer_key.address()
+                );
+                continue;
+            };
 
             // Build PEX Extended message for this peer.
-            if let Some(wire_bytes) = cmd.build_pex_extended_message(&remote_addr, LOCAL_UT_PEX_ID)
+            if let Some(wire_bytes) = cmd.build_pex_extended_message(&remote_addr, remote_ut_pex_id)
             {
                 conn.queue_message(wire_bytes);
 

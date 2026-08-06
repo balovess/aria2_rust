@@ -52,45 +52,13 @@ fn sync_peer_snapshots(
     group.set_bt_peer_snapshots(snapshots);
 }
 
-fn unique_source_peer(
-    source_peers: impl IntoIterator<Item = std::net::SocketAddr>,
-) -> Option<std::net::SocketAddr> {
-    let mut unique = source_peers.into_iter();
-    let first = unique.next()?;
-    unique.all(|peer| peer == first).then_some(first)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::unique_source_peer;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    fn peer(port: u16) -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
-    }
-
-    #[test]
-    fn unique_source_peer_accepts_one_source() {
-        assert_eq!(unique_source_peer([peer(6881)]), Some(peer(6881)));
-    }
-
-    #[test]
-    fn unique_source_peer_accepts_repeated_blocks_from_one_source() {
-        assert_eq!(
-            unique_source_peer([peer(6881), peer(6881), peer(6881)]),
-            Some(peer(6881))
-        );
-    }
-
-    #[test]
-    fn unique_source_peer_rejects_mixed_sources() {
-        assert_eq!(unique_source_peer([peer(6881), peer(6882)]), None);
-    }
-
-    #[test]
-    fn unique_source_peer_rejects_unknown_source_set() {
-        assert_eq!(unique_source_peer(std::iter::empty()), None);
-    }
+struct NewPeerConnectionsContext<'a> {
+    peer_last_data_time: &'a mut HashMap<PeerKey, Instant>,
+    pex_enabled_peers: &'a mut HashSet<PeerKey>,
+    allowed_fast_sent_peers: &'a mut HashMap<PeerKey, HashSet<u32>>,
+    suggest_sent_counts: &'a mut HashMap<PeerKey, usize>,
+    peer_tracker: &'a mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+    choking_algo: &'a mut Option<crate::engine::choking_algorithm::ChokingAlgorithm>,
 }
 
 impl BtDownloadCommand {
@@ -186,6 +154,58 @@ impl BtDownloadCommand {
                 allowed_fast_sent_peers.insert(peer_key, HashSet::new());
             }
         }
+    }
+
+    fn append_new_connections(
+        active_connections: &mut Vec<BtPeerConn>,
+        mut new_connections: Vec<BtPeerConn>,
+        is_private: bool,
+        context: &mut NewPeerConnectionsContext<'_>,
+    ) -> usize {
+        new_connections.retain(|conn| {
+            let Some(endpoint) = conn.remote_endpoint() else {
+                tracing::debug!("[BT] Dropping new peer without a remote endpoint");
+                return false;
+            };
+            if endpoint.ip().is_unspecified() || endpoint.port() == 0 {
+                tracing::debug!(peer = %endpoint, "[BT] Dropping new peer with invalid endpoint");
+                return false;
+            }
+            true
+        });
+
+        let previous_len = active_connections.len();
+        active_connections.extend(new_connections);
+        let connected = active_connections.len() - previous_len;
+        if connected == 0 {
+            return 0;
+        }
+
+        for conn in &active_connections[previous_len..] {
+            let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) else {
+                continue;
+            };
+            context.peer_last_data_time.insert(peer_key, Instant::now());
+            context.allowed_fast_sent_peers.entry(peer_key).or_default();
+            context.suggest_sent_counts.entry(peer_key).or_insert(0);
+            if !is_private {
+                context.pex_enabled_peers.insert(peer_key);
+            }
+            let bitfield = conn
+                .session_resource
+                .as_ref()
+                .map_or(&[][..], |resource| resource.bitfield());
+            context
+                .peer_tracker
+                .update_peer_bitfield(&BtPeerInteraction::peer_tracker_key(conn), bitfield);
+        }
+
+        if let Some(algo) = context.choking_algo.as_mut() {
+            for conn in &active_connections[previous_len..] {
+                algo.add_peer(conn.stats.clone());
+            }
+        }
+        connected
     }
 
     pub(super) async fn download_pieces_loop(
@@ -421,34 +441,24 @@ impl BtDownloadCommand {
                         total_size,
                     )
                     .await;
-                let previous_len = active_connections.len();
-                active_connections.extend(new_connections);
-                let connected = active_connections.len() - previous_len;
-                for index in previous_len..active_connections.len() {
-                    let conn = &active_connections[index];
-                    let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) else {
-                        continue;
-                    };
-                    peer_last_data_time.insert(peer_key, Instant::now());
-                    self.allowed_fast_sent_peers.entry(peer_key).or_default();
-                    self.suggest_sent_counts.entry(peer_key).or_insert(0);
-                    let bitfield = conn
-                        .session_resource
-                        .as_ref()
-                        .map_or(&[][..], |resource| resource.bitfield());
-                    peer_tracker
-                        .update_peer_bitfield(&BtPeerInteraction::peer_tracker_key(conn), bitfield);
-                    if !self.is_private {
-                        pex_enabled_peers.insert(peer_key);
-                    }
-                }
-                if let Some(algo) = self.choking_algo.as_mut() {
-                    for conn in &active_connections[previous_len..] {
-                        algo.add_peer(conn.stats.clone());
-                    }
-                }
+                let mut context = NewPeerConnectionsContext {
+                    peer_last_data_time: &mut peer_last_data_time,
+                    pex_enabled_peers,
+                    allowed_fast_sent_peers: &mut self.allowed_fast_sent_peers,
+                    suggest_sent_counts: &mut self.suggest_sent_counts,
+                    peer_tracker: &mut peer_tracker,
+                    choking_algo: &mut self.choking_algo,
+                };
+                let connected = Self::append_new_connections(
+                    active_connections,
+                    new_connections,
+                    self.is_private,
+                    &mut context,
+                );
                 if connected > 0 {
                     info!("[PEX] Successfully connected to {} new peers", connected);
+                    let group = self.group.recover();
+                    sync_peer_snapshots(&group, active_connections);
                 }
             }
 
@@ -481,36 +491,24 @@ impl BtDownloadCommand {
                             total_size,
                         )
                         .await;
-                    let previous_len = active_connections.len();
-                    active_connections.extend(new_connections);
-                    let connected = active_connections.len() - previous_len;
-                    for index in previous_len..active_connections.len() {
-                        let conn = &active_connections[index];
-                        if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
-                            peer_last_data_time.insert(peer_key, Instant::now());
-                            self.allowed_fast_sent_peers
-                                .insert(peer_key, HashSet::new());
-                            self.suggest_sent_counts.insert(peer_key, 0);
-                        }
-                        let key = BtPeerInteraction::peer_tracker_key(conn);
-                        let bitfield = conn
-                            .session_resource
-                            .as_ref()
-                            .map_or(&[][..], |resource| resource.bitfield());
-                        peer_tracker.update_peer_bitfield(&key, bitfield);
-                        if !self.is_private {
-                            if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
-                                pex_enabled_peers.insert(peer_key);
-                            }
-                        }
-                    }
-                    if let Some(algo) = self.choking_algo.as_mut() {
-                        for conn in &active_connections[previous_len..] {
-                            algo.add_peer(conn.stats.clone());
-                        }
-                    }
+                    let mut context = NewPeerConnectionsContext {
+                        peer_last_data_time: &mut peer_last_data_time,
+                        pex_enabled_peers,
+                        allowed_fast_sent_peers: &mut self.allowed_fast_sent_peers,
+                        suggest_sent_counts: &mut self.suggest_sent_counts,
+                        peer_tracker: &mut peer_tracker,
+                        choking_algo: &mut self.choking_algo,
+                    };
+                    let connected = Self::append_new_connections(
+                        active_connections,
+                        new_connections,
+                        self.is_private,
+                        &mut context,
+                    );
                     if connected > 0 {
-                        info!("[BT] Connected to {} tracker-discovered peers", connected);
+                        info!("[BT] Connected to {} new peers", connected);
+                        let group = self.group.recover();
+                        sync_peer_snapshots(&group, active_connections);
                     }
                 }
             }
@@ -570,6 +568,47 @@ impl BtDownloadCommand {
 
             match download_result {
                 Ok(piece_result) => {
+                    let piece_data = piece_result.data;
+                    let piece_data_len = piece_data.len();
+
+                    // Consume peer indices before failed connections are removed and the Vec compacts.
+                    for peer_download in &piece_result.peer_bytes {
+                        let Some(conn) = active_connections.get(peer_download.peer_index) else {
+                            tracing::debug!(
+                                peer_index = peer_download.peer_index,
+                                peer = %peer_download.peer,
+                                "Discarding peer byte accounting for stale connection index"
+                            );
+                            continue;
+                        };
+                        let Some(address) = format!("{}:{}", conn.ip_addr, conn.port)
+                            .parse::<std::net::SocketAddr>()
+                            .ok()
+                        else {
+                            continue;
+                        };
+                        if address != peer_download.peer {
+                            tracing::debug!(
+                                peer_index = peer_download.peer_index,
+                                expected = %peer_download.peer,
+                                actual = %address,
+                                "Discarding peer byte accounting for mismatched connection"
+                            );
+                            continue;
+                        }
+                        let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) else {
+                            continue;
+                        };
+                        active_connections[peer_download.peer_index]
+                            .stats
+                            .on_data_received(peer_download.bytes);
+                        self.on_data_received_from_peer(
+                            peer_download.peer_index,
+                            peer_download.bytes,
+                        );
+                        peer_last_data_time.insert(peer_key, Instant::now());
+                    }
+
                     Self::remove_failed_peers(
                         active_connections,
                         &piece_result.failed_peers,
@@ -578,36 +617,9 @@ impl BtDownloadCommand {
                         &mut peer_last_data_time,
                         &mut self.allowed_fast_sent_peers,
                         &mut self.suggest_sent_counts,
-                        // Remove failed peers from endgame duplicate-request tracking.
                         &mut endgame_state,
                         &mut peer_tracker,
                     );
-                    let piece_data = piece_result.data;
-                    let piece_data_len = piece_data.len();
-
-                    // Update statistics with the exact bytes supplied by each peer.
-                    for peer_download in &piece_result.peer_bytes {
-                        if let Some((index, peer_key)) = active_connections
-                            .iter()
-                            .enumerate()
-                            .find_map(|(index, conn)| {
-                                (format!("{}:{}", conn.ip_addr, conn.port)
-                                    .parse::<std::net::SocketAddr>()
-                                    .ok()
-                                    == Some(peer_download.peer))
-                                .then(|| {
-                                    Some((index, PeerKey::from_peer(&conn.ip_addr, conn.port)))
-                                })
-                                .flatten()
-                            })
-                        {
-                            active_connections[index]
-                                .stats
-                                .on_data_received(peer_download.bytes);
-                            self.on_data_received_from_peer(index, peer_download.bytes);
-                            peer_last_data_time.insert(peer_key, Instant::now());
-                        }
-                    }
                     {
                         let group = self.group.recover();
                         sync_peer_snapshots(&group, active_connections);
@@ -675,11 +687,15 @@ impl BtDownloadCommand {
                             "[BT] Piece {} hash verification FAILED - potential bad peer detected",
                             next_piece_idx
                         );
-                        if let Some(peer_addr) = unique_source_peer(piece_result.source_peers) {
-                            let peer_ip = peer_addr.ip().to_string();
+                        let mut peer_bytes = piece_result.peer_bytes.iter();
+                        let unique_peer = peer_bytes
+                            .next()
+                            .filter(|first| peer_bytes.all(|peer| peer.peer == first.peer));
+                        if let Some(peer_download) = unique_peer {
+                            let peer_ip = peer_download.peer.ip().to_string();
                             self.reject_peer_temporarily(&peer_ip);
                             tracing::warn!(
-                                peer = %peer_addr,
+                                peer = %peer_download.peer,
                                 piece = next_piece_idx,
                                 "Rejected peer after a piece hash mismatch"
                             );

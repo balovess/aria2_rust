@@ -186,11 +186,18 @@ impl BtMessageHandler {
                                     payload.len()
                                 );
                             } else {
-                                // Try to decode as ut_pex payload. We use a
-                                // heuristic: if the payload parses as a valid
-                                // bencoded dict with "added" or "added6" keys,
-                                // treat it as PEX. Otherwise log and skip.
-                                Self::try_process_pex_during_read(conn, ext_id, payload);
+                                // Only the peer's negotiated ut_pex ID can carry
+                                // PEX data. Unknown extension IDs must not be
+                                // classified by payload shape because they may be
+                                // ut_metadata or another BEP 10 extension.
+                                if conn.peer_extension_id("ut_pex") == Some(ext_id) {
+                                    Self::try_process_pex_during_read(conn, ext_id, payload);
+                                } else {
+                                    trace!(
+                                        "[BT] Ignoring non-ut_pex extension during block read: ext_id={}",
+                                        ext_id
+                                    );
+                                }
                             }
                         }
                         other => {
@@ -330,7 +337,6 @@ impl BtMessageHandler {
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<PieceDownloadResult> {
         let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
-        let mut source_peers = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_inner(
             connections,
@@ -339,14 +345,12 @@ impl BtMessageHandler {
             num_blocks,
             dht_engine,
             &mut peer_bytes,
-            &mut source_peers,
             &mut failed_peers,
         )
         .await?;
         Ok(PieceDownloadResult {
             data,
             peer_bytes,
-            source_peers,
             failed_peers,
         })
     }
@@ -376,13 +380,11 @@ impl BtMessageHandler {
         num_blocks: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         peer_bytes: &mut Vec<PeerDownloadBytes>,
-        source_peers: &mut Vec<std::net::SocketAddr>,
         failed_peers: &mut Vec<std::net::SocketAddr>,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times
         for _retry in 0..MAX_RETRIES {
             peer_bytes.clear();
-            source_peers.clear();
             failed_peers.clear();
             info!(
                 "[BT] Piece download attempt {} for piece {}",
@@ -423,14 +425,15 @@ impl BtMessageHandler {
                                 if let Some(peer) = connections.get(peer_index) {
                                     if let Ok(ip) = peer.ip_addr.parse() {
                                         let address = std::net::SocketAddr::new(ip, peer.port);
-                                        source_peers.push(address);
                                         let bytes = result.bytes_received;
-                                        if let Some(entry) =
-                                            peer_bytes.iter_mut().find(|item| item.peer == address)
+                                        if let Some(entry) = peer_bytes
+                                            .iter_mut()
+                                            .find(|item| item.peer_index == peer_index)
                                         {
                                             entry.bytes += bytes;
                                         } else {
                                             peer_bytes.push(PeerDownloadBytes {
+                                                peer_index,
                                                 peer: address,
                                                 bytes,
                                             });

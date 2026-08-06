@@ -25,7 +25,7 @@
 - **Full BitTorrent Support**: 
   - ✅ DHT network (KRPC + routing table + bootstrap)
   - ✅ Tracker communication (UDP/HTTP)
-  - ✅ Peer Exchange (PEX)
+  - ✅ Peer Exchange (PEX, per-peer BEP 10 extension-ID negotiation)
   - ✅ MSE/PE encryption (BEP14 handshake)
   - ✅ Choking algorithms + seed-time/ratio support
   - ✅ RarestFirst piece selection
@@ -36,7 +36,7 @@
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (34 methods + 7 events, 94% coverage)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (37 listed methods, 6 notifications; compatibility coverage tracked separately)
 - **Configuration System**: ~95 core options with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -414,9 +414,9 @@ For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-gui
 | CLI arguments | ✅ Core | ~50 most-used options |
 | Configuration file (`aria2.conf`) | ✅ | Same syntax format |
 | Environment variables | ✅ | `ARIA2_*` prefix mapping |
-| JSON-RPC API | ✅ | 34 methods (94% coverage) |
+| JSON-RPC API | ✅ | 37 methods returned by `system.listMethods` |
 | XML-RPC API | ✅ | Full methodCall/response/fault support |
-| WebSocket events | ✅ | 7 event types |
+| WebSocket events | ✅ | 6 notifications returned by `system.listNotifications` |
 | URI list file (`-i`) | ✅ | Mirror + inline options |
 | NetRC auth | ✅ | machine/default/macdef parsing |
 | Session save/load | ✅ | Round-trip consistent |
@@ -435,12 +435,11 @@ For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-gui
 | LPD | ✅ Complete | Local Peer Discovery |
 | Seeding Mode | ✅ Complete | Upload support |
 
-**Not yet implemented** (planned for future):
-- `aria2.forceShutdown` RPC method
-- `system.listMethods/listNotifications`
-- HTTPS RPC support
-- IPv6 DHT
-- More CLI options (~132 missing)
+**Known gaps and verification status:**
+- `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
+- HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
+- IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
+- Additional CLI/runtime option behavior still requires systematic comparison against `aria2_original`.
 
 ## License
 
