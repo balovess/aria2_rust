@@ -31,6 +31,52 @@ pub use seed_api::SeedStats;
 pub(crate) const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
+#[derive(Debug)]
+pub(crate) struct BtRuntimeState {
+    connections: std::sync::atomic::AtomicUsize,
+    max_peers: std::sync::atomic::AtomicUsize,
+}
+
+impl BtRuntimeState {
+    pub(crate) fn new(max_peers: usize) -> Self {
+        Self {
+            connections: std::sync::atomic::AtomicUsize::new(0),
+            max_peers: std::sync::atomic::AtomicUsize::new(max_peers),
+        }
+    }
+
+    pub(crate) fn set_connections(&self, connections: usize) {
+        self.connections
+            .store(connections, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn set_max_peers(&self, max_peers: usize) {
+        self.max_peers
+            .store(max_peers, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn connections(&self) -> usize {
+        self.connections.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn max_peers(&self) -> usize {
+        self.max_peers.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn min_peers(&self) -> usize {
+        let max_peers = self.max_peers.load(std::sync::atomic::Ordering::Acquire);
+        if max_peers == 0 {
+            0
+        } else {
+            (max_peers * 4 / 5).max(1)
+        }
+    }
+
+    pub(crate) fn less_than_min_peers(&self) -> bool {
+        self.connections() < self.min_peers()
+    }
+}
+
 pub struct BtDownloadCommand {
     /// Stable BitTorrent peer ID for this download session.
     pub(crate) local_peer_id: [u8; 20],
@@ -39,6 +85,8 @@ pub struct BtDownloadCommand {
     pub(crate) progress: Arc<AtomicProgress>,
     pub(crate) output_path: std::path::PathBuf,
     pub(crate) started: bool,
+    /// Monotonic timestamp captured when execution begins.
+    pub(crate) started_at: Option<Instant>,
     pub(crate) completed_bytes: u64,
     pub(crate) torrent_data: Vec<u8>,
     pub(crate) seed_enabled: bool,
@@ -49,6 +97,7 @@ pub struct BtDownloadCommand {
     /// Unified tracker announcer (HTTP + UDP) using BtAnnounce state machine.
     /// Created during execute() from the torrent announce list.
     pub(crate) tracker_announcer: Option<crate::engine::bt_tracker_comm::TrackerAnnouncer>,
+    pub(crate) bt_runtime: std::sync::Arc<BtRuntimeState>,
     pub(crate) dht_engine:
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:

@@ -431,6 +431,7 @@ fn test_download_options_to_map_all_fields() {
         cookie_file: Some("/tmp/cookies.txt".to_string()),
         cookies: Some("key=value".to_string()),
         // BT
+        bt_max_peers: 55,
         bt_force_encrypt: true,
         bt_require_crypto: true,
         enable_dht: false,

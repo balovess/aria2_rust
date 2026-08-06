@@ -114,11 +114,12 @@ impl BtDownloadCommand {
             .collect();
         endgame_state.remove_peers(&removed_keys);
         let mut removed = Vec::new();
-        active_connections.retain_mut(|conn| {
-            let address = match format!("{}:{}", conn.ip_addr, conn.port).parse() {
-                Ok(address) => address,
-                Err(_) => return true,
-            };
+        active_connections.retain(|conn| {
+            let address =
+                match format!("{}:{}", conn.ip_addr, conn.port).parse::<std::net::SocketAddr>() {
+                    Ok(address) => address,
+                    Err(_) => return true,
+                };
             if failed.contains(&address) {
                 removed.push(address);
                 false
@@ -159,9 +160,13 @@ impl BtDownloadCommand {
     fn append_new_connections(
         active_connections: &mut Vec<BtPeerConn>,
         mut new_connections: Vec<BtPeerConn>,
+        max_peers: usize,
         is_private: bool,
         context: &mut NewPeerConnectionsContext<'_>,
     ) -> usize {
+        if max_peers != 0 {
+            new_connections.truncate(max_peers.saturating_sub(active_connections.len()));
+        }
         new_connections.retain(|conn| {
             let Some(endpoint) = conn.remote_endpoint() else {
                 tracing::debug!("[BT] Dropping new peer without a remote endpoint");
@@ -452,6 +457,7 @@ impl BtDownloadCommand {
                 let connected = Self::append_new_connections(
                     active_connections,
                     new_connections,
+                    self.group.recover().options().bt_max_peers,
                     self.is_private,
                     &mut context,
                 );
@@ -462,11 +468,10 @@ impl BtDownloadCommand {
                 }
             }
 
-            // Periodic tracker re-announce for peer discovery.
-            // C++ aria2 uses TrackerWatcherCommand which checks
-            // BtAnnounce::isAnnounceReady() on each iteration.
-            // If we have too few active connections, try to discover more peers.
-            if active_connections.len() < 5 {
+            // Keep tracker numwant aligned with the live peer command count,
+            // then re-announce when the tracker interval permits it.
+            self.update_tracker_peer_state(active_connections.len());
+            if self.should_discover_more_peers(active_connections.len()) {
                 let new_peers = self
                     .periodic_tracker_announce(
                         &meta.info_hash.bytes,
@@ -502,6 +507,7 @@ impl BtDownloadCommand {
                     let connected = Self::append_new_connections(
                         active_connections,
                         new_connections,
+                        self.group.recover().options().bt_max_peers,
                         self.is_private,
                         &mut context,
                     );

@@ -225,6 +225,7 @@ impl BtDownloadCommand {
             progress,
             output_path: effective_output_path,
             started: false,
+            started_at: None,
             completed_bytes: 0,
             torrent_data: torrent_bytes.to_vec(),
             seed_enabled: options.seed_time.unwrap_or(0.0) > 0.0
@@ -234,6 +235,7 @@ impl BtDownloadCommand {
             total_uploaded: 0,
             udp_client: None,
             tracker_announcer: None,
+            bt_runtime: std::sync::Arc::new(super::BtRuntimeState::new(options.bt_max_peers)),
             dht_engine: None,
             public_trackers: None,
             choking_algo,

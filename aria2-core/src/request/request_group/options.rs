@@ -205,6 +205,9 @@ pub struct DownloadOptions {
     pub checksum: Option<(String, String)>,
     pub cookie_file: Option<String>,
     pub cookies: Option<String>,
+    /// Maximum active BitTorrent peer connections (C++ `BtRuntime::maxPeers_`).
+    /// The tracker demand threshold is derived as 80% of this value.
+    pub bt_max_peers: usize,
     pub bt_force_encrypt: bool,
     pub bt_require_crypto: bool,
     pub enable_dht: bool,
@@ -474,6 +477,7 @@ impl Default for DownloadOptions {
             ftp_proxy: None,
             no_proxy: None,
             dht_file_path: None,
+            bt_max_peers: 55,
             bt_max_upload_slots: None,
             bt_optimistic_unchoke_interval: None,
             bt_snubbed_timeout: None,

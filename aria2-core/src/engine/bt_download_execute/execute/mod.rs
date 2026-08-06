@@ -28,6 +28,7 @@ impl Command for BtDownloadCommand {
         if !self.started {
             self.group.recover_mut().start()?;
             self.started = true;
+            self.started_at = Some(Instant::now());
         }
 
         // Register this BT download into the engine's BtRegistry so that
@@ -155,7 +156,10 @@ impl Command for BtDownloadCommand {
         if self.hash_check_only {
             info!("hash-check-only enabled; stopping after integrity validation");
             if self.check_integrity && verified_piece_indices.len() == num_pieces as usize {
+                self.completed_bytes = total_size;
+                self.progress.set_completed_length(total_size);
                 self.group.recover_mut().complete()?;
+                info!("hash-check-only completed successfully");
                 return Ok(());
             }
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -357,6 +361,17 @@ impl Command for BtDownloadCommand {
         self.group.recover().clear_bt_peer_snapshots();
         piece_result?;
 
+        if let Some(ref mut announcer) = self.tracker_announcer {
+            announcer
+                .announce_completed(
+                    &meta.info_hash.bytes,
+                    &self.local_peer_id,
+                    self.completed_bytes,
+                    self.total_uploaded,
+                )
+                .await;
+        }
+
         if self.seed_enabled && !active_connections.is_empty() {
             info!(
                 "Starting seeding phase with {} peers...",
@@ -380,7 +395,8 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        self.finalize_download(Instant::now(), &meta).await?;
+        let started_at = self.started_at.unwrap_or_else(Instant::now);
+        self.finalize_download(started_at, &meta).await?;
 
         Ok(())
     }

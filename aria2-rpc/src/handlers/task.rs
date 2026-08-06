@@ -846,6 +846,7 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
         cookie_file: get_str("cookie-file"),
         cookies: get_str("cookies"),
         // BT
+        bt_max_peers: get_u64("bt-max-peers").unwrap_or(55) as usize,
         bt_force_encrypt: opts
             .get("bt-force-encryption")
             .and_then(|v| v.as_bool())

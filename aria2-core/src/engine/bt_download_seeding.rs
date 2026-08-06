@@ -6,7 +6,6 @@ use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use crate::engine::bt_upload_session::BtSeedingConfig;
 use crate::error::Result;
-use crate::request::request_group::HaltReason;
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
@@ -17,11 +16,6 @@ impl BtDownloadCommand {
         num_pieces: u32,
         info_hash: [u8; 20],
     ) -> Result<()> {
-        if connections.is_empty() {
-            info!("No active peers for seeding");
-            return Ok(());
-        }
-
         let file_provider = std::sync::Arc::new(FileBackedPieceProvider::new(
             self.output_path.clone(),
             piece_length,
@@ -61,32 +55,9 @@ impl BtDownloadCommand {
                 })
                 .collect();
 
-        // Tracker announcer for periodic re-announce while seeding
-        // (C++ SeedCheckCommand). Built from the torrent's announce list.
-        let (announce_list, announce_url) = {
-            use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
-            let ctx = self.group.recover().get_download_context();
-            if let Some(ref c) = ctx {
-                if let Some(attr) = c.get_attribute(ContextAttributeType::BitTorrent) {
-                    if let Some(ta) = attr.downcast_ref::<TorrentAttribute>() {
-                        let list = &ta.announce_list;
-                        (
-                            list.clone(),
-                            list.first().and_then(|tier| tier.first()).cloned(),
-                        )
-                    } else {
-                        (Vec::new(), None)
-                    }
-                } else {
-                    (Vec::new(), None)
-                }
-            } else {
-                (Vec::new(), None)
-            }
-        };
-        let announcer = announce_url.as_ref().map(|_| {
-            crate::engine::bt_tracker_comm::TrackerAnnouncer::new(&announce_list, &announce_url)
-        });
+        // Reuse the download announcer so the completed event and tracker
+        // timing state remain part of one lifecycle.
+        let announcer = self.tracker_announcer.take();
         let peer_id = self.local_peer_id;
 
         let mut manager = BtSeedManager::new_with_announcer(
@@ -100,10 +71,12 @@ impl BtDownloadCommand {
             announcer,
             peer_id,
         );
-        manager.run_seeding_loop().await?;
+        let seeding_result = manager.run_seeding_loop().await;
+        self.tracker_announcer = manager.take_announcer();
+        seeding_result?;
 
         if manager.halt_requested() {
-            self.group.recover().request_halt(HaltReason::UserRequest);
+            info!("Seeding exit criteria reached");
         }
         self.total_uploaded = manager.total_uploaded();
         info!(

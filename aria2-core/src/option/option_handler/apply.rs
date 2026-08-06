@@ -182,6 +182,7 @@ impl OptionHandlerApply for OptionHandler {
             checksum: None,
             cookie_file: get_str("cookie-file"),
             cookies: get_str("cookies"),
+            bt_max_peers: self.get("bt-max-peers").as_usize(),
             bt_force_encrypt: self.get("bt-force-encrypt").as_bool().unwrap_or(false),
             bt_require_crypto: self.get("bt-require-crypto").as_bool().unwrap_or(false),
             enable_dht: self.get("enable-dht").as_bool().unwrap_or(true),

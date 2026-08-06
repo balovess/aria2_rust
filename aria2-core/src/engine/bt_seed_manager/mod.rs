@@ -337,22 +337,7 @@ impl BtSeedManager {
             self.upload_sessions.len()
         );
 
-        // Signal the completed transition before regular seeding announces.
-        // This mirrors DefaultBtAnnounce's Completed -> Seeding event lifecycle
-        // and prevents the first seed announce from being sent as Started.
-        if let Some(announcer) = self.announcer.as_mut() {
-            announcer
-                .announce_completed(
-                    &self.info_hash,
-                    &self.peer_id,
-                    self.total_downloaded,
-                    self.total_uploaded,
-                )
-                .await;
-        }
-
         let mut tick = tokio::time::interval(SEED_TICK_INTERVAL);
-        let mut stopped_announce_sent = false;
 
         loop {
             // -- Cancellation check (non-blocking) ----------------------------
@@ -443,14 +428,12 @@ impl BtSeedManager {
                     self.total_uploaded,
                 )
                 .await;
-            stopped_announce_sent = true;
         }
         self.is_active = false;
         info!(
-            "Seeding loop ended: uploaded {} bytes in {:?} (stopped_announce_sent={})",
+            "Seeding loop ended: uploaded {} bytes in {:?}",
             self.total_uploaded,
-            self.seeding_duration(),
-            stopped_announce_sent
+            self.seeding_duration()
         );
         Ok(())
     }
@@ -632,6 +615,10 @@ impl BtSeedManager {
     /// Return total bytes uploaded during seeding.
     pub fn total_uploaded(&self) -> u64 {
         self.total_uploaded
+    }
+
+    pub fn take_announcer(&mut self) -> Option<TrackerAnnouncer> {
+        self.announcer.take()
     }
 
     /// Return total bytes downloaded (used for seed ratio calculation).

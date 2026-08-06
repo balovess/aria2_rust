@@ -51,6 +51,8 @@ pub struct AnnounceResult {
 pub struct TrackerAnnouncer {
     /// The core announce state machine.
     announce: BtAnnounce,
+    /// Prevent duplicate stopped events after a successful announce.
+    stopped_sent: bool,
     /// UDP tracker manager (created lazily when first UDP URL is seen).
     udp_manager: Option<UdpTrackerManager>,
     /// Shared UDP client for the UDP tracker manager.
@@ -62,6 +64,7 @@ impl TrackerAnnouncer {
     pub fn new(announce_list: &[Vec<String>], announce: &Option<String>) -> Self {
         Self {
             announce: BtAnnounce::new(announce_list, announce),
+            stopped_sent: false,
             udp_manager: None,
             udp_client: None,
         }
@@ -71,6 +74,7 @@ impl TrackerAnnouncer {
     pub fn with_udp_client(announce: BtAnnounce, udp_client: Option<SharedUdpClient>) -> Self {
         Self {
             announce,
+            stopped_sent: false,
             udp_manager: None,
             udp_client,
         }
@@ -114,29 +118,18 @@ impl TrackerAnnouncer {
         if !self.announce.is_announce_ready() {
             return None;
         }
-
-        // Adjust the announce list (sets event, moves to appropriate tier)
         if !self.announce.adjust_announce_list() {
             return None;
         }
 
-        // Get the current tracker URL and event, cloning to avoid borrow conflicts
         let tracker_url = self.announce.announce_list().get_announce()?.to_string();
-        let event = self.announce.announce_list().get_event();
         let is_udp = is_udp_tracker(&tracker_url);
+        let event = self.announce.announce_list().get_event();
 
         // Determine if this is a UDP or HTTP tracker
         if is_udp {
-            self.announce_udp(
-                info_hash,
-                peer_id,
-                downloaded,
-                left,
-                uploaded,
-                event,
-                &tracker_url,
-            )
-            .await
+            self.announce_udp(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
+                .await
         } else {
             // HTTP announce — build URL and dispatch
             self.announce_http(
@@ -160,9 +153,11 @@ impl TrackerAnnouncer {
         downloaded: u64,
         left: u64,
         uploaded: u64,
-        event: AnnounceEvent,
         tracker_url: &str, // must be &str for lifetime flexibility
     ) -> Option<AnnounceResult> {
+        let event = self.announce.announce_list().get_event();
+        let udp_event = self.announce.current_udp_event();
+        let numwant = self.announce.numwant();
         // Initialize UDP manager lazily
         if self.udp_manager.is_none() {
             if let Some(ref client) = self.udp_client {
@@ -197,15 +192,8 @@ impl TrackerAnnouncer {
         // Signal announce start
         self.announce.announce_start();
 
-        // Convert event to UDP event
-        let udp_event = self.announce.current_udp_event();
-
-        // Determine numwant
-        let numwant = if self.announce.announce_list().get_event() == AnnounceEvent::Stopped {
-            0
-        } else {
-            50
-        };
+        // The event and numwant were captured before network I/O so the
+        // request and result describe the same state-machine transition.
 
         debug!(
             "[BT] Announcing to UDP tracker {} (event={:?}, udp_event={})",
@@ -268,9 +256,9 @@ impl TrackerAnnouncer {
         tracker_url: &str,
     ) -> Option<AnnounceResult> {
         // Build the announce URL through BtAnnounce state machine
-        let url = self
-            .announce
-            .get_announce_url(info_hash, peer_id, uploaded, downloaded, left, None)?;
+        let url = self.announce.get_announce_url_without_adjustment(
+            info_hash, peer_id, uploaded, downloaded, left, None,
+        )?;
 
         // Signal announce start
         self.announce.announce_start();
@@ -379,11 +367,15 @@ impl TrackerAnnouncer {
         left: u64,
         uploaded: u64,
     ) {
+        if self.stopped_sent {
+            return;
+        }
         self.announce.set_runtime_halted(true);
 
         // Try to send stopped event to all applicable tiers
         let mut attempts = 0;
         const MAX_STOPPED_ATTEMPTS: usize = 5;
+        let mut sent_successfully = false;
 
         while self.announce.is_stopped_announce_ready() && attempts < MAX_STOPPED_ATTEMPTS {
             if let Some(result) = self
@@ -395,9 +387,11 @@ impl TrackerAnnouncer {
                     result.tracker_url,
                     result.peers.len()
                 );
+                sent_successfully = true;
             }
             attempts += 1;
         }
+        self.stopped_sent = sent_successfully;
     }
 
     /// Send a "completed" event to all applicable trackers.

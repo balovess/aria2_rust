@@ -153,6 +153,22 @@ fn test_get_announce_url_with_existing_query() {
 }
 
 #[test]
+fn test_numwant_matches_runtime_peer_state() {
+    let mut bt = BtAnnounce::new(&[], &Some("udp://tracker.test:6969".to_string()));
+    assert_eq!(bt.numwant(), 50);
+
+    bt.set_less_than_min_peers(false);
+    assert_eq!(bt.numwant(), 0);
+
+    bt.set_less_than_min_peers(true);
+    bt.set_runtime_halted(true);
+    assert_eq!(bt.numwant(), 0);
+
+    bt.set_runtime_halted(false);
+    assert_eq!(bt.numwant(), 50);
+}
+
+#[test]
 fn test_get_announce_url_numwant_zero_when_enough_peers() {
     let mut bt = BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string()));
     bt.set_less_than_min_peers(false); // we have enough peers
@@ -164,6 +180,25 @@ fn test_get_announce_url_numwant_zero_when_enough_peers() {
         .unwrap();
 
     assert!(url.contains("numwant=0"));
+}
+
+#[test]
+fn test_current_udp_event_mapping_matches_wire_values() {
+    use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
+
+    let mut bt = BtAnnounce::new(&[], &Some("udp://tracker.test:6969".to_string()));
+    for (event, expected) in [
+        (AnnounceEvent::Downloading, UdpEvent::None),
+        (AnnounceEvent::Started, UdpEvent::Started),
+        (AnnounceEvent::StartedAfterCompletion, UdpEvent::Started),
+        (AnnounceEvent::Completed, UdpEvent::Completed),
+        (AnnounceEvent::Stopped, UdpEvent::Stopped),
+        (AnnounceEvent::Seeding, UdpEvent::None),
+        (AnnounceEvent::Halted, UdpEvent::None),
+    ] {
+        bt.announce_list_mut().tiers[0].event = event;
+        assert_eq!(bt.current_udp_event(), expected);
+    }
 }
 
 #[test]

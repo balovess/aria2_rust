@@ -356,8 +356,14 @@ impl BtDownloadCommand {
         // be a per-session singleton.
         let local_peer_id = self.local_peer_id;
 
-        let mut eligible_peers = Vec::with_capacity(peer_addrs.len());
-        for peer in peer_addrs {
+        let max_peers = self.group.recover().options().bt_max_peers;
+        let peer_limit = if max_peers == 0 {
+            peer_addrs.len()
+        } else {
+            max_peers
+        };
+        let mut eligible_peers = Vec::with_capacity(peer_addrs.len().min(peer_limit));
+        for peer in peer_addrs.iter().take(peer_limit) {
             if let Ok(ip) = peer.ip.parse::<std::net::IpAddr>() {
                 if self.is_peer_temporarily_rejected(&ip.to_string()) {
                     tracing::debug!(peer = %ip, port = peer.port, "Skipping temporarily rejected peer");
@@ -481,6 +487,28 @@ impl BtDownloadCommand {
                 "[BT] PeerStats snub check: {} peers timed out",
                 stats_snubbed.len()
             );
+        }
+    }
+
+    /// Update tracker demand from the live connection count.
+    ///
+    /// The C++ `BtRuntime::lessThanMinPeers()` is derived from active peer
+    /// commands and its configured max-peer limit, not from the last tracker
+    /// response. Keep the Rust announce state synchronized at the same boundary.
+    pub(super) fn update_tracker_peer_state(&mut self, active_connections: usize) {
+        let max_peers = self.group.recover().options().bt_max_peers;
+        self.bt_runtime.set_max_peers(max_peers);
+        self.bt_runtime.set_connections(active_connections);
+        if let Some(announcer) = self.tracker_announcer.as_mut() {
+            announcer.set_less_than_min_peers(self.bt_runtime.less_than_min_peers());
+        }
+    }
+
+    pub(super) fn should_discover_more_peers(&self, active_connections: usize) -> bool {
+        if self.bt_runtime.max_peers() == 0 {
+            active_connections < 5
+        } else {
+            self.bt_runtime.less_than_min_peers()
         }
     }
 

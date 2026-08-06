@@ -228,11 +228,18 @@ impl BtDownloadCommand {
             .iter()
             .map(|conn| (conn.ip_addr.clone(), conn.port))
             .collect();
+        let max_peers = self.group.recover().options().bt_max_peers;
+        let remaining_slots = max_peers.saturating_sub(active_connections.len());
+        let batch_limit = if max_peers == 0 {
+            10
+        } else {
+            remaining_slots.min(10)
+        };
         let peers_to_connect: Vec<PeerAddr> = new_peers
             .iter()
             .filter(|peer| !already_connected.contains(&(peer.ip.clone(), peer.port)))
             .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
-            .take(10) // Limit to 10 new connections per PEX batch
+            .take(batch_limit)
             .cloned()
             .collect();
 
@@ -253,7 +260,8 @@ impl BtDownloadCommand {
             )
         };
 
-        // Attempt connections. Errors are logged but don't fail the batch.
+        // Attempt connections sequentially. Individual errors are logged without
+        // aborting the remaining connection attempts in this batch.
         let mut connected = Vec::with_capacity(peers_to_connect.len());
         for peer in &peers_to_connect {
             match BtPeerInteraction::connect_peer_ready(

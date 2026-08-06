@@ -223,19 +223,28 @@ impl BtAnnounce {
         if !self.adjust_announce_list() {
             return None;
         }
+        self.get_announce_url_without_adjustment(
+            info_hash, peer_id, uploaded, downloaded, left, key,
+        )
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_announce_url_without_adjustment(
+        &self,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        uploaded: u64,
+        downloaded: u64,
+        left: u64,
+        key: Option<&[u8]>,
+    ) -> Option<String> {
         let base_url = self.announce_list.get_announce()?;
         let separator = if base_url.contains('?') { "&" } else { "?" };
 
         // Use last 8 bytes of peer ID as key if not explicitly provided
         let key_bytes = key.unwrap_or(&peer_id[12..20]);
 
-        // numwant: 50 if we need peers, 0 if we have enough or are halting
-        let numwant = if self.less_than_min_peers && !self.runtime_halted {
-            DEFAULT_NUMWANT
-        } else {
-            0
-        };
+        let numwant = self.numwant();
 
         let mut url = format!(
             "{}{}info_hash={}&peer_id={}&uploaded={}&downloaded={}&left={}&compact=1&key={}&numwant={}&no_peer_id=1",
@@ -280,6 +289,14 @@ impl BtAnnounce {
         }
 
         Some(url)
+    }
+
+    pub fn numwant(&self) -> u32 {
+        if self.less_than_min_peers && !self.runtime_halted {
+            DEFAULT_NUMWANT
+        } else {
+            0
+        }
     }
 
     /// Signal that an announce request has been sent (matching C++ announceStart).

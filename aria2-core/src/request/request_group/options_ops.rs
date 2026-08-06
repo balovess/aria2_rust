@@ -171,6 +171,12 @@ impl super::RequestGroup {
                 }
                 true
             }
+            "bt-max-peers" => {
+                if let Some(v) = value.as_u64() {
+                    opts.bt_max_peers = v as usize;
+                }
+                true
+            }
             "bt-max-upload-slots" => {
                 if let Some(v) = value.as_u64() {
                     opts.bt_max_upload_slots = Some(v as u32);
