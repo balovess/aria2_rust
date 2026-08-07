@@ -76,12 +76,12 @@ impl BtUploadSession {
         loop {
             match self.conn.read_message().await {
                 Ok(Some(msg)) => {
-                    if let Some(validator) = &self.message_validator {
-                        if let Err(error) = validator.validate(&msg) {
-                            warn!("Invalid BitTorrent upload message: {}", error);
-                            self.is_dead = true;
-                            break;
-                        }
+                    if let Some(validator) = &self.message_validator
+                        && let Err(error) = validator.validate(&msg)
+                    {
+                        warn!("Invalid BitTorrent upload message: {}", error);
+                        self.is_dead = true;
+                        break;
                     }
                     match msg {
                         BtMessage::Request { request } => {
@@ -233,6 +233,12 @@ impl BtUploadSession {
 
     pub fn is_dead(&self) -> bool {
         self.is_dead
+    }
+
+    pub fn endpoint(&self) -> Option<(String, u16)> {
+        self.conn
+            .remote_addr()
+            .map(|addr| (addr.ip().to_string(), addr.port()))
     }
 
     pub fn uploaded_bytes(&self) -> u64 {

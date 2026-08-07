@@ -39,7 +39,10 @@ pub async fn spawn_download_task(
     global_limiter: Option<RateLimiter>,
     generation: u64,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, u64, TaskResult)>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<(
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Sender<()>,
+)> {
     let gid = group.recover().gid();
     let uris = group.recover().uris().to_vec();
     let options = group.recover().options_arc();
@@ -57,6 +60,8 @@ pub async fn spawn_download_task(
         }
     };
 
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
     // Metalink owns mirror ordering and torrent fallback. Dispatch it before
     // resolving the first mirror: one unavailable mirror must not prevent the
     // command from trying the remaining mirrors or the torrent fallback.
@@ -65,10 +70,10 @@ pub async fn spawn_download_task(
         let mut cmd = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source(
             Arc::clone(&group), &metalink_data, file_index, &options,
         );
-        if let Ok(ref mut command) = cmd {
-            if let Some(limiter) = global_limiter.clone() {
-                command.set_global_limiter(limiter);
-            }
+        if let Ok(ref mut command) = cmd
+            && let Some(limiter) = global_limiter.clone()
+        {
+            command.set_global_limiter(limiter);
         }
         let mut cmd: Box<dyn Command> = match cmd {
             Ok(command) => Box::new(command),
@@ -79,13 +84,20 @@ pub async fn spawn_download_task(
             }
         };
         let completion_tx = completion_tx.clone();
-        return Some(tokio::spawn(async move {
-            let task_result = match cmd.execute().await {
+        let handle = tokio::spawn(async move {
+            let task_result = match tokio::select! {
+                result = cmd.execute() => result,
+                _ = &mut shutdown_rx => {
+                    cmd.shutdown().await;
+                    Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
+                }
+            } {
                 Ok(()) => TaskResult::Success,
                 Err(error) => TaskResult::Failed(error),
             };
             let _ = completion_tx.send((gid, generation, task_result));
-        }));
+        });
+        return Some((handle, shutdown_tx));
     }
 
     // Resolve the origin before constructing the command. This keeps DNS failures
@@ -110,7 +122,7 @@ pub async fn spawn_download_task(
             let handle = tokio::spawn(async move {
                 let _ = completion_tx.send((gid, generation, TaskResult::Failed(error)));
             });
-            return Some(handle);
+            return Some((handle, shutdown_tx));
         }
     }
 
@@ -137,7 +149,13 @@ pub async fn spawn_download_task(
 
     // Spawn the task. It sends completion via channel when done.
     let handle = tokio::spawn(async move {
-        let result = cmd.execute().await;
+        let result = tokio::select! {
+            result = cmd.execute() => result,
+            _ = &mut shutdown_rx => {
+                cmd.shutdown().await;
+                Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
+            }
+        };
         let task_result = match result {
             Ok(()) => {
                 debug!(gid = gid.value(), "Download task completed successfully");
@@ -166,7 +184,7 @@ pub async fn spawn_download_task(
         }
     });
 
-    Some(handle)
+    Some((handle, shutdown_tx))
 }
 
 fn direct_origin(uri: &str) -> Option<(String, u16)> {
@@ -270,10 +288,10 @@ async fn create_command_for_uri(
             cmd.set_global_limiter(limiter);
         }
         cmd.set_dns_cache(Arc::clone(dns_cache));
-        if let Some((hostname, port)) = direct_origin(uri) {
-            if let Ok(addresses) = dns_cache.lock().await.resolve(&hostname, port).await {
-                cmd.set_resolved_addresses(addresses);
-            }
+        if let Some((hostname, port)) = direct_origin(uri)
+            && let Ok(addresses) = dns_cache.lock().await.resolve(&hostname, port).await
+        {
+            cmd.set_resolved_addresses(addresses);
         }
         return Ok(Box::new(cmd));
     }

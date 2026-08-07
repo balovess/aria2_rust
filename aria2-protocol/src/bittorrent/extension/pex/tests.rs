@@ -433,19 +433,15 @@ fn test_build_pex_message_separates_v4_v6_keys() {
 
     // IPv6 added peers should be in "added6" key
     let added6_bytes = msg.dict_get("added6").and_then(|v| v.as_bytes()).unwrap();
-    assert_eq!(added6_bytes.len(), 1 * 18, "1 IPv6 added peer = 18 bytes");
+    assert_eq!(added6_bytes.len(), 18, "1 IPv6 added peer = 18 bytes");
 
     // IPv4 dropped peers should be in "dropped" key
     let dropped_bytes = msg.dict_get("dropped").and_then(|v| v.as_bytes()).unwrap();
-    assert_eq!(dropped_bytes.len(), 1 * 6, "1 IPv4 dropped peer = 6 bytes");
+    assert_eq!(dropped_bytes.len(), 6, "1 IPv4 dropped peer = 6 bytes");
 
     // IPv6 dropped peers should be in "dropped6" key
     let dropped6_bytes = msg.dict_get("dropped6").and_then(|v| v.as_bytes()).unwrap();
-    assert_eq!(
-        dropped6_bytes.len(),
-        1 * 18,
-        "1 IPv6 dropped peer = 18 bytes"
-    );
+    assert_eq!(dropped6_bytes.len(), 18, "1 IPv6 dropped peer = 18 bytes");
 
     // Full roundtrip: parse the encoded message
     let encoded = msg.encode();

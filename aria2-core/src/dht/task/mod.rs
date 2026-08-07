@@ -264,6 +264,6 @@ mod tests {
 
         let batch = state.next_query_batch();
         assert!(batch.len() <= 3); // ALPHA
-        assert!(batch.len() > 0);
+        assert!(!batch.is_empty());
     }
 }

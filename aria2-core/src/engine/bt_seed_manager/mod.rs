@@ -75,6 +75,7 @@ const CHOKE_ROUND_INTERVAL_SECS: u64 = 10;
 /// 4. Monitors seed exit conditions (ratio/time) and stops when met
 ///
 /// Mirrors C++ `SeedCheckCommand` combined with upload session management.
+/// Top-level manager for the BitTorrent seeding phase.
 pub struct BtSeedManager {
     /// Info hash of the torrent being seeded
     info_hash: [u8; 20],
@@ -105,6 +106,10 @@ pub struct BtSeedManager {
     choking_algo: Option<ChokingAlgorithm>,
     /// Cancellation token for graceful shutdown
     cancel_token: CancellationToken,
+    /// Shared peer storage used to release seeding sessions on disconnect.
+    peer_storage: Option<
+        std::sync::Arc<std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>>,
+    >,
     /// Set when seed criteria ends the runtime, matching BtRuntime::halt.
     halt_requested: bool,
     /// Timestamp of the last choke round
@@ -272,18 +277,16 @@ impl BtSeedManager {
             })
             .collect();
 
-        // Initialise PeerStats for each session (seeder-state algorithm needs
-        // peer_interested, upload_speed, etc.)
-        // Use a placeholder address since PeerConnection does not expose
-        // the remote address after construction; the address is only used
-        // for logging/identification in PeerStats.
+        // Initialise PeerStats for each session (the seeder-state algorithm
+        // needs peer_interested, upload_speed, etc.). Keep the transport
+        // endpoint as the identity used by the choking and reporting layers.
         let peer_stats: Vec<PeerStats> = upload_sessions
             .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let addr: std::net::SocketAddr = format!("127.0.0.1:{}", 6881 + i as u16)
-                    .parse()
-                    .unwrap_or_else(|_| "127.0.0.1:6881".parse().unwrap());
+            .map(|session| {
+                let addr = session
+                    .endpoint()
+                    .and_then(|(ip, port)| format!("{ip}:{port}").parse().ok())
+                    .unwrap_or_else(|| "0.0.0.0:0".parse().expect("valid unspecified address"));
                 PeerStats::new([0u8; 20], addr)
             })
             .collect();
@@ -304,11 +307,23 @@ impl BtSeedManager {
             seeder_choke,
             choking_algo,
             cancel_token,
+            peer_storage: None,
             halt_requested: false,
             last_choke_time: Instant::now(),
             announcer,
             peer_id,
         }
+    }
+
+    /// Attach the session-scoped peer storage used to release seeding peers.
+    pub fn with_peer_storage(
+        mut self,
+        peer_storage: std::sync::Arc<
+            std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
+        >,
+    ) -> Self {
+        self.peer_storage = Some(peer_storage);
+        self
     }
 
     // -----------------------------------------------------------------------
@@ -363,8 +378,7 @@ impl BtSeedManager {
             // the tracker-provided interval) ----------------------------------
             if let Some(announcer) = self.announcer.as_mut()
                 && announcer.is_default_announce_ready()
-            {
-                if let Some(result) = announcer
+                && let Some(result) = announcer
                     .announce(
                         &self.info_hash,
                         &self.peer_id,
@@ -373,12 +387,11 @@ impl BtSeedManager {
                         self.total_uploaded,
                     )
                     .await
-                {
-                    debug!(
-                        "[Seed] Re-announced to {} ({} seeders, {} leechers)",
-                        result.tracker_url, result.seeders, result.leechers
-                    );
-                }
+            {
+                debug!(
+                    "[Seed] Re-announced to {} ({} seeders, {} leechers)",
+                    result.tracker_url, result.seeders, result.leechers
+                );
             }
 
             // -- Handle incoming messages from peers --------------------------
@@ -491,12 +504,24 @@ impl BtSeedManager {
             .collect();
 
         // Remove in reverse order to keep indices stable
-        for idx in dead_indices.iter().rev() {
-            self.upload_sessions.remove(*idx);
-            if *idx < self.peer_stats.len() {
-                self.peer_stats.remove(*idx);
+        for idx in dead_indices.into_iter().rev() {
+            if let Some((ip, port)) = self.upload_sessions[idx].endpoint()
+                && let Some(peer_storage) = &self.peer_storage
+            {
+                peer_storage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .return_peer_by_endpoint(&ip, port);
+            }
+            self.upload_sessions.remove(idx);
+            if idx < self.peer_stats.len() {
+                self.peer_stats.remove(idx);
             }
         }
+
+        // Keep the parallel statistics vector aligned even if it was already
+        // out of sync before dead sessions were removed.
+        self.peer_stats.truncate(self.upload_sessions.len());
 
         let removed = before - self.upload_sessions.len();
         if removed > 0 {

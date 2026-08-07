@@ -535,6 +535,7 @@ impl UriEntry {
 #[serde(rename_all = "lowercase")]
 pub enum UriStatus {
     Used,
+    Spent,
     #[default]
     Waiting,
 }
@@ -877,7 +878,7 @@ mod tests {
         ]);
         let announce_list = ben_list(&[tier1, tier2]);
 
-        let torrent = ben_dict(&[
+        ben_dict(&[
             (
                 ben_str("announce"),
                 ben_str("http://tracker.example.com:80/announce"),
@@ -890,9 +891,7 @@ mod tests {
             (ben_str("creation date"), ben_int(1700000000)),
             (ben_str("created by"), ben_str("aria2-rust-test/0.2.4")),
             (ben_str("info"), info_dict),
-        ]);
-
-        torrent
+        ])
     }
 
     /// Build a mock multi-file torrent with metadata.
@@ -923,7 +922,7 @@ mod tests {
 
         let announce_list = ben_list(&[ben_list(&[ben_str("udp://tracker.multi.com:80")])]);
 
-        let torrent = ben_dict(&[
+        ben_dict(&[
             (
                 ben_str("announce"),
                 ben_str("http://tracker.multi.com:80/announce"),
@@ -936,9 +935,7 @@ mod tests {
             (ben_str("creation date"), ben_int(1800000000)),
             (ben_str("created by"), ben_str("aria2-rust-test")),
             (ben_str("info"), info_dict),
-        ]);
-
-        torrent
+        ])
     }
 
     // -------------------------------------------------------------------------

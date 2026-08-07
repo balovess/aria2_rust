@@ -176,8 +176,8 @@ impl super::RequestGroupMan {
     /// 1. Sets `haltRequested` (graceful halt)
     /// 2. Sets `pauseRequested` (will pause after halt)
     /// 3. Sets `restartRequested` (will re-queue when limit increases)
-    /// This ensures paused downloads automatically resume when the concurrent
-    /// limit is raised again.
+    ///    This ensures paused downloads automatically resume when the concurrent
+    ///    limit is raised again.
     pub fn reduce_to_limit(&self) -> usize {
         let max = self.max_concurrent();
         if max == 0 {

@@ -1,6 +1,7 @@
 //! Tests for OptionHandler.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::apply::OptionHandlerApply;
     use super::super::{OptionHandler, built_in_defaults, detect_value_type};

@@ -119,6 +119,7 @@ impl HttpSegmentDownloader {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn download_range(
         &self,
         url: &str,

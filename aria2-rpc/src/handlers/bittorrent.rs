@@ -9,10 +9,22 @@ use crate::rpc_helpers::split_auth_token;
 use crate::types::{
     FileInfo, PeerInfo, ServerInfo, ServerInfoIndex, UriEntry, UriStatus, VersionInfo,
 };
+use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 
 impl RpcEngine {
+    async fn lifecycle_gids(&self) -> Vec<String> {
+        let Some(group_man) = &self.group_man else {
+            return Vec::new();
+        };
+        let man = group_man.read().await;
+        man.all_groups()
+            .into_iter()
+            .map(|(_, group)| group.recover().gid().to_hex_string())
+            .collect()
+    }
+
     /// Handle `aria2.removeDownloadResult` - Remove a specific stopped download result.
     pub async fn handle_remove_download_result(
         &self,
@@ -82,6 +94,7 @@ impl RpcEngine {
 
     /// Handle `aria2.pauseAll` - Pause all active downloads.
     pub async fn handle_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let gids = self.lifecycle_gids().await;
         let result = self
             .engine_cmd_tx
             .as_ref()
@@ -96,16 +109,24 @@ impl RpcEngine {
                 })
             });
         match result {
-            Ok(()) => JsonRpcResponse::success(
-                req.id.clone().unwrap_or_default(),
-                serde_json::json!("OK"),
-            ),
+            Ok(()) => {
+                for gid in gids {
+                    let _ = self
+                        .event_publisher
+                        .publish(EventType::DownloadPause, DownloadEvent::download_pause(gid));
+                }
+                JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!("OK"),
+                )
+            }
             Err(e) => e.into_response(req.id.clone()),
         }
     }
 
     /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
     pub async fn handle_force_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let gids = self.lifecycle_gids().await;
         let result = self
             .engine_cmd_tx
             .as_ref()
@@ -120,16 +141,24 @@ impl RpcEngine {
                 })
             });
         match result {
-            Ok(()) => JsonRpcResponse::success(
-                req.id.clone().unwrap_or_default(),
-                serde_json::json!("OK"),
-            ),
+            Ok(()) => {
+                for gid in gids {
+                    let _ = self
+                        .event_publisher
+                        .publish(EventType::DownloadPause, DownloadEvent::download_pause(gid));
+                }
+                JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!("OK"),
+                )
+            }
             Err(e) => e.into_response(req.id.clone()),
         }
     }
 
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.
     pub async fn handle_unpause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let gids = self.lifecycle_gids().await;
         let result = self
             .engine_cmd_tx
             .as_ref()
@@ -144,10 +173,17 @@ impl RpcEngine {
                 })
             });
         match result {
-            Ok(()) => JsonRpcResponse::success(
-                req.id.clone().unwrap_or_default(),
-                serde_json::json!("OK"),
-            ),
+            Ok(()) => {
+                for gid in gids {
+                    let _ = self
+                        .event_publisher
+                        .publish(EventType::DownloadStart, DownloadEvent::download_start(gid));
+                }
+                JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!("OK"),
+                )
+            }
             Err(e) => e.into_response(req.id.clone()),
         }
     }

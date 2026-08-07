@@ -14,6 +14,7 @@
 mod common;
 
 use common::start_test_server;
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -481,7 +482,7 @@ async fn e2e_ws_jsonrpc_get_version() {
         "params": [],
         "id": 1
     });
-    tx.send(Message::Text(request.to_string().into()))
+    tx.send(Message::Text(request.to_string()))
         .await
         .expect("send failed");
 
@@ -525,7 +526,7 @@ async fn e2e_ws_jsonrpc_batch_request() {
         {"jsonrpc": "2.0", "method": "aria2.getVersion", "params": [], "id": "b1"},
         {"jsonrpc": "2.0", "method": "aria2.getGlobalStat", "params": [], "id": "b2"},
     ]);
-    tx.send(Message::Text(batch.to_string().into()))
+    tx.send(Message::Text(batch.to_string()))
         .await
         .expect("send failed");
 
@@ -608,7 +609,7 @@ async fn e2e_ws_jsonrpc_with_events() {
         "params": [],
         "id": "ev-test"
     });
-    tx.send(Message::Text(request.to_string().into()))
+    tx.send(Message::Text(request.to_string()))
         .await
         .expect("send failed");
 
@@ -760,16 +761,28 @@ async fn e2e_full_lifecycle() {
     // DownloadResult (stopped list) so tellStatus returns status="removed"
     // rather than an error. Only errors if the GID was never added or
     // has been purged via removeDownloadResult/purgeDownloadResult.
-    let removed_status = rpc_call(&client, &base, "aria2.tellStatus", json![[&gid]]).await;
-    if let Some(result) = removed_status.get("result") {
-        // GID still in stopped results — status should be "removed"
-        let status = result.get("status").and_then(|s| s.as_str()).unwrap_or("");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let removed_status = rpc_call(&client, &base, "aria2.tellStatus", json![[&gid]]).await;
+        if let Some(result) = removed_status.get("result") {
+            let status = result.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            if status == "removed" || status == "error" {
+                break;
+            }
+            assert_eq!(
+                status, "waiting",
+                "unexpected intermediate status: {status}"
+            );
+        } else if removed_status.get("error").is_some() {
+            break;
+        }
+
         assert!(
-            status == "removed" || status == "error",
-            "removed download status should be 'removed' or 'error', got '{status}'"
+            tokio::time::Instant::now() < deadline,
+            "removed download did not reach a terminal state: {removed_status}"
         );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // If the GID was already purged from stopped results, we'd get an error — also acceptable
 }
 
 #[tokio::test]

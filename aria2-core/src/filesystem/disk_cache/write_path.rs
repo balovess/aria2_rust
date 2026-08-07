@@ -73,7 +73,6 @@ impl WrDiskCache {
     // -----------------------------------------------------------------------
 
     /// Evict clean (non-dirty) entries to make room for `needed_size` additional bytes.
-
     ///
     /// This method acquires the entries lock internally. For use when already holding
     /// the lock, see [evict_clean_entries_locked](Self::evict_clean_entries_locked).
@@ -91,7 +90,6 @@ impl WrDiskCache {
     /// Repeatedly removes the clean (non-dirty) entry with the smallest seq
     /// (oldest insertion = LRU candidate) until either:
     /// - We have freed enough space for `needed_size` new bytes, OR
-
     /// - We have reached the eviction target (50% of max), OR
     /// - No more clean entries remain
     ///

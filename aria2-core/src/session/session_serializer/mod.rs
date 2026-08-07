@@ -23,7 +23,7 @@
 //! Session files contain one or more entries separated by blank lines:
 //!
 //! ```text
-//! uri1	uri2
+//! uri1    uri2
 //!  GID=hex_value
 //!  option=value
 //!

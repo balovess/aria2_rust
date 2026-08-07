@@ -42,6 +42,31 @@ fn test_sftp_uri_parsing_default_port() {
 }
 
 #[test]
+fn test_sftp_uri_without_user_preserves_host_and_path() {
+    let result = SftpDownloadCommand::new(
+        GroupId::new(31),
+        "sftp://127.0.0.1:2222/data/file.bin",
+        &DownloadOptions::default(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(result.timeout().is_some());
+}
+
+#[test]
+fn test_sftp_uri_parsing_bracketed_ipv6() {
+    let result = SftpDownloadCommand::new(
+        GroupId::new(32),
+        "sftp://user@[::1]:2222/data/file.bin",
+        &DownloadOptions::default(),
+        None,
+        None,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_sftp_uri_reject_non_sftp_scheme() {
     let result = SftpDownloadCommand::new(
         GroupId::new(4),

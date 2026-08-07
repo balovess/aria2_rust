@@ -71,7 +71,7 @@ impl DhtEngine {
                 // Target node is unresponsive — replace it with the candidate
                 replacements_to_apply.push((
                     task.bucket_prefix_len(),
-                    task.target_node().id().clone(),
+                    *task.target_node().id(),
                     task.replacement_node().clone(),
                 ));
                 false // remove from active list

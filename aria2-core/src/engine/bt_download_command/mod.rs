@@ -75,6 +75,27 @@ impl BtRuntimeState {
     pub(crate) fn less_than_min_peers(&self) -> bool {
         self.connections() < self.min_peers()
     }
+
+    pub(crate) fn less_than_max_peers(&self) -> bool {
+        self.max_peers() == 0 || self.connections() < self.max_peers()
+    }
+}
+
+impl Drop for BtDownloadCommand {
+    fn drop(&mut self) {
+        if let Some(listener_task) = self.incoming_peer_listener_task.take() {
+            listener_task.abort();
+        }
+
+        let mut storage = self
+            .peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let peers: Vec<_> = storage.used_peers().iter().cloned().collect();
+        for peer in peers {
+            storage.return_peer(&peer);
+        }
+    }
 }
 
 pub struct BtDownloadCommand {
@@ -97,7 +118,10 @@ pub struct BtDownloadCommand {
     /// Unified tracker announcer (HTTP + UDP) using BtAnnounce state machine.
     /// Created during execute() from the torrent announce list.
     pub(crate) tracker_announcer: Option<crate::engine::bt_tracker_comm::TrackerAnnouncer>,
+    /// Actual TCP listener port advertised to trackers for this command.
+    pub(crate) listen_port: u16,
     pub(crate) bt_runtime: std::sync::Arc<BtRuntimeState>,
+    pub(crate) peer_coordinator: crate::engine::bt_peer_coordinator::BtPeerCoordinator,
     pub(crate) dht_engine:
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
@@ -197,12 +221,54 @@ pub struct BtDownloadCommand {
 
     /// Shared rejection state for verified bad piece sources.
     pub(crate) peer_rejection: crate::engine::bt_peer_storage::SharedPeerRejection,
+
+    /// Session-scoped peer identity pool shared by discovery and connection
+    /// scheduling. Socket ownership remains in the download loop until the
+    /// lifecycle adapter is wired in.
+    pub(crate) peer_storage:
+        std::sync::Arc<std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>>,
+
+    /// Receiver for incoming peers accepted by the session-scoped listener.
+    pub(crate) incoming_peers:
+        Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
+    /// Owned listener task; aborting it closes the listener socket with the command.
+    pub(crate) incoming_peer_listener_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl BtDownloadCommand {
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         use crate::util::rwlock_ext::RwLockRecover;
         self.group.recover()
+    }
+
+    pub fn group_handle(&self) -> Arc<std::sync::RwLock<RequestGroup>> {
+        Arc::clone(&self.group)
+    }
+
+    /// Complete the asynchronous shutdown phase before the command is dropped.
+    ///
+    /// `Drop` can only reclaim synchronous resources. Callers that own the
+    /// command lifecycle should await this method before aborting or dropping
+    /// the task so tracker stopped announcements are not lost.
+    pub async fn shutdown(&mut self) {
+        if let Ok(meta) =
+            aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
+            && let Some(ref mut announcer) = self.tracker_announcer
+        {
+            let total_size = meta.total_size();
+            announcer
+                .announce_stopped(
+                    &meta.info_hash.bytes,
+                    &self.local_peer_id,
+                    self.completed_bytes,
+                    total_size.saturating_sub(self.completed_bytes),
+                    self.total_uploaded,
+                )
+                .await;
+        }
+        if let Some(listener_task) = self.incoming_peer_listener_task.take() {
+            listener_task.abort();
+        }
     }
 
     /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
@@ -272,5 +338,36 @@ impl BtDownloadCommand {
             total_size,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BtRuntimeState;
+
+    #[test]
+    fn runtime_state_uses_the_same_min_peer_boundary_as_tracker_demand() {
+        let runtime = BtRuntimeState::new(55);
+        assert_eq!(runtime.min_peers(), 44);
+        assert!(runtime.less_than_min_peers());
+
+        runtime.set_connections(44);
+        assert!(!runtime.less_than_min_peers());
+
+        runtime.set_max_peers(0);
+        assert_eq!(runtime.min_peers(), 0);
+        assert!(!runtime.less_than_min_peers());
+        assert!(runtime.less_than_max_peers());
+    }
+
+    #[test]
+    fn runtime_state_accepts_runtime_max_peer_changes() {
+        let runtime = BtRuntimeState::new(10);
+        runtime.set_connections(7);
+        assert!(runtime.less_than_min_peers());
+
+        runtime.set_max_peers(8);
+        assert!(!runtime.less_than_min_peers());
+        assert_eq!(runtime.max_peers(), 8);
     }
 }

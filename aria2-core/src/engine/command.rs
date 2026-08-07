@@ -37,6 +37,10 @@ pub struct ProgressUpdate {
 pub trait Command: Send + Sync {
     async fn execute(&mut self) -> Result<()>;
 
+    /// Perform protocol-level asynchronous cleanup before task cancellation.
+    /// Commands with network lifecycle state may override this hook.
+    async fn shutdown(&mut self) {}
+
     fn status(&self) -> CommandStatus;
 
     fn timeout(&self) -> Option<Duration> {

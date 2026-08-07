@@ -221,6 +221,7 @@ impl TrackerAnnouncer {
         // Process the first response through the state machine
         let response = &responses[0];
         let peers = self.announce.process_udp_announce_response(response);
+        self.announce.announce_success();
 
         // Collect additional peers from subsequent responses
         let mut all_peers = peers;
@@ -245,6 +246,7 @@ impl TrackerAnnouncer {
     }
 
     /// Execute an HTTP tracker announce.
+    #[allow(clippy::too_many_arguments)]
     async fn announce_http(
         &mut self,
         info_hash: &[u8; 20],
@@ -298,6 +300,7 @@ impl TrackerAnnouncer {
                                         // Process through BtAnnounce state machine
                                         match self.announce.process_announce_response(&tracker_resp) {
                                             Ok(peers) => {
+                                                self.announce.announce_success();
                                                 let interval = self.announce.interval();
                                                 let seeders = self.announce.complete();
                                                 let leechers = self.announce.incomplete();
@@ -455,6 +458,11 @@ impl TrackerAnnouncer {
     /// Set the TCP port for announce URL construction.
     pub fn set_tcp_port(&mut self, port: u16) {
         self.announce.set_tcp_port(port);
+    }
+
+    /// Return the TCP port currently advertised to trackers.
+    pub fn tcp_port(&self) -> u16 {
+        self.announce.tcp_port()
     }
 
     /// Set whether the download is complete.

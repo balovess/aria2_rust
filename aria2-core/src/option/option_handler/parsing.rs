@@ -1,4 +1,4 @@
-﻿//! Option value parsing and type detection.
+//! Option value parsing and type detection.
 //!
 //! Provides [`detect_value_type`] for auto-detecting the type of a raw string
 //! value and wrapping it in [`OptionValue`], and [`parse_kv_arg`] for parsing
@@ -76,10 +76,10 @@ pub fn detect_value_type(value: &str) -> Option<OptionValue> {
     }
 
     // Negative integer
-    if let Some(neg) = trimmed.strip_prefix('-') {
-        if neg.parse::<i64>().is_ok() {
-            return Some(OptionValue::Int(-neg.parse::<i64>().unwrap()));
-        }
+    if let Some(neg) = trimmed.strip_prefix('-')
+        && neg.parse::<i64>().is_ok()
+    {
+        return Some(OptionValue::Int(-neg.parse::<i64>().unwrap()));
     }
 
     // Unsigned integer

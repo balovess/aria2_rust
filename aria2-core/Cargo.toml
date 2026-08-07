@@ -26,10 +26,6 @@ sftp = ["aria2-protocol/sftp"]
 [dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
-# Optional io_uring backend (Linux only). When the `io_uring` feature is
-# enabled, `tokio-uring` provides async positioned I/O via the io_uring
-# syscall interface. Not available on Windows/macOS.
-tokio-uring = { version = "0.4", optional = true }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -94,6 +90,10 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tokio-uring is available only on Linux and is enabled through the `io_uring` feature.
+tokio-uring = { version = "0.4", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

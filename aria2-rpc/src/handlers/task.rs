@@ -259,11 +259,19 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        if let Some(group_man) = &self.group_man
+            && group_man.read().await.group_by_hex(&gid).is_none()
+        {
+            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+        }
         engine_cmd_tx
             .send(EngineCommand::RemoveDownload { gid: gid_parsed })
             .map_err(|e| {
                 JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
             })?;
+        let _ = self
+            .event_publisher
+            .publish(EventType::DownloadStop, DownloadEvent::download_stop(&gid));
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::json!(gid),
@@ -284,11 +292,20 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        if let Some(group_man) = &self.group_man
+            && group_man.read().await.group_by_hex(&gid).is_none()
+        {
+            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+        }
         engine_cmd_tx
             .send(EngineCommand::Pause { gid: gid_parsed })
             .map_err(|e| {
                 JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
             })?;
+        let _ = self.event_publisher.publish(
+            EventType::DownloadPause,
+            DownloadEvent::download_pause(&gid),
+        );
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::json!(gid),
@@ -309,11 +326,20 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        if let Some(group_man) = &self.group_man
+            && group_man.read().await.group_by_hex(&gid).is_none()
+        {
+            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+        }
         engine_cmd_tx
             .send(EngineCommand::ForcePause { gid: gid_parsed })
             .map_err(|e| {
                 JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
             })?;
+        let _ = self.event_publisher.publish(
+            EventType::DownloadPause,
+            DownloadEvent::download_pause(&gid),
+        );
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::json!(gid),
@@ -334,11 +360,20 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
+        if let Some(group_man) = &self.group_man
+            && group_man.read().await.group_by_hex(&gid).is_none()
+        {
+            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+        }
         engine_cmd_tx
             .send(EngineCommand::Unpause { gid: gid_parsed })
             .map_err(|e| {
                 JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
             })?;
+        let _ = self.event_publisher.publish(
+            EventType::DownloadStart,
+            DownloadEvent::download_start(&gid),
+        );
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::json!(gid),
@@ -386,6 +421,9 @@ impl RpcEngine {
                 .map_err(|e| {
                     JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
                 })?;
+            let _ = self
+                .event_publisher
+                .publish(EventType::DownloadStop, DownloadEvent::download_stop(gid));
         }
         let result_gid = gids.last().cloned().unwrap_or_default();
         Ok(JsonRpcResponse::success(
@@ -402,8 +440,14 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let del_uris: Vec<String> = req.get_param(1)?;
-        let add_uris: Vec<String> = req.get_param(2)?;
+        let file_index: i64 = req.get_param(1)?;
+        if file_index < 1 {
+            return Err(JsonRpcError::InvalidParams(
+                "fileIndex must be at least 1".into(),
+            ));
+        }
+        let del_uris: Vec<String> = req.get_param(2)?;
+        let add_uris: Vec<String> = req.get_param(3)?;
         let group_man = self
             .group_man
             .as_ref()
@@ -415,7 +459,7 @@ impl RpcEngine {
         let result = group
             .write()
             .map_err(|_| JsonRpcError::InternalError("Failed to lock request group".into()))?
-            .change_uris(&del_uris, &add_uris)
+            .change_uris(file_index as usize, &del_uris, &add_uris)
             .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),

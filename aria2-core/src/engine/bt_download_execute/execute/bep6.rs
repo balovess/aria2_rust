@@ -176,10 +176,10 @@ impl BtDownloadCommand {
             {
                 Ok(count) => {
                     total_sent += count as u64;
-                    if !sent_for_peer.is_empty() {
-                        if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
-                            self.allowed_fast_sent_peers.insert(peer_key, sent_for_peer);
-                        }
+                    if !sent_for_peer.is_empty()
+                        && let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port)
+                    {
+                        self.allowed_fast_sent_peers.insert(peer_key, sent_for_peer);
                     }
                 }
                 Err(e) => {

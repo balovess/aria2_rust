@@ -133,6 +133,9 @@ impl MockFtpServer {
             ));
         }
         if verb == "SIZE" {
+            if args.contains("notfound") {
+                return Some("550 File not found\r\n".into());
+            }
             let size = Self::file_size(args);
             return Some(format!("213 {}\r\n", size));
         }

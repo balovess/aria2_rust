@@ -34,7 +34,7 @@ fn test_choke_round_interval_elapsed_after_round() {
 #[test]
 fn test_identity_choke_execution_matches_legacy_execution() {
     let mut storage = DefaultPeerStorage::new();
-    let mut peers = vec![
+    let mut peers = [
         PeerStats::new([1u8; 20], "127.0.0.1:7001".parse().unwrap()),
         PeerStats::new([2u8; 20], "127.0.0.1:7002".parse().unwrap()),
     ];

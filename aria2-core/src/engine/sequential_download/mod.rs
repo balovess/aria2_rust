@@ -41,6 +41,7 @@ pub struct SequentialDownloader {
 }
 
 impl SequentialDownloader {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Arc<reqwest::Client>,
         output_path: std::path::PathBuf,
@@ -98,6 +99,13 @@ impl SequentialDownloader {
                 Err(Aria2Error::DownloadFailed("Download halted".into()))
             }
             _ => Ok(()),
+        }
+    }
+
+    pub(crate) async fn wait_for_cancellation(&self) -> Result<()> {
+        loop {
+            self.check_cancelled()?;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 

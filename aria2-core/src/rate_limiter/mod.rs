@@ -1,4 +1,5 @@
 pub mod config;
+#[allow(clippy::module_inception)]
 mod rate_limiter;
 mod tests;
 pub mod throttled_writer;

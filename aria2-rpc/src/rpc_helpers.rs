@@ -223,13 +223,13 @@ mod tests {
 
     #[test]
     fn test_validate_option_keys_all_valid() {
-        let keys = vec!["dir", "split", "max-retries"];
+        let keys = ["dir", "split", "max-retries"];
         assert!(validate_option_keys(keys.iter().copied()).is_ok());
     }
 
     #[test]
     fn test_validate_option_keys_invalid_key() {
-        let keys = vec!["invalid-option"];
+        let keys = ["invalid-option"];
         assert!(validate_option_keys(keys.iter().copied()).is_err());
     }
 

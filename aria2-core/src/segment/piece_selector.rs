@@ -263,7 +263,7 @@ mod tests {
 
     /// Build a bitfield byte array from a list of set bit indices (MSB-first).
     fn build_bitfield(nbits: usize, set_bits: &[usize]) -> Vec<u8> {
-        let num_bytes = (nbits + 7) / 8;
+        let num_bytes = nbits.div_ceil(8);
         let mut bf = vec![0u8; num_bytes];
         for &bit in set_bits {
             let byte = bit / 8;

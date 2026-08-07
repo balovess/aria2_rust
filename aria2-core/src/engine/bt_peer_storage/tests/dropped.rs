@@ -24,6 +24,7 @@ fn test_return_peer_adds_to_dropped_on_graceful_disconnect() {
 
     assert_eq!(storage.dropped_peers.len(), 1);
     assert_eq!(storage.dropped_peers[0].ip, "192.168.1.1");
+    assert_eq!(storage.dropped_peers[0].used_by, 0);
 }
 
 #[test]

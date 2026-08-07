@@ -202,9 +202,13 @@ impl super::RequestGroup {
     /// Remove the requested URIs and append new URIs to the first requested file entry.
     pub fn change_uris(
         &mut self,
+        file_index: usize,
         del_uris: &[String],
         add_uris: &[String],
     ) -> crate::error::Result<(usize, usize)> {
+        let file_index = file_index.checked_sub(1).ok_or_else(|| {
+            crate::error::Aria2Error::InvalidArgument("file index must be at least 1".to_string())
+        })?;
         let mut guard = self.download_context.recover_mut();
         if let Some(ctx) = guard.as_mut() {
             let ctx_inner = Arc::get_mut(ctx).ok_or_else(|| {
@@ -214,8 +218,8 @@ impl super::RequestGroup {
             })?;
             let entry = ctx_inner
                 .get_file_entries_mut()
-                .iter_mut()
-                .find(|fe| fe.is_requested())
+                .get_mut(file_index)
+                .filter(|fe| fe.is_requested())
                 .ok_or_else(|| {
                     crate::error::Aria2Error::InvalidArgument(
                         "download context has no requested file entry".to_string(),
@@ -230,6 +234,11 @@ impl super::RequestGroup {
         }
 
         let mut deleted = 0;
+        if file_index != 0 {
+            return Err(crate::error::Aria2Error::InvalidArgument(
+                "file index is unavailable before download context initialization".to_string(),
+            ));
+        }
         self.uris.retain(|uri| {
             if del_uris.iter().any(|deleted_uri| deleted_uri == uri) {
                 deleted += 1;
@@ -353,17 +362,16 @@ impl super::RequestGroup {
             // Try to get exclusive mutable access to the inner DownloadContext.
             // Arc::get_mut succeeds only when we hold the sole Arc reference,
             // which is typical during download execution.
-            if let Some(ctx_inner) = Arc::get_mut(ctx) {
-                if let Some(fe) = ctx_inner
+            if let Some(ctx_inner) = Arc::get_mut(ctx)
+                && let Some(fe) = ctx_inner
                     .get_file_entries_mut()
                     .iter_mut()
                     .find(|fe| fe.is_requested())
-                {
-                    if fe.add_uri(uri) {
-                        trace!("Added redirect URI to FileEntry: {}", uri);
-                    }
-                    return;
+            {
+                if fe.add_uri(uri) {
+                    trace!("Added redirect URI to FileEntry: {}", uri);
                 }
+                return;
             }
             // If Arc is shared (rare during download), fall back to the
             // initial URI list. The URI will be available for the next

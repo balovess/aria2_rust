@@ -270,10 +270,10 @@ pub async fn execute(
                 if let Some(ref lim) = limiter {
                     lim.acquire_download(data.len() as u64).await;
                 }
-                if let Some(ref gl) = dl.global_limiter {
-                    if gl.is_download_limited() {
-                        gl.acquire_download(data.len() as u64).await;
-                    }
+                if let Some(ref gl) = dl.global_limiter
+                    && gl.is_download_limited()
+                {
+                    gl.acquire_download(data.len() as u64).await;
                 }
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -304,10 +304,10 @@ pub async fn execute(
             if let Some(ref lim) = limiter {
                 lim.acquire_download(data.len() as u64).await;
             }
-            if let Some(ref gl) = dl.global_limiter {
-                if gl.is_download_limited() {
-                    gl.acquire_download(data.len() as u64).await;
-                }
+            if let Some(ref gl) = dl.global_limiter
+                && gl.is_download_limited()
+            {
+                gl.acquire_download(data.len() as u64).await;
             }
             writer.write_bytes_at(offset, data).await.map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -323,8 +323,8 @@ pub async fn execute(
         tokio::select! {
             // A segment completed
             Some((seg_idx, result, peer_addr)) = active.next() => {
-                if let Some(peer_addr) = peer_addr {
-                    if let Ok(url) = reqwest::Url::parse(uri)
+                if let Some(peer_addr) = peer_addr
+                    && let Ok(url) = reqwest::Url::parse(uri)
                         && let Some(host) = url.host_str()
                     {
                         dl.group.recover().set_connection_context(
@@ -335,17 +335,15 @@ pub async fn execute(
                             ),
                         );
                     }
-                }
                 // Drain writes again after a segment completes
                 while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
                     if let Some(ref lim) = limiter {
                         lim.acquire_download(data.len() as u64).await;
                     }
-                    if let Some(ref gl) = dl.global_limiter {
-                        if gl.is_download_limited() {
+                    if let Some(ref gl) = dl.global_limiter
+                        && gl.is_download_limited() {
                             gl.acquire_download(data.len() as u64).await;
                         }
-                    }
                     writer.write_bytes_at(offset, data).await.map_err(|e| {
                         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                             "Write failed: {}",
@@ -453,11 +451,10 @@ pub async fn execute(
                 if let Some(ref lim) = limiter {
                     lim.acquire_download(data.len() as u64).await;
                 }
-                if let Some(ref gl) = dl.global_limiter {
-                    if gl.is_download_limited() {
+                if let Some(ref gl) = dl.global_limiter
+                    && gl.is_download_limited() {
                         gl.acquire_download(data.len() as u64).await;
                     }
-                }
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "Write failed: {}",
@@ -503,10 +500,10 @@ pub async fn execute(
         if let Some(ref lim) = limiter {
             lim.acquire_download(data.len() as u64).await;
         }
-        if let Some(ref gl) = dl.global_limiter {
-            if gl.is_download_limited() {
-                gl.acquire_download(data.len() as u64).await;
-            }
+        if let Some(ref gl) = dl.global_limiter
+            && gl.is_download_limited()
+        {
+            gl.acquire_download(data.len() as u64).await;
         }
         writer.write_bytes_at(offset, data).await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(

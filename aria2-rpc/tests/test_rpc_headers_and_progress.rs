@@ -250,13 +250,13 @@ async fn test_tell_active_lists_active_downloads() {
         rg1.start().unwrap();
     }
 
-    // tellActive should include both (is_active() returns true for Active AND Waiting)
+    // tellActive follows aria2 semantics and includes only the active group.
     let req = JsonRpcRequest::new("aria2.tellActive", json!([])).with_id(3);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
     let active = resp.result.unwrap();
     let arr = active.as_array().expect("tellActive should return array");
-    assert_eq!(arr.len(), 2, "both downloads should be active/waiting");
+    assert_eq!(arr.len(), 1, "tellActive should exclude the waiting group");
 
     // Verify GIDs are present
     let gids: Vec<&str> = arr.iter().map(|v| v["gid"].as_str().unwrap()).collect();

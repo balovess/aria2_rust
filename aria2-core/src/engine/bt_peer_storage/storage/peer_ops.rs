@@ -214,6 +214,36 @@ impl DefaultPeerStorage {
         Some(peer)
     }
 
+    /// Update the connection lifecycle flag for a checked-out peer.
+    pub fn set_peer_active(&mut self, ip: &str, port: u16, active: bool) {
+        let key = (ip.to_owned(), port);
+        let Some(peer) = self
+            .used_peers
+            .iter()
+            .find(|peer| (peer.ip.clone(), peer.port) == key)
+            .cloned()
+        else {
+            return;
+        };
+        self.used_peers.remove(&peer);
+        let mut updated = peer;
+        updated.is_active = active;
+        self.used_peers.insert(updated);
+    }
+
+    /// Return the checked-out peer identified by its endpoint.
+    pub fn return_peer_by_endpoint(&mut self, ip: &str, port: u16) {
+        let Some(peer) = self
+            .used_peers
+            .iter()
+            .find(|peer| peer.ip == ip && peer.port == port)
+            .cloned()
+        else {
+            return;
+        };
+        self.return_peer(&peer);
+    }
+
     /// Return a peer from the used set.
     ///
     /// Handles the peer's disconnect lifecycle:
@@ -231,8 +261,10 @@ impl DefaultPeerStorage {
         );
 
         if self.used_peers.remove(peer) {
-            self.on_returning_peer(peer);
-            self.on_erasing_peer(peer);
+            let mut returned_peer = peer.clone();
+            returned_peer.used_by = 0;
+            self.on_returning_peer(&returned_peer);
+            self.on_erasing_peer(&returned_peer);
         } else {
             warn!("Cannot find peer {}:{} in used_peers", peer.ip, peer.port);
         }

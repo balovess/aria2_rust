@@ -22,7 +22,6 @@ mod tests;
 // Re-exports — preserve the original public API surface.
 pub use announce_logic::{
     announce_to_public_tracker, announce_to_public_tracker_with_event, perform_announce_with_event,
-    perform_http_tracker_announce,
 };
 pub(crate) use tracker_url::urlencode_bytes;
 pub use tracker_url::{is_udp_tracker, urlencode_infohash};
@@ -433,6 +432,11 @@ impl BtAnnounce {
         self.tcp_port = port;
     }
 
+    /// Return the TCP port currently included in announce requests.
+    pub fn tcp_port(&self) -> u16 {
+        self.tcp_port
+    }
+
     /// Set whether the download is complete.
     pub fn set_download_complete(&mut self, complete: bool) {
         self.download_complete = complete;
@@ -488,7 +492,7 @@ impl BtAnnounce {
     pub fn is_current_tracker_udp(&self) -> bool {
         self.announce_list
             .get_announce()
-            .map(|url| is_udp_tracker(&url))
+            .map(is_udp_tracker)
             .unwrap_or(false)
     }
 

@@ -540,7 +540,6 @@ pub fn shared() -> SharedCheckIntegrityMan {
         .clone();
     let _ = WORKER.get_or_init(|| {
         tokio::spawn(worker_loop(man.clone()));
-        ()
     });
     man
 }

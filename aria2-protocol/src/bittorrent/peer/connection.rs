@@ -77,6 +77,7 @@ impl PeerAddr {
 
 pub struct PeerConnection {
     stream: TcpStream,
+    remote_addr: Option<std::net::SocketAddr>,
     pub state: PeerState,
     pub remote_peer_id: Option<[u8; 20]>,
     pub remote_bitfield: Vec<u8>,
@@ -111,6 +112,34 @@ impl PeerConnection {
             .await
             .map_err(|e| format!("Failed to send handshake: {}", e))?;
 
+        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash).await?;
+        Self::finish_handshake(stream, remote_hs)
+    }
+
+    /// Complete the server side of a BitTorrent handshake.
+    ///
+    /// Incoming peers send their handshake first.  The listener must validate
+    /// the torrent identity before admitting the endpoint to PeerStorage, then
+    /// reply with our handshake and keep the stream for the upload/download
+    /// session.
+    pub async fn from_incoming_stream(
+        mut stream: tokio::net::TcpStream,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash).await?;
+        let handshake = Handshake::new(info_hash, local_peer_id);
+        stream
+            .write_all(&handshake.to_bytes())
+            .await
+            .map_err(|e| format!("Failed to send handshake response: {}", e))?;
+        Self::finish_handshake(stream, remote_hs)
+    }
+
+    async fn read_remote_handshake(
+        stream: &mut tokio::net::TcpStream,
+        info_hash: &[u8; 20],
+    ) -> Result<Handshake, String> {
         let mut response = [0u8; 68];
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -124,18 +153,24 @@ impl PeerConnection {
         }
 
         let remote_hs = Handshake::parse(&response)?;
-
         if remote_hs.info_hash != *info_hash {
             return Err("info_hash mismatch".to_string());
         }
+        Ok(remote_hs)
+    }
 
+    fn finish_handshake(
+        stream: tokio::net::TcpStream,
+        remote_hs: Handshake,
+    ) -> Result<Self, String> {
         info!(
             "Peer handshake successful: peer_id={}",
             remote_hs.peer_id_str()
         );
-
+        let remote_addr = stream.peer_addr().ok();
         Ok(Self {
             stream,
+            remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(remote_hs.peer_id),
             remote_bitfield: vec![],
@@ -143,8 +178,10 @@ impl PeerConnection {
     }
 
     pub fn from_stream_with_peer(stream: tokio::net::TcpStream, peer_id: [u8; 20]) -> Self {
+        let remote_addr = stream.peer_addr().ok();
         Self {
             stream,
+            remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(peer_id),
             remote_bitfield: vec![],
@@ -242,6 +279,10 @@ impl PeerConnection {
 
     pub fn is_connected(&self) -> bool {
         self.remote_peer_id.is_some()
+    }
+
+    pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
+        self.remote_addr
     }
 
     pub async fn stream_write(&mut self, data: &[u8]) -> Result<(), String> {

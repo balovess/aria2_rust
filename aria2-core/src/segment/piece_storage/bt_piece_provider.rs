@@ -207,12 +207,10 @@ impl DefaultPieceStorage {
         // pieces that are: (1) in peer's allowed-fast set, (2) missing locally,
         // and (3) the peer has. Since mis_bitfield already encodes (2) and (3),
         // we just need to clear any index NOT in the allowed-fast set.
-        if fast_only {
-            if let Some(allowed) = allowed_fast_set {
-                for i in 0..num_pieces {
-                    if !allowed.contains(&(i as u32)) {
-                        super::super::bitfield_util::clear_bit(&mut mis_bitfield, num_pieces, i);
-                    }
+        if fast_only && let Some(allowed) = allowed_fast_set {
+            for i in 0..num_pieces {
+                if !allowed.contains(&(i as u32)) {
+                    super::super::bitfield_util::clear_bit(&mut mis_bitfield, num_pieces, i);
                 }
             }
         }

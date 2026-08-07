@@ -169,10 +169,10 @@ impl SequentialDownloader {
                 if let Some(ref lim) = limiter {
                     lim.acquire_download(data.len() as u64).await;
                 }
-                if let Some(ref gl) = self.global_limiter {
-                    if gl.is_download_limited() {
-                        gl.acquire_download(data.len() as u64).await;
-                    }
+                if let Some(ref gl) = self.global_limiter
+                    && gl.is_download_limited()
+                {
+                    gl.acquire_download(data.len() as u64).await;
                 }
 
                 match writer.write_bytes_at(stream_offset, data.clone()).await {

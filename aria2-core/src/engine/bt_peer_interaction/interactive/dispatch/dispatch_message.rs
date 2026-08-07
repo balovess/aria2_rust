@@ -277,10 +277,10 @@ impl BtPeerInteractive {
                     );
                 }
 
-                if let Some(ref ext_update) = ext_update {
-                    if let Some(handler) = &self.extension_update_handler {
-                        handler(ext_update);
-                    }
+                if let Some(ref ext_update) = ext_update
+                    && let Some(handler) = &self.extension_update_handler
+                {
+                    handler(ext_update);
                 }
                 update.extension_update = ext_update;
             }

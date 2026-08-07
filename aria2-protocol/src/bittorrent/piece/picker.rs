@@ -380,7 +380,7 @@ impl PiecePicker {
                 for i in 0..n {
                     if usable(self, i) {
                         seen += 1;
-                        if self.next_rand() % seen == 0 {
+                        if self.next_rand().is_multiple_of(seen) {
                             chosen = Some(i);
                         }
                     }

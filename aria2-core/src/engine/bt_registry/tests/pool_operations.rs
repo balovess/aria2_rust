@@ -289,11 +289,8 @@ fn test_multiple_gids() {
     let mut registry = BtRegistry::new();
 
     for i in 1..=10 {
-        let obj = make_bt_object_with_ctx(
-            1024 * i as u32,
-            4096 * i as u64,
-            &format!("/tmp/file{}.bin", i),
-        );
+        let obj =
+            make_bt_object_with_ctx(1024 * i as u32, 4096 * i, &format!("/tmp/file{}.bin", i));
         registry.put(i, obj);
     }
 

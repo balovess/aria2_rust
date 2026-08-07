@@ -181,10 +181,10 @@ impl RpcEngine {
         // Supports both array-style ("token:xxx" as first param element)
         // and object-style ({"token": "xxx"}) params for backward compatibility.
         let (token, stripped_params) = split_auth_token(&req.params);
-        if !is_multicall || token.is_some() {
-            if let Err(auth_err) = self.auth_middleware.validate(token.as_deref()) {
-                return auth_err.into_response(req.id.clone());
-            }
+        if (!is_multicall || token.is_some())
+            && let Err(auth_err) = self.auth_middleware.validate(token.as_deref())
+        {
+            return auth_err.into_response(req.id.clone());
         }
 
         // Dispatch against the token-stripped params so method handlers never

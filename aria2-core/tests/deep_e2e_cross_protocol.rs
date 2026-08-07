@@ -15,10 +15,11 @@ use aria2_core::filesystem::disk_writer::{ByteArrayDiskWriter, DefaultDiskWriter
 use aria2_core::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::session::session_entry::SessionEntry;
-use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
+use e2e_helpers::mock_http_server::{MockHttpServer, full_body};
 use fixtures::mock_ftp_server::{MockFtpServer, small_content};
 #[cfg(feature = "metalink")]
 use fixtures::test_metalink_builder::{build_metalink_v3, compute_sha256};
+use http::{Response, StatusCode};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -26,6 +27,7 @@ use std::time::{Duration, Instant};
 // ==================== Helper Functions ====================
 
 /// Start a MockHttpServer instance for HTTP-based tests
+#[allow(dead_code)]
 async fn start_http_server() -> MockHttpServer {
     MockHttpServer::start()
         .await

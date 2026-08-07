@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -17,6 +17,58 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
+    fn return_checked_out_peers(
+        &self,
+        checked_out: &[(
+            aria2_protocol::bittorrent::peer::connection::PeerAddr,
+            crate::engine::bt_peer_storage::PeerEntry,
+        )],
+    ) {
+        let mut storage = self
+            .peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, peer) in checked_out {
+            storage.return_peer(peer);
+        }
+    }
+
+    fn reconcile_checked_out_peers(
+        &self,
+        checked_out: &[(
+            aria2_protocol::bittorrent::peer::connection::PeerAddr,
+            crate::engine::bt_peer_storage::PeerEntry,
+        )],
+        active_connections: &[BtPeerConn],
+    ) {
+        let active: HashSet<_> = active_connections
+            .iter()
+            .map(|peer| (peer.ip_addr.clone(), peer.port))
+            .collect();
+        let mut storage = self
+            .peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (address, peer) in checked_out {
+            if active.contains(&(address.ip.clone(), address.port)) {
+                storage.set_peer_active(&peer.ip, peer.port, true);
+            } else {
+                storage.return_peer(peer);
+            }
+        }
+    }
+
+    pub(super) fn return_all_checked_out_peers(&self) {
+        let mut storage = self
+            .peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let peers: Vec<_> = storage.used_peers().iter().cloned().collect();
+        for peer in peers {
+            storage.return_peer(&peer);
+        }
+    }
+
     /// Discover peers via tracker announce (HTTP/UDP), DHT, public trackers, and LPD.
     ///
     /// Uses the `TrackerAnnouncer` state machine for proper HTTP/UDP dispatch,
@@ -57,6 +109,10 @@ impl BtDownloadCommand {
             announcer.set_udp_client(shared);
         }
 
+        // The listener is created before discovery, matching BtSetup's order in
+        // the original engine. Advertise its actual port in every announce.
+        announcer.set_tcp_port(self.listen_port);
+
         let mut peer_addrs: Vec<(String, u16)> = Vec::new();
 
         // Try tracker announces through the state machine (handles both HTTP and UDP)
@@ -85,29 +141,6 @@ impl BtDownloadCommand {
                 }
             }
             announce_attempts += 1;
-        }
-
-        // Fall back to simple HTTP announce if the state machine didn't produce peers
-        if peer_addrs.is_empty() {
-            debug!("[BT] State-machine announce produced no peers, trying simple HTTP announce");
-            match crate::engine::bt_tracker_comm::perform_http_tracker_announce(
-                &meta.announce,
-                info_hash_raw,
-                &my_peer_id,
-                total_size,
-            )
-            .await
-            {
-                Ok(peers) => {
-                    // perform_http_tracker_announce returns Vec<PeerAddr>
-                    for p in peers {
-                        peer_addrs.push((p.ip.clone(), p.port));
-                    }
-                }
-                Err(e) => {
-                    debug!("[BT] Simple HTTP announce also failed: {}", e);
-                }
-            }
         }
 
         // Store the announcer for periodic re-announce during download
@@ -357,23 +390,57 @@ impl BtDownloadCommand {
         let local_peer_id = self.local_peer_id;
 
         let max_peers = self.group.recover().options().bt_max_peers;
+        self.peer_coordinator.set_max_peers(max_peers);
+        self.bt_runtime.set_max_peers(max_peers);
+        self.bt_runtime.set_connections(0);
+        let remaining_slots = if self.bt_runtime.less_than_max_peers() {
+            max_peers.saturating_sub(self.bt_runtime.connections())
+        } else {
+            0
+        };
         let peer_limit = if max_peers == 0 {
             peer_addrs.len()
         } else {
-            max_peers
+            remaining_slots.min(peer_addrs.len())
         };
-        let mut eligible_peers = Vec::with_capacity(peer_addrs.len().min(peer_limit));
+        let mut eligible_peers = Vec::with_capacity(peer_limit);
         for peer in peer_addrs.iter().take(peer_limit) {
-            if let Ok(ip) = peer.ip.parse::<std::net::IpAddr>() {
-                if self.is_peer_temporarily_rejected(&ip.to_string()) {
-                    tracing::debug!(peer = %ip, port = peer.port, "Skipping temporarily rejected peer");
-                    continue;
-                }
+            if let Ok(ip) = peer.ip.parse::<std::net::IpAddr>()
+                && self.is_peer_temporarily_rejected(&ip.to_string())
+            {
+                tracing::debug!(peer = %ip, port = peer.port, "Skipping temporarily rejected peer");
+                continue;
             }
             eligible_peers.push(peer.clone());
         }
 
-        let conn_result = BtPeerInteraction::connect_to_peers(
+        let mut seen = HashSet::with_capacity(eligible_peers.len());
+        eligible_peers.retain(|peer| seen.insert((peer.ip.clone(), peer.port)));
+        let caretaker_id = self.group.recover().gid().value();
+        let mut checked_out = Vec::with_capacity(eligible_peers.len());
+        {
+            let mut storage = self
+                .peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for peer in eligible_peers {
+                let entry =
+                    crate::engine::bt_peer_storage::PeerEntry::new(peer.ip.clone(), peer.port);
+                if let Some(checked_peer) = storage.add_and_checkout_peer(entry, caretaker_id) {
+                    checked_out.push((peer, checked_peer));
+                }
+            }
+        }
+        let eligible_peers: Vec<_> = checked_out.iter().map(|(peer, _)| peer.clone()).collect();
+        if eligible_peers.is_empty() {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "No available peers after PeerStorage checkout".into(),
+                },
+            ));
+        }
+
+        let conn_result = match BtPeerInteraction::connect_to_peers(
             &eligible_peers,
             info_hash_raw,
             num_pieces,
@@ -382,7 +449,14 @@ impl BtDownloadCommand {
             require_crypto,
             force_encrypt,
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.return_checked_out_peers(&checked_out);
+                return Err(error);
+            }
+        };
 
         let mut active_connections = conn_result.connections;
 
@@ -398,6 +472,8 @@ impl BtDownloadCommand {
                 active_connections.len()
             );
         }
+        self.reconcile_checked_out_peers(&checked_out, &active_connections);
+        self.bt_runtime.set_connections(active_connections.len());
 
         if active_connections.is_empty() {
             return Err(Aria2Error::Recoverable(
@@ -505,11 +581,7 @@ impl BtDownloadCommand {
     }
 
     pub(super) fn should_discover_more_peers(&self, active_connections: usize) -> bool {
-        if self.bt_runtime.max_peers() == 0 {
-            active_connections < 5
-        } else {
-            self.bt_runtime.less_than_min_peers()
-        }
+        self.peer_coordinator.should_replenish(active_connections)
     }
 
     /// Periodic tracker re-announce for peer discovery during download.

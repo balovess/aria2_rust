@@ -400,7 +400,7 @@ mod tests {
     /// Builds `open`-repeated ... `e`-repeated, e.g. depth 3 with `l` => "llleee".
     fn nested(open: u8, depth: usize) -> Vec<u8> {
         let mut v = vec![open; depth];
-        v.extend(std::iter::repeat(b'e').take(depth));
+        v.extend(std::iter::repeat_n(b'e', depth));
         v
     }
 
@@ -429,7 +429,7 @@ mod tests {
             input.extend_from_slice(b"d1:a");
         }
         input.extend_from_slice(b"i0e");
-        input.extend(std::iter::repeat(b'e').take(depth));
+        input.extend(std::iter::repeat_n(b'e', depth));
         let err = BencodeValue::decode(&input).unwrap_err();
         assert!(err.contains("too deep"), "unexpected error: {err}");
     }

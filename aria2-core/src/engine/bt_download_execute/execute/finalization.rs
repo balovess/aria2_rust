@@ -14,6 +14,7 @@ impl BtDownloadCommand {
         start_time: Instant,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
     ) -> Result<()> {
+        self.return_all_checked_out_peers();
         let final_speed = elapsed_speed(self.completed_bytes, start_time);
         self.progress.set_completed_length(self.completed_bytes);
         self.progress.set_download_speed(final_speed);
@@ -47,10 +48,10 @@ impl BtDownloadCommand {
             }
         }
 
-        if let Some(ref manager) = self.progress_manager {
-            if let Err(error) = manager.remove_progress(&meta.info_hash.bytes) {
-                warn!(%error, "Failed to remove progress file after completion");
-            }
+        if let Some(ref manager) = self.progress_manager
+            && let Err(error) = manager.remove_progress(&meta.info_hash.bytes)
+        {
+            warn!(%error, "Failed to remove progress file after completion");
         }
 
         if let Some(ref hooks) = self.hook_manager {

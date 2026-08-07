@@ -22,8 +22,51 @@ use crate::filesystem::control_file::ControlFile;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
+impl BtDownloadCommand {
+    fn drain_incoming_peers(
+        &mut self,
+        active_connections: &mut Vec<crate::engine::bt_peer_connection::BtPeerConn>,
+        piece_length: u32,
+        total_size: u64,
+    ) {
+        let Some(receiver) = self.incoming_peers.as_mut() else {
+            return;
+        };
+        while let Ok(incoming) = receiver.try_recv() {
+            let endpoint = incoming.endpoint;
+            let mut conn = crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
+                incoming.connection,
+                endpoint,
+            );
+            let remote_peer_id = conn.remote_peer_id();
+            if remote_peer_id == Some(self.local_peer_id)
+                || remote_peer_id.is_some_and(|peer_id| {
+                    active_connections
+                        .iter()
+                        .any(|active| active.peer_id == Some(peer_id))
+                })
+            {
+                self.peer_storage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
+                info!(%endpoint, "Rejected incoming self or duplicate BitTorrent peer");
+                continue;
+            }
+            conn.allocate_session_resource(piece_length, total_size);
+            active_connections.push(conn);
+            self.bt_runtime.set_connections(active_connections.len());
+            info!("[BT] Admitted incoming peer {}", endpoint);
+        }
+    }
+}
+
 #[async_trait]
 impl Command for BtDownloadCommand {
+    async fn shutdown(&mut self) {
+        BtDownloadCommand::shutdown(self).await;
+    }
+
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
             self.group.recover_mut().start()?;
@@ -69,11 +112,11 @@ impl Command for BtDownloadCommand {
                 &announce_url,
             ));
             let bt_object = crate::engine::bt_registry::BtObject::builder()
+                .bt_announce(bt_announce)
                 .download_context(download_context.unwrap_or_else(|| {
                     Arc::new(crate::download::DownloadContext::new(0, 0, String::new()))
                 }))
                 .peer_rejection(self.peer_rejection.clone())
-                .bt_announce(bt_announce)
                 .build();
             if let Ok(mut reg) = registry.write() {
                 reg.put(gid, bt_object);
@@ -231,27 +274,90 @@ impl Command for BtDownloadCommand {
             }
         }
 
+        // BtSetup/PeerListenCommand counterpart: create the session-scoped
+        // listener before discovery so a torrent with no initial peers can
+        // still accept an incoming connection.
+        if self.incoming_peers.is_none() {
+            let (listen_ports, max_peers, caretaker_id, disable_ipv6) = {
+                let group = self.group.recover();
+                let ports = group
+                    .options()
+                    .listen_port
+                    .as_deref()
+                    .map(parse_listen_ports)
+                    .transpose()
+                    .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?
+                    .unwrap_or(0..=0);
+                (
+                    ports,
+                    group.options().bt_max_peers,
+                    group.gid().value(),
+                    group.options().disable_ipv6,
+                )
+            };
+            let bind_listener = |bind_ip: std::net::IpAddr| {
+                crate::engine::bt_peer_listener::BtPeerListener::bind_ports(
+                    bind_ip,
+                    listen_ports.clone(),
+                    meta.info_hash.bytes,
+                    self.local_peer_id,
+                    caretaker_id,
+                    max_peers,
+                    std::sync::Arc::clone(&self.peer_storage),
+                )
+            };
+            let listener = if disable_ipv6 {
+                bind_listener(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+            } else {
+                match bind_listener(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).await {
+                    Ok(listener) => Ok(listener),
+                    Err(ipv6_error) => {
+                        warn!(
+                            error = %ipv6_error,
+                            "IPv6 BitTorrent listener unavailable; falling back to IPv4"
+                        );
+                        bind_listener(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+                    }
+                }
+            }
+            .map_err(|error| {
+                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
+                    message: format!("failed to bind BitTorrent peer listener: {error}"),
+                })
+            })?;
+            let actual_addr = listener.local_addr().map_err(|error| {
+                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
+                    message: format!("failed to query BitTorrent listener address: {error}"),
+                })
+            })?;
+            self.listen_port = actual_addr.port();
+            if let Some(registry) = &self.bt_registry
+                && let Ok(mut registry) = registry.write()
+            {
+                registry.set_tcp_port(self.listen_port);
+            }
+            let (incoming_peers, listener_task) = listener.spawn(max_peers.max(1));
+            self.incoming_peers = Some(incoming_peers);
+            self.incoming_peer_listener_task = Some(listener_task);
+            info!("[BT] Incoming peer listener bound at {}", actual_addr);
+        }
+
         let peer_addrs = self
             .discover_peers(&meta, total_size, &meta.info_hash.bytes)
             .await?;
 
-        if peer_addrs.is_empty() {
-            return Err(Aria2Error::Recoverable(
-                crate::error::RecoverableError::TemporaryNetworkFailure {
-                    message: "No peers from tracker or DHT".into(),
-                },
-            ));
-        }
-
-        let mut active_connections = self
-            .connect_to_peers(
+        let mut active_connections = if peer_addrs.is_empty() {
+            Vec::new()
+        } else {
+            self.connect_to_peers(
                 &peer_addrs,
                 &meta.info_hash.bytes,
                 num_pieces,
                 piece_length,
                 total_size,
             )
-            .await?;
+            .await?
+        };
 
         // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
         // BEP 0027 (Private Torrent): PEX must be disabled for private torrents
@@ -343,6 +449,11 @@ impl Command for BtDownloadCommand {
             }
         }
 
+        // Admit handshaken incoming peers before the first piece cycle. Later
+        // cycles drain the receiver below, preserving PeerListenCommand's
+        // long-lived listener semantics.
+        self.drain_incoming_peers(&mut active_connections, piece_length, total_size);
+
         // Download pieces from the connected peers, using web seeds and PEX as configured.
         let piece_result = self
             .download_pieces_loop(
@@ -359,7 +470,20 @@ impl Command for BtDownloadCommand {
             )
             .await;
         self.group.recover().clear_bt_peer_snapshots();
-        piece_result?;
+        if let Err(error) = piece_result {
+            if let Some(ref mut announcer) = self.tracker_announcer {
+                announcer
+                    .announce_stopped(
+                        &meta.info_hash.bytes,
+                        &self.local_peer_id,
+                        self.completed_bytes,
+                        total_size.saturating_sub(self.completed_bytes),
+                        self.total_uploaded,
+                    )
+                    .await;
+            }
+            return Err(error);
+        }
 
         if let Some(ref mut announcer) = self.tracker_announcer {
             announcer
@@ -425,9 +549,30 @@ impl Command for BtDownloadCommand {
     }
 }
 
+fn parse_listen_ports(value: &str) -> std::result::Result<std::ops::RangeInclusive<u16>, String> {
+    let value = value.trim();
+    let mut parts = value.split('-');
+    let start = parts
+        .next()
+        .filter(|port| !port.is_empty())
+        .ok_or_else(|| "listen-port must not be empty".to_owned())?
+        .parse::<u16>()
+        .map_err(|error| format!("invalid listen-port start: {error}"))?;
+    let end = match parts.next() {
+        Some(value) if !value.is_empty() => value
+            .parse::<u16>()
+            .map_err(|error| format!("invalid listen-port end: {error}"))?,
+        Some(_) => return Err(format!("invalid listen-port range: {value}")),
+        None => start,
+    };
+    if parts.next().is_some() || start > end {
+        return Err(format!("invalid listen-port range: {value}"));
+    }
+    Ok(start..=end)
+}
+
 impl BtDownloadCommand {
-    /// Prepare the download environment: create output directories, parse torrent
-    /// metadata, and set total length on the request group.
+    /// Prepare the download environment: create output directories, parse torrent metadata, and set total length on the request group.
     async fn prepare_environment(
         &mut self,
     ) -> Result<(

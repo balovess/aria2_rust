@@ -21,7 +21,7 @@ pub const DH_G: u64 = 2;
 pub const PRIME_BITS: usize = 768;
 
 /// Key length in bytes = (768 + 7) / 8 = 96, matching C++ `KEY_LENGTH`.
-pub const KEY_LENGTH: usize = (PRIME_BITS + 7) / 8; // 96
+pub const KEY_LENGTH: usize = PRIME_BITS.div_ceil(8); // 96
 
 /// Private key length in bits, matching C++ `init(PRIME, PRIME_BITS, GENERATOR, 160)`.
 pub const PRIVATE_KEY_BITS: usize = 160;
@@ -123,7 +123,7 @@ impl DhKeyPair {
         //   size_t pbytes = (privateKeyBits + 7) / 8;  // = 20
         //   util::generateRandomData(buf, pbytes);
         //   privateKey_ = n(buf, pbytes);
-        let private_bytes = (PRIVATE_KEY_BITS + 7) / 8; // 20 bytes
+        let private_bytes = PRIVATE_KEY_BITS.div_ceil(8); // 20 bytes
         let private_big = {
             use rand::RngCore;
             let mut buf = vec![0u8; private_bytes];
@@ -298,7 +298,7 @@ mod tests {
         // Verify the prime matches the C++ constant exactly
         let p = DhKeyPair::get_prime();
         let hex = format!("{:X}", p);
-        assert_eq!(hex, DH_P_768_HEX.replace('\\', "").replace('\n', ""));
+        assert_eq!(hex, DH_P_768_HEX.replace(['\\', '\n'], ""));
     }
 
     #[test]

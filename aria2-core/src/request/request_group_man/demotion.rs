@@ -186,7 +186,7 @@ impl super::RequestGroupMan {
                 was_restart_requested,
                 was_halt_requested,
             ) {
-                hooks.fire_event(DownloadEvent::Pause, &*group.recover());
+                hooks.fire_event(DownloadEvent::Pause, &group.recover());
             }
 
             self.reserved.push_front(group);
@@ -239,7 +239,7 @@ impl super::RequestGroupMan {
             // Must extract while download context is still available.
             // C++ fires hooks while the group is still alive.
             let event_ctx =
-                event_hooks.map(|_| DownloadEventContext::from_group(&*dg.group.recover()));
+                event_hooks.map(|_| DownloadEventContext::from_group(&dg.group.recover()));
 
             // ── Post-download processing (BEFORE demoting) ──────────────
             // C++: `group->postDownloadProcessing(nextGroups)` is called
@@ -312,7 +312,7 @@ impl super::RequestGroupMan {
                         }
                         // No per-group command: fall back to global hooks
                         // (and still notify observers unconditionally).
-                        _ => hooks.fire_event(event, &*dg.group.recover()),
+                        _ => hooks.fire_event(event, &dg.group.recover()),
                     }
                 }
             }
@@ -336,7 +336,7 @@ impl super::RequestGroupMan {
         let g = group.recover();
 
         // Extract download info while context is still available.
-        let info = extract_download_info(&*g);
+        let info = extract_download_info(&g);
 
         // Build handler chain based on download options.
         let handlers = build_handler_chain(&info.options);

@@ -203,6 +203,17 @@ impl Command for SftpDownloadCommand {
         info!("[SFTP-CMD] Starting transfer loop: {} bytes", total_length);
 
         loop {
+            let halted = {
+                let group = self.group.recover();
+                group.is_force_halt_requested() || group.is_halt_requested()
+            };
+            if halted {
+                let _ = remote_file.close().await;
+                let _ = writer.finalize().await;
+                let _ = conn.disconnect().await;
+                return Err(Aria2Error::DownloadFailed("SFTP download halted".into()));
+            }
+
             let remaining = total_length.saturating_sub(self.completed_bytes);
             if remaining == 0 {
                 break; // Download complete

@@ -49,9 +49,12 @@ impl BtDownloadCommand {
         let plain_connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> =
             connections
                 .into_iter()
-                .filter_map(|c| match c.inner {
-                    crate::engine::bt_peer_connection::InnerConnection::Plain(p) => Some(p),
-                    _ => None,
+                .filter_map(|c| {
+                    if let crate::engine::bt_peer_connection::InnerConnection::Plain(p) = c.inner {
+                        Some(p)
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 

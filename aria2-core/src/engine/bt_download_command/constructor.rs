@@ -235,7 +235,12 @@ impl BtDownloadCommand {
             total_uploaded: 0,
             udp_client: None,
             tracker_announcer: None,
+            listen_port: 0,
             bt_runtime: std::sync::Arc::new(super::BtRuntimeState::new(options.bt_max_peers)),
+            peer_coordinator: crate::engine::bt_peer_coordinator::BtPeerCoordinator::new(
+                options.bt_max_peers,
+                10,
+            ),
             dht_engine: None,
             public_trackers: None,
             choking_algo,
@@ -294,6 +299,11 @@ impl BtDownloadCommand {
             global_limiter: None,
 
             peer_rejection: crate::engine::bt_peer_storage::PeerRejectionState::shared(),
+            peer_storage: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
+            )),
+            incoming_peers: None,
+            incoming_peer_listener_task: None,
         })
     }
 }

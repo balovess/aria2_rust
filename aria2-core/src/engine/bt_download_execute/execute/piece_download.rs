@@ -75,6 +75,9 @@ impl BtDownloadCommand {
         suggest_sent_counts: &mut HashMap<PeerKey, usize>,
         endgame_state: &mut EndgameState,
         peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        peer_storage: &std::sync::Arc<
+            std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
+        >,
     ) {
         if failed_peers.is_empty() {
             return;
@@ -105,12 +108,7 @@ impl BtDownloadCommand {
         let removed_keys: Vec<_> = removed_indices
             .iter()
             .filter_map(|&index| active_connections.get(index))
-            .filter_map(|conn| {
-                format!("{}:{}", conn.ip_addr, conn.port)
-                    .parse()
-                    .ok()
-                    .map(crate::engine::bt_download_execute::types::PeerKey::new)
-            })
+            .filter_map(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port))
             .collect();
         endgame_state.remove_peers(&removed_keys);
         let mut removed = Vec::new();
@@ -130,30 +128,19 @@ impl BtDownloadCommand {
         if removed.is_empty() {
             return;
         }
-        pex_enabled_peers.clear();
-        peer_last_data_time.clear();
-        allowed_fast_sent_peers.clear();
-        suggest_sent_counts.clear();
-        for index in 0..active_connections.len() {
-            if let Some(peer_key) = active_connections
-                .get(index)
-                .and_then(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port))
-            {
-                suggest_sent_counts.insert(peer_key, 0);
-                pex_enabled_peers.insert(peer_key);
+        {
+            let mut storage = peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for address in &removed {
+                storage.return_peer_by_endpoint(&address.ip().to_string(), address.port());
             }
-            if let Some(peer_key) = active_connections
-                .get(index)
-                .and_then(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port))
-            {
-                peer_last_data_time.insert(peer_key, Instant::now());
-            }
-            if let Some(peer_key) = active_connections
-                .get(index)
-                .and_then(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port))
-            {
-                allowed_fast_sent_peers.insert(peer_key, HashSet::new());
-            }
+        }
+        for peer_key in &removed_keys {
+            pex_enabled_peers.remove(peer_key);
+            peer_last_data_time.remove(peer_key);
+            allowed_fast_sent_peers.remove(peer_key);
+            suggest_sent_counts.remove(peer_key);
         }
     }
 
@@ -163,10 +150,11 @@ impl BtDownloadCommand {
         max_peers: usize,
         is_private: bool,
         context: &mut NewPeerConnectionsContext<'_>,
+        peer_storage: &std::sync::Arc<
+            std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
+        >,
+        caretaker_id: u64,
     ) -> usize {
-        if max_peers != 0 {
-            new_connections.truncate(max_peers.saturating_sub(active_connections.len()));
-        }
         new_connections.retain(|conn| {
             let Some(endpoint) = conn.remote_endpoint() else {
                 tracing::debug!("[BT] Dropping new peer without a remote endpoint");
@@ -178,13 +166,58 @@ impl BtDownloadCommand {
             }
             true
         });
+        let checkout_limit = if max_peers == 0 {
+            usize::MAX
+        } else {
+            max_peers.saturating_sub(active_connections.len())
+        };
+        let mut seen_endpoints = HashSet::with_capacity(new_connections.len());
+        new_connections.retain(|conn| {
+            let Some(endpoint) = conn.remote_endpoint() else {
+                return false;
+            };
+            seen_endpoints.insert((endpoint.ip(), endpoint.port()))
+        });
+
+        let mut checked_out_endpoints = Vec::with_capacity(new_connections.len());
+        {
+            let mut storage = peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            new_connections.retain(|conn| {
+                let Some(endpoint) = conn.remote_endpoint() else {
+                    return false;
+                };
+                let entry = crate::engine::bt_peer_storage::PeerEntry::new(
+                    endpoint.ip().to_string(),
+                    endpoint.port(),
+                );
+                if checked_out_endpoints.len() >= checkout_limit
+                    || storage.add_and_checkout_peer(entry, caretaker_id).is_none()
+                {
+                    return false;
+                }
+                checked_out_endpoints.push((endpoint.ip().to_string(), endpoint.port()));
+                true
+            });
+        }
 
         let previous_len = active_connections.len();
         active_connections.extend(new_connections);
         let connected = active_connections.len() - previous_len;
+        {
+            let mut storage = peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (ip, port) in &checked_out_endpoints {
+                storage.set_peer_active(ip, *port, true);
+            }
+        }
         if connected == 0 {
             return 0;
         }
+
+        tracing::debug!(connected, "[BT] Added new peer connections");
 
         for conn in &active_connections[previous_len..] {
             let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) else {
@@ -213,6 +246,7 @@ impl BtDownloadCommand {
         connected
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn download_pieces_loop(
         &mut self,
         active_connections: &mut Vec<BtPeerConn>,
@@ -358,6 +392,9 @@ impl BtDownloadCommand {
         }
 
         loop {
+            self.drain_incoming_peers(active_connections, piece_length, total_size);
+            self.bt_runtime.set_connections(active_connections.len());
+
             let halt_requested = {
                 let group = self.group.recover();
                 group.is_force_halt_requested() || group.is_halt_requested()
@@ -437,7 +474,7 @@ impl BtDownloadCommand {
                 );
                 // Attempt to connect to PEX-discovered peers
                 let new_connections = self
-                    .connect_to_pex_discovered_peers(
+                    .connect_to_discovered_peers(
                         &all_new_pex_peers,
                         &meta.info_hash.bytes,
                         num_pieces,
@@ -460,6 +497,8 @@ impl BtDownloadCommand {
                     self.group.recover().options().bt_max_peers,
                     self.is_private,
                     &mut context,
+                    &self.peer_storage,
+                    self.group.recover().gid().value(),
                 );
                 if connected > 0 {
                     info!("[PEX] Successfully connected to {} new peers", connected);
@@ -487,7 +526,7 @@ impl BtDownloadCommand {
                     );
                     // Connect to newly discovered peers
                     let new_connections = self
-                        .connect_to_pex_discovered_peers(
+                        .connect_to_discovered_peers(
                             &new_peers,
                             &meta.info_hash.bytes,
                             num_pieces,
@@ -510,6 +549,8 @@ impl BtDownloadCommand {
                         self.group.recover().options().bt_max_peers,
                         self.is_private,
                         &mut context,
+                        &self.peer_storage,
+                        self.group.recover().gid().value(),
                     );
                     if connected > 0 {
                         info!("[BT] Connected to {} new peers", connected);
@@ -625,7 +666,9 @@ impl BtDownloadCommand {
                         &mut self.suggest_sent_counts,
                         &mut endgame_state,
                         &mut peer_tracker,
+                        &self.peer_storage,
                     );
+                    self.update_tracker_peer_state(active_connections.len());
                     {
                         let group = self.group.recover();
                         sync_peer_snapshots(&group, active_connections);

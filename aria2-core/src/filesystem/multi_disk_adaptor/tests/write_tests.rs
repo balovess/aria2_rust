@@ -52,7 +52,7 @@ async fn test_cross_file_write_spanning_two_files() {
 
     // file2.txt first byte should be 'F'
     let content2 = tokio::fs::read(dir.path().join("file2.txt")).await.unwrap();
-    assert!(content2.len() >= 1);
+    assert!(!content2.is_empty());
     assert_eq!(content2[0], b'F');
 }
 
@@ -84,7 +84,7 @@ async fn test_cross_file_write_full_cplusplus_test() {
     assert_eq!(&content1[..15], b"1234567890ABCDE");
 
     let content2 = tokio::fs::read(dir.path().join("file2.txt")).await.unwrap();
-    assert!(content2.len() >= 1);
+    assert!(!content2.is_empty());
     assert_eq!(content2[0], b'F');
 
     // Re-open and write "12345123456712" at offset 10

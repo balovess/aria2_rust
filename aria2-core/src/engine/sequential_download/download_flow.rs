@@ -98,31 +98,36 @@ impl SequentialDownloader {
                     && (current_uri.starts_with("http://") || current_uri.starts_with("https://"))
                 {
                     let ctrl_path = ControlFile::control_path_for(&self.output_path);
-                    if !ctrl_path.exists() && self.output_path.exists() {
-                        if let Ok(metadata) = std::fs::metadata(&self.output_path) {
-                            if let Ok(modified) = metadata.modified() {
-                                let mtime = modified
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
-                                let dt = SimpleDateTime::from_timestamp(mtime);
-                                let http_date = dt.format_imf_fixdate();
-                                tracing::debug!(
-                                    "Conditional GET: sending If-Modified-Since: {}",
-                                    http_date
-                                );
-                                request = request.header("If-Modified-Since", &http_date);
-                            }
-                        }
+                    if !ctrl_path.exists()
+                        && self.output_path.exists()
+                        && let Ok(metadata) = std::fs::metadata(&self.output_path)
+                        && let Ok(modified) = metadata.modified()
+                    {
+                        let mtime = modified
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let dt = SimpleDateTime::from_timestamp(mtime);
+                        let http_date = dt.format_imf_fixdate();
+                        tracing::debug!(
+                            "Conditional GET: sending If-Modified-Since: {}",
+                            http_date
+                        );
+                        request = request.header("If-Modified-Since", &http_date);
                     }
                 }
             }
 
-            let response = request.send().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("HTTP request failed: {}", e),
-                })
-            })?;
+            let response = tokio::select! {
+                result = request.send() => result.map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("HTTP request failed: {}", e),
+                    })
+                })?,
+                cancellation = self.wait_for_cancellation() => {
+                    return Err(cancellation.expect_err("cancellation watcher must not complete successfully"));
+                }
+            };
             self.publish_connection_context(&current_uri, response.remote_addr());
 
             self.cookie_helper
@@ -283,7 +288,7 @@ impl SequentialDownloader {
         _uri: &str,
         resume_state: &ResumeState,
     ) -> Result<()> {
-        let resp_length = response.content_length().unwrap_or(0) as u64;
+        let resp_length = response.content_length().unwrap_or(0);
         let actual_total = if resume_state.should_resume {
             resume_state.start_offset + resp_length
         } else {
@@ -485,9 +490,8 @@ impl SequentialDownloader {
                 // Use the cookie module's RFC 6265 HTTP-date parser which
                 // supports IMF-fixdate, RFC 850, and asctime formats.
                 if let Some(epoch_secs) = crate::http::cookie::parsing::parse_http_date(lm_str) {
-                    let mtime_file = std::time::SystemTime::from(
-                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs as u64),
-                    );
+                    let mtime_file =
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs as u64);
                     // Use std::fs::metadata + set_file_mtime via filetime crate
                     // for cross-platform support. If filetime is not available,
                     // we can use platform-specific calls.

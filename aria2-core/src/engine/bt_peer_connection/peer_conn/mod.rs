@@ -154,9 +154,11 @@ impl BtPeerConn {
     pub fn remote_endpoint(&self) -> Option<std::net::SocketAddr> {
         match &self.inner {
             InnerConnection::Utp(conn) => conn.remote_addr(),
-            InnerConnection::Plain(_) | InnerConnection::Encrypted(_) => {
-                format!("{}:{}", self.ip_addr, self.port).parse().ok()
-            }
+            InnerConnection::Plain(_) | InnerConnection::Encrypted(_) => self
+                .ip_addr
+                .parse::<std::net::IpAddr>()
+                .ok()
+                .map(|ip| std::net::SocketAddr::new(ip, self.port)),
         }
     }
 }

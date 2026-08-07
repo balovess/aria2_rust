@@ -6,6 +6,8 @@
 //! - WebSocket event publishing stability
 //! - No response loss verification
 
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::server::RpcAuthMiddleware;
@@ -407,7 +409,21 @@ async fn test_stress_rpc_auth_concurrent() {
 /// Verifies state transitions work correctly under concurrent load
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_stress_task_lifecycle_operations() {
-    let engine = Arc::new(RpcEngine::new());
+    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let mut download_engine = DownloadEngine::new(1);
+    download_engine.set_request_group_man(Arc::clone(&group_man));
+    download_engine.set_keep_alive(true);
+    let engine_cmd_tx = download_engine.engine_command_sender();
+    let shutdown_tx = download_engine
+        .take_shutdown_sender()
+        .expect("download engine must provide a shutdown sender");
+    let engine_task = tokio::spawn(async move {
+        download_engine
+            .run()
+            .await
+            .expect("download engine should run");
+    });
+    let engine = Arc::new(RpcEngine::wired(Arc::clone(&group_man), engine_cmd_tx));
 
     // Create tasks first
     let mut gids = Vec::new();
@@ -476,9 +492,18 @@ async fn test_stress_task_lifecycle_operations() {
 
     assert_eq!(all_success, 100, "All lifecycle operations should succeed");
 
-    // Verify engine has no active tasks
-    let task_count = engine.task_count().await;
+    // `remove` is asynchronous; wait for the real engine loop to finalize all
+    // completion notifications and demote the groups to stopped results.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut task_count = engine.task_count().await;
+    while task_count != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        task_count = engine.task_count().await;
+    }
     assert_eq!(task_count, 0, "All tasks should be removed");
+
+    let _ = shutdown_tx.send(());
+    engine_task.abort();
 
     println!(
         "Task lifecycle stress test: 100 tasks, 400 operations in {}ms",

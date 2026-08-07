@@ -421,24 +421,23 @@ impl BtMessageHandler {
                     Ok(result) if result.success => {
                         failed_peers.extend(result.failed_peers);
                         if let Some(data) = result.data {
-                            if let Some(peer_index) = result.peer_index {
-                                if let Some(peer) = connections.get(peer_index) {
-                                    if let Ok(ip) = peer.ip_addr.parse() {
-                                        let address = std::net::SocketAddr::new(ip, peer.port);
-                                        let bytes = result.bytes_received;
-                                        if let Some(entry) = peer_bytes
-                                            .iter_mut()
-                                            .find(|item| item.peer_index == peer_index)
-                                        {
-                                            entry.bytes += bytes;
-                                        } else {
-                                            peer_bytes.push(PeerDownloadBytes {
-                                                peer_index,
-                                                peer: address,
-                                                bytes,
-                                            });
-                                        }
-                                    }
+                            if let Some(peer_index) = result.peer_index
+                                && let Some(peer) = connections.get(peer_index)
+                                && let Ok(ip) = peer.ip_addr.parse()
+                            {
+                                let address = std::net::SocketAddr::new(ip, peer.port);
+                                let bytes = result.bytes_received;
+                                if let Some(entry) = peer_bytes
+                                    .iter_mut()
+                                    .find(|item| item.peer_index == peer_index)
+                                {
+                                    entry.bytes += bytes;
+                                } else {
+                                    peer_bytes.push(PeerDownloadBytes {
+                                        peer_index,
+                                        peer: address,
+                                        bytes,
+                                    });
                                 }
                             }
                             piece_data.extend_from_slice(&data);

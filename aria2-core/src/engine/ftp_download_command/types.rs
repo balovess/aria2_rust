@@ -189,14 +189,22 @@ impl FtpDownloadCommand {
             (auth.to_string(), String::new())
         };
 
-        let (host, port) = match host_port.rfind(':') {
-            Some(idx) => (
-                host_port[..idx].to_string(),
-                host_port[idx + 1..]
-                    .parse::<u16>()
-                    .unwrap_or(constants::FTP_DEFAULT_PORT),
-            ),
-            None => (host_port.to_string(), constants::FTP_DEFAULT_PORT),
+        let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+            let (host, suffix) = bracketed
+                .split_once(']')
+                .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("Invalid FTP host".into())))?;
+            let port = suffix
+                .strip_prefix(':')
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(constants::FTP_DEFAULT_PORT);
+            (host.to_string(), port)
+        } else {
+            match host_port.rsplit_once(':') {
+                Some((host, port)) if port.parse::<u16>().is_ok() => {
+                    (host.to_string(), port.parse().unwrap())
+                }
+                _ => (host_port.to_string(), constants::FTP_DEFAULT_PORT),
+            }
         };
 
         Ok((host, port, username, password, urlencoding_decode(path)))

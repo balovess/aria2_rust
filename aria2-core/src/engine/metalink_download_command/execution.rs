@@ -9,6 +9,8 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::GroupId;
+#[cfg(feature = "bittorrent")]
+use crate::request::request_group::MetadataInfo;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::MetalinkDownloadCommand;
@@ -400,6 +402,20 @@ impl MetalinkDownloadCommand {
                 last_speed_update = Instant::now();
                 last_completed = self.completed_bytes;
             }
+        }
+
+        if let Some(expected) = expected_size
+            && data.len() as u64 != expected
+        {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "Metalink size mismatch: expected {} bytes, received {}",
+                        expected,
+                        data.len()
+                    ),
+                },
+            ));
         }
 
         Ok(data)

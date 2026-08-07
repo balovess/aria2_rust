@@ -49,7 +49,7 @@ impl RpcEngine {
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
                 let g = group_lock.recover();
-                if g.status().is_active() {
+                if matches!(g.status(), DownloadStatus::Active) {
                     let gid_hex = gid.to_hex_string();
                     result.push(Self::build_status_from_group(&g, &gid_hex));
                 }

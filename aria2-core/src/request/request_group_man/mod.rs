@@ -280,8 +280,8 @@ impl RequestGroupMan {
     }
 
     pub fn remove_group(&self, gid: GroupId) -> Result<()> {
-        // C++ aria2 keeps an active group in requestGroups_ and only marks it
-        // for halt; RequestGroupMan removes it after its last command exits.
+        // Keep active groups in requestGroups_ and only mark them for halt;
+        // RequestGroupMan removes them after their last command exits.
         if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
             let group = group_lock.recover();
             group.request_halt(HaltReason::UserRequest);
@@ -289,6 +289,13 @@ impl RequestGroupMan {
             let _ = group.process_remove_control_file();
             info!("Requested removal of active download task #{}", gid.value());
             return Ok(());
+        }
+
+        if self.reserved.find_by_gid(gid).is_none() {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID {} not found",
+                gid.value()
+            )));
         }
 
         // A reserved group has no command to drain, so it can be removed now.
@@ -321,6 +328,7 @@ impl RequestGroupMan {
             );
             return Ok(());
         }
+        // Reserved groups have no in-flight task, so remove them synchronously.
         self.remove_group(gid)
     }
 
@@ -367,30 +375,33 @@ impl RequestGroupMan {
     // ── Pause/Unpause ───────────────────────────────────────────────────
 
     pub fn pause_group(&self, gid: GroupId) -> Result<()> {
-        if let Some(group_lock) = self.find_group(gid) {
-            let mut group = group_lock.recover_mut();
-            group.pause()?;
-            info!("Pausing download task #{}", gid.value());
-        }
+        let group_lock = self.find_group(gid).ok_or_else(|| {
+            crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
+        })?;
+        let mut group = group_lock.recover_mut();
+        group.pause()?;
+        info!("Pausing download task #{}", gid.value());
         Ok(())
     }
 
     pub fn unpause_group(&self, gid: GroupId) -> Result<()> {
-        if let Some(group_lock) = self.find_group(gid) {
-            let mut group = group_lock.recover_mut();
-            if group.status().is_paused() {
-                group.resume()?;
-                info!("Resuming download task #{}", gid.value());
-            }
+        let group_lock = self.find_group(gid).ok_or_else(|| {
+            crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
+        })?;
+        let mut group = group_lock.recover_mut();
+        if group.status().is_paused() {
+            group.resume()?;
+            info!("Resuming download task #{}", gid.value());
         }
         Ok(())
     }
 
     pub fn force_pause_group(&self, gid: GroupId) -> Result<()> {
-        if let Some(group_lock) = self.find_group(gid) {
-            let mut group = group_lock.recover_mut();
-            group.force_pause()?;
-        }
+        let group_lock = self.find_group(gid).ok_or_else(|| {
+            crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
+        })?;
+        let mut group = group_lock.recover_mut();
+        group.force_pause()?;
         Ok(())
     }
 

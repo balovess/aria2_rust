@@ -115,8 +115,8 @@ fn test_extension_name_for_id() {
     let hs = ExtensionHandshake::new();
     reg.update_from_peer_handshake(&hs);
 
-    assert_eq!(reg.extension_name_for_id(1), Some(&UT_METADATA_NAME[..]));
-    assert_eq!(reg.extension_name_for_id(2), Some(&UT_PEX_NAME[..]));
+    assert_eq!(reg.extension_name_for_id(1), Some(UT_METADATA_NAME));
+    assert_eq!(reg.extension_name_for_id(2), Some(UT_PEX_NAME));
     assert_eq!(reg.extension_name_for_id(3), None);
 }
 

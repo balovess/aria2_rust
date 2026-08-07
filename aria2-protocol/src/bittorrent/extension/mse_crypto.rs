@@ -31,8 +31,6 @@ impl MseCryptoMethod {
     pub fn from_u32(v: u32) -> Self {
         if v & 0x02 != 0 {
             Self::Rc4
-        } else if v & 0x01 != 0 {
-            Self::Plain
         } else {
             Self::Plain
         }
@@ -185,8 +183,11 @@ impl MseDerivedKeys {
     /// revealing it in plaintext.
     pub fn req2_xor_req3(&self) -> [u8; SHA1_LENGTH] {
         let mut result = [0u8; SHA1_LENGTH];
-        for i in 0..SHA1_LENGTH {
-            result[i] = self.req2[i] ^ self.req3[i];
+        for (result, (&req2, &req3)) in result
+            .iter_mut()
+            .zip(self.req2.iter().zip(self.req3.iter()))
+        {
+            *result = req2 ^ req3;
         }
         result
     }
@@ -474,8 +475,11 @@ mod tests {
         let xor = keys.req2_xor_req3();
 
         let mut expected = [0u8; SHA1_LENGTH];
-        for i in 0..SHA1_LENGTH {
-            expected[i] = keys.req2[i] ^ keys.req3[i];
+        for (expected, (&req2, &req3)) in expected
+            .iter_mut()
+            .zip(keys.req2.iter().zip(keys.req3.iter()))
+        {
+            *expected = req2 ^ req3;
         }
         assert_eq!(xor, expected);
     }

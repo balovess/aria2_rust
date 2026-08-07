@@ -221,10 +221,9 @@ async fn notification_pause_all_fires_pause_for_each_task() {
     for _ in 1..=3 {
         if let Ok(Ok((event_type, _))) =
             tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await
+            && event_type == EventType::DownloadPause
         {
-            if event_type == EventType::DownloadPause {
-                pause_count += 1;
-            }
+            pause_count += 1;
         }
     }
     assert_eq!(pause_count, 3, "Should receive 3 DownloadPause events");

@@ -37,13 +37,8 @@ async fn start_test_server(
     let addr = listener.local_addr().unwrap();
 
     let handle = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    handler(stream);
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            handler(stream);
         }
     });
 
@@ -118,7 +113,7 @@ async fn test_redirect_follow_5_jumps() {
     redirect_chain.insert(current_url.clone());
 
     // Simulate 5 consecutive redirects
-    let urls = vec![
+    let urls = [
         "http://example.com/page1",
         "http://example.com/page2",
         "http://example.com/page3",
@@ -236,6 +231,19 @@ fn test_range_request_build() {
         Some((500, 999, u64::MAX)),
         "Unknown total parsing failed"
     );
+
+    assert_eq!(
+        manager.parse_content_range("100-199/200"),
+        Some((100, 199, 200)),
+        "Servers may omit the bytes unit"
+    );
+    assert_eq!(
+        manager.parse_content_range("bytes=100-199/200"),
+        Some((100, 199, 200)),
+        "Servers may use bytes= syntax"
+    );
+    assert_eq!(manager.parse_content_range("bytes 200-100/300"), None);
+    assert_eq!(manager.parse_content_range("bytes 0-300/300"), None);
     println!("Content-Range parsed (unknown total): {:?}", parsed2);
 
     // Test 6: Invalid format

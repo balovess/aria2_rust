@@ -188,11 +188,10 @@ impl RpcEngine {
         if let Some(max) = new_opts
             .get("max-concurrent-downloads")
             .and_then(|v| v.as_u64())
+            && let Some(tx) = &self.engine_cmd_tx
         {
-            if let Some(tx) = &self.engine_cmd_tx {
-                use aria2_core::engine::engine_command::EngineCommand;
-                let _ = tx.send(EngineCommand::SetMaxConcurrent { max: max as u32 });
-            }
+            use aria2_core::engine::engine_command::EngineCommand;
+            let _ = tx.send(EngineCommand::SetMaxConcurrent { max: max as u32 });
         }
         // TODO(engine): max-overall-download-limit / max-overall-upload-limit
         // need a global RateLimiter in the engine (per-download limits already
@@ -268,16 +267,24 @@ impl RpcEngine {
         let gid: String = req.get_param(0)?;
         let changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
 
-        let group =
-            if let Some(group_man) = self.group_man.as_ref() {
-                Some(
-                    group_man.read().await.group_by_hex(&gid).ok_or_else(|| {
-                        JsonRpcError::RpcExecution(format!("GID {} not found", gid))
-                    })?,
+        let group = if let Some(group_man) = self.group_man.as_ref() {
+            let group_man = group_man.read().await;
+            group_man.group_by_hex(&gid)
+        } else {
+            None
+        };
+        if self.group_man.is_some()
+            && group.is_none()
+            && !self.task_opts.read().await.contains_key(&gid)
+            && changes.keys().any(|key| {
+                matches!(
+                    is_option_changeable(key.as_str(), false),
+                    ChangeableKind::NotChangeable
                 )
-            } else {
-                None
-            };
+            })
+        {
+            return Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid)));
+        }
         let is_active = group
             .as_ref()
             .is_some_and(|group| group.recover().status().is_active());
@@ -306,7 +313,7 @@ impl RpcEngine {
         if !immediate.is_empty()
             && let Some(ref group_man) = self.group_man
         {
-            let gm = group_man.read().await;
+            let gm = group_man.write().await;
             if let Err(e) = gm.update_group_options(&gid, immediate.clone()) {
                 if !e.contains("not found") {
                     return Err(JsonRpcError::InvalidParams(e));
@@ -327,11 +334,15 @@ impl RpcEngine {
                 pending.len(),
                 pending.keys().collect::<Vec<_>>()
             );
-            if let Some(group) = group.as_ref() {
-                group.recover().set_pending_options(pending);
+            if let Some(group) = group.clone() {
+                {
+                    let group_guard = group.recover();
+                    group_guard.set_pending_options(pending);
+                }
                 if is_active {
+                    let group_gid = group.recover().gid();
                     let gm = self.group_man.as_ref().unwrap().read().await;
-                    gm.pause_group(group.recover().gid())
+                    gm.pause_group(group_gid)
                         .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
                     group.recover().request_restart();
                 }

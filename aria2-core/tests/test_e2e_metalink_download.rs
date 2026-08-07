@@ -96,6 +96,31 @@ async fn test_e2e_metalink_medium_file_download() {
 }
 
 #[tokio::test]
+async fn test_e2e_metalink_size_mismatch_is_rejected() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let bad_size_url = format!("{}/files/small.bin", server.base_url());
+    let good_url = format!("{}/files/small.bin", server.base_url());
+    let sha = compute_sha256(SMALL_CONTENT);
+    let metalink_xml = build_metalink_v3(
+        "size_fallback.bin",
+        5,
+        &[(bad_size_url, 1), (good_url, 2)],
+        &sha,
+    );
+    let mut cmd = MetalinkDownloadCommand::new(
+        GroupId::new(30),
+        &metalink_xml,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+    )
+    .unwrap();
+    let result = cmd.execute().await;
+    assert!(result.is_err());
+    assert!(!dir.path().join("size_fallback.bin").exists());
+}
+
+#[tokio::test]
 async fn test_e2e_metalink_mirror_fallback() {
     let server = start_server().await;
     let dir = tmp_dir();

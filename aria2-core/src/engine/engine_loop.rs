@@ -38,6 +38,7 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 /// Maximum number of stopped results to keep before pruning.
 /// Mirrors C++ `MAX_DOWNLOAD_RESULT` (default 1000).
 const MAX_STOPPED_RESULTS: usize = 1000;
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 /// Context passed into the engine loop, holding shared state that the
 /// loop needs to coordinate between EngineCommand processing, promotion,
@@ -85,6 +86,7 @@ type CommandGeneration = u64;
 struct RunningDownload {
     /// JoinHandle for the spawned tokio task.
     _handle: JoinHandle<()>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Stable identity of this command instance, independent of its GID.
     generation: CommandGeneration,
     /// Instant the task was spawned.
@@ -101,10 +103,10 @@ struct RunningDownload {
 /// caller that mutates download state (queue membership, status, options,
 /// progress) must flip this flag or `save_if_dirty()` never writes.
 fn mark_session_dirty(ctx: &EngineLoopContext) {
-    if let Some(ref auto_save) = ctx.auto_save {
-        if let Ok(save) = auto_save.try_lock() {
-            save.mark_dirty();
-        }
+    if let Some(ref auto_save) = ctx.auto_save
+        && let Ok(save) = auto_save.try_lock()
+    {
+        save.mark_dirty();
     }
 }
 
@@ -182,12 +184,13 @@ pub async fn run_engine_loop(
             )
             .await
             {
-                Some(handle) => {
+                Some((handle, shutdown_tx)) => {
                     let timeout = group.recover().timeout();
                     running_downloads.push((
                         gid,
                         RunningDownload {
                             _handle: handle,
+                            shutdown_tx: Some(shutdown_tx),
                             generation,
                             started: Instant::now(),
                             timeout,
@@ -312,7 +315,7 @@ pub async fn run_engine_loop(
 async fn process_engine_commands(
     ctx: &EngineLoopContext,
     cmd_rx: &mut mpsc::UnboundedReceiver<EngineCommand>,
-    running_downloads: &mut Vec<(GroupId, RunningDownload)>,
+    running_downloads: &mut [(GroupId, RunningDownload)],
     halt_requested: &mut bool,
     force_halt_requested: &mut bool,
     completion_tx: &mpsc::UnboundedSender<(GroupId, CommandGeneration, TaskResult)>,
@@ -347,6 +350,17 @@ async fn process_engine_commands(
                 let man = ctx.group_man.read().await;
                 if let Err(e) = man.remove_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to remove download");
+                    continue;
+                }
+                // Graceful removal is observed by the protocol command. If the
+                // transport is waiting for a response, wake it through the
+                // command's shutdown channel so the completion can be recorded
+                // without waiting for a network timeout.
+                for (_, running) in running_downloads.iter_mut().filter(|(id, _)| *id == gid) {
+                    if !request_shutdown_and_wait(running).await {
+                        let _ =
+                            completion_tx.send((gid, running.generation, TaskResult::Cancelled));
+                    }
                 }
             }
 
@@ -356,11 +370,11 @@ async fn process_engine_commands(
                     warn!(gid = gid.value(), error = %e, "Failed to force-remove download");
                     continue;
                 }
-                // Publish the accounting event before aborting. The task may
-                // be cancelled before its own completion send runs.
-                for (_, running) in running_downloads.iter().filter(|(id, _)| *id == gid) {
-                    let _ = completion_tx.send((gid, running.generation, TaskResult::Cancelled));
-                    running._handle.abort();
+                for (_, running) in running_downloads.iter_mut().filter(|(id, _)| *id == gid) {
+                    if !request_shutdown_and_wait(running).await {
+                        let _ =
+                            completion_tx.send((gid, running.generation, TaskResult::Cancelled));
+                    }
                 }
             }
 
@@ -434,13 +448,8 @@ async fn process_engine_commands(
                 man.force_halt_all(reason);
                 *force_halt_requested = true;
 
-                // Abort is not allowed to bypass command accounting. Publish
-                // one synthetic completion for every running command before
-                // aborting its Tokio task; duplicate task-side sends are
-                // ignored by the completion ledger.
-                for (gid, running) in running_downloads.iter() {
-                    let _ = completion_tx.send((*gid, running.generation, TaskResult::Cancelled));
-                    running._handle.abort();
+                for (_, running) in running_downloads.iter_mut() {
+                    let _ = request_shutdown_and_wait(running).await;
                 }
             }
 
@@ -505,7 +514,7 @@ fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
             DownloadResultCode::HttpAuthFailed
         }
         Aria2Error::Recoverable(RecoverableError::ServerError { code })
-            if matches!(*code, 502 | 503 | 504) =>
+            if matches!(*code, 502..=504) =>
         {
             DownloadResultCode::HttpServiceUnavailable
         }
@@ -717,7 +726,7 @@ async fn process_task_completions(
 /// - Prune excess stopped results
 async fn run_housekeeping(
     ctx: &EngineLoopContext,
-    running_downloads: &mut Vec<(GroupId, RunningDownload)>,
+    running_downloads: &mut [(GroupId, RunningDownload)],
 ) {
     // ── Timeout enforcement ──────────────────────────────────────────────
     // Abort tasks whose per-command timeout has elapsed.
@@ -815,6 +824,25 @@ async fn run_housekeeping(
     }
 }
 
+async fn request_shutdown_and_wait(running: &mut RunningDownload) -> bool {
+    let Some(shutdown_tx) = running.shutdown_tx.take() else {
+        return false;
+    };
+    let _ = shutdown_tx.send(());
+    match tokio::time::timeout(SHUTDOWN_WAIT, &mut running._handle).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            warn!(%error, "Download task panicked during shutdown");
+            false
+        }
+        Err(_) => {
+            warn!("Download task shutdown timed out");
+            running._handle.abort();
+            false
+        }
+    }
+}
+
 /// Cleanup on engine exit.
 ///
 /// Mirrors C++ `onEndOfRun()`: remove stopped groups, close files, save.
@@ -838,10 +866,14 @@ async fn on_end_of_run(
         info!("Demoted {} final groups on shutdown", demoted.len());
     }
 
-    // Abort any remaining running tasks.
-    for (gid, rd) in running_downloads.drain(..) {
-        rd._handle.abort();
-        debug!(gid = gid.value(), "Aborted running task on shutdown");
+    // Request protocol-level shutdown and wait for each task before dropping
+    // the engine, bounded so a broken command cannot hang engine teardown.
+    for (gid, mut rd) in running_downloads.drain(..) {
+        let completed = request_shutdown_and_wait(&mut rd).await;
+        debug!(
+            gid = gid.value(),
+            completed, "Finished running task shutdown"
+        );
     }
 
     // Final session save.

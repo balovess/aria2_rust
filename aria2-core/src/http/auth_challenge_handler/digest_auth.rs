@@ -16,6 +16,7 @@ use super::types::AuthChallengeResult;
 /// computing the Digest response hash.
 ///
 /// This surpasses the original C++ aria2 which only supports Basic auth.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_digest_challenge(
     auth_factory: &mut AuthConfigFactory,
     host: &str,

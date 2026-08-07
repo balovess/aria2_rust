@@ -372,7 +372,7 @@ impl FileAllocationMan {
     ///
     /// Mirrors C++ `SequentialPicker::isPicked(pred)`.
     pub fn is_picked_gid(&self, gid: u64) -> bool {
-        self.picked.as_ref().map_or(false, |m| m.gid == gid)
+        self.picked.as_ref().is_some_and(|m| m.gid == gid)
     }
 
     /// Check whether a specific group is queued for allocation.
@@ -468,7 +468,6 @@ pub fn shared() -> SharedFileAllocationMan {
     // handle; `shared()` is only ever called from async command code.
     let _ = WORKER.get_or_init(|| {
         tokio::spawn(worker_loop(man.clone()));
-        ()
     });
 
     man
@@ -530,9 +529,7 @@ async fn run_entry_allocation(entry: &mut FileAllocationEntry) -> Result<()> {
             if *length == 0 || entry.strategy == AllocationStrategy::None {
                 return Ok(());
             }
-            if let Err(e) = ensure_parent_dir(path).await {
-                return Err(e);
-            }
+            ensure_parent_dir(path).await?;
             check_disk_space(path, *length).await?;
             if entry.is_cancelled() {
                 return Err(cancelled_error());
@@ -548,9 +545,7 @@ async fn run_entry_allocation(entry: &mut FileAllocationEntry) -> Result<()> {
                 if *length == 0 {
                     continue;
                 }
-                if let Err(e) = ensure_parent_dir(path).await {
-                    return Err(e);
-                }
+                ensure_parent_dir(path).await?;
                 if entry.is_cancelled() {
                     return Err(cancelled_error());
                 }

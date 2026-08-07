@@ -210,7 +210,7 @@ impl BtDownloadCommand {
     ///
     /// # Returns
     /// The successfully connected peers, ready for piece scheduling.
-    pub async fn connect_to_pex_discovered_peers(
+    pub async fn connect_to_discovered_peers(
         &mut self,
         new_peers: &[PeerAddr],
         info_hash_raw: &[u8; 20],
@@ -228,19 +228,11 @@ impl BtDownloadCommand {
             .iter()
             .map(|conn| (conn.ip_addr.clone(), conn.port))
             .collect();
-        let max_peers = self.group.recover().options().bt_max_peers;
-        let remaining_slots = max_peers.saturating_sub(active_connections.len());
-        let batch_limit = if max_peers == 0 {
-            10
-        } else {
-            remaining_slots.min(10)
-        };
-        let peers_to_connect: Vec<PeerAddr> = new_peers
-            .iter()
-            .filter(|peer| !already_connected.contains(&(peer.ip.clone(), peer.port)))
+        let peers_to_connect: Vec<PeerAddr> = self
+            .peer_coordinator
+            .select_candidates(new_peers, &already_connected)
+            .into_iter()
             .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
-            .take(batch_limit)
-            .cloned()
             .collect();
 
         if peers_to_connect.is_empty() {

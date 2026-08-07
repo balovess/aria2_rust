@@ -6,20 +6,14 @@ use tracing::{debug, info};
 ///
 /// Unlike a position in `active_connections`, an address remains valid when
 /// another connection is removed and the vector is compacted.
-#[derive(Debug, Clone, Copy, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Ord)]
 pub struct PeerKey(SocketAddr);
-
-impl PartialEq for PeerKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
 
 impl Eq for PeerKey {}
 
 impl PartialEq<usize> for PeerKey {
     fn eq(&self, other: &usize) -> bool {
-        *self == PeerKey::from(*other)
+        self.0 == PeerKey::from(*other).0
     }
 }
 

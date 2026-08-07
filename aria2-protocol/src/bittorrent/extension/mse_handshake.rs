@@ -318,8 +318,11 @@ impl MseHandshake {
                 // Try our own info_hash
                 let expected_xor = {
                     let mut expected = [0u8; SHA1_LENGTH];
-                    for i in 0..SHA1_LENGTH {
-                        expected[i] = keys.req2[i] ^ keys.req3[i];
+                    for (expected, (&req2, &req3)) in expected
+                        .iter_mut()
+                        .zip(keys.req2.iter().zip(keys.req3.iter()))
+                    {
+                        *expected = req2 ^ req3;
                     }
                     expected
                 };

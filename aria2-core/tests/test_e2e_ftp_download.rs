@@ -13,6 +13,19 @@ fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
 
+#[test]
+fn test_ftp_uri_parsing_bracketed_ipv6() {
+    let command = FtpDownloadCommand::new(
+        GroupId::new(100),
+        "ftp://user:pass@[::1]:2121/path/file.bin",
+        &DownloadOptions::default(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(command.timeout().is_some());
+}
+
 #[tokio::test]
 async fn test_e2e_ftp_download_small_file() {
     let server = start_server().await;

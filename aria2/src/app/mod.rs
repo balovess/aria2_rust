@@ -253,11 +253,11 @@ impl App {
         // Apply engine-level options from config (CLI/file/env) BEFORE tasks
         // are added. max-concurrent-downloads drives the engine's slot limit;
         // the RequestGroupMan default is 5 (matching aria2).
-        if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await {
-            if max > 0 {
-                self.request_man.read().await.set_max_concurrent(max as u32);
-                info!("Max concurrent downloads set to {} (from config)", max);
-            }
+        if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await
+            && max > 0
+        {
+            self.request_man.read().await.set_max_concurrent(max as u32);
+            info!("Max concurrent downloads set to {} (from config)", max);
         }
 
         // Initialize engine (must be before session restore)

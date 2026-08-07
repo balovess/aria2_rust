@@ -432,10 +432,10 @@ impl DownloadEventHooks {
             DownloadEvent::BtComplete => opts.on_bt_download_complete.as_ref(),
         };
 
-        if let Some(cmd) = per_group {
-            if !cmd.is_empty() {
-                return Some(cmd.clone());
-            }
+        if let Some(cmd) = per_group
+            && !cmd.is_empty()
+        {
+            return Some(cmd.clone());
         }
 
         // Priority 2: global hooks

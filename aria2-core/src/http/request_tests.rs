@@ -41,7 +41,7 @@ fn test_request_auto_headers_generation() {
     assert_eq!(request.headers.get("User-Agent").unwrap(), "aria2-rust/1.0");
     assert_eq!(request.headers.get("Accept").unwrap(), "*/*");
     // Default: no Connection header (HTTP/1.1 keep-alive)
-    assert!(request.headers.get("Connection").is_none());
+    assert!(!request.headers.contains_key("Connection"));
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn test_accept_gzip_disabled_by_default() {
         .build()
         .unwrap();
 
-    assert!(request.headers.get("Accept-Encoding").is_none());
+    assert!(!request.headers.contains_key("Accept-Encoding"));
 }
 
 // ==================== No-cache tests ====================
@@ -166,8 +166,8 @@ fn test_no_cache_disabled_by_default() {
         .build()
         .unwrap();
 
-    assert!(request.headers.get("Pragma").is_none());
-    assert!(request.headers.get("Cache-Control").is_none());
+    assert!(!request.headers.contains_key("Pragma"));
+    assert!(!request.headers.contains_key("Cache-Control"));
 }
 
 // ==================== Want-Digest tests ====================
@@ -328,7 +328,7 @@ fn test_connection_keep_alive_default() {
         .unwrap();
 
     // HTTP/1.1 default is keep-alive; no Connection header emitted
-    assert!(request.headers.get("Connection").is_none());
+    assert!(!request.headers.contains_key("Connection"));
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn test_range_disabled_by_default() {
         .build()
         .unwrap();
 
-    assert!(request.headers.get("Range").is_none());
+    assert!(!request.headers.contains_key("Range"));
 }
 
 // ==================== Combined header tests ====================

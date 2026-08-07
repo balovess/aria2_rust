@@ -117,9 +117,7 @@ fn test_lpd_receive_parses_bep14_case_insensitive_hash() {
     let sender_ip = test_ip();
 
     // Mixed case info hash in BEP 14 format
-    let data = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: ABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD\r\n\r\n\r\n"
-    ).into_bytes();
+    let data = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: ABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD\r\n\r\n\r\n".to_string().into_bytes();
 
     let result = parse_lpd_announcement(&data, sender_ip);
     assert!(result.is_some());
@@ -135,9 +133,7 @@ fn test_lpd_receive_parses_bep14_extra_whitespace() {
     let sender_ip = test_ip();
 
     // Extra whitespace around values
-    let data = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort:   6881   \r\nInfohash:   0123456789abcdef0123456789abcdef01234567   \r\n\r\n\r\n"
-    ).into_bytes();
+    let data = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort:   6881   \r\nInfohash:   0123456789abcdef0123456789abcdef01234567   \r\n\r\n\r\n".to_string().into_bytes();
 
     let result = parse_lpd_announcement(&data, sender_ip);
     assert!(result.is_some(), "Should handle extra whitespace");
@@ -152,9 +148,7 @@ fn test_lpd_receive_parses_bep14_unordered_headers() {
     let sender_ip = test_ip();
 
     // Infohash before Port (C++ uses HttpHeaderProcessor which is order-independent)
-    let data = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\nPort: 6999\r\n\r\n\r\n"
-    ).into_bytes();
+    let data = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\nPort: 6999\r\n\r\n\r\n".to_string().into_bytes();
 
     let result = parse_lpd_announcement(&data, sender_ip);
     assert!(result.is_some(), "Should handle unordered headers");
@@ -248,18 +242,14 @@ fn test_lpd_receive_ignores_invalid_hash_format() {
     let sender_ip = test_ip();
 
     // Too short (39 chars) in BEP14 format
-    let short_hash = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0123456789abcdef0123456789abcdef0123456\r\n\r\n\r\n"
-    ).into_bytes();
+    let short_hash = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0123456789abcdef0123456789abcdef0123456\r\n\r\n\r\n".to_string().into_bytes();
     assert!(
         parse_lpd_announcement(&short_hash, sender_ip).is_none(),
         "Too-short hash should fail"
     );
 
     // Contains non-hex characters
-    let bad_chars = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: gggg56789abcdef0123456789abcdef01234567\r\n\r\n\r\n"
-    ).into_bytes();
+    let bad_chars = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: gggg56789abcdef0123456789abcdef01234567\r\n\r\n\r\n".to_string().into_bytes();
     assert!(
         parse_lpd_announcement(&bad_chars, sender_ip).is_none(),
         "Non-hex hash should fail"
@@ -271,18 +261,14 @@ fn test_lpd_receive_ignores_invalid_port() {
     let sender_ip = test_ip();
 
     // Port 0 (invalid) in BEP14 format
-    let port_zero = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 0\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n"
-    ).into_bytes();
+    let port_zero = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 0\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n".to_string().into_bytes();
     assert!(
         parse_lpd_announcement(&port_zero, sender_ip).is_none(),
         "Port 0 should be invalid"
     );
 
     // Non-numeric port in BEP14 format
-    let bad_port = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: abc\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n"
-    ).into_bytes();
+    let bad_port = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: abc\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\n\r\n\r\n".to_string().into_bytes();
     assert!(
         parse_lpd_announcement(&bad_port, sender_ip).is_none(),
         "Non-numeric port should fail"
@@ -294,9 +280,7 @@ fn test_lpd_receive_ignores_unknown_fields() {
     let sender_ip = test_ip();
 
     // Unknown/extra headers should not cause failure
-    let with_extra = format!(
-        "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\nExtraField: value\r\nUnknown: data\r\n\r\n\r\n"
-    ).into_bytes();
+    let with_extra = "BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0123456789abcdef0123456789abcdef01234567\r\nExtraField: value\r\nUnknown: data\r\n\r\n\r\n".to_string().into_bytes();
 
     let result = parse_lpd_announcement(&with_extra, sender_ip);
     assert!(

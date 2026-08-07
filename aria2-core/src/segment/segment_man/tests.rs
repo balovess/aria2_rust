@@ -570,7 +570,7 @@ fn test_remove_advertised_piece() {
     assert!(indexes.contains(&0));
 
     // Remove all entries with registered_time <= far future (effectively all)
-    let far_future_ms = std::u64::MAX;
+    let far_future_ms = u64::MAX;
     man.remove_advertised_piece(far_future_ms);
 
     // Should be empty now

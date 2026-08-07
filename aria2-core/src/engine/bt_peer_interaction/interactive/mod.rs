@@ -126,6 +126,7 @@ pub struct BtPeerInteractive {
     /// Per-peer extension registry tracking local and peer ext_id assignments.
     pub(crate) extension_registry: ExtensionRegistry,
     /// Optional sink for factory-created extension message side effects.
+    #[allow(clippy::type_complexity)]
     pub(crate) extension_update_handler: Option<
         std::sync::Arc<dyn Fn(&crate::engine::extension_registry::ExtensionUpdate) + Send + Sync>,
     >,

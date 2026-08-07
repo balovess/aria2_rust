@@ -75,7 +75,7 @@ impl SequentialDownloader {
             scheme: scheme.clone(),
             realm: auth_header
                 .as_deref()
-                .map(|h| crate::http::skip_response::HttpSkipResponseHandler::extract_realm(h))
+                .map(crate::http::skip_response::HttpSkipResponseHandler::extract_realm)
                 .unwrap_or_default(),
             is_proxy,
             digest_challenge: if scheme == AuthScheme::Digest {
@@ -112,7 +112,7 @@ impl SequentialDownloader {
 
         // Use the URL for credential resolution
         let url = match url_parsed {
-            Some(u) => url::Url::parse(&u.to_string()).ok()?,
+            Some(u) => url::Url::parse(u.as_ref()).ok()?,
             None => return None,
         };
 
@@ -122,10 +122,10 @@ impl SequentialDownloader {
         {
             let g = self.group.recover();
             let opts = g.options();
-            if let Some(ref netrc_path) = opts.netrc_path {
-                if let Err(e) = auth_factory.load_netrc_file(std::path::Path::new(netrc_path)) {
-                    tracing::debug!("Failed to load netrc file {}: {}", netrc_path, e);
-                }
+            if let Some(ref netrc_path) = opts.netrc_path
+                && let Err(e) = auth_factory.load_netrc_file(std::path::Path::new(netrc_path))
+            {
+                tracing::debug!("Failed to load netrc file {}: {}", netrc_path, e);
             }
         }
 

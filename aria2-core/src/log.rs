@@ -123,9 +123,10 @@ impl Write for SizeRotatingWriter {
         if self.current_size > 0 && self.current_size + buf.len() as u64 > self.max_size {
             self.rotate()?;
         }
-        let file = self.file.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "SizeRotatingWriter has no open file")
-        })?;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("SizeRotatingWriter has no open file"))?;
         let n = file.write(buf)?;
         self.current_size += n as u64;
         Ok(n)

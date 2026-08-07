@@ -64,7 +64,11 @@ pub mod bt_peer_blocklist;
 #[cfg(feature = "bittorrent")]
 pub mod bt_peer_connection;
 #[cfg(feature = "bittorrent")]
+pub(crate) mod bt_peer_coordinator;
+#[cfg(feature = "bittorrent")]
 pub mod bt_peer_interaction;
+#[cfg(feature = "bittorrent")]
+pub mod bt_peer_listener;
 #[cfg(feature = "bittorrent")]
 pub mod bt_peer_storage;
 #[cfg(feature = "bittorrent")]

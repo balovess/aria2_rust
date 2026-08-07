@@ -400,23 +400,24 @@ impl HttpConnectionManager {
     /// Parse Content-Range response header. Returns `(start, end, total)`.
     pub fn parse_content_range(&self, header: &str) -> Option<(u64, u64, u64)> {
         let header = header.trim();
-        if !header.starts_with("bytes ") {
+        let range = header
+            .strip_prefix("bytes ")
+            .or_else(|| header.strip_prefix("bytes="))
+            .unwrap_or(header);
+        let (range, total) = range.split_once('/')?;
+        let (start, end) = range.split_once('-')?;
+        let start = start.trim().parse::<u64>().ok()?;
+        let end = end.trim().parse::<u64>().ok()?;
+        if start > end {
             return None;
         }
-        let parts: Vec<&str> = header[6..].split('/').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        let rv: Vec<&str> = parts[0].split('-').collect();
-        if rv.len() != 2 {
-            return None;
-        }
-        let start: u64 = rv[0].trim().parse().ok()?;
-        let end: u64 = rv[1].trim().parse().ok()?;
-        let total = match parts[1].trim() {
+        let total = match total.trim() {
             "*" => u64::MAX,
-            s => s.parse().ok()?,
+            value => value.parse().ok()?,
         };
+        if total != u64::MAX && end >= total {
+            return None;
+        }
         Some((start, end, total))
     }
 

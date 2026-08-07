@@ -48,6 +48,7 @@ impl DiskWriter for DefaultDiskWriter {
                 tokio::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(&self.path)
                     .await
             } else {

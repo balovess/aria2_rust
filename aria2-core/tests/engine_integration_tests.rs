@@ -19,6 +19,7 @@ use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::rate_limiter::RateLimiterConfig;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 // Re-export helpers from test harness module
 use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
@@ -1028,7 +1029,8 @@ async fn engine_session_save_restore_roundtrip() {
         .take_shutdown_sender()
         .expect("engine should provide a shutdown sender");
     let engine_task = tokio::spawn(engine.run());
-    let engine_result = tokio::time::timeout(Duration::from_secs(15), async {
+    #[allow(clippy::let_unit_value)]
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let group_state = group_man.read().await;
             let downloads_complete = [GroupId::new(1), GroupId::new(2)].iter().all(|gid| {
@@ -1053,7 +1055,7 @@ async fn engine_session_save_restore_roundtrip() {
     .await
     .expect("engine run did not terminate within 15 seconds")
     .expect("engine run failed");
-    assert_eq!(engine_result, ());
+    assert_eq!((), ());
 
     let session_content = std::fs::read_to_string(&session_path)
         .expect("final engine save should create session file");

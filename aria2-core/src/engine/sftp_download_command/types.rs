@@ -188,35 +188,48 @@ impl SftpDownloadCommand {
             None => (without_scheme, "/"),
         };
 
-        // Split user info from host:port
+        // Split user info from host:port. A missing user falls back to the
+        // local account while preserving the URI's host and remote path.
         let (username, rest) = match auth_host_port.find('@') {
-            Some(idx) => (&auth_host_port[..idx], &auth_host_port[idx + 1..]),
-            None => {
-                // No username in URI; try environment variable
-                let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-                return Ok((
-                    user.to_string(),
-                    constants::SFTP_DEFAULT_PORT,
-                    user,
-                    None,
-                    "/".to_string(),
-                ));
-            }
+            Some(idx) => (
+                auth_host_port[..idx].to_string(),
+                &auth_host_port[idx + 1..],
+            ),
+            None => (
+                std::env::var("USER")
+                    .or_else(|_| std::env::var("USERNAME"))
+                    .unwrap_or_else(|_| "root".to_string()),
+                auth_host_port,
+            ),
         };
 
         // Extract optional password from username
-        let password = username.split(':').nth(1).map(|p| p.to_string());
-        let clean_user = username.split(':').next().unwrap_or(username).to_string();
+        let password = username
+            .split_once(':')
+            .map(|(_, password)| password.to_string());
+        let clean_user = username
+            .split_once(':')
+            .map_or(username.as_str(), |(user, _)| user)
+            .to_string();
 
-        // Split host from port
-        let (host, port) = match rest.rfind(':') {
-            Some(idx) => (
-                rest[..idx].to_string(),
-                rest[idx + 1..]
-                    .parse::<u16>()
-                    .unwrap_or(constants::SFTP_DEFAULT_PORT),
-            ),
-            None => (rest.to_string(), constants::SFTP_DEFAULT_PORT),
+        // Split host from port. Bracketed IPv6 literals are handled without
+        // mistaking their internal colons for a port separator.
+        let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
+            let (host, suffix) = bracketed
+                .split_once(']')
+                .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("Invalid SFTP host".into())))?;
+            let port = suffix
+                .strip_prefix(':')
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(constants::SFTP_DEFAULT_PORT);
+            (host.to_string(), port)
+        } else {
+            match rest.rsplit_once(':') {
+                Some((host, port)) if port.parse::<u16>().is_ok() => {
+                    (host.to_string(), port.parse().unwrap())
+                }
+                _ => (rest.to_string(), constants::SFTP_DEFAULT_PORT),
+            }
         };
 
         Ok((host, port, clean_user, password, sftp_path_decode(path)))

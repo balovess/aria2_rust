@@ -29,8 +29,8 @@ pub(crate) const DEFAULT_FILE: &str = "index.html";
 /// Priority order (matching C++ `HttpResponse::determineFilename()`):
 /// 1. `Content-Disposition: attachment; filename="..."` or `filename*=...`
 ///    — Filenames containing `/` or `\` are rejected per C++
-///      `getContentDispositionFilename()` which checks
-///      `res.find_first_of("/\\") == std::string::npos`.
+///    `getContentDispositionFilename()` which checks
+///    `res.find_first_of("/\\\\") == std::string::npos`.
 /// 2. URL path basename (percent-decoded, safe-path-ified)
 /// 3. "index.html" if URL path ends with `/`
 ///
@@ -50,23 +50,22 @@ pub fn determine_filename(
     content_disposition_default_utf8: bool,
 ) -> String {
     // Try Content-Disposition header first
-    if let Some(cd) = response_head.header("content-disposition") {
-        if let Some(filename) =
+    if let Some(cd) = response_head.header("content-disposition")
+        && let Some(filename) =
             parse_content_disposition_filename(cd, content_disposition_default_utf8)
-        {
-            debug!(
-                filename = %filename,
-                source = "Content-Disposition",
-                "Filename determined"
-            );
-            // C++ getContentDispositionFilename does NOT apply createSafePath
-            // to Content-Disposition filenames — they are rejected outright
-            // if they contain path separators. Since the RFC 6266 parser's
-            // is_dir_traversal check already handles most cases, and we
-            // additionally reject filenames with '/' or '\' below, the
-            // filename returned here is safe to use directly.
-            return filename;
-        }
+    {
+        debug!(
+            filename = %filename,
+            source = "Content-Disposition",
+            "Filename determined"
+        );
+        // C++ getContentDispositionFilename does NOT apply createSafePath
+        // to Content-Disposition filenames — they are rejected outright
+        // if they contain path separators. Since the RFC 6266 parser's
+        // is_dir_traversal check already handles most cases, and we
+        // additionally reject filenames with '/' or '\' below, the
+        // filename returned here is safe to use directly.
+        return filename;
     }
 
     // Fall back to URL path

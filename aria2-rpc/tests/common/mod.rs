@@ -10,9 +10,14 @@
 //! once at the start of every E2E test binary.
 
 use std::net::TcpListener as StdTcpListener;
-use std::sync::Arc;
-use std::sync::Once;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Once};
+
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::request::request_group_man::RequestGroupMan;
 use std::time::Duration;
+
+use tokio::sync::RwLock;
 
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::server::{RpcAuthMiddleware, RpcServer, ServerConfig};
@@ -40,37 +45,66 @@ fn ensure_crypto_provider() {
 /// Returns `(base_url, server_handle)`.  The server runs in a background
 /// tokio task; dropping `server_handle` aborts it.
 pub async fn start_test_server(token: Option<&str>) -> (String, TestServerHandle) {
-    // Install the ring crypto provider before any reqwest::Client is built.
+    start_test_server_with_max_concurrent(token, 5).await
+}
+
+/// Start an RPC server with an explicit promotion limit for queue-state tests.
+/// A zero limit leaves new groups in the reserved queue.
+pub async fn start_test_server_with_max_concurrent(
+    token: Option<&str>,
+    max_concurrent: u32,
+) -> (String, TestServerHandle) {
+    // Ensure the ring crypto provider is installed before constructing clients.
     ensure_crypto_provider();
     // Find a random available port via a pre-bind probe.
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
-    let port = listener.local_addr().unwrap().port();
+    let port = listener
+        .local_addr()
+        .expect("Failed to read random listener address")
+        .port();
     drop(listener); // release so the RPC server can claim it
 
     let config = ServerConfig::default()
         .with_host("127.0.0.1")
         .with_port(port);
 
+    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let mut download_engine = DownloadEngine::new(1);
+    group_man.read().await.set_max_concurrent(max_concurrent);
+    download_engine.set_request_group_man(Arc::clone(&group_man));
+    download_engine.set_keep_alive(true);
+    let engine_cmd_tx = download_engine.engine_command_sender();
+    let shutdown_tx = download_engine
+        .take_shutdown_sender()
+        .expect("new download engine must have a shutdown sender");
+    let engine_task = tokio::spawn(async move {
+        if let Err(e) = download_engine.run().await {
+            eprintln!("[test-helper] DownloadEngine exited with error: {e}");
+        }
+    });
+
     // Wire auth onto the engine (ServerConfig.auth is decorative only;
     // the actual check lives in RpcEngine::auth_middleware). Also configure a
-    // temp --save-session path so `aria2.saveSession` (which falls back to the
-    // engine config when no explicit path is given) actually persists.
-    let save_session_path =
-        std::env::temp_dir().join(format!("aria2_rpc_e2e_{}.sess", std::process::id()));
-    let engine = if let Some(t) = token {
-        Arc::new(
-            RpcEngine::new()
-                .with_auth_middleware(RpcAuthMiddleware::new(t))
-                .with_save_session_path(save_session_path),
-        )
+    // unique session path for each fixture.
+    static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let save_session_path = std::env::temp_dir().join(format!(
+        "aria2_rpc_e2e_{}_{}.sess",
+        std::process::id(),
+        session_id
+    ));
+    let rpc_engine = RpcEngine::wired(Arc::clone(&group_man), engine_cmd_tx)
+        .with_save_session_path(save_session_path);
+    let rpc_engine = if let Some(t) = token {
+        rpc_engine.with_auth_middleware(RpcAuthMiddleware::new(t))
     } else {
-        Arc::new(RpcEngine::new().with_save_session_path(save_session_path))
+        rpc_engine
     };
-
-    let server = RpcServer::new_with_engine(config, engine).expect("Failed to create RpcServer");
+    let server = RpcServer::new_with_engine(config, Arc::new(rpc_engine))
+        .expect("Failed to create RpcServer");
     let base_url = format!("http://127.0.0.1:{}", port);
 
-    let handle = tokio::spawn(async move {
+    let server_task = tokio::spawn(async move {
         if let Err(e) = server.serve().await {
             eprintln!("[test-helper] RPC server exited with error: {e}");
         }
@@ -82,7 +116,9 @@ pub async fn start_test_server(token: Option<&str>) -> (String, TestServerHandle
     (
         base_url,
         TestServerHandle {
-            inner: Some(handle),
+            server_task: Some(server_task),
+            engine_task: Some(engine_task),
+            shutdown_tx: Some(shutdown_tx),
         },
     )
 }
@@ -117,13 +153,21 @@ async fn wait_for_server_ready(base_url: &str) {
 
 /// RAII guard that aborts the background server on drop.
 pub struct TestServerHandle {
-    inner: Option<tokio::task::JoinHandle<()>>,
+    server_task: Option<tokio::task::JoinHandle<()>>,
+    engine_task: Option<tokio::task::JoinHandle<()>>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Drop for TestServerHandle {
     fn drop(&mut self) {
-        if let Some(h) = self.inner.take() {
-            h.abort();
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.server_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.engine_task.take() {
+            task.abort();
         }
     }
 }

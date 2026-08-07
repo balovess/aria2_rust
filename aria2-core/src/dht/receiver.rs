@@ -154,6 +154,7 @@ impl DhtReceiver {
     ///
     /// Performs node ID change detection (C++ `DHTMessageTracker::messageArrived()`)
     /// and RTT update (C++ `node->updateRTT()`).
+    #[allow(clippy::too_many_arguments)]
     fn handle_response(
         &self,
         msg: &DhtMessage,

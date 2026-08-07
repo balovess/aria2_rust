@@ -234,6 +234,7 @@ mod tests {
 
     /// Build a Firefox-shaped database and return its path (the `TempDir` must
     /// outlive it, hence returning both).
+    #[allow(clippy::type_complexity)]
     fn make_moz_db(
         rows: &[(&str, &str, i64, i64, &str, Option<&str>, i64)],
     ) -> (TempDir, std::path::PathBuf) {

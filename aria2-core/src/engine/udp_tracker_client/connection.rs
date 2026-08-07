@@ -19,6 +19,10 @@ impl UdpTrackerClient {
             }
 
             if let Some(mut req) = self.pending.pop_front() {
+                if req.reply.is_some() || req.scrape_results.is_some() {
+                    self.pending.push_front(req);
+                    return false;
+                }
                 let host_key = req.remote_addr;
 
                 if let Some(conn) = self.conn_cache.get(&host_key) {
@@ -153,6 +157,33 @@ impl UdpTrackerClient {
             Err(e) => {
                 warn!("Send CONNECT to {} failed: {}", addr, e);
                 true
+            }
+        }
+    }
+
+    pub(crate) fn has_inflight(&self) -> bool {
+        !self.inflight.is_empty()
+    }
+
+    pub(crate) async fn receive_next(&mut self) -> bool {
+        let mut buffer = [0u8; 4096];
+        match tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.socket.recv_from(&mut buffer),
+        )
+        .await
+        {
+            Ok(Ok((len, from))) => {
+                self.handle_response(&buffer[..len], &from).await;
+                true
+            }
+            Ok(Err(error)) => {
+                warn!(%error, "UDP tracker receive failed");
+                false
+            }
+            Err(_) => {
+                warn!("UDP tracker response timed out");
+                false
             }
         }
     }

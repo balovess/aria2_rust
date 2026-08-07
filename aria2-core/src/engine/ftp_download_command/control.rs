@@ -275,6 +275,11 @@ impl RawFtpControl {
             debug!("File size: {} bytes", size);
             return Ok(Some(size));
         }
+        if resp.0 == 550 {
+            return Err(Aria2Error::Fatal(FatalError::FileNotFound {
+                path: remote_path.to_string(),
+            }));
+        }
         // SIZE command may not be supported by all servers
         debug!("SIZE command returned: {} {}", resp.0, resp.1);
         Ok(None)

@@ -344,7 +344,7 @@ fn test_announce_list_shuffle() {
     let urls: Vec<String> = (0..20)
         .map(|i| format!("http://tracker{}.com/announce", i))
         .collect();
-    let mut list = AnnounceList::new(&[urls.clone()], &None);
+    let mut list = AnnounceList::new(std::slice::from_ref(&urls), &None);
 
     let _original_first = list.get_announce().unwrap().to_string();
     list.shuffle();

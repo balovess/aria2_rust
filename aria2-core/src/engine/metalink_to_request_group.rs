@@ -571,8 +571,10 @@ mod tests {
 
     #[test]
     fn options_location_is_applied_case_insensitively() {
-        let mut options = DownloadOptions::default();
-        options.metalink_location = Some(" US, jp ".to_string());
+        let options = DownloadOptions {
+            metalink_location: Some(" US, jp ".to_string()),
+            ..DownloadOptions::default()
+        };
         let converter = MetalinkToRequestGroup::new();
         let configured = converter
             .generate_from_bytes(

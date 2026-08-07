@@ -134,8 +134,8 @@ async fn test_reset_disk_writer_entries_file3_file4_not_requested() {
 async fn test_reset_disk_writer_entries_only_first_requested() {
     let dir = tempfile::tempdir().unwrap();
     let mut entries = make_test_entries(dir.path());
-    for i in 1..9 {
-        entries[i].set_requested(false);
+    for entry in entries.iter_mut().take(9).skip(1) {
+        entry.set_requested(false);
     }
 
     let mut adaptor = MultiDiskAdaptor::new(2);
@@ -157,8 +157,8 @@ async fn test_reset_disk_writer_entries_only_first_requested() {
 async fn test_reset_disk_writer_entries_first_two_requested() {
     let dir = tempfile::tempdir().unwrap();
     let mut entries = make_test_entries(dir.path());
-    for i in 2..9 {
-        entries[i].set_requested(false);
+    for entry in entries.iter_mut().take(9).skip(2) {
+        entry.set_requested(false);
     }
 
     let mut adaptor = MultiDiskAdaptor::new(2);
@@ -182,8 +182,8 @@ async fn test_reset_disk_writer_entries_first_two_requested() {
 async fn test_reset_disk_writer_entries_only_file6_requested() {
     let dir = tempfile::tempdir().unwrap();
     let mut entries = make_test_entries(dir.path());
-    for i in 0..6 {
-        entries[i].set_requested(false);
+    for entry in entries.iter_mut().take(6) {
+        entry.set_requested(false);
     }
     entries[8].set_requested(false);
 

@@ -1,6 +1,7 @@
 //! Integration tests for the authentication challenge handler.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use base64::Engine;
 

@@ -1,6 +1,7 @@
 use tracing::{debug, info};
 
 use crate::error::Result;
+use crate::util::rwlock_ext::RwLockRecover;
 
 use super::BtDownloadCommand;
 
@@ -63,6 +64,26 @@ impl BtDownloadCommand {
 
         let total_downloaded = meta.total_size();
 
+        let caretaker_id = self.group.recover().gid().value();
+        {
+            let mut storage = self
+                .peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for connection in &connections {
+                let Some(endpoint) = connection.remote_addr() else {
+                    continue;
+                };
+                let entry = crate::engine::bt_peer_storage::PeerEntry::new(
+                    endpoint.ip().to_string(),
+                    endpoint.port(),
+                );
+                if storage.add_and_checkout_peer(entry, caretaker_id).is_some() {
+                    storage.set_peer_active(&endpoint.ip().to_string(), endpoint.port(), true);
+                }
+            }
+        }
+
         let seed_manager = BtSeedManager::new_with_info_hash(
             meta.info_hash.bytes,
             connections,
@@ -70,7 +91,8 @@ impl BtDownloadCommand {
             config,
             exit_condition,
             total_downloaded,
-        );
+        )
+        .with_peer_storage(std::sync::Arc::clone(&self.peer_storage));
 
         self.seed_manager = Some(seed_manager);
 

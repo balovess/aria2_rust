@@ -151,6 +151,9 @@ impl UdpTrackerManager {
 
             let mut c = self.client.lock().await;
             while c.process_one().await {
+                if c.has_inflight() && !c.receive_next().await {
+                    break;
+                }
                 tokio::task::yield_now().await;
             }
         }

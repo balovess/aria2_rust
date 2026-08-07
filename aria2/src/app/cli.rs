@@ -51,11 +51,11 @@
 //! Every boolean is `Option<bool>` rather than `bool` so that the merge step in
 //! [`super::config`] can distinguish three states:
 //!
-//! * `None`        — the user did not mention the option; keep the config-file
-//!                   / environment / registry-default value.
-//! * `Some(true)`  — explicitly enabled on the command line.
+//! * `None` — the user did not mention the option; keep the config-file,
+//!   environment, or registry-default value.
+//! * `Some(true)` — explicitly enabled on the command line.
 //! * `Some(false)` — explicitly disabled on the command line; this must override
-//!                   a `continue=true` line in `aria2.conf`.
+//!   a `continue=true` line in `aria2.conf`.
 //!
 //! A plain `bool` collapses the first and last case, which silently dropped
 //! `--continue=false` style overrides.

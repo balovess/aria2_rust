@@ -4,8 +4,11 @@
 pub(super) const MAX_FIELD_NAME_LEN: usize = 1024;
 /// Maximum allowed size for a single header field value (bytes).
 pub(super) const MAX_FIELD_VALUE_LEN: usize = 8192;
-/// Maximum total header block size (bytes). Prevents OOM from malicious servers.
-pub(super) const MAX_HEADER_SIZE: usize = 65536;
+/// Maximum total header block size (bytes).
+///
+/// Matches aria2's `HttpHeaderProcessor` 8 KiB aggregate header limit while
+/// still bounding allocations from an untrusted peer.
+pub(super) const MAX_HEADER_SIZE: usize = 8 * 1024;
 
 // ---------------------------------------------------------------------------
 // HttpHeaderParseState
