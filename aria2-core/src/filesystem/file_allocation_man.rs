@@ -458,17 +458,27 @@ pub type SharedFileAllocationMan = Arc<RwLock<FileAllocationMan>>;
 /// first use (must be called from a tokio runtime context).
 pub fn shared() -> SharedFileAllocationMan {
     static SHARED: OnceLock<SharedFileAllocationMan> = OnceLock::new();
-    static WORKER: OnceLock<()> = OnceLock::new();
+    static WORKER: OnceLock<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+        OnceLock::new();
 
     let man = SHARED
         .get_or_init(|| Arc::new(RwLock::new(FileAllocationMan::new())))
         .clone();
 
-    // Spawn the worker exactly once. `tokio::spawn` requires a runtime
-    // handle; `shared()` is only ever called from async command code.
-    let _ = WORKER.get_or_init(|| {
-        tokio::spawn(worker_loop(man.clone()));
-    });
+    // A worker task belongs to the Tokio runtime that spawned it. Tests and
+    // embedders may create multiple runtimes, so a completed worker must be
+    // replaced rather than treated as a process-wide permanent singleton.
+    let worker = WORKER.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = match worker.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished)
+    {
+        *guard = Some(tokio::spawn(worker_loop(man.clone())));
+    }
 
     man
 }

@@ -486,14 +486,11 @@ impl DhtEngine {
             let nodes: Vec<DhtNode> = inner.routing_table.collect_good_nodes();
             drop(inner);
 
-            if !nodes.is_empty() {
-                match super::persistence::DhtPersistence::save_to_file_sync(path, &self_id, &nodes)
-                {
-                    Ok(_) => {
-                        info!(path = %path.display(), count = nodes.len(), "Saved DHT routing table")
-                    }
-                    Err(e) => warn!("Failed to save DHT routing table: {}", e),
+            match super::persistence::DhtPersistence::save_to_file_sync(path, &self_id, &nodes) {
+                Ok(_) => {
+                    info!(path = %path.display(), count = nodes.len(), "Saved DHT routing table")
                 }
+                Err(e) => warn!("Failed to save DHT routing table: {}", e),
             }
         }
 

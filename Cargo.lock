@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "aria2"
-version = "0.2.4"
+version = "0.2.8"
 dependencies = [
  "aria2-core",
  "aria2-protocol",

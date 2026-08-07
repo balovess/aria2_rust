@@ -22,7 +22,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use tokio::sync::RwLock;
@@ -69,7 +72,7 @@ pub struct LpdReceiveLoop {
     /// Cancellation token to gracefully stop the receive loop
     cancel_token: CancellationToken,
     /// Whether the receive loop is currently running
-    is_running: bool,
+    is_running: Arc<AtomicBool>,
 }
 
 impl LpdReceiveLoop {
@@ -80,7 +83,7 @@ impl LpdReceiveLoop {
         Self {
             task_handle: None,
             cancel_token: CancellationToken::new(),
-            is_running: false,
+            is_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -102,7 +105,7 @@ impl LpdReceiveLoop {
         peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
         active_hashes: Arc<RwLock<HashSet<String>>>,
     ) -> Result<(), String> {
-        if self.is_running {
+        if self.is_running.load(Ordering::Acquire) {
             debug!("LPD receive loop already running");
             return Ok(());
         }
@@ -116,6 +119,7 @@ impl LpdReceiveLoop {
             .map_err(|e| format!("Failed to convert LPD socket to async: {}", e))?;
 
         let cancel_token = self.cancel_token.clone();
+        let is_running = Arc::clone(&self.is_running);
 
         info!(
             addr = %constants::LPD_MULTICAST_ADDRESS,
@@ -124,12 +128,13 @@ impl LpdReceiveLoop {
         );
 
         // Spawn the background receive task.
+        is_running.store(true, Ordering::Release);
         let handle = tokio::spawn(async move {
             run_receive_loop(async_socket, peers, active_hashes, cancel_token).await;
+            is_running.store(false, Ordering::Release);
         });
 
         self.task_handle = Some(handle);
-        self.is_running = true;
         Ok(())
     }
 
@@ -137,7 +142,7 @@ impl LpdReceiveLoop {
     ///
     /// Cancels the background task and waits for it to finish.
     pub async fn stop(&mut self) {
-        if !self.is_running {
+        if !self.is_running.load(Ordering::Acquire) {
             return;
         }
 
@@ -158,14 +163,14 @@ impl LpdReceiveLoop {
             }
         }
 
-        self.is_running = false;
+        self.is_running.store(false, Ordering::Release);
         // Create a fresh cancellation token for potential restart
         self.cancel_token = CancellationToken::new();
     }
 
     /// Check if the receive loop is currently running.
     pub fn is_running(&self) -> bool {
-        self.is_running
+        self.is_running.load(Ordering::Acquire)
     }
 
     /// Get a clone of the cancellation token.

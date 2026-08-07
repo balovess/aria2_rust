@@ -82,7 +82,7 @@ impl PositionedDiskWriter {
         opts.create(true).write(true).read(true);
         let file = opts
             .open(&self.path)
-            .map_err(|e| Aria2Error::FileOpen(format!("{}: {e}", self.path.display())))?;
+            .map_err(|e| Aria2Error::FileOpen(format!("path {}: {e}", self.path.display())))?;
         debug!("Opened file for positioned I/O: {:?}", self.path);
 
         // Pre-allocate the file if a total size was specified and the file is

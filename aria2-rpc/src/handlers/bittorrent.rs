@@ -95,6 +95,9 @@ impl RpcEngine {
     /// Handle `aria2.pauseAll` - Pause all active downloads.
     pub async fn handle_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
+        if let Some(group_man) = &self.group_man {
+            group_man.write().await.pause_all();
+        }
         let result = self
             .engine_cmd_tx
             .as_ref()
@@ -127,6 +130,9 @@ impl RpcEngine {
     /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
     pub async fn handle_force_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
+        if let Some(group_man) = &self.group_man {
+            group_man.write().await.force_pause_all();
+        }
         let result = self
             .engine_cmd_tx
             .as_ref()
@@ -159,6 +165,9 @@ impl RpcEngine {
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.
     pub async fn handle_unpause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
+        if let Some(group_man) = &self.group_man {
+            group_man.write().await.unpause_all();
+        }
         let result = self
             .engine_cmd_tx
             .as_ref()

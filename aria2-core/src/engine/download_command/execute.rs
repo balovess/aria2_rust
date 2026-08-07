@@ -78,11 +78,10 @@ impl Command for DownloadCommand {
         }
 
         let release_path = |path: &std::path::Path| {
-            let p = path.to_path_buf();
-            #[allow(clippy::let_underscore_future)]
-            let _ = tokio::spawn(async move {
-                global_registry().release(&p).await;
-            });
+            let path = path.to_path_buf();
+            async move {
+                global_registry().release(&path).await;
+            }
         };
 
         let url_for_head = reqwest::Url::parse(&uri).ok();
@@ -153,15 +152,18 @@ impl Command for DownloadCommand {
                 resume_state.existing_length
             );
             self.completed_bytes = resume_state.existing_length;
-            let g = self.group.recover();
-            g.set_total_length(self.completed_bytes);
-            g.update_progress(self.completed_bytes);
-            g.set_completed_length(self.completed_bytes);
-            drop(g);
-            let mut g = self.group.recover_mut();
-            g.complete()?;
+            {
+                let g = self.group.recover();
+                g.set_total_length(self.completed_bytes);
+                g.update_progress(self.completed_bytes);
+                g.set_completed_length(self.completed_bytes);
+            }
+            {
+                let mut g = self.group.recover_mut();
+                g.complete()?;
+            }
             self.completed = true;
-            release_path(&self.output_path);
+            release_path(&self.output_path).await;
             return Ok(());
         }
 
@@ -173,7 +175,7 @@ impl Command for DownloadCommand {
         // Release the registered output path so future downloads can reuse
         // the filename.
         if let Err(e) = self.check_cancelled() {
-            release_path(&self.output_path);
+            release_path(&self.output_path).await;
             return Err(e);
         }
 
@@ -240,11 +242,13 @@ impl Command for DownloadCommand {
                                 self.completed_bytes = total_length;
                                 resume_state.start_offset = total_length;
                                 resume_state.is_complete = true;
-                                let mut group = self.group.recover_mut();
-                                group.set_completed_length(total_length);
-                                group.complete()?;
+                                {
+                                    let mut group = self.group.recover_mut();
+                                    group.set_completed_length(total_length);
+                                    group.complete()?;
+                                }
                                 self.completed = true;
-                                release_path(&self.output_path);
+                                release_path(&self.output_path).await;
                                 return Ok(());
                             }
                         }
@@ -422,7 +426,7 @@ impl Command for DownloadCommand {
             g.update_progress(total);
             g.set_completed_length(total);
         }
-        release_path(&self.output_path);
+        release_path(&self.output_path).await;
         download_result
     }
 

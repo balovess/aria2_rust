@@ -14,7 +14,7 @@ fn test_e2e_serialize_single_entry() {
     let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
     let text = entry.serialize();
     assert!(text.contains("http://example.com/file.zip"));
-    assert!(text.contains("GID=d270c8a2"));
+    assert!(text.contains("GID=00000000d270c8a2"));
 
     let entries = deserialize(&text).unwrap();
     assert_eq!(entries.len(), 1);

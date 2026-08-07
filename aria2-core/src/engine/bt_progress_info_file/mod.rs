@@ -63,6 +63,8 @@ pub struct BtProgressManager {
     save_dir: PathBuf,
     /// SHA-1 digest of the last written content (for dedup)
     last_digest: Option<[u8; 20]>,
+    /// Serializes replacement of the shared progress path.
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl BtProgressManager {
@@ -79,6 +81,7 @@ impl BtProgressManager {
         Ok(Self {
             save_dir: save_dir.to_path_buf(),
             last_digest: None,
+            write_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -92,6 +95,10 @@ impl BtProgressManager {
     /// `fs::rename` fails if the destination already exists, so the existing
     /// file is removed first (last-writer-wins semantics).
     pub fn save_progress(&self, info_hash: &[u8; 20], progress: &BtProgress) -> Result<()> {
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Aria2Error::Io("BT progress write lock is poisoned".into()))?;
         let path = self.get_progress_file_path(info_hash);
         let data = binary::serialize_binary(progress)?;
 

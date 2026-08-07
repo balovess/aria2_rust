@@ -533,14 +533,25 @@ pub type SharedCheckIntegrityMan = Arc<RwLock<CheckIntegrityMan>>;
 /// Must be called from a tokio runtime context.
 pub fn shared() -> SharedCheckIntegrityMan {
     static SHARED: OnceLock<SharedCheckIntegrityMan> = OnceLock::new();
-    static WORKER: OnceLock<()> = OnceLock::new();
+    static WORKER: OnceLock<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+        OnceLock::new();
 
     let man = SHARED
         .get_or_init(|| Arc::new(RwLock::new(CheckIntegrityMan::new())))
         .clone();
-    let _ = WORKER.get_or_init(|| {
-        tokio::spawn(worker_loop(man.clone()));
-    });
+    // A worker is tied to the runtime that spawned it. Recreate it when the
+    // previous runtime has shut down instead of retaining a stale start flag.
+    let worker = WORKER.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = match worker.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished)
+    {
+        *guard = Some(tokio::spawn(worker_loop(man.clone())));
+    }
     man
 }
 

@@ -132,6 +132,7 @@ pub async fn run_engine_loop(
     let mut last_housekeeping = Instant::now();
     let mut halt_requested = false;
     let mut force_halt_requested = false;
+    let mut shutdown_received = false;
 
     // Completion channel: spawned tasks send (GID, TaskResult) here when done.
     let (completion_tx, mut completion_rx) =
@@ -289,7 +290,8 @@ pub async fn run_engine_loop(
             _ = ticker.tick() => {
                 // Next tick
             }
-            Ok(_) = &mut shutdown_rx => {
+            Ok(_) = &mut shutdown_rx, if !shutdown_received => {
+                shutdown_received = true;
                 info!("Shutdown signal received");
                 // Process graceful halt
                 let man = ctx.group_man.read().await;
@@ -591,7 +593,8 @@ async fn process_task_completions(
                         let code = group.recover().get_last_error_code();
                         group.recover().mark_error_with_code(code, message);
                     } else {
-                        match group.recover().get_halt_reason() {
+                        let halt_reason = group.recover().get_halt_reason();
+                        match halt_reason {
                             crate::request::request_group::HaltReason::UserRequest => {
                                 group.recover().mark_removed();
                             }

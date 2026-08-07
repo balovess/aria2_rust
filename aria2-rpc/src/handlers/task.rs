@@ -297,6 +297,13 @@ impl RpcEngine {
         {
             return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
         }
+        if let Some(group_man) = &self.group_man {
+            group_man
+                .write()
+                .await
+                .pause_group(gid_parsed)
+                .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
+        }
         engine_cmd_tx
             .send(EngineCommand::Pause { gid: gid_parsed })
             .map_err(|e| {
@@ -364,6 +371,13 @@ impl RpcEngine {
             && group_man.read().await.group_by_hex(&gid).is_none()
         {
             return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+        }
+        if let Some(group_man) = &self.group_man {
+            group_man
+                .write()
+                .await
+                .unpause_group(gid_parsed)
+                .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
         }
         engine_cmd_tx
             .send(EngineCommand::Unpause { gid: gid_parsed })

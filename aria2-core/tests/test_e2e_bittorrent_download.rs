@@ -93,7 +93,15 @@ async fn test_tracker_udp_e2e_uses_connect_and_announce() {
     .expect("UDP tracker returned no result");
 
     assert_eq!(result.tracker_url, tracker.url());
-    assert_eq!(result.peers, vec![("127.0.0.1".to_string(), 45057)]);
+    let mut peers = result.peers;
+    peers.sort_unstable();
+    assert_eq!(
+        peers,
+        vec![
+            ("10.0.0.1".to_string(), 6882),
+            ("192.168.1.1".to_string(), 6881),
+        ]
+    );
 }
 
 #[tokio::test]
