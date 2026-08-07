@@ -70,6 +70,15 @@ impl ReservedQueue {
         self.groups.recover_mut().pop_front()
     }
 
+    /// Remove and return every group still waiting in the queue.
+    ///
+    /// Force shutdown uses this to discard work that has not acquired an
+    /// engine slot yet. Active groups remain owned by the engine so their
+    /// running commands can observe the force-halt request and finalize.
+    pub fn drain(&self) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
+        self.groups.recover_mut().drain(..).collect()
+    }
+
     /// Number of groups in the reserved queue.
     pub fn len(&self) -> usize {
         self.groups.recover().len()

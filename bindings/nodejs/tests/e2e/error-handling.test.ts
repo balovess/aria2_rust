@@ -4,14 +4,14 @@ import { RpcError, ConnectionError, TimeoutError } from '../../src/errors.js';
 import { skipIfNoBinary, startAria2Server } from './helpers.js';
 
 describe.skipIf(skipIfNoBinary())('Error Handling E2E', () => {
-  let aria2Server: { url: string; stop: () => Promise<void> };
+  let aria2Server: { url: string; stop: () => Promise<void> } | undefined;
 
   beforeAll(async () => {
     aria2Server = await startAria2Server();
   });
 
   afterAll(async () => {
-    await aria2Server.stop();
+    await aria2Server?.stop();
   });
 
   it('invalid GID throws RpcError', async () => {

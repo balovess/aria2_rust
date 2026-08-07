@@ -3,7 +3,8 @@
 > 目标：以 **aria2_original** 为兼容基准，完成完整兼容且高性能的 Rust 现代下载引擎迁移。
 > aria2-next 增强项仅选择性采纳（日志轮转、tail reclaim 等小型项），ED2K 协议缓后。
 >
-> 本文件是迁移过程的唯一主入口。逐文件对照结果记录在 `docs/migration/<module>.md`，
+> 当前真实完成度以 [docs/compatibility-status.md](compatibility-status.md) 为准。
+> 本文件是迁移过程的历史主台账。逐文件对照结果记录在 `docs/migration/<module>.md`，
 > 每个 C++ 单元只审计一次并登记日期，**避免重复对比或遗漏对比**。
 
 ## 决策记录（用户确认）
@@ -22,7 +23,9 @@
 
 ## 模块对照进度
 
-**530 / 530 单元已完成逐项对照（2026-07-30），2026-07-31 全模块达到零缺失。**
+**530 / 530 个 C++ 单元已完成逐项源码对照（2026-07-30）。**
+这只表示审计记录覆盖，不表示 Rust 已达到行为兼容、协议互操作或
+workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
 
 | 模块 | 矩阵文件 | 单元数 | 完整 | 部分 | 缺失 | 不适用 |
 |---|---|---|---|---|---|---|
@@ -53,9 +56,11 @@
 > 在 Rust 的 trait + 所有权 + tokio 异步模型下被语言机制直接取代。
 > 每一行均在结论列注明"由什么机制替代"，不存在未说明的跳过项。
 
-### 剩余 `缺失` 单元
+### 台账中的 `缺失` 列
 
-**0 项。** 2026-07-31 已消灭最后 2 项（`Sqlite3CookieParser` / `Sqlite3CookieParserImpl`）——
+台账当前将逐文件缺失列记为 **0 项**。这不是行为缺口为零的证明；
+例如 C ABI、完整完整性生命周期和部分 E2E 仍在当前状态矩阵中单独跟踪。
+2026-07-31 的历史记录曾处理最后 2 项（Sqlite3CookieParser / Sqlite3CookieParserImpl）——
 引入 `rusqlite`（`bundled` feature，静态编译 SQLite 进二进制，无系统依赖），
 新增 `aria2-core/src/http/sqlite_cookie_parser.rs`：`parse_firefox`（moz_cookies 表）、
 `parse_chromium`（Cookies 表，1601 微秒纪元 → UNIX 秒换算）、`parse_auto` +
@@ -344,3 +349,21 @@
 - `halt_watchers` 8 测试全绿、`engine_loop` 5 测试全绿
 - `cargo test -p aria2-core --lib piece_storage`：**89 passed / 0 failed，0.01 秒**
 - `aria2` / `aria2-rpc` 编译 0 error
+
+### 2026-08-07
+
+#### RPC 启动写锁阻塞与异步锁生命周期收口
+
+- **根因**：`aria2/src/app/mod.rs` 在计算是否存在恢复任务后，把
+  `RequestGroupMan` 的读 guard 保留到了整个 `App::run` 生命周期。RPC
+  `addUri` 的首个写锁因此永久等待。
+- **修复**：恢复任务数量改为短生命周期快照；应用层会话保存、Metalink
+  GID 分配、引擎 remove/force-halt 和 timeout housekeeping 均不再持有
+  manager guard 跨越异步等待。RPC add path 保持单一注册，不重复发送同一
+  `EngineCommand::AddDownload`。
+- **回归结果**：Node HTTP E2E 3/3、pause/resume 2/2，完整 Node E2E
+  11/11；Node unit 86/86；`aria2-rpc` lib 201/201；默认
+  `aria2-core` lib 2428 passed、1 ignored；all-features workspace lib
+  matrix 通过。
+- **环境限制**：Python binding 测试尚未执行。当前虚拟环境的 launcher
+  指向不存在的 Python 安装，需要修复解释器后再纳入 acceptance gate。

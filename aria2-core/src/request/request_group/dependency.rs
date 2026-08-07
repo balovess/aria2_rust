@@ -305,12 +305,16 @@ impl Dependency for NoDependency {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "bittorrent")]
     use crate::request::request_group::{DownloadOptions, MetadataInfo, RequestGroup};
     #[cfg(feature = "bittorrent")]
     use crate::util::rwlock_ext::RwLockRecover;
+    #[cfg(feature = "bittorrent")]
     use std::path::PathBuf;
+    #[cfg(feature = "bittorrent")]
     use std::sync::{Arc, RwLock};
 
+    #[cfg(feature = "bittorrent")]
     fn minimal_torrent() -> Vec<u8> {
         let mut data = b"d8:announce28:http://tracker.test/announce4:infod6:lengthi0e4:name4:test12:piece lengthi16384e6:pieces20:".to_vec();
         data.extend_from_slice(&[

@@ -276,9 +276,14 @@ impl App {
             }
         }
 
-        // Check if there are any inputs (restored tasks or CLI URIs)
-        let man = self.request_man.read().await;
-        let has_restored_tasks = man.count() > 0;
+        // Check if there are any inputs (restored tasks or CLI URIs). Keep the
+        // manager guard scoped to this synchronous snapshot: `run` continues
+        // through RPC startup and the engine lifetime, so retaining it here
+        // would starve the first RPC write lock indefinitely.
+        let has_restored_tasks = {
+            let man = self.request_man.read().await;
+            man.count() > 0
+        };
 
         // In daemon mode, we need RPC enabled to control the daemon
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);

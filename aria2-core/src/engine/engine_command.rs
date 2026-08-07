@@ -66,6 +66,15 @@ pub enum EngineCommand {
 
     /// Change the maximum concurrent download limit.
     SetMaxConcurrent { max: u32 },
+
+    /// Change the process-wide download and upload rate limits.
+    ///
+    /// `None` means unlimited. The engine keeps one shared limiter handle so
+    /// this update also affects commands that were already spawned.
+    SetGlobalRateLimit {
+        download_limit: Option<u64>,
+        upload_limit: Option<u64>,
+    },
 }
 
 /// Result of a completed download task, sent back to the engine loop.

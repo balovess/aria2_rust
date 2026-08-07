@@ -12,4 +12,9 @@ bindings/python/tests/__pycache__/
 *.md
 *.7z
 *.bak
-docs/
+!docs/
+!docs/compatibility-status.md
+AGENTS.md
+docs/compatibility-status.md
+docs/MIGRATION.md
+

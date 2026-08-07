@@ -712,12 +712,14 @@ impl SshConnectionPool {
 
     /// Remove and close a specific connection from the pool
     pub async fn remove(&mut self, target: &str) -> Option<SshConnection> {
-        self.connections.remove(target).map(|arc| {
-            // We need to extract the inner value; in practice this requires careful handling
-            // For now, just mark it for removal
-            drop(arc);
-            unreachable!("Pool removal requires ownership transfer")
-        })
+        let connection = self.connections.remove(target)?;
+
+        // A caller may still hold a clone returned by `get_or_create`. In that
+        // case the pool can evict its own reference, but it cannot safely take
+        // ownership of the connection out of the mutex yet. Returning `None`
+        // reports that distinction without panicking or leaking a live entry.
+        let connection = Arc::try_unwrap(connection).ok()?;
+        Some(connection.into_inner())
     }
 
     /// Close all connections in the pool
@@ -884,6 +886,35 @@ mod tests {
         let pool = SshConnectionPool::new(3, Duration::from_secs(300));
         assert!(pool.is_empty());
         assert_eq!(pool.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_connection_pool_remove_unknown_is_noop() {
+        let mut pool = SshConnectionPool::new(1, Duration::from_secs(60));
+        assert!(pool.remove("missing@example.com:22").await.is_none());
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_host_key_fingerprint_formats() {
+        let key = keys::parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
+        )
+        .expect("fixture key must parse");
+        let key_bytes = key.to_bytes().expect("fixture key must encode");
+
+        let md5_digest = format!("md5={}", hex::encode(Md5::digest(&key_bytes)));
+        let sha1_digest = format!("sha-1={}", hex::encode(Sha1::digest(&key_bytes)));
+        let sha256_digest = key.fingerprint(HashAlg::Sha256).to_string();
+
+        assert!(matches_fingerprint(&key, &md5_digest));
+        assert!(matches_fingerprint(&key, &sha1_digest));
+        assert!(matches_fingerprint(
+            &key,
+            &format!("sha-256={sha256_digest}")
+        ));
+        assert!(!matches_fingerprint(&key, "sha-1=00"));
+        assert!(!matches_fingerprint(&key, "unknown=00"));
     }
 
     #[test]

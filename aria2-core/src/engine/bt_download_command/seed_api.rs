@@ -57,7 +57,8 @@ impl BtDownloadCommand {
             SeedExitCondition::with_time_and_ratio(seed_time.unwrap_or(0), seed_ratio);
 
         let config = BtSeedingConfig {
-            max_upload_bytes_per_sec: None, // Will be set from options if needed
+            max_upload_bytes_per_sec: self.group.recover().options().max_upload_limit,
+            global_limiter: self.global_limiter.clone(),
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         };

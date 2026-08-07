@@ -34,7 +34,14 @@ impl DownloadEngine {
             server_stat_man: super::super::super::selector::server_stat_man::ServerStatMan::shared(
             )
             .clone(),
-            global_limiter: self.global_limiter.clone(),
+            // Keep a shared limiter even when no limit was configured. This
+            // gives runtime RPC changes a stable handle that is already
+            // present in every spawned command.
+            global_limiter: Some(
+                self.global_limiter
+                    .take()
+                    .unwrap_or_else(crate::rate_limiter::RateLimiter::unlimited),
+            ),
         };
 
         super::super::engine_loop::run_engine_loop(

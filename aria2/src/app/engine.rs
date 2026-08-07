@@ -13,6 +13,8 @@ use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
+#[cfg(feature = "metalink")]
+use aria2_protocol::metalink::parser::MetalinkDocument;
 use std::sync::Arc;
 use tracing::info;
 
@@ -231,10 +233,29 @@ impl App {
                 .all(|input| matches!(input.input_type, InputType::MetalinkFile));
         #[cfg(feature = "metalink")]
         if all_metalink_inputs {
-            let mut gid_iter = {
+            // Reserve a local GID sequence before parsing/building groups.
+            // The old iterator captured the async manager read guard across
+            // the conversion loop, which could block RPC writes for the
+            // entire Metalink conversion. Two IDs per file cover both the
+            // direct-resource and metadata/payload graph paths.
+            let gid_count = self
+                .detected_inputs
+                .iter()
+                .filter_map(|input| input.file_data.as_deref())
+                .map(|data| {
+                    MetalinkDocument::parse(data, None)
+                        .map(|document| document.files.len().saturating_mul(2))
+                        .map_err(|error| format!("Metalink GID reservation failed: {error}"))
+                })
+                .try_fold(0usize, |total, count| {
+                    count.map(|count| total.saturating_add(count))
+                })?;
+            let first_gid = {
                 let man = self.request_man.read().await;
-                (0..).map(move |_| man.next_available_gid())
+                man.next_available_gid().value()
             };
+            let mut gid_iter =
+                (0..gid_count).map(|offset| GroupId::new(first_gid.saturating_add(offset as u64)));
             for input in &self.detected_inputs {
                 let data = input
                     .file_data

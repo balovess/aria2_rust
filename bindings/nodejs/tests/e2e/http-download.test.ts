@@ -3,9 +3,9 @@ import { Aria2Client } from '../../src/client.js';
 import { skipIfNoBinary, startFileServer, startAria2Server } from './helpers.js';
 
 describe.skipIf(skipIfNoBinary())('HTTP Download E2E', () => {
-  let client: Aria2Client;
-  let fileServer: { url: string; stop: () => Promise<void> };
-  let aria2Server: { url: string; stop: () => Promise<void> };
+  let client: Aria2Client | undefined;
+  let fileServer: { url: string; stop: () => Promise<void> } | undefined;
+  let aria2Server: { url: string; stop: () => Promise<void> } | undefined;
 
   beforeAll(async () => {
     aria2Server = await startAria2Server();
@@ -14,9 +14,9 @@ describe.skipIf(skipIfNoBinary())('HTTP Download E2E', () => {
   });
 
   afterAll(async () => {
-    await client.close();
-    await fileServer.stop();
-    await aria2Server.stop();
+    await client?.close();
+    await fileServer?.stop();
+    await aria2Server?.stop();
   });
 
   it('addUri and check status', async () => {

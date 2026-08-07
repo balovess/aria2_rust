@@ -577,13 +577,10 @@ impl RpcEngine {
                 "aria2.shutdown is not supported by the core state model".into(),
             )
         })?;
-        let active_count = group_man
-            .read()
-            .await
-            .all_groups()
-            .into_iter()
-            .filter(|(_, group)| group.recover().status() == DownloadStatus::Active)
-            .count();
+        // Shutdown covers both active and waiting work. A request can reach
+        // RPC before the engine's next promotion tick, and that queued task
+        // must still be included in the shutdown acknowledgement.
+        let active_count = group_man.read().await.count();
         let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
             JsonRpcError::RpcExecution(
                 "aria2.shutdown is not supported by the core state model".into(),
@@ -614,7 +611,15 @@ impl RpcEngine {
                 "aria2.forceShutdown is not supported by the core state model".into(),
             )
         })?;
-        let cancelled_count = group_man.read().await.count();
+        let cancelled_count = {
+            let man = group_man.read().await;
+            let count = man.count();
+            // Queued groups have no command handle to drain, so remove them
+            // synchronously. Active groups remain in the manager until the
+            // delayed force-halt command reaches the engine loop.
+            man.force_remove_reserved();
+            count
+        };
         let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
             JsonRpcError::RpcExecution(
                 "aria2.forceShutdown is not supported by the core state model".into(),
@@ -637,8 +642,13 @@ impl RpcEngine {
 
     /// Internal helper to add a new download task.
     ///
-    /// Registers a `RequestGroup` and sends `EngineCommand::AddDownload` to the
-    /// single core download engine.
+    /// Registers a `RequestGroup` in the shared reserved queue and notifies
+    /// the engine loop with one idempotent `AddDownload` command.
+    ///
+    /// Registration happens before the command is sent so RPC status queries
+    /// can observe the task immediately. The engine-side insert is guarded by
+    /// the GID check in `add_group_arc`, so this notification cannot enqueue a
+    /// second copy of the group.
     async fn add_task(
         &self,
         uris: Vec<String>,
@@ -667,34 +677,36 @@ impl RpcEngine {
                 .map_err(|e| JsonRpcError::InvalidParams(format!("Invalid checksum: {}", e)))?;
         }
 
-        // Start a real download only through the structured engine command path.
-        let mut registered_in_group_man = false;
-        if let (Some(group_man), Some(engine_cmd_tx)) = (&self.group_man, &self.engine_cmd_tx) {
-            let man = group_man.read().await;
-            man.add_group_with_gid(gid, uris.clone(), dl_options.clone())
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::InternalError("RequestGroupMan is required".into()))?;
+        let engine_cmd_tx = self
+            .engine_cmd_tx
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::InternalError("Engine command channel is required".into()))?
+            .clone();
+
+        let group = {
+            // Serialize the check-and-insert so concurrent RPC calls cannot
+            // observe the same GID as available at the same time.
+            let man = group_man.write().await;
+            man.add_group_with_gid(gid, uris, dl_options)
                 .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
-
-            let group = man.group_by_id(gid).ok_or_else(|| {
+            man.group_by_id(gid).ok_or_else(|| {
                 JsonRpcError::InternalError("Group not found after insert".into())
-            })?;
+            })?
+        };
 
-            // Send EngineCommand::AddDownload to the engine loop.
-            // The loop will promote the group from reserved to active on the
-            // next tick, create the appropriate Command, and spawn it.
-            use aria2_core::engine::engine_command::EngineCommand;
-            engine_cmd_tx
-                .send(EngineCommand::AddDownload { group })
-                .map_err(|e| {
-                    JsonRpcError::InternalError(format!("Failed to send engine command: {}", e))
-                })?;
-            registered_in_group_man = true;
+        if let Err(error) = engine_cmd_tx.send(EngineCommand::AddDownload { group }) {
+            // The group has not been promoted yet, so it can be removed
+            // synchronously if the engine has already gone away.
+            let _ = group_man.write().await.remove_group_by_id(gid);
+            return Err(JsonRpcError::InternalError(format!(
+                "Failed to send engine command: {error}"
+            )));
         }
 
-        if !registered_in_group_man {
-            return Err(JsonRpcError::InternalError(
-                "RequestGroupMan and engine command channel are required".into(),
-            ));
-        }
         let mut task_opts = self.task_opts.write().await;
         task_opts.insert(gid_str.clone(), merged_options);
         // C++ aria2 notification only includes gid (no files field)

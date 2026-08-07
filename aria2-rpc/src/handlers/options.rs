@@ -133,6 +133,59 @@ const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "show-files",
 ];
 
+fn parse_non_negative_u64(value: &serde_json::Value, option: &str) -> Result<u64, JsonRpcError> {
+    if let Some(value) = value.as_u64() {
+        return Ok(value);
+    }
+    if let Some(value) = value.as_i64() {
+        return u64::try_from(value).map_err(|_| {
+            JsonRpcError::InvalidParams(format!("Option '{}' must be non-negative", option))
+        });
+    }
+    if let Some(value) = value.as_str() {
+        return value.trim().parse::<u64>().map_err(|_| {
+            JsonRpcError::InvalidParams(format!("Option '{}' must be an integer", option))
+        });
+    }
+    Err(JsonRpcError::InvalidParams(format!(
+        "Option '{}' must be an integer",
+        option
+    )))
+}
+
+fn parse_rate_limit(value: &serde_json::Value, option: &str) -> Result<Option<u64>, JsonRpcError> {
+    let raw = if let Some(value) = value.as_str() {
+        value.trim().to_string()
+    } else {
+        parse_non_negative_u64(value, option)?.to_string()
+    };
+    let (number, multiplier) = match raw.chars().last() {
+        Some('k' | 'K') => (&raw[..raw.len() - 1], 1024u64),
+        Some('m' | 'M') => (&raw[..raw.len() - 1], 1024u64 * 1024),
+        Some('g' | 'G') => (&raw[..raw.len() - 1], 1024u64 * 1024 * 1024),
+        Some('t' | 'T') => (&raw[..raw.len() - 1], 1024u64 * 1024 * 1024 * 1024),
+        _ => (raw.as_str(), 1),
+    };
+    let number = number.parse::<f64>().map_err(|_| {
+        JsonRpcError::InvalidParams(format!("Option '{}' must be a byte rate", option))
+    })?;
+    if !number.is_finite() || number < 0.0 {
+        return Err(JsonRpcError::InvalidParams(format!(
+            "Option '{}' must be a non-negative byte rate",
+            option
+        )));
+    }
+    let bytes = number * multiplier as f64;
+    if bytes > u64::MAX as f64 {
+        return Err(JsonRpcError::InvalidParams(format!(
+            "Option '{}' is too large",
+            option
+        )));
+    }
+    let bytes = bytes as u64;
+    Ok((bytes > 0).then_some(bytes))
+}
+
 impl RpcEngine {
     /// Handle `aria2.getGlobalOption` - Get global configuration options.
     ///
@@ -169,6 +222,21 @@ impl RpcEngine {
             }
         }
 
+        let current_download_limit = self
+            .global_opts
+            .read()
+            .await
+            .get("max-overall-download-limit")
+            .map(|value| parse_rate_limit(value, "max-overall-download-limit"))
+            .transpose()?;
+        let current_upload_limit = self
+            .global_opts
+            .read()
+            .await
+            .get("max-overall-upload-limit")
+            .map(|value| parse_rate_limit(value, "max-overall-upload-limit"))
+            .transpose()?;
+
         let mut opts = self.global_opts.write().await;
         for (k, v) in &new_opts {
             opts.insert(k.clone(), v.clone());
@@ -185,17 +253,37 @@ impl RpcEngine {
         // Apply engine-level options live.
         // max-concurrent-downloads drives the engine's slot limit; the
         // engine loop reduces excess active downloads immediately.
-        if let Some(max) = new_opts
-            .get("max-concurrent-downloads")
-            .and_then(|v| v.as_u64())
+        if let Some(value) = new_opts.get("max-concurrent-downloads")
             && let Some(tx) = &self.engine_cmd_tx
         {
+            let max = parse_non_negative_u64(value, "max-concurrent-downloads")?;
             use aria2_core::engine::engine_command::EngineCommand;
-            let _ = tx.send(EngineCommand::SetMaxConcurrent { max: max as u32 });
+            let max = u32::try_from(max).map_err(|_| {
+                JsonRpcError::InvalidParams(
+                    "Option 'max-concurrent-downloads' is too large".to_string(),
+                )
+            })?;
+            let _ = tx.send(EngineCommand::SetMaxConcurrent { max });
         }
-        // TODO(engine): max-overall-download-limit / max-overall-upload-limit
-        // need a global RateLimiter in the engine (per-download limits already
-        // work via max-download-limit / max-upload-limit).
+        if new_opts.contains_key("max-overall-download-limit")
+            || new_opts.contains_key("max-overall-upload-limit")
+        {
+            let download_limit = match new_opts.get("max-overall-download-limit") {
+                Some(value) => parse_rate_limit(value, "max-overall-download-limit")?,
+                None => current_download_limit.flatten(),
+            };
+            let upload_limit = match new_opts.get("max-overall-upload-limit") {
+                Some(value) => parse_rate_limit(value, "max-overall-upload-limit")?,
+                None => current_upload_limit.flatten(),
+            };
+            if let Some(tx) = &self.engine_cmd_tx {
+                use aria2_core::engine::engine_command::EngineCommand;
+                let _ = tx.send(EngineCommand::SetGlobalRateLimit {
+                    download_limit,
+                    upload_limit,
+                });
+            }
+        }
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             "OK",

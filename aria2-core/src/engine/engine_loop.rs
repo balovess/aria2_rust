@@ -119,7 +119,7 @@ fn mark_session_dirty(ctx: &EngineLoopContext) {
 /// The loop processes `EngineCommand`s from `cmd_rx`, task completion
 /// notifications from `completion_rx`, and runs periodic housekeeping.
 pub async fn run_engine_loop(
-    ctx: EngineLoopContext,
+    mut ctx: EngineLoopContext,
     mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     tick_interval: Duration,
@@ -146,7 +146,7 @@ pub async fn run_engine_loop(
         // batch RPC requests (e.g. addUri followed by unpause) are applied
         // atomically within the same tick.
         process_engine_commands(
-            &ctx,
+            &mut ctx,
             &mut cmd_rx,
             &mut running_downloads,
             &mut halt_requested,
@@ -315,7 +315,7 @@ pub async fn run_engine_loop(
 
 /// Process all pending `EngineCommand` messages from the channel.
 async fn process_engine_commands(
-    ctx: &EngineLoopContext,
+    ctx: &mut EngineLoopContext,
     cmd_rx: &mut mpsc::UnboundedReceiver<EngineCommand>,
     running_downloads: &mut [(GroupId, RunningDownload)],
     halt_requested: &mut bool,
@@ -349,8 +349,11 @@ async fn process_engine_commands(
             }
 
             EngineCommand::RemoveDownload { gid } => {
-                let man = ctx.group_man.read().await;
-                if let Err(e) = man.remove_group(gid) {
+                let remove_result = {
+                    let man = ctx.group_man.read().await;
+                    man.remove_group(gid)
+                };
+                if let Err(e) = remove_result {
                     warn!(gid = gid.value(), error = %e, "Failed to remove download");
                     continue;
                 }
@@ -367,8 +370,11 @@ async fn process_engine_commands(
             }
 
             EngineCommand::ForceRemoveDownload { gid } => {
-                let man = ctx.group_man.read().await;
-                if let Err(e) = man.force_remove_group(gid) {
+                let remove_result = {
+                    let man = ctx.group_man.read().await;
+                    man.force_remove_group(gid)
+                };
+                if let Err(e) = remove_result {
                     warn!(gid = gid.value(), error = %e, "Failed to force-remove download");
                     continue;
                 }
@@ -446,8 +452,10 @@ async fn process_engine_commands(
             }
 
             EngineCommand::ForceHaltAll { reason } => {
-                let man = ctx.group_man.read().await;
-                man.force_halt_all(reason);
+                {
+                    let man = ctx.group_man.read().await;
+                    man.force_halt_all(reason);
+                }
                 *force_halt_requested = true;
 
                 for (_, running) in running_downloads.iter_mut() {
@@ -480,6 +488,27 @@ async fn process_engine_commands(
                         );
                     }
                 }
+            }
+
+            EngineCommand::SetGlobalRateLimit {
+                download_limit,
+                upload_limit,
+            } => {
+                let limiter = ctx
+                    .global_limiter
+                    .get_or_insert_with(RateLimiter::unlimited);
+                limiter.set_download_rate(download_limit);
+                limiter.set_upload_rate(upload_limit);
+
+                // Keep the manager's option snapshot aligned with the live
+                // limiter. This is also used by status/reporting code.
+                let man = ctx.group_man.read().await;
+                man.set_global_speed_limit(download_limit, upload_limit);
+                info!(
+                    download_limit = ?download_limit,
+                    upload_limit = ?upload_limit,
+                    "Global speed limits updated"
+                );
             }
         }
     }
@@ -745,44 +774,50 @@ async fn run_housekeeping(
         }
     }
 
-    if !timed_out.is_empty() {
-        let man = ctx.group_man.read().await;
-        for gid in timed_out {
-            if let Some(group) = man.get_group(gid) {
-                let request_contexts = group.recover().connection_contexts();
-                let uris = group.recover().get_all_uris();
-                if let Some(uri) = uris.first()
-                    && let Ok(parsed) = reqwest::Url::parse(uri)
-                    && let Some(host) = parsed.host_str()
-                {
-                    let protocol = parsed.scheme().to_ascii_lowercase();
-                    ctx.server_stat_man
-                        .mark_failure_with_protocol(host, &protocol, 408);
-                    if !request_contexts.is_empty() {
-                        let mut dns = ctx.dns_cache.lock().await;
-                        for context in request_contexts {
-                            dns.mark_bad_context(&context);
-                            if !dns.has_good_address(&context.endpoint) {
-                                dns.remove_cached(
-                                    context.endpoint.hostname(),
-                                    context.endpoint.port(),
-                                );
-                            }
-                        }
+    for gid in timed_out {
+        let timeout_context = {
+            let man = ctx.group_man.read().await;
+            man.get_group(gid).map(|group| {
+                (
+                    group.recover().connection_contexts(),
+                    group.recover().get_all_uris(),
+                )
+            })
+        };
+
+        if let Some((request_contexts, uris)) = timeout_context
+            && let Some(uri) = uris.first()
+            && let Ok(parsed) = reqwest::Url::parse(uri)
+            && let Some(host) = parsed.host_str()
+        {
+            let protocol = parsed.scheme().to_ascii_lowercase();
+            ctx.server_stat_man
+                .mark_failure_with_protocol(host, &protocol, 408);
+            if !request_contexts.is_empty() {
+                let mut dns = ctx.dns_cache.lock().await;
+                for context in request_contexts {
+                    dns.mark_bad_context(&context);
+                    if !dns.has_good_address(&context.endpoint) {
+                        dns.remove_cached(context.endpoint.hostname(), context.endpoint.port());
                     }
                 }
             }
-            if man.timeout_group(gid) {
-                // Timeout is a graceful halt: the command observes the halt
-                // flag, flushes its writer, saves resumable progress, and
-                // publishes the single completion used for accounting. Do not
-                // abort here; aborting would bypass protocol-specific cleanup
-                // and can leave buffered bytes newer than the control file.
-                warn!(
-                    gid = gid.value(),
-                    "Download task timed out, requesting graceful halt"
-                );
-            }
+        }
+
+        let timed_out_now = {
+            let man = ctx.group_man.read().await;
+            man.timeout_group(gid)
+        };
+        if timed_out_now {
+            // Timeout is a graceful halt: the command observes the halt
+            // flag, flushes its writer, saves resumable progress, and
+            // publishes the single completion used for accounting. Do not
+            // abort here; aborting would bypass protocol-specific cleanup
+            // and can leave buffered bytes newer than the control file.
+            warn!(
+                gid = gid.value(),
+                "Download task timed out, requesting graceful halt"
+            );
         }
     }
 
@@ -1010,7 +1045,7 @@ mod tests {
 
         // The auto-save must share the SAME group manager that the engine
         // commands mutate, otherwise it serializes a stale/empty snapshot.
-        let ctx = EngineLoopContext {
+        let mut ctx = EngineLoopContext {
             group_man: man,
             ftp_pool: Arc::new(FtpConnectionPool::new(1)),
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
@@ -1035,7 +1070,7 @@ mod tests {
         let mut force_halt_requested = false;
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         process_engine_commands(
-            &ctx,
+            &mut ctx,
             &mut rx,
             &mut Vec::new(),
             &mut halt_requested,
@@ -1067,6 +1102,61 @@ mod tests {
     // TaskResult::Failed("Download paused") (the download loop observes the
     // Paused status via check_cancelled). Before the fix the engine recorded
     // an Error, which is terminal and can never be unpaused.
+
+    #[tokio::test]
+    async fn global_rate_limit_command_updates_shared_limiter() {
+        let mut ctx = test_ctx(false);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(EngineCommand::SetGlobalRateLimit {
+            download_limit: Some(2_000),
+            upload_limit: Some(1_000),
+        })
+        .unwrap();
+
+        let (completion_tx, _completion_rx) =
+            mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
+        let mut running_downloads = Vec::new();
+        process_engine_commands(
+            &mut ctx,
+            &mut rx,
+            &mut running_downloads,
+            &mut false,
+            &mut false,
+            &completion_tx,
+        )
+        .await;
+
+        let limiter = ctx
+            .global_limiter
+            .as_ref()
+            .expect("runtime updates create the shared limiter")
+            .clone();
+        let config = limiter.config().await;
+        assert_eq!(config.download_rate(), Some(2_000));
+        assert_eq!(config.upload_rate(), Some(1_000));
+
+        tx.send(EngineCommand::SetGlobalRateLimit {
+            download_limit: None,
+            upload_limit: None,
+        })
+        .unwrap();
+        process_engine_commands(
+            &mut ctx,
+            &mut rx,
+            &mut running_downloads,
+            &mut false,
+            &mut false,
+            &completion_tx,
+        )
+        .await;
+        let config = limiter.config().await;
+        assert_eq!(config.download_rate(), None);
+        assert_eq!(config.upload_rate(), None);
+
+        let man = ctx.group_man.read().await;
+        assert_eq!(man.global_download_limit(), None);
+        assert_eq!(man.global_upload_limit(), None);
+    }
 
     #[tokio::test]
     async fn paused_task_failure_keeps_group_paused() {

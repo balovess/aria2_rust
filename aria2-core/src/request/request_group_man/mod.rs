@@ -455,6 +455,26 @@ impl RequestGroupMan {
         }
     }
 
+    /// Remove all groups that have not started yet.
+    ///
+    /// A force shutdown must not leave queued work behind while the engine is
+    /// terminating. Active groups are deliberately untouched here: the engine
+    /// still owns their command handles and will force-halt them through
+    /// [`Self::force_halt_all`].
+    pub fn force_remove_reserved(&self) -> usize {
+        let groups = self.reserved.drain();
+        let removed = groups.len();
+        for group_lock in groups {
+            let mut group = group_lock.recover_mut();
+            let _ = group.remove();
+            self.stopped.add(group.create_download_result());
+        }
+        if removed > 0 {
+            info!(removed, "Removed reserved downloads during force shutdown");
+        }
+        removed
+    }
+
     // ── Option Updates ──────────────────────────────────────────────────
 
     pub fn update_group_options(

@@ -9,6 +9,25 @@ import httpx
 from .errors import AuthError, ConnectionError, RpcError, TimeoutError
 
 
+def _is_auth_rpc_error(code: Any, message: str) -> bool:
+    """Recognize auth failures without confusing aria2 domain code 1 errors."""
+    if code == -32001:
+        return True
+
+    normalized = message.casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "unauthorized",
+            "auth fail",
+            "authentication",
+            "authorization",
+            "invalid token",
+            "token required",
+        )
+    )
+
+
 @runtime_checkable
 class Transport(Protocol):
     async def send_request(self, method: str, params: list) -> Any:
@@ -52,6 +71,8 @@ class HttpTransport:
         try:
             response = await self._client.post(self._url, json=payload)
             response.raise_for_status()
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise ConnectionError(f"Connection error: {exc}") from exc
         except httpx.TimeoutException as exc:
             raise TimeoutError(f"Request timed out: {exc}") from exc
         except httpx.HTTPStatusError as exc:
@@ -66,7 +87,7 @@ class HttpTransport:
             err = data["error"]
             err_msg = err.get("message", "Unknown RPC error")
             err_code = err.get("code", -1)
-            if err_code in (1, 2):
+            if _is_auth_rpc_error(err_code, err_msg):
                 raise AuthError(err_msg, err_code)
             raise RpcError(err_msg, err_code)
 

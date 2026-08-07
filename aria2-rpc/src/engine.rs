@@ -527,7 +527,7 @@ mod tests {
 
         let set_req = JsonRpcRequest::new(
             "aria2.changeGlobalOption",
-            serde_json::json!([{"max-concurrent-downloads": 3}]),
+            serde_json::json!([{"max-concurrent-downloads": "3"}]),
         )
         .with_id(1);
         let resp = engine.handle_request(&set_req).await;
@@ -538,6 +538,42 @@ mod tests {
         match rx.try_recv() {
             Ok(EngineCommand::SetMaxConcurrent { max }) => assert_eq!(max, 3),
             other => panic!("expected SetMaxConcurrent command, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_change_global_option_rate_limit_emits_command() {
+        use aria2_core::engine::engine_command::EngineCommand;
+
+        let engine = RpcEngine::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineCommand>();
+        let engine = engine.with_engine_cmd_tx(tx);
+
+        let set_req = JsonRpcRequest::new(
+            "aria2.changeGlobalOption",
+            serde_json::json!([
+                {
+                    "max-overall-download-limit": "2M",
+                    "max-overall-upload-limit": "0"
+                }
+            ]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&set_req).await;
+        assert!(resp.is_success());
+
+        match rx.try_recv() {
+            Ok(EngineCommand::SetGlobalRateLimit {
+                download_limit,
+                upload_limit,
+            }) => {
+                assert_eq!(download_limit, Some(2 * 1024 * 1024));
+                assert_eq!(upload_limit, None);
+            }
+            other => panic!(
+                "expected SetGlobalRateLimit command, got {:?}",
+                other.is_ok()
+            ),
         }
     }
 

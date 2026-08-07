@@ -26,6 +26,7 @@ impl BtDownloadCommand {
         let upload_limit = { self.group.recover().options().max_upload_limit };
         let config = BtSeedingConfig {
             max_upload_bytes_per_sec: upload_limit,
+            global_limiter: self.global_limiter.clone(),
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         };

@@ -155,9 +155,13 @@ impl App {
 
         let mgr = ActiveSessionManager::new(session_path, Duration::from_secs(interval as u64));
 
-        // Get all active groups
-        let man = self.request_man.read().await;
-        let groups = man.list_groups();
+        // Snapshot group handles before the asynchronous file write. The
+        // manager lock must not be held while session serialization performs
+        // filesystem I/O, otherwise RPC mutations can be blocked at shutdown.
+        let groups = {
+            let man = self.request_man.read().await;
+            man.list_groups()
+        };
 
         if groups.is_empty() {
             info!("No active download tasks, skipping session save");

@@ -15,9 +15,17 @@
 
 ---
 
-**aria2-rust** is a complete rewrite of the renowned [aria2](https://aria2.github.io/) download utility in Rust. It supports HTTP/HTTPS, FTP/SFTP, BitTorrent, and Metalink protocols, with JSON-RPC/XML-RPC/WebSocket remote control capabilities.
+**aria2-rust** is a Rust download engine in active compatibility migration
+against the [aria2](https://aria2.github.io/) implementation. It contains
+HTTP/HTTPS, FTP/SFTP, BitTorrent, Metalink, and JSON-RPC/XML-RPC/WebSocket
+paths; compatibility status and verification evidence are tracked in
+[docs/compatibility-status.md](docs/compatibility-status.md).
 
-## Features
+## Implemented Capabilities
+
+The capability inventory below describes code paths, not a claim that every
+feature has passed the complete cross-platform E2E matrix. See the
+[compatibility status](docs/compatibility-status.md) for the current gate.
 
 - **Multi-Protocol Download**: HTTP/HTTPS, FTP/SFTP, BitTorrent (DHT/PEX/MSE), Metalink V3/V4
 - **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
@@ -193,8 +201,10 @@ aria2c -i uris.txt
 
 ## Architecture
 
-Total Codebase: ~35,000+ lines Rust/TS  
-Test Suite: 1432+ tests passing
+The workspace contains four Rust crates plus Python and Node.js bindings.
+Test status is reported from reproducible commands in
+[docs/compatibility-status.md](docs/compatibility-status.md), rather than as
+a fixed historical test count.
 
 The project is organized as a Cargo workspace with 4 crates:
 
@@ -436,6 +446,9 @@ For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-gui
 | Seeding Mode | ✅ Complete | Upload support |
 
 **Known gaps and verification status:**
+- This table is a capability inventory, not a release compatibility claim.
+- The migration is not currently all pass; optional features, ignored
+  network tests, binding E2E suites, and the public C ABI remain tracked work.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.

@@ -17,6 +17,8 @@ pub trait PieceDataProvider: Send + Sync {
 
 pub struct BtSeedingConfig {
     pub max_upload_bytes_per_sec: Option<u64>,
+    /// Process-wide limiter shared by all download/seeding commands.
+    pub global_limiter: Option<RateLimiter>,
     pub max_peers_to_unchoke: usize,
     pub optimistic_unchoke_interval_secs: u64,
 }
@@ -25,6 +27,7 @@ impl Default for BtSeedingConfig {
     fn default() -> Self {
         Self {
             max_upload_bytes_per_sec: None,
+            global_limiter: None,
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         }
@@ -37,6 +40,7 @@ pub struct BtUploadSession {
     peer_interested: bool,
     uploaded_bytes: u64,
     upload_limiter: Option<RateLimiter>,
+    global_upload_limiter: Option<RateLimiter>,
     message_validator: Option<BtMessageValidator>,
     pub(crate) is_dead: bool,
 }
@@ -54,6 +58,7 @@ impl BtUploadSession {
             peer_interested: false,
             uploaded_bytes: 0,
             upload_limiter,
+            global_upload_limiter: config.global_limiter.clone(),
             message_validator: None,
             is_dead: false,
         }
@@ -99,6 +104,11 @@ impl BtUploadSession {
                                 if let Some(piece_data) = data {
                                     let data_len = piece_data.len() as u64;
                                     if let Some(ref lim) = self.upload_limiter {
+                                        lim.acquire_upload(data_len).await;
+                                    }
+                                    if let Some(ref lim) = self.global_upload_limiter
+                                        && lim.is_upload_limited()
+                                    {
                                         lim.acquire_upload(data_len).await;
                                     }
                                     self.conn.send_message(&BtMessage::Piece {

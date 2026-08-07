@@ -149,6 +149,10 @@ impl DownloadCommand {
         let path = std::path::PathBuf::from(&dir).join(&filename);
         let headers = options.parsed_headers();
 
+        // Every client construction path below must use the same rustls
+        // provider. The DNS-cache and proxy branches build custom clients
+        // instead of reusing the global pool client.
+        crate::http::client_pool::ensure_rustls_provider();
         let no_proxy = options.http_proxy.is_none() && options.all_proxy.is_none();
         let client = if no_proxy {
             if let Some(addresses) = resolved_addresses.as_deref()
