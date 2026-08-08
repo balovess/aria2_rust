@@ -22,12 +22,46 @@ use crate::error::Result;
 use async_trait::async_trait;
 use std::path::Path;
 
+/// Build the sequential writer used by single-source download commands.
+///
+/// Metadata sources selected by `follow-torrent=mem` or
+/// `follow-metalink=mem` use the same writer interface as normal downloads,
+/// but keep the completed bytes in memory and never open the output path.
+/// Keeping this choice at one seam prevents protocol adapters from drifting
+/// in their memory-download behavior.
+pub fn new_sequential_download_writer(
+    path: &Path,
+    in_memory: bool,
+    write_offset: u64,
+    expected_length: Option<u64>,
+) -> Box<dyn DiskWriter> {
+    if in_memory {
+        let capacity = expected_length.unwrap_or_default().min(usize::MAX as u64) as usize;
+        Box::new(ByteArrayDiskWriter::with_capacity(capacity))
+    } else if write_offset > 0 {
+        Box::new(DefaultDiskWriter::new_with_offset(path, write_offset))
+    } else {
+        Box::new(DefaultDiskWriter::new(path))
+    }
+}
+
 // ── Sequential writer trait ──────────────────────────────────────────────
 
 #[async_trait]
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
     async fn finalize(&mut self) -> Result<Vec<u8>>;
+}
+
+#[async_trait]
+impl DiskWriter for Box<dyn DiskWriter> {
+    async fn write(&mut self, data: &[u8]) -> Result<()> {
+        self.as_mut().write(data).await
+    }
+
+    async fn finalize(&mut self) -> Result<Vec<u8>> {
+        self.as_mut().finalize().await
+    }
 }
 
 // ── Positioned (seekable) writer trait ───────────────────────────────────

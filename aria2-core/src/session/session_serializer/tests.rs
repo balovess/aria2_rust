@@ -49,6 +49,63 @@ fn test_generated_child_groups_are_not_saved() {
     assert!(group_to_entry(&child.recover()).is_none());
 }
 
+#[cfg(feature = "bittorrent")]
+#[test]
+fn ordinary_follow_child_keeps_plain_session_identity() {
+    let child = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2),
+        vec!["bt://parent".to_string()],
+        DownloadOptions::default(),
+    )));
+    child
+        .recover()
+        .set_metadata_info(crate::request::request_group::MetadataInfo::new(
+            GroupId::new(1),
+            "https://example.test/parent.torrent",
+        ));
+    child.recover().set_following_gid(GroupId::new(1));
+
+    let entry = group_to_entry(&child.recover()).expect("plain child should be serializable");
+    assert_eq!(entry.gid, 2);
+    assert_eq!(entry.uris, vec!["bt://parent"]);
+    assert!(!entry.options.contains_key("aria2-rust-payload-gid"));
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[test]
+fn metalink_graph_session_entry_uses_metadata_identity_and_descriptor() {
+    let graph =
+        crate::engine::metalink_request_graph::MetalinkRequestGraph::new_memory_with_fallback(
+            "https://example.test/metadata.torrent",
+            "payload.bin",
+            &DownloadOptions::default(),
+            GroupId::new(0x10),
+            GroupId::new(0x20),
+            vec!["https://mirror.test/payload.bin".to_string()],
+        )
+        .expect("graph should be constructible");
+
+    let entry = group_to_entry(&graph.payload.recover()).expect("payload should be serializable");
+    assert_eq!(entry.gid, 0x10);
+    assert_eq!(entry.uris, vec!["https://example.test/metadata.torrent"]);
+    assert_eq!(
+        entry.options.get("aria2-rust-payload-gid"),
+        Some(&"0000000000000020".to_string())
+    );
+    assert_eq!(
+        entry.options.get("aria2-rust-metadata-uri"),
+        Some(&"https://example.test/metadata.torrent".to_string())
+    );
+    assert!(entry.options.contains_key("aria2-rust-fallback-uris"));
+
+    let restored = deserialize(&entry.serialize()).expect("serialized entry should parse");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored[0].options.get("aria2-rust-payload-gid"),
+        Some(&"0000000000000020".to_string())
+    );
+}
+
 #[test]
 fn test_deserialize_mixed_content() {
     // Test handling of mixed content: comments, blanks, valid entries

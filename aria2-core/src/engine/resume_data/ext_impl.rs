@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
-#[cfg(feature = "metalink")]
+#[cfg(any(feature = "metalink", feature = "bittorrent"))]
 use base64::Engine;
 
 impl ResumeDataExt for ResumeData {
@@ -68,19 +68,19 @@ impl ResumeDataExt for ResumeData {
 
         // Extract file info from options
         let options = group.options();
-        let output_path = options.out.clone().or_else(|| {
-            // Construct path from dir + out if both exist
-            options.dir.as_ref().and_then(|dir| {
-                options.out.as_ref().map(|out| {
-                    let mut p = dir.clone();
-                    if !p.ends_with('/') && !p.ends_with('\\') {
-                        p.push(std::path::MAIN_SEPARATOR);
-                    }
-                    p.push_str(out);
-                    p
-                })
+        let output_name = group.output_name().or_else(|| options.out.clone());
+        let output_path = output_name
+            .map(|name| {
+                let path = std::path::Path::new(&name);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else if let Some(dir) = options.dir.as_deref() {
+                    std::path::Path::new(dir).join(path)
+                } else {
+                    path.to_path_buf()
+                }
             })
-        });
+            .map(|path| path.to_string_lossy().into_owned());
 
         // Extract checksum if configured
         let checksum = options
@@ -90,6 +90,10 @@ impl ResumeDataExt for ResumeData {
                 algorithm: algo.clone(),
                 expected: expected.clone(),
             });
+
+        // Extract BT/metadata provenance before building the persisted option
+        // subset so graph restoration can recover the source task identity.
+        let metadata_info = group.metadata_info();
 
         // Extract download options subset for persistence
         let mut options_map = HashMap::new();
@@ -105,6 +109,16 @@ impl ResumeDataExt for ResumeData {
         if let Some(ref out) = options.out {
             options_map.insert("out".to_string(), out.clone());
         }
+        if let Some(info) = metadata_info.as_ref()
+            && let Some(metadata_gid) = info.gid()
+            && !info.uri().is_empty()
+        {
+            options_map.insert("metadata-gid".to_string(), metadata_gid.to_hex_string());
+            options_map.insert("metadata-uri".to_string(), info.uri().to_string());
+        }
+        if let Some(output_name) = group.output_name() {
+            options_map.insert("aria2-rust-output-name".to_string(), output_name);
+        }
         if let Some(mode) = options.follow_torrent {
             options_map.insert("follow-torrent".to_string(), mode.as_str().to_string());
         }
@@ -117,18 +131,70 @@ impl ResumeDataExt for ResumeData {
         if let Some(seed_ratio) = options.seed_ratio {
             options_map.insert("seed-ratio".to_string(), seed_ratio.to_string());
         }
+        if let Some((algorithm, expected)) = options.checksum.as_ref() {
+            options_map.insert(
+                "checksum".to_string(),
+                format!("{}={}", algorithm, expected),
+            );
+        }
+        if group.is_in_memory_download() {
+            options_map.insert("aria2-rust-memory-download".to_string(), "true".to_string());
+        }
+        if let Some(content_type) = group.content_type() {
+            options_map.insert("aria2-rust-content-type".to_string(), content_type);
+        }
+
+        #[cfg(feature = "bittorrent")]
+        if let Some((memory_source, fallback_uris, file_mappings)) =
+            group.bt_dependency_descriptor()
+        {
+            options_map.insert(
+                "aria2-rust-metadata-memory".to_string(),
+                memory_source.to_string(),
+            );
+            if let Ok(json) = serde_json::to_vec(&fallback_uris) {
+                options_map.insert(
+                    "aria2-rust-fallback-uris".to_string(),
+                    base64::engine::general_purpose::STANDARD.encode(json),
+                );
+            }
+            if let Ok(json) = serde_json::to_vec(&file_mappings) {
+                options_map.insert(
+                    "aria2-rust-file-mappings".to_string(),
+                    base64::engine::general_purpose::STANDARD.encode(json),
+                );
+            }
+        }
+
+        #[cfg(feature = "bittorrent")]
+        if let Some(data) = group.bt_metadata_data() {
+            options_map.insert(
+                "aria2-rust-bt-metadata-data".to_string(),
+                base64::engine::general_purpose::STANDARD.encode(data),
+            );
+        }
 
         // Extract BT-specific fields
         let bt_bitfield = group.get_bt_bitfield();
-        let metadata_info = group.metadata_info();
+        let bt_num_pieces = group.get_bt_num_pieces();
+        let bt_piece_length = group.get_bt_piece_length();
+        let bt_info_hash = group.get_bt_info_hash_hex();
         #[cfg(feature = "metalink")]
         let metalink_source = group.metalink_source();
 
         // Determine if this is a BT download from URI pattern or resolved
         // metadata provenance.
-        let is_bt = raw_uris.iter().any(|u| {
-            u.starts_with("magnet:?") || u.ends_with(".torrent") || u.starts_with("bt://")
-        }) || metadata_info.is_some();
+        #[cfg(feature = "bittorrent")]
+        let has_bt_runtime_state =
+            group.bt_metadata_data().is_some() || group.bt_dependency_descriptor().is_some();
+        #[cfg(not(feature = "bittorrent"))]
+        let has_bt_runtime_state = false;
+        let is_bt = raw_uris
+            .iter()
+            .any(|u| u.starts_with("magnet:?") || u.starts_with("bt://"))
+            || group.get_bt_num_pieces() > 0
+            || group.get_bt_info_hash_hex().is_some()
+            || has_bt_runtime_state;
 
         let (bitfield, bt_info_hash, bt_saved_metadata_path) = if is_bt {
             let bf = bt_bitfield.unwrap_or_default();
@@ -140,7 +206,7 @@ impl ResumeDataExt for ResumeData {
             let metadata_path = metadata_info
                 .as_ref()
                 .and_then(|info| info.metadata_path().map(str::to_owned));
-            (bf, info_hash, metadata_path)
+            (bf, info_hash.or(bt_info_hash), metadata_path)
         } else {
             (vec![], None, None)
         };
@@ -167,8 +233,8 @@ impl ResumeDataExt for ResumeData {
             completed_length,
             uploaded_length,
             bitfield,
-            num_pieces: None,   // Could be calculated from bitfield length
-            piece_length: None, // Would need to be stored in RequestGroup
+            num_pieces: (bt_num_pieces > 0).then_some(bt_num_pieces),
+            piece_length: (bt_piece_length > 0).then_some(bt_piece_length),
             status: status_str,
             error_message,
             last_download_time,

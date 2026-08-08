@@ -107,6 +107,9 @@ impl SftpDownloadCommand {
 
         // Step 5: Create the request group
         let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
+        if options.uses_memory_download() {
+            group.mark_in_memory_download();
+        }
 
         info!(
             "[SFTP-CMD] Created download command: {} -> {} ({}@{}:{}/{})",
@@ -143,6 +146,9 @@ impl SftpDownloadCommand {
         output_name: Option<&str>,
     ) -> Result<Self> {
         let (host, port, username, password, remote_path) = Self::parse_uri(uri)?;
+        if options.uses_memory_download() {
+            group.recover().mark_in_memory_download();
+        }
         let dir = output_dir
             .map(str::to_owned)
             .or_else(|| options.dir.clone())

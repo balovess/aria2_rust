@@ -6,7 +6,8 @@ use crate::util::rwlock_ext::RwLockRecover;
 impl RequestGroup {
     /// Mark this group as an in-memory source download.
     ///
-    /// Mirrors C++ `RequestGroup::markInMemoryDownload()` and is intentionally
+    /// This flag is both the pre-download request and the post-download state,
+    /// matching C++ `RequestGroup::markInMemoryDownload()`. It is intentionally
     /// independent of whether the bytes are BitTorrent or Metalink data.
     pub fn mark_in_memory_download(&self) {
         self.in_memory_download
@@ -50,6 +51,23 @@ impl RequestGroup {
         self.bt_metadata_data.recover().clone()
     }
 
+    /// Snapshot the durable parts of a BitTorrent dependency for session
+    /// serializers. Keeping this behind the RequestGroup seam avoids making
+    /// persistence code depend on the dependency's private storage layout.
+    #[cfg(feature = "bittorrent")]
+    pub fn bt_dependency_descriptor(
+        &self,
+    ) -> Option<(bool, Vec<String>, Vec<super::BtFileMapping>)> {
+        let dependency = self.dependency.recover();
+        let dependency = dependency.as_ref()?;
+        let dependency = dependency.as_any().downcast_ref::<super::BtDependency>()?;
+        Some((
+            dependency.uses_memory_source(),
+            dependency.fallback_uris().to_vec(),
+            dependency.file_mappings().to_vec(),
+        ))
+    }
+
     /// Attach metadata provenance to this group.
     pub fn set_metadata_info(&self, info: MetadataInfo) {
         *self.metadata_info.recover_mut() = Some(info);
@@ -82,5 +100,32 @@ impl RequestGroup {
     #[cfg(feature = "metalink")]
     pub fn metalink_base_uri(&self) -> Option<String> {
         self.metalink_base_uri.recover().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestGroup;
+    use crate::request::request_group::{DownloadOptions, GroupId};
+
+    #[test]
+    fn in_memory_source_state_is_explicit_and_retrievable() {
+        let group = RequestGroup::new(
+            GroupId::new(7),
+            vec!["https://example.test/a".into()],
+            DownloadOptions::default(),
+        );
+        assert!(!group.is_in_memory_download());
+        assert_eq!(group.in_memory_data(), None);
+
+        group.set_content_type("application/x-bittorrent");
+        group.set_in_memory_data(vec![1, 2, 3]);
+
+        assert!(group.is_in_memory_download());
+        assert_eq!(group.in_memory_data(), Some(vec![1, 2, 3]));
+        assert_eq!(
+            group.content_type().as_deref(),
+            Some("application/x-bittorrent")
+        );
     }
 }

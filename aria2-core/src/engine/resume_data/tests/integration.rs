@@ -188,6 +188,16 @@ async fn test_integration_from_request_group_roundtrip() {
         resume_data.checksum.is_some(),
         "Checksum should be extracted from options"
     );
+    let expected_output = std::path::Path::new("/downloads").join("test-file.bin");
+    assert_eq!(
+        resume_data.output_path.as_deref(),
+        Some(expected_output.to_string_lossy().as_ref()),
+        "Resume data must preserve the directory together with the output name"
+    );
+    assert_eq!(
+        resume_data.options.get("checksum").map(String::as_str),
+        Some("sha-256=abc123def4567890abcdef1234567890abcdef1234567890abcdef1234567890")
+    );
 
     // Validate the extracted data
     resume_data

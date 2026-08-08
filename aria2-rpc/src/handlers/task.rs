@@ -15,6 +15,8 @@ use aria2_core::request::request_group_man::ChangePositionMode;
 use aria2_core::session::save_session_command::SaveSessionCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::collections::HashMap;
+#[cfg(feature = "metalink")]
+use std::sync::Arc;
 
 /// Delay between answering a shutdown RPC and actually halting the engine.
 ///
@@ -186,58 +188,124 @@ impl RpcEngine {
             ));
         }
 
-        #[cfg(all(feature = "bittorrent", feature = "metalink"))]
-        if let Some(group_man) = &self.group_man {
-            let options = rpc_options_to_download_options(&opts);
-            let document =
-                aria2_protocol::metalink::parser::MetalinkDocument::parse(&decoded_bytes, None)
-                    .map_err(|error| JsonRpcError::InvalidParams(error.to_string()))?;
+        #[cfg(feature = "metalink")]
+        {
+            let group_man = self
+                .group_man
+                .as_ref()
+                .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is required".into()))?;
+            let engine_cmd_tx = self.engine_cmd_tx.as_ref().ok_or_else(|| {
+                JsonRpcError::RpcExecution("Engine command channel is required".into())
+            })?;
+
+            // Keep global RPC options and task options consistent with addUri.
+            // The converter is the only Metalink construction seam; no
+            // synthetic URI is used when the document contains direct files.
+            let merged_options = {
+                let user = self.user_global_opts.read().await;
+                let mut merged = user.clone();
+                merged.extend(opts.clone());
+                merged
+            };
+            let options = rpc_options_to_download_options(&merged_options);
+            if let Some((ref algo, ref value)) = options.checksum {
+                Checksum::from_type_and_value(algo, value).map_err(|error| {
+                    JsonRpcError::InvalidParams(format!("Invalid checksum: {error}"))
+                })?;
+            }
+
             let converter =
                 aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
-            let mut gids = Vec::new();
-            let man = group_man.read().await;
-            for file in document.files.iter().filter(|file| {
-                file.meta_urls.iter().any(|metaurl| {
-                    metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
-                })
-            }) {
-                let metadata_gid = man.next_available_gid();
-                let payload_gid = man.next_available_gid();
-                let graph = converter
-                    .create_torrent_graph(file, &options, metadata_gid, payload_gid)
+
+            // GID allocation and queue insertion are serialized by the
+            // manager lock. Parsing is bounded XML work and keeping the lock
+            // across this transaction prevents another RPC request from
+            // consuming the IDs between the resource and graph paths.
+            let mut registered = Vec::new();
+            let mut returned_gids = Vec::new();
+            {
+                let man = group_man.write().await;
+                let mut gids = std::iter::from_fn(|| Some(man.next_available_gid()));
+
+                #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+                let graphs = converter
+                    .create_torrent_graphs_from_bytes(&decoded_bytes, &options, &mut gids)
                     .map_err(|error| JsonRpcError::InvalidParams(error.to_string()))?;
-                let (metadata_gid, payload_gid) = man
-                    .add_metalink_graph(graph)
-                    .map_err(|error| JsonRpcError::InternalError(error.to_string()))?;
-                let _ = metadata_gid;
-                gids.push(payload_gid.to_hex_string());
+
+                let groups = converter
+                    .create_resource_groups_from_bytes(&decoded_bytes, &options, &mut gids)
+                    .map_err(|error| JsonRpcError::InvalidParams(error.to_string()))?;
+
+                for group in groups {
+                    let gid = group.recover().gid();
+                    man.add_group_arc(Arc::clone(&group));
+                    returned_gids.push(gid.to_hex_string());
+                    registered.push(group);
+                }
+
+                #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+                for graph in graphs {
+                    let metadata = Arc::clone(&graph.metadata);
+                    let payload = Arc::clone(&graph.payload);
+                    let (metadata_gid, payload_gid) = man
+                        .add_metalink_graph(graph)
+                        .map_err(|error| JsonRpcError::InternalError(error.to_string()))?;
+                    // The metadata group is a real internal aria2 task, so
+                    // expose both graph nodes just like the C++ RPC result.
+                    returned_gids.push(metadata_gid.to_hex_string());
+                    returned_gids.push(payload_gid.to_hex_string());
+                    registered.push(metadata);
+                    registered.push(payload);
+                }
+
+                if let Some(position) = position {
+                    // Insert the whole result at one position while
+                    // preserving the order in which groups were generated.
+                    for group in registered.iter().rev() {
+                        man.change_position(
+                            group.recover().gid(),
+                            position as i32,
+                            ChangePositionMode::SetFromStart,
+                        )
+                        .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
+                    }
+                }
             }
-            if !gids.is_empty() {
-                return Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    gids,
-                ));
+
+            // The manager already owns the groups, but the notification lets
+            // the engine mark session state dirty and keeps insertion
+            // semantics identical to addUri. add_group_arc is idempotent.
+            for group in &registered {
+                engine_cmd_tx
+                    .send(EngineCommand::AddDownload {
+                        group: Arc::clone(group),
+                    })
+                    .map_err(|error| {
+                        JsonRpcError::InternalError(format!("Failed to submit Metalink: {error}"))
+                    })?;
             }
+
+            let mut task_opts = self.task_opts.write().await;
+            for gid in &returned_gids {
+                task_opts.insert(gid.clone(), merged_options.clone());
+                let _ = self
+                    .event_publisher
+                    .publish(EventType::DownloadStart, DownloadEvent::download_start(gid));
+            }
+
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                returned_gids,
+            ));
         }
 
-        let gid = self
-            .add_task(vec!["metalink://download".to_string()], opts)
-            .await?;
-        if let Some(pos) = position {
-            let pos_req = JsonRpcRequest::new(
-                "aria2.changePosition",
-                serde_json::json!([&gid, pos as i64, "POS_SET"]),
-            );
-            let _ = self.handle_change_position(&pos_req).await;
+        #[cfg(not(feature = "metalink"))]
+        {
+            let _ = (decoded_bytes, opts, position);
+            Err(JsonRpcError::InvalidParams(
+                "Metalink support is not enabled".into(),
+            ))
         }
-        // Return an array of GIDs matching C++ aria2 behaviour.
-        // Currently we create a single download task per metalink; when
-        // multi-file metalink parsing is implemented, this will return
-        // one GID per file in the metalink document.
-        Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
-            vec![gid],
-        ))
     }
 
     /// Handle `aria2.remove` - Remove a download task.

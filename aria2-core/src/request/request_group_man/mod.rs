@@ -88,7 +88,11 @@ impl RequestGroupMan {
     /// Returns the generated GID.
     pub fn add_group(&self, uris: Vec<String>, options: DownloadOptions) -> Result<GroupId> {
         let gid = self.generate_gid();
+        let memory_download = options.uses_memory_download();
         let group = RequestGroup::new(gid, uris, options);
+        if memory_download {
+            group.mark_in_memory_download();
+        }
         self.reserved
             .push_back(Arc::new(std::sync::RwLock::new(group)));
 
@@ -210,7 +214,11 @@ impl RequestGroupMan {
         // Keep automatically generated GIDs ahead of explicitly assigned ones.
         self.next_gid
             .fetch_max(gid.value().saturating_add(1), Ordering::SeqCst);
+        let memory_download = options.uses_memory_download();
         let group = RequestGroup::new(gid, uris, options);
+        if memory_download {
+            group.mark_in_memory_download();
+        }
         self.reserved
             .push_back(Arc::new(std::sync::RwLock::new(group)));
         info!(
@@ -377,6 +385,7 @@ impl RequestGroupMan {
     /// This is deliberately separate from `fail_spawned_group`: no command
     /// exists yet, so leaving the group in `reserved` would make it appear as
     /// waiting forever and prevent the engine from reaching an idle state.
+    #[cfg(feature = "bittorrent")]
     pub(super) fn fail_reserved_group(&self, gid: GroupId, message: &str) -> bool {
         let Some(group) = self.reserved.remove_by_gid(gid) else {
             warn!(gid = gid.value(), "Failed reserved group not found");

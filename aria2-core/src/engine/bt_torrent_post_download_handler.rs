@@ -180,7 +180,6 @@ impl BtTorrentPostDownloadHandler {
         child_options.follow_torrent = Some(FollowMode::Disabled);
 
         let child_group = RequestGroup::new(child_gid, uris, child_options);
-        child_group.set_belongs_to_gid(parent_gid);
 
         // Set BitTorrent-specific metadata on the child group.
         // This data will be used by BtDownloadCommand when the group

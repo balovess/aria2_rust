@@ -3,7 +3,8 @@
 use aria2_core::engine::command::Command;
 use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
 use aria2_core::error::{Aria2Error, FatalError};
-use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 #[test]
 fn test_sftp_uri_parsing_valid() {
@@ -121,6 +122,27 @@ fn test_sftp_status_before_execute_is_pending() {
         aria2_core::engine::command::CommandStatus::Pending => {}
         other => panic!("执行前状态应为Pending, got: {:?}", other),
     }
+}
+
+#[test]
+fn test_sftp_memory_option_marks_request_group() {
+    let options = DownloadOptions {
+        follow_metalink: Some(FollowMode::Memory),
+        ..DownloadOptions::default()
+    };
+    let cmd = SftpDownloadCommand::new(
+        GroupId::new(33),
+        "sftp://user@host/source.meta4",
+        &options,
+        Some("missing-output-dir"),
+        None,
+    )
+    .expect("memory SFTP command should construct");
+
+    let group = cmd
+        .request_group()
+        .expect("SFTP command should expose its request group");
+    assert!(group.recover().is_in_memory_download());
 }
 
 #[test]

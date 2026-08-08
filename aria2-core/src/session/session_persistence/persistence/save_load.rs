@@ -6,8 +6,13 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::engine::resume_data::{ResumeData, ResumeDataExt};
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use crate::request::request_group::{BtFileMapping, FollowMode};
 use crate::request::request_group::{DownloadOptions, GroupId, MetadataInfo, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use std::collections::HashMap;
 
 use super::types::SessionPersistence;
 
@@ -167,6 +172,8 @@ impl SessionPersistence {
         }
 
         let mut loaded = 0usize;
+        #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+        let mut graph_options: HashMap<GroupId, HashMap<String, String>> = HashMap::new();
         let mut entries = tokio::fs::read_dir(&self.session_dir).await.map_err(|e| {
             format!(
                 "Failed to read session dir {}: {}",
@@ -202,6 +209,8 @@ impl SessionPersistence {
                                 continue;
                             }
 
+                            #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+                            graph_options.insert(gid, resume_data.options.clone());
                             groups.push(Arc::new(std::sync::RwLock::new(group)));
                             loaded += 1;
                             info!(
@@ -232,6 +241,9 @@ impl SessionPersistence {
                 }
             }
         }
+
+        #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+        restore_metalink_graphs(groups, &graph_options);
 
         // Load global options if available
         let _ = self.load_global_options().await;
@@ -307,16 +319,60 @@ impl SessionPersistence {
             )
         })?;
 
-        let group = RequestGroup::new(gid, uris, options);
+        let memory_download = options.uses_memory_download()
+            || resume_data
+                .options
+                .get("aria2-rust-memory-download")
+                .is_some_and(|value| value == "true");
+        let mut group = RequestGroup::new(gid, uris, options);
+        if memory_download {
+            group.mark_in_memory_download();
+        }
+        group.set_total_length(resume_data.total_length);
+        group.set_completed_length(resume_data.completed_length);
+        group.set_uploaded_length(resume_data.uploaded_length);
+        if !resume_data.bitfield.is_empty() {
+            group.set_bt_bitfield(Some(resume_data.bitfield.clone()));
+        }
+        if resume_data.num_pieces.is_some()
+            || resume_data.piece_length.is_some()
+            || resume_data.bt_info_hash.is_some()
+        {
+            group.set_bt_metadata(
+                resume_data.num_pieces.unwrap_or_default(),
+                resume_data.piece_length.unwrap_or_default(),
+                resume_data.bt_info_hash.clone().unwrap_or_default(),
+            );
+        }
+        if let Some(output_name) = resume_data.options.get("aria2-rust-output-name") {
+            group.set_output_name(output_name.clone());
+        }
+        if let Some(content_type) = resume_data.options.get("aria2-rust-content-type") {
+            group.set_content_type(content_type.clone());
+        }
+
+        #[cfg(feature = "bittorrent")]
+        if let Some(data) =
+            decode_base64_bytes(resume_data.options.get("aria2-rust-bt-metadata-data"))
+        {
+            group.set_bt_metadata_data(data);
+        }
 
         if let Some(metadata_path) = resume_data.bt_saved_metadata_path.as_deref() {
+            let metadata_gid = resume_data
+                .options
+                .get("metadata-gid")
+                .and_then(|value| GroupId::from_hex_string(value))
+                .unwrap_or(gid);
             let metadata_uri = resume_data
-                .uris
-                .first()
-                .map(|uri| uri.uri.as_str())
+                .options
+                .get("metadata-uri")
+                .map(String::as_str)
+                .or_else(|| resume_data.uris.first().map(|uri| uri.uri.as_str()))
                 .unwrap_or_default();
             group.set_metadata_info(
-                MetadataInfo::new(gid, metadata_uri).with_metadata_path(metadata_path.to_owned()),
+                MetadataInfo::new(metadata_gid, metadata_uri)
+                    .with_metadata_path(metadata_path.to_owned()),
             );
         }
         #[cfg(feature = "metalink")]
@@ -331,15 +387,13 @@ impl SessionPersistence {
             group.set_metalink_source(data, file_index);
         }
 
-        // Mark as paused if status indicates so
-        if resume_data.status == "paused" || resume_data.status == "waiting" {
-            // The group will be created in a paused/waiting state
-            // Actual pause handling depends on the engine's lifecycle management
-        }
-
         // Restore progress information if available
         if resume_data.completed_length > 0 {
             group.set_resume_offset(resume_data.completed_length);
+        }
+
+        if resume_data.status == "paused" {
+            group.pause().map_err(|error| error.to_string())?;
         }
 
         Ok(group)
@@ -397,4 +451,162 @@ impl SessionPersistence {
             }
         }))
     }
+}
+
+/// Recreate the metadata prerequisite for a persisted Metalink torrent graph.
+///
+/// Generated payload groups are intentionally not serialized independently.
+/// The payload's `MetadataInfo` and persisted metadata path are the durable
+/// identity, so loading must rebuild the metadata group and its dependency
+/// before the manager starts promoting downloads.
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn restore_metalink_graphs(
+    groups: &mut Vec<Arc<std::sync::RwLock<RequestGroup>>>,
+    graph_options: &HashMap<GroupId, HashMap<String, String>>,
+) {
+    use std::path::PathBuf;
+
+    let existing_gids: Vec<GroupId> = groups.iter().map(|group| group.recover().gid()).collect();
+    let mut new_metadata = Vec::new();
+
+    for payload in groups.iter() {
+        let (payload_gid, info, options, output_name) = {
+            let group = payload.recover();
+            if group.belongs_to_gid().is_some()
+                || !group.uris().iter().any(|uri| uri.starts_with("bt://"))
+            {
+                continue;
+            }
+            let Some(info) = group.metadata_info() else {
+                continue;
+            };
+            if info.gid().is_none() || info.uri().is_empty() || info.metadata_path().is_none() {
+                continue;
+            }
+            (
+                group.gid(),
+                info,
+                group.options().clone(),
+                group.output_name().or_else(|| group.options().out.clone()),
+            )
+        };
+
+        let metadata_gid = info.gid().expect("metadata provenance was checked above");
+        let metadata_path = PathBuf::from(
+            info.metadata_path()
+                .expect("metadata path was checked above"),
+        );
+        let persisted_options = graph_options.get(&payload_gid);
+        let fallback_uris = persisted_options
+            .and_then(|options| decode_json_string_list(options.get("aria2-rust-fallback-uris")))
+            .unwrap_or_default();
+        let file_mappings = persisted_options
+            .and_then(|options| decode_json_file_mappings(options.get("aria2-rust-file-mappings")))
+            .unwrap_or_default();
+        let metadata_data = persisted_options
+            .and_then(|options| decode_base64_bytes(options.get("aria2-rust-bt-metadata-data")));
+        let memory_source = persisted_options
+            .and_then(|options| options.get("aria2-rust-metadata-memory"))
+            .is_some_and(|value| value == "true")
+            || metadata_data.is_some();
+
+        let metadata_group = if let Some(existing) = groups.iter().find(|group| {
+            let group = group.recover();
+            group.gid() == metadata_gid && group.uris().iter().any(|uri| uri == info.uri())
+        }) {
+            Arc::clone(existing)
+        } else if existing_gids.contains(&metadata_gid)
+            || new_metadata
+                .iter()
+                .any(|group: &Arc<std::sync::RwLock<RequestGroup>>| {
+                    group.recover().gid() == metadata_gid
+                })
+        {
+            tracing::warn!(
+                payload_gid = payload_gid.value(),
+                metadata_gid = metadata_gid.value(),
+                "Cannot restore Metalink graph because metadata GID is already occupied"
+            );
+            continue;
+        } else {
+            let mut metadata_options = options.clone();
+            metadata_options.follow_torrent = Some(FollowMode::Disabled);
+            metadata_options.follow_metalink = Some(FollowMode::Disabled);
+            metadata_options.dir = metadata_path
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned());
+            metadata_options.out = metadata_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+                metadata_gid,
+                vec![info.uri().to_string()],
+                metadata_options,
+            )));
+            if memory_source {
+                group.recover().mark_in_memory_download();
+                if let Some(data) = metadata_data.clone() {
+                    group.recover().set_in_memory_data(data);
+                }
+            }
+            group.recover().set_belongs_to_gid(payload_gid);
+            new_metadata.push(Arc::clone(&group));
+            group
+        };
+
+        let payload_path = output_name
+            .map(|name| PathBuf::from(options.dir.as_deref().unwrap_or(".")).join(name))
+            .unwrap_or_else(|| {
+                PathBuf::from(options.dir.as_deref().unwrap_or("."))
+                    .join(format!("{}.bin", payload_gid.to_hex_string()))
+            });
+
+        let dependency = if memory_source {
+            crate::request::request_group::BtDependency::new_memory_with_fallback(
+                metadata_gid,
+                Arc::clone(payload),
+                Arc::clone(&metadata_group),
+                payload_path,
+                info,
+                fallback_uris,
+            )
+        } else {
+            crate::request::request_group::BtDependency::new_file_with_fallback(
+                metadata_gid,
+                Arc::clone(payload),
+                metadata_path,
+                payload_path,
+                info,
+                fallback_uris,
+            )
+        }
+        .with_file_mappings(file_mappings);
+        payload.recover().set_dependency(Box::new(dependency));
+        let _ = metadata_group;
+    }
+
+    for group in new_metadata.into_iter().rev() {
+        groups.insert(0, group);
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+fn decode_base64_bytes(value: Option<&String>) -> Option<Vec<u8>> {
+    use base64::Engine;
+
+    base64::engine::general_purpose::STANDARD
+        .decode(value?)
+        .ok()
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn decode_json_string_list(value: Option<&String>) -> Option<Vec<String>> {
+    let bytes = decode_base64_bytes(value)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn decode_json_file_mappings(value: Option<&String>) -> Option<Vec<BtFileMapping>> {
+    let bytes = decode_base64_bytes(value)?;
+    serde_json::from_slice(&bytes).ok()
 }

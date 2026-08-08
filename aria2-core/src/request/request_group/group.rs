@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use tracing::info;
 
@@ -76,8 +76,6 @@ pub struct RequestGroup {
     /// Lock-free progress counters shared via `Arc` so the hot-path download
     /// code can update progress without acquiring the outer `RwLock`.
     pub progress: Arc<AtomicProgress>,
-    /// Total uploaded bytes (BT only).
-    pub uploaded_length: AtomicU64,
     /// BT piece bitfield.
     pub bt_bitfield: std::sync::RwLock<Option<Vec<u8>>>,
     /// Current active BT peer snapshots for read-only consumers.
@@ -214,7 +212,6 @@ impl RequestGroup {
             start_time: std::sync::RwLock::new(None),
             end_time: std::sync::RwLock::new(None),
             progress: Arc::new(AtomicProgress::new()),
-            uploaded_length: AtomicU64::new(0),
             bt_bitfield: std::sync::RwLock::new(None),
             bt_peer_snapshots: std::sync::RwLock::new(Vec::new()),
             download_context: std::sync::RwLock::new(None),

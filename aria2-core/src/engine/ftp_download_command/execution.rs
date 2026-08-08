@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
-use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
+use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::network::ConnectionContext;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::GroupId;
@@ -61,8 +61,11 @@ impl Command for FtpDownloadCommand {
             self.output_path.display()
         );
 
+        let in_memory_download = self.group.recover().is_in_memory_download();
+
         // Create output directory if needed
-        if let Some(parent) = self.output_path.parent()
+        if !in_memory_download
+            && let Some(parent) = self.output_path.parent()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -166,6 +169,8 @@ impl Command for FtpDownloadCommand {
 impl FtpDownloadCommand {
     /// Execute a single download attempt
     async fn execute_single_attempt(&mut self) -> std::result::Result<(), FtpAttemptError> {
+        let in_memory_download = self.group.recover().is_in_memory_download();
+
         if self.resolved_addresses.is_empty() {
             self.refresh_control_addresses().await?;
         }
@@ -205,9 +210,13 @@ impl FtpDownloadCommand {
         // This mirrors FtpNegotiationCommand::onFileSizeDetermined(): a
         // complete local file is terminal, while an oversized file must not
         // be used as a resume prefix.
-        let local_size = std::fs::metadata(&self.output_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let local_size = if in_memory_download {
+            0
+        } else {
+            std::fs::metadata(&self.output_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        };
         if let Some(actual_size) = file_size {
             {
                 let g = self.group.recover();
@@ -216,7 +225,7 @@ impl FtpDownloadCommand {
                 g.set_total_length(actual_size);
             }
 
-            if local_size == actual_size {
+            if !in_memory_download && local_size == actual_size {
                 self.resume_offset = actual_size;
                 self.completed_bytes = actual_size;
                 {
@@ -233,7 +242,9 @@ impl FtpDownloadCommand {
                 return Ok(());
             }
 
-            if local_size > actual_size {
+            if in_memory_download {
+                self.resume_offset = 0;
+            } else if local_size > actual_size {
                 std::fs::OpenOptions::new()
                     .write(true)
                     .open(&self.output_path)
@@ -255,7 +266,8 @@ impl FtpDownloadCommand {
         // FileAllocationEntry command chain used by FTP downloads.
         let allocation =
             crate::filesystem::file_allocation::AllocationStrategy::from_str(&self.file_allocation);
-        if allocation != crate::filesystem::file_allocation::AllocationStrategy::None
+        if !in_memory_download
+            && allocation != crate::filesystem::file_allocation::AllocationStrategy::None
             && file_size.unwrap_or(0) > 0
         {
             let gid = { self.group.recover().gid().value() };
@@ -273,7 +285,9 @@ impl FtpDownloadCommand {
 
         // Step 6: Set resume offset if applicable. If the server rejects REST,
         // restart from zero and truncate the stale local partial file.
-        let resume_accepted = if self.resume_offset > 0 {
+        let resume_accepted = if in_memory_download {
+            true
+        } else if self.resume_offset > 0 {
             ctrl.set_resume_offset(self.resume_offset).await?
         } else {
             true
@@ -371,12 +385,15 @@ impl FtpDownloadCommand {
         // Set TCP no-delay on data connection
         let _ = data_stream.set_nodelay(true); // Ignore error if not supported
 
-        // Step 9: Setup disk writer with optional rate limiting
-        let raw_writer = if write_offset > 0 {
-            DefaultDiskWriter::new_with_offset(&self.output_path, write_offset)
-        } else {
-            DefaultDiskWriter::new(&self.output_path)
-        };
+        // Step 9: Select a disk or memory writer, then apply optional rate
+        // limiting. The memory writer is the FTP/SFTP equivalent of aria2's
+        // MemoryPreDownloadHandler and never opens output_path.
+        let raw_writer = new_sequential_download_writer(
+            &self.output_path,
+            in_memory_download,
+            write_offset,
+            file_size,
+        );
         let rate_limit = {
             let g = self.group.recover();
             g.options().max_download_limit
@@ -402,7 +419,7 @@ impl FtpDownloadCommand {
             }
             Box::new(tw)
         } else {
-            Box::new(raw_writer)
+            raw_writer
         };
 
         // Seek to resume offset if resuming
@@ -485,9 +502,16 @@ impl FtpDownloadCommand {
         drop(data_stream); // Close data connection
 
         // Finalize disk writer (flush buffers, etc.)
-        writer.finalize().await.map_err(|e| {
+        let finalized_data = writer.finalize().await.map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!("Finalize writer failed: {}", e)))
         })?;
+
+        if in_memory_download {
+            let group = self.group.recover();
+            group.set_total_length(self.completed_bytes);
+            group.set_completed_length(self.completed_bytes);
+            group.set_in_memory_data(finalized_data);
+        }
 
         // Read transfer completion response from control channel
         ctrl.read_transfer_complete().await?;

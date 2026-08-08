@@ -1,10 +1,125 @@
 //! Tests for the App module
 
+use super::cli::CliArgs;
 use super::*;
 use aria2_core::config::OptionValue;
 use aria2_core::request::request_group::DownloadOptions;
+use aria2_core::util::rwlock_ext::RwLockRecover;
+use clap::Parser;
 use std::collections::HashMap;
 use tempfile::TempDir;
+
+#[tokio::test]
+async fn test_cli_metalink_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--follow-metalink=mem",
+        "--metalink-version=4.0",
+        "--metalink-language=en",
+        "--metalink-os=linux",
+        "--metalink-location=us,jp",
+        "--metalink-preferred-protocol=https",
+        "--select-file=2",
+        "https://example.test/metadata",
+    ])
+    .expect("Metalink CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let options = app.download_options().await;
+
+    assert_eq!(
+        options.follow_metalink,
+        Some(aria2_core::request::request_group::FollowMode::Memory)
+    );
+    assert_eq!(options.metalink_version.as_deref(), Some("4.0"));
+    assert_eq!(options.metalink_language.as_deref(), Some("en"));
+    assert_eq!(options.metalink_os.as_deref(), Some("linux"));
+    assert_eq!(options.metalink_location.as_deref(), Some("us,jp"));
+    assert_eq!(
+        options.metalink_preferred_protocol.as_deref(),
+        Some("https")
+    );
+    assert_eq!(options.select_file.as_deref(), Some("2"));
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_standard_session_restores_metalink_graph() {
+    use aria2_core::session::session_entry::SessionEntry;
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let metadata_path = temp_dir.path().join("metadata.torrent");
+    let mut options = HashMap::new();
+    options.insert(
+        "dir".to_string(),
+        temp_dir.path().to_string_lossy().into_owned(),
+    );
+    options.insert(
+        "aria2-rust-payload-gid".to_string(),
+        "0000000000000020".to_string(),
+    );
+    options.insert(
+        "aria2-rust-metadata-uri".to_string(),
+        "https://example.test/metadata.torrent".to_string(),
+    );
+    options.insert(
+        "aria2-rust-metadata-path".to_string(),
+        metadata_path.to_string_lossy().into_owned(),
+    );
+    options.insert("aria2-rust-metadata-memory".to_string(), "true".to_string());
+    options.insert(
+        "aria2-rust-output-name".to_string(),
+        "payload.bin".to_string(),
+    );
+    let entry = SessionEntry::new(
+        0x10,
+        vec!["https://example.test/metadata.torrent".to_string()],
+    )
+    .with_options(options);
+    tokio::fs::write(&session_file, entry.serialize())
+        .await
+        .expect("write session");
+
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+
+    assert_eq!(app.restore_session().await.expect("restore session"), 2);
+    let groups = app.request_man.read().await.list_groups();
+    let metadata = groups
+        .iter()
+        .find(|group| {
+            group.recover().gid() == aria2_core::request::request_group::GroupId::new(0x10)
+        })
+        .expect("metadata group should be restored");
+    assert_eq!(
+        metadata.recover().belongs_to_gid(),
+        Some(aria2_core::request::request_group::GroupId::new(0x20))
+    );
+    let payload = groups
+        .iter()
+        .find(|group| {
+            group.recover().gid() == aria2_core::request::request_group::GroupId::new(0x20)
+        })
+        .expect("payload group should be restored");
+    assert_eq!(
+        payload.recover().output_name().as_deref(),
+        Some("payload.bin")
+    );
+    assert!(!payload.recover().is_dependency_resolved());
+}
 
 /// Test 1: Load entries from session file
 ///

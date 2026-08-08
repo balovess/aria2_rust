@@ -1,7 +1,8 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
-use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::mock_ftp_server::{MockFtpServer, medium_pattern, small_content};
 use std::path::Path;
 
@@ -54,6 +55,41 @@ async fn test_e2e_ftp_download_small_file() {
 
     let data = std::fs::read(&output_path).expect("读取下载文件失败");
     assert_eq!(data, small_content(), "内容不匹配");
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_memory_download_keeps_source_out_of_filesystem() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        ..DownloadOptions::default()
+    };
+
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(9),
+        &url,
+        &options,
+        dir.path().to_str(),
+        Some("source.torrent"),
+    )
+    .expect("memory FTP command should construct");
+
+    cmd.execute()
+        .await
+        .expect("memory FTP download should succeed");
+
+    assert!(!dir.path().join("source.torrent").exists());
+    let group = cmd
+        .request_group()
+        .expect("FTP command should expose its request group");
+    let group = group.recover();
+    assert!(group.is_in_memory_download());
+    assert_eq!(group.in_memory_data(), Some(small_content().to_vec()));
+    assert_eq!(group.total_length(), small_content().len() as u64);
+    assert!(group.status().is_completed());
 }
 
 #[tokio::test]

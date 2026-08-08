@@ -21,6 +21,7 @@
 //! | `generate_from_bytes()` | `generate(groups, binaryStream, option, baseUri)` |
 //! | `create_request_groups()` | `createRequestGroup(groups, entries, option)` |
 
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use tracing::{debug, info};
@@ -29,6 +30,8 @@ use crate::engine::metalink_download_command::MetalinkDownloadCommand;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use crate::engine::metalink_request_graph::MetalinkRequestGraph;
 use crate::error::{Aria2Error, Result};
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use crate::request::request_group::BtFileMapping;
 use crate::request::request_group::DownloadOptions;
 use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::metalink::parser::{
@@ -187,6 +190,47 @@ impl MetalinkToRequestGroup {
             .map(|segments| segments.unwrap_or_default())
     }
 
+    /// Apply the Metalink resource rules that are needed by every execution
+    /// path, including manager-owned groups that keep the raw document for
+    /// restart/fallback handling.
+    pub(crate) fn normalize_file_for_runtime(
+        &self,
+        file: &mut MetalinkFile,
+        options: &DownloadOptions,
+    ) {
+        let locations: Vec<String> = if self.locations.is_empty() {
+            options
+                .metalink_location
+                .as_deref()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|location| !location.is_empty())
+                        .map(str::to_ascii_lowercase)
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            self.locations.clone()
+        };
+        let preferred_protocol = self
+            .preferred_protocol
+            .as_deref()
+            .or(options.metalink_preferred_protocol.as_deref())
+            .filter(|protocol| !protocol.eq_ignore_ascii_case("none"));
+
+        file.drop_unsupported_resources();
+        if !locations.is_empty() {
+            let location_refs: Vec<&str> = locations.iter().map(String::as_str).collect();
+            file.set_location_priority(&location_refs, -LOWEST_PRIORITY);
+        }
+        if let Some(protocol) = preferred_protocol {
+            file.set_protocol_priority(protocol, -LOWEST_PRIORITY);
+        }
+        file.reorder_metaurls_by_priority();
+    }
+
     /// Parse, query, select, and normalize Metalink entries once for all
     /// manager-owned construction paths.
     ///
@@ -231,39 +275,8 @@ impl MetalinkToRequestGroup {
                 .collect()
         };
 
-        let locations: Vec<String> = if self.locations.is_empty() {
-            options
-                .metalink_location
-                .as_deref()
-                .map(|value| {
-                    value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|location| !location.is_empty())
-                        .map(str::to_ascii_lowercase)
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            self.locations.clone()
-        };
-        let preferred_protocol = self
-            .preferred_protocol
-            .as_deref()
-            .or(options.metalink_preferred_protocol.as_deref())
-            .filter(|protocol| !protocol.eq_ignore_ascii_case("none"));
-        let priority_boost = -LOWEST_PRIORITY;
-
         for (_, file) in &mut files {
-            file.drop_unsupported_resources();
-            if !locations.is_empty() {
-                let location_refs: Vec<&str> = locations.iter().map(String::as_str).collect();
-                file.set_location_priority(&location_refs, priority_boost);
-            }
-            if let Some(protocol) = preferred_protocol {
-                file.set_protocol_priority(protocol, priority_boost);
-            }
-            file.reorder_metaurls_by_priority();
+            self.normalize_file_for_runtime(file, options);
         }
 
         files.retain(|(_, file)| !file.urls.is_empty() || !file.meta_urls.is_empty());
@@ -302,10 +315,7 @@ impl MetalinkToRequestGroup {
         let metadata_uri = file
             .meta_urls
             .iter()
-            .find(|metaurl| {
-                metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
-                    && !metaurl.url.is_empty()
-            })
+            .find(|metaurl| metaurl.mediatype.is_torrent() && !metaurl.url.is_empty())
             .map(|metaurl| metaurl.url.as_str())
             .ok_or_else(|| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(
@@ -319,14 +329,52 @@ impl MetalinkToRequestGroup {
             .filter(|url| url.is_non_p2p())
             .map(|url| url.url.clone())
             .collect();
-        MetalinkRequestGraph::new_with_fallback(
+        let file_mappings = Self::torrent_file_mappings(std::slice::from_ref(file), &[0], options);
+        MetalinkRequestGraph::new_memory_with_fallback_and_mappings(
             metadata_uri,
             &file.name,
             options,
             metadata_gid,
             payload_gid,
             fallback_uris,
+            file_mappings,
         )
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    fn torrent_file_mappings(
+        files: &[MetalinkFile],
+        indices: &[usize],
+        options: &DownloadOptions,
+    ) -> Vec<BtFileMapping> {
+        let output_dir = options.dir.as_deref().unwrap_or(".");
+        let max_connection_per_server =
+            options.max_connection_per_server.unwrap_or(1).max(1) as usize;
+
+        indices
+            .iter()
+            .filter_map(|&index| files.get(index))
+            .map(|file| BtFileMapping {
+                original_name: file
+                    .meta_urls
+                    .iter()
+                    .find(|metaurl| metaurl.mediatype.is_torrent())
+                    .and_then(|metaurl| metaurl.name.clone())
+                    .unwrap_or_default(),
+                path: Path::new(output_dir)
+                    .join(&file.name)
+                    .to_string_lossy()
+                    .into_owned(),
+                uris: file
+                    .get_sorted_urls()
+                    .into_iter()
+                    .filter(|url| url.is_non_p2p())
+                    .map(|url| url.url.clone())
+                    .collect(),
+                max_connection_per_server,
+                unique_protocol: options.metalink_enable_unique_protocol,
+            })
+            .collect()
     }
 
     /// Return whether a selected file mixes direct resources with torrent metaurls.
@@ -364,9 +412,7 @@ impl MetalinkToRequestGroup {
                     .filter(|url| url.is_non_p2p())
                     .collect::<Vec<_>>()
                     .is_empty();
-                let has_torrent = file.meta_urls.iter().any(|metaurl| {
-                    metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
-                });
+                let has_torrent = file.has_torrent_metaurl();
                 has_direct && has_torrent
             }))
     }
@@ -387,11 +433,7 @@ impl MetalinkToRequestGroup {
             // whole Metalink group. It must not also become an independent
             // direct-resource group; the graph path below supplies its
             // metadata prerequisite and any direct fallback mirrors.
-            let has_torrent_dependency = cfg!(feature = "bittorrent")
-                && file
-                    .meta_urls
-                    .first()
-                    .is_some_and(|metaurl| metaurl.mediatype.is_torrent());
+            let has_torrent_dependency = cfg!(feature = "bittorrent") && file.has_torrent_metaurl();
             if has_torrent_dependency {
                 continue;
             }
@@ -438,18 +480,14 @@ impl MetalinkToRequestGroup {
         let prepared = self.prepare_files(&doc, options)?;
         let mut source_files = Vec::new();
         for (_, file) in prepared {
-            if file
-                .meta_urls
-                .first()
-                .is_some_and(|metaurl| metaurl.mediatype.is_torrent())
-            {
+            if file.has_torrent_metaurl() {
                 source_files.push(file);
             }
         }
         if source_files.is_empty() {
             return Ok(Vec::new());
         }
-        let groups = group_entry_by_metaurl_name(&source_files);
+        let groups = group_torrent_files_by_metaurl(&source_files);
         groups
             .into_iter()
             .filter(|(metaurl, _)| !metaurl.is_empty())
@@ -471,13 +509,15 @@ impl MetalinkToRequestGroup {
                         "Metalink graph GID allocator exhausted".to_string(),
                     ))
                 })?;
-                MetalinkRequestGraph::new_with_fallback(
+                let file_mappings = Self::torrent_file_mappings(&source_files, &indices, options);
+                MetalinkRequestGraph::new_memory_with_fallback_and_mappings(
                     &metadata_uri,
                     &first.name,
                     options,
                     metadata_gid,
                     payload_gid,
                     fallback_uris,
+                    file_mappings,
                 )
             })
             .collect()
@@ -629,6 +669,48 @@ impl MetalinkToRequestGroup {
     }
 }
 
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn group_torrent_files_by_metaurl(files: &[MetalinkFile]) -> Vec<(String, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+
+    for (index, file) in files.iter().enumerate() {
+        let Some(metaurl) = file
+            .meta_urls
+            .iter()
+            .find(|metaurl| metaurl.mediatype.is_torrent() && !metaurl.url.is_empty())
+        else {
+            continue;
+        };
+
+        // Match aria2's merge rule: unnamed or size-unknown members remain
+        // independent even when they point at the same torrent URL.
+        let can_merge =
+            metaurl.name.as_deref().is_some_and(|name| !name.is_empty()) && file.size_known;
+        let group_index = if can_merge {
+            groups.iter().position(|(url, indices)| {
+                let first = &files[indices[0]];
+                let first_has_name = first
+                    .meta_urls
+                    .iter()
+                    .find(|candidate| candidate.mediatype.is_torrent())
+                    .and_then(|candidate| candidate.name.as_deref())
+                    .is_some_and(|name| !name.is_empty());
+                url == &metaurl.url && first_has_name
+            })
+        } else {
+            None
+        };
+
+        if let Some(group_index) = group_index {
+            groups[group_index].1.push(index);
+        } else {
+            groups.push((metaurl.url.clone(), vec![index]));
+        }
+    }
+
+    groups
+}
+
 impl Default for MetalinkToRequestGroup {
     fn default() -> Self {
         Self::new()
@@ -771,6 +853,32 @@ mod tests {
         assert_eq!(commands.len(), 2);
     }
 
+    #[cfg(feature = "metalink")]
+    #[test]
+    fn manager_resource_groups_apply_select_file_and_location_priority() {
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="first.bin"><url location="de" priority="1">https://de.example/first</url></file><file name="second.bin"><url location="us" priority="100">https://us.example/second</url><url location="de" priority="1">https://de.example/second</url></file></metalink>"#;
+        let options = DownloadOptions {
+            select_file: Some("2".to_string()),
+            metalink_location: Some("us".to_string()),
+            ..DownloadOptions::default()
+        };
+        let mut gids = [crate::request::request_group::GroupId::new(70)].into_iter();
+        let groups = MetalinkToRequestGroup::new()
+            .create_resource_groups_from_bytes(data, &options, &mut gids)
+            .expect("filtered Metalink should create one resource group");
+
+        assert_eq!(groups.len(), 1);
+        let group = groups[0].recover();
+        assert_eq!(group.output_name().as_deref(), Some("second.bin"));
+        assert_eq!(
+            group.uris(),
+            &[
+                "https://us.example/second".to_string(),
+                "https://de.example/second".to_string()
+            ]
+        );
+    }
+
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
     #[test]
     fn create_torrent_graphs_allocates_metadata_and_payload_pairs() {
@@ -832,6 +940,93 @@ mod tests {
         assert!(!graphs[0].payload.recover().is_dependency_resolved());
     }
 
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn shared_torrent_graph_maps_torrent_files_to_metalink_paths() {
+        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+        use std::collections::BTreeMap;
+
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="renamed/one.bin"><size>3</size><url>https://mirror.test/one.bin</url><metaurl name="dir1/file1.txt" mediatype="torrent">https://example.test/shared.torrent</metaurl></file><file name="renamed/two.bin"><size>2</size><url>https://mirror.test/two.bin</url><metaurl name="dir2/file2.dat" mediatype="torrent">https://example.test/shared.torrent</metaurl></file></metalink>"#;
+        let converter = MetalinkToRequestGroup::new();
+        let options = DownloadOptions::default();
+        let mut gids = [
+            crate::request::request_group::GroupId::new(100),
+            crate::request::request_group::GroupId::new(101),
+        ]
+        .into_iter();
+        let mut graphs = converter
+            .create_torrent_graphs_from_bytes(data, &options, &mut gids)
+            .expect("shared torrent graph should be created");
+        assert_eq!(graphs.len(), 1);
+
+        let torrent_data = {
+            let mut file_entries = Vec::new();
+            for (length, path) in [
+                (3, vec!["dir1", "file1.txt"]),
+                (2, vec!["dir2", "file2.dat"]),
+            ] {
+                let path = BencodeValue::List(
+                    path.into_iter()
+                        .map(|component| BencodeValue::Bytes(component.as_bytes().to_vec()))
+                        .collect(),
+                );
+                let mut file = BTreeMap::new();
+                file.insert(b"length".to_vec(), BencodeValue::Int(length));
+                file.insert(b"path".to_vec(), path);
+                file_entries.push(BencodeValue::Dict(file));
+            }
+            let mut info = BTreeMap::new();
+            info.insert(b"files".to_vec(), BencodeValue::List(file_entries));
+            info.insert(b"name".to_vec(), BencodeValue::Bytes(b"bundle".to_vec()));
+            info.insert(b"piece length".to_vec(), BencodeValue::Int(5));
+            info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 20]));
+            let mut root = BTreeMap::new();
+            root.insert(
+                b"announce".to_vec(),
+                BencodeValue::Bytes(b"https://tracker.test/announce".to_vec()),
+            );
+            root.insert(b"info".to_vec(), BencodeValue::Dict(info));
+            BencodeValue::Dict(root).encode()
+        };
+
+        let graph = graphs.pop().unwrap();
+        let metadata = Arc::clone(&graph.metadata);
+        let payload = Arc::clone(&graph.payload);
+        metadata.recover().set_in_memory_data(torrent_data);
+        let manager = crate::request::request_group_man::RequestGroupMan::new();
+        manager.add_metalink_graph(graph).unwrap();
+        assert_eq!(manager.fill_from_reserver().len(), 1);
+        manager.resolve_dependencies_for_status(
+            crate::request::request_group::GroupId::new(100),
+            crate::request::request_group::DownloadStatus::Complete,
+        );
+        assert_eq!(manager.fill_from_reserver().len(), 1);
+
+        let context = payload
+            .recover()
+            .get_download_context()
+            .expect("resolved payload should have a context");
+        let entries = context.get_file_entries();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries[0].path().ends_with("renamed\\one.bin")
+                || entries[0].path().ends_with("renamed/one.bin")
+        );
+        assert!(
+            entries[1].path().ends_with("renamed\\two.bin")
+                || entries[1].path().ends_with("renamed/two.bin")
+        );
+        assert_eq!(
+            entries[0].remaining_uris().front().map(String::as_str),
+            Some("https://mirror.test/one.bin")
+        );
+        assert_eq!(
+            entries[1].remaining_uris().front().map(String::as_str),
+            Some("https://mirror.test/two.bin")
+        );
+        assert!(entries.iter().all(|entry| entry.is_requested()));
+    }
+
     #[cfg(all(feature = "metalink", not(feature = "bittorrent")))]
     #[test]
     fn mixed_resource_group_is_retained_without_bittorrent_support() {
@@ -874,6 +1069,26 @@ mod tests {
         assert_eq!(
             graphs[0].payload.recover().uris(),
             &["bt://000000000000005c"]
+        );
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn torrent_graph_detects_torrent_metaurl_after_other_metaurl() {
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://mirror.example/payload.bin</url><metaurl mediatype="xml" priority="1">https://example.test/payload.meta</metaurl><metaurl mediatype="torrent" priority="2">https://example.test/payload.torrent</metaurl></file></metalink>"#;
+        let mut gids = [
+            crate::request::request_group::GroupId::new(94),
+            crate::request::request_group::GroupId::new(95),
+        ]
+        .into_iter();
+        let graphs = MetalinkToRequestGroup::new()
+            .create_torrent_graphs_from_bytes(data, &DownloadOptions::default(), &mut gids)
+            .expect("torrent metaurl should be detected regardless of position");
+
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(
+            graphs[0].metadata.recover().uris(),
+            &["https://example.test/payload.torrent".to_string()]
         );
     }
 

@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
-use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
+use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -39,6 +39,8 @@ impl Command for SftpDownloadCommand {
             self.started = true;
         }
 
+        let in_memory_download = self.group.recover().is_in_memory_download();
+
         debug!(
             "[SFTP-CMD] Starting download: {}@{}:{} -> {}",
             self.username,
@@ -48,7 +50,8 @@ impl Command for SftpDownloadCommand {
         );
 
         // Ensure output directory exists
-        if let Some(parent) = self.output_path.parent()
+        if !in_memory_download
+            && let Some(parent) = self.output_path.parent()
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
@@ -137,10 +140,14 @@ impl Command for SftpDownloadCommand {
         // Update RequestGroup with total length and recover a local prefix.
         // SFTP reads are positioned, so an existing partial file can be resumed
         // without downloading or rewriting its already-present prefix.
-        let existing_length = tokio::fs::metadata(&self.output_path)
-            .await
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let existing_length = if in_memory_download {
+            0
+        } else {
+            tokio::fs::metadata(&self.output_path)
+                .await
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        };
         self.completed_bytes = Self::validate_resume_offset(existing_length, total_length)?;
         {
             let g = self.group.recover();
@@ -163,8 +170,12 @@ impl Command for SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 5: Prepare Local Disk Writer
         // -----------------------------------------------------------------
-        let raw_writer =
-            DefaultDiskWriter::new_with_offset(&self.output_path, self.completed_bytes);
+        let raw_writer = new_sequential_download_writer(
+            &self.output_path,
+            in_memory_download,
+            self.completed_bytes,
+            Some(total_length),
+        );
 
         // Apply rate limiting if configured
         let rate_limit = {
@@ -189,7 +200,7 @@ impl Command for SftpDownloadCommand {
             }
             Box::new(tw)
         } else {
-            Box::new(raw_writer)
+            raw_writer
         };
 
         // -----------------------------------------------------------------
@@ -292,11 +303,18 @@ impl Command for SftpDownloadCommand {
 
         // Finalize disk writer (flush, sync, etc.). Completion is not valid
         // unless the local bytes have been durably finalized.
-        writer.finalize().await.map_err(|error| {
+        let finalized_data = writer.finalize().await.map_err(|error| {
             Aria2Error::FileIo(format!(
                 "[SFTP-CMD] Failed to finalize disk writer: {error}"
             ))
         })?;
+
+        if in_memory_download {
+            let group = self.group.recover();
+            group.set_total_length(self.completed_bytes);
+            group.set_completed_length(self.completed_bytes);
+            group.set_in_memory_data(finalized_data);
+        }
 
         // Disconnect SSH session
         if let Err(e) = conn.disconnect().await {

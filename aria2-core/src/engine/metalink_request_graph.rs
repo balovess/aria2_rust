@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{
-    BtDependency, DownloadOptions, GroupId, MetadataInfo, RequestGroup,
+    BtDependency, BtFileMapping, DownloadOptions, FollowMode, GroupId, MetadataInfo, RequestGroup,
 };
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -48,6 +48,92 @@ impl MetalinkRequestGraph {
         payload_gid: GroupId,
         fallback_uris: Vec<String>,
     ) -> Result<Self> {
+        Self::build(
+            metadata_uri,
+            payload_name,
+            options,
+            metadata_gid,
+            payload_gid,
+            fallback_uris,
+            Vec::new(),
+            false,
+        )
+    }
+
+    /// Construct a Metalink torrent graph whose metadata prerequisite is
+    /// fetched into memory and never materialized as a `.torrent` file.
+    pub fn new_memory(
+        metadata_uri: &str,
+        payload_name: &str,
+        options: &DownloadOptions,
+        metadata_gid: GroupId,
+        payload_gid: GroupId,
+    ) -> Result<Self> {
+        Self::new_memory_with_fallback(
+            metadata_uri,
+            payload_name,
+            options,
+            metadata_gid,
+            payload_gid,
+            Vec::new(),
+        )
+    }
+
+    /// Construct a memory-backed Metalink torrent graph with direct mirrors
+    /// available when the torrent metadata cannot be used.
+    pub fn new_memory_with_fallback(
+        metadata_uri: &str,
+        payload_name: &str,
+        options: &DownloadOptions,
+        metadata_gid: GroupId,
+        payload_gid: GroupId,
+        fallback_uris: Vec<String>,
+    ) -> Result<Self> {
+        Self::build(
+            metadata_uri,
+            payload_name,
+            options,
+            metadata_gid,
+            payload_gid,
+            fallback_uris,
+            Vec::new(),
+            true,
+        )
+    }
+
+    /// Construct a memory-backed graph with explicit Metalink-to-torrent
+    /// file mappings for shared multi-file torrents.
+    pub fn new_memory_with_fallback_and_mappings(
+        metadata_uri: &str,
+        payload_name: &str,
+        options: &DownloadOptions,
+        metadata_gid: GroupId,
+        payload_gid: GroupId,
+        fallback_uris: Vec<String>,
+        file_mappings: Vec<BtFileMapping>,
+    ) -> Result<Self> {
+        Self::build(
+            metadata_uri,
+            payload_name,
+            options,
+            metadata_gid,
+            payload_gid,
+            fallback_uris,
+            file_mappings,
+            true,
+        )
+    }
+
+    fn build(
+        metadata_uri: &str,
+        payload_name: &str,
+        options: &DownloadOptions,
+        metadata_gid: GroupId,
+        payload_gid: GroupId,
+        fallback_uris: Vec<String>,
+        file_mappings: Vec<BtFileMapping>,
+        memory_source: bool,
+    ) -> Result<Self> {
         if metadata_uri.is_empty() || payload_name.is_empty() {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                 "Metalink torrent graph requires metadata URI and payload name".to_string(),
@@ -66,11 +152,21 @@ impl MetalinkRequestGraph {
 
         let mut metadata_options = options.clone();
         metadata_options.out = Some(metadata_name);
+        if memory_source {
+            // The metadata group is an internal prerequisite. It must not
+            // create a second follow child after BtDependency consumes its
+            // bytes, and its source is always the memory pre-download path.
+            metadata_options.follow_torrent = Some(FollowMode::Disabled);
+            metadata_options.follow_metalink = Some(FollowMode::Disabled);
+        }
         let metadata = Arc::new(RwLock::new(RequestGroup::new(
             metadata_gid,
             vec![metadata_uri.to_string()],
             metadata_options,
         )));
+        if memory_source {
+            metadata.recover().mark_in_memory_download();
+        }
         let payload = Arc::new(RwLock::new(RequestGroup::new(
             payload_gid,
             vec![format!("bt://{}", metadata_gid.to_hex_string())],
@@ -85,16 +181,28 @@ impl MetalinkRequestGraph {
         let metadata_info = MetadataInfo::new(metadata_gid, metadata_uri)
             .with_metadata_path(metadata_path.to_string_lossy());
         payload.recover().set_metadata_info(metadata_info.clone());
-        payload
-            .recover()
-            .set_dependency(Box::new(BtDependency::new_file_with_fallback(
+        let dependency = if memory_source {
+            BtDependency::new_memory_with_fallback(
+                metadata_gid,
+                Arc::clone(&payload),
+                Arc::clone(&metadata),
+                payload_path,
+                metadata_info,
+                fallback_uris,
+            )
+            .with_file_mappings(file_mappings)
+        } else {
+            BtDependency::new_file_with_fallback(
                 metadata_gid,
                 Arc::clone(&payload),
                 metadata_path.clone(),
                 payload_path,
                 metadata_info,
                 fallback_uris,
-            )));
+            )
+            .with_file_mappings(file_mappings)
+        };
+        payload.recover().set_dependency(Box::new(dependency));
 
         Ok(Self {
             metadata,
@@ -186,5 +294,42 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("payload.torrent")
         );
+    }
+
+    #[test]
+    fn memory_graph_reads_metadata_from_source_group() {
+        let manager = crate::request::request_group_man::RequestGroupMan::new();
+        let graph = MetalinkRequestGraph::new_memory(
+            "https://example.test/releases/payload.torrent",
+            "payload.bin",
+            &DownloadOptions::default(),
+            GroupId::new(30),
+            GroupId::new(31),
+        )
+        .expect("memory graph should be constructible");
+        let metadata = Arc::clone(&graph.metadata);
+        let payload = Arc::clone(&graph.payload);
+
+        assert!(metadata.recover().is_in_memory_download());
+        assert!(metadata.recover().options().follow_torrent == Some(FollowMode::Disabled));
+        assert!(metadata.recover().options().follow_metalink == Some(FollowMode::Disabled));
+        metadata.recover().set_in_memory_data(minimal_torrent());
+        manager.add_metalink_graph(graph).unwrap();
+
+        let first = manager.fill_from_reserver();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].recover().gid(), GroupId::new(30));
+        manager.resolve_dependencies_for_status(
+            GroupId::new(30),
+            crate::request::request_group::DownloadStatus::Complete,
+        );
+        let promoted = manager.fill_from_reserver();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].recover().gid(), GroupId::new(31));
+        assert_eq!(
+            payload.recover().bt_metadata_data(),
+            Some(minimal_torrent())
+        );
+        assert!(payload.recover().get_download_context().is_some());
     }
 }

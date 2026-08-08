@@ -187,6 +187,8 @@ quiet=false
         handler.set("out", OptionValue::Str("output.bin".to_string()));
         handler.set("seed-time", OptionValue::Usize(300));
         handler.set("seed-ratio", OptionValue::Float(2.0));
+        handler.set("follow-torrent", OptionValue::Str("mem".to_string()));
+        handler.set("follow-metalink", OptionValue::Str("false".to_string()));
 
         let opts = handler.to_download_options();
 
@@ -199,6 +201,14 @@ quiet=false
         assert_eq!(opts.out, Some("output.bin".to_string()));
         assert_eq!(opts.seed_time, Some(300.0));
         assert_eq!(opts.seed_ratio, Some(2.0));
+        assert_eq!(
+            opts.follow_torrent,
+            Some(crate::request::request_group::FollowMode::Memory)
+        );
+        assert_eq!(
+            opts.follow_metalink,
+            Some(crate::request::request_group::FollowMode::Disabled)
+        );
 
         // Default values (non-zero) should be preserved in DownloadOptions
         let handler2 = OptionHandler::new();

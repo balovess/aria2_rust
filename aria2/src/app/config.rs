@@ -9,10 +9,21 @@
 use super::App;
 use super::cli::CliArgs;
 use aria2_core::config::{OptionValue, UriListFile};
+use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
 
 impl App {
+    /// Convert the complete, validated global configuration into the core
+    /// download options used by CLI, RPC and session-restored downloads.
+    pub(super) async fn download_options(&self) -> DownloadOptions {
+        let values = {
+            let config = self.config.read().await;
+            config.get_all_global_options().await
+        };
+        DownloadOptions::from_option_values(&values)
+    }
+
     /// Load parsed CLI arguments (from clap `CliArgs`) into the configuration.
     ///
     /// Each option that was explicitly set on the command line is applied to
@@ -118,6 +129,12 @@ impl App {
         set_bool_true!("deferred-input", g.deferred_input);
         set_bool_true!("disable-ipv6", g.disable_ipv6);
         set_bool_true!("hash-check-only", g.hash_check_only);
+        set_str!("follow-metalink", g.follow_metalink);
+        set_str!("metalink-version", g.metalink_version);
+        set_str!("metalink-language", g.metalink_language);
+        set_str!("metalink-os", g.metalink_os);
+        set_str!("metalink-location", g.metalink_location);
+        set_str!("metalink-preferred-protocol", g.metalink_preferred_protocol);
         set_bool_true!("parameterized-uri", g.parameterized_uri);
         set_bool_true!("pause", g.pause);
         set_bool_true!("remove-control-file", g.remove_control_file);

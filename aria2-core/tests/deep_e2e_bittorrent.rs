@@ -4,6 +4,7 @@
 //! MSE encrypted handshake, and tracker multi-peer distribution end-to-end.
 
 #![cfg(feature = "bittorrent")]
+mod e2e_helpers;
 mod fixtures;
 
 mod test_harness;
@@ -19,6 +20,7 @@ use test_harness::{assert_file_contents, generate_test_data, setup_temp_dir};
 use aria2_core::engine::bt_progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
 };
+use aria2_core::engine::command::Command;
 use aria2_core::engine::hook_manager::{
     DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
     HookManager, MoveHook, PostDownloadHook, TouchHook,
@@ -26,9 +28,113 @@ use aria2_core::engine::hook_manager::{
 use aria2_core::engine::lpd_manager::{
     LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
 };
+use aria2_core::engine::post_download_handler::{
+    build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,
+};
 use aria2_core::request::request_group::GroupId;
+use aria2_core::request::request_group::{DownloadOptions, FollowMode};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::extension::mse_crypto::{MseCryptoMethod, MseCryptoState};
 use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake;
+
+use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
+
+// ===========================================================================
+// Metadata follow E2E
+// ===========================================================================
+
+/// Download a torrent metainfo URL through the real HTTP command path using
+/// `follow-torrent=mem`, then run the production post-download chain.
+///
+/// This covers the behavior that unit tests cannot prove together: response
+/// content type propagation, memory-only source handling, bencode parsing, and
+/// child-group creation without a source `.torrent` file.
+#[tokio::test]
+async fn follow_torrent_mem_http_creates_child_without_source_file() {
+    let dir = setup_temp_dir();
+    let server = MockHttpServer::start()
+        .await
+        .expect("mock HTTP server should start");
+    let tracker_url = "http://tracker.invalid:6969/announce";
+    let torrent =
+        fixtures::test_torrent_builder::build_test_torrent("payload.bin", 1024, 512, tracker_url);
+    let torrent_for_server = torrent.clone();
+    server.on_get("/source.torrent", move |_| {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/x-bittorrent")
+            .header("Content-Length", torrent_for_server.len())
+            .body(full_body(torrent_for_server.clone()))
+            .unwrap()
+    });
+
+    let url = format!("{}/source.torrent", server.base_url());
+    let mut options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        ..DownloadOptions::default()
+    };
+    options.dir = Some(dir.path().display().to_string());
+
+    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+        GroupId::new(0x700),
+        &url,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+        Some("source.torrent"),
+    )
+    .expect("memory torrent command should construct");
+    command
+        .execute()
+        .await
+        .expect("memory torrent download should succeed");
+
+    let source_path = dir.path().join("source.torrent");
+    assert!(
+        !source_path.exists(),
+        "follow-torrent=mem must not create the source torrent file"
+    );
+
+    let group = command
+        .request_group()
+        .expect("HTTP command should expose its request group");
+    let info = {
+        let group = group.recover();
+        assert!(group.is_in_memory_download());
+        assert_eq!(group.in_memory_data(), Some(torrent));
+        assert_eq!(
+            group.content_type().as_deref(),
+            Some("application/x-bittorrent")
+        );
+        extract_download_info(&group)
+    };
+
+    let handlers = build_handler_chain(&info.options);
+    let handler_refs: Vec<&dyn aria2_core::engine::post_download_handler::PostDownloadHandler> =
+        handlers.iter().map(|handler| handler.as_ref()).collect();
+    let mut next_gid = 0x701u64;
+    let mut allocate_gid = || {
+        let gid = GroupId::new(next_gid);
+        next_gid += 1;
+        gid
+    };
+    let children =
+        run_post_download_processing_with_allocator(&info, &handler_refs, &mut allocate_gid);
+
+    assert_eq!(
+        children.len(),
+        1,
+        "torrent metadata should create one child"
+    );
+    let child = children[0].recover();
+    assert_eq!(child.uris(), &[tracker_url.to_string()]);
+    assert_eq!(child.get_bt_num_pieces(), 2);
+    assert_eq!(child.get_bt_piece_length(), 512);
+    assert_eq!(child.following_gid(), Some(GroupId::new(0x700)));
+    assert!(child.belongs_to_gid().is_none());
+    assert_eq!(child.options().follow_torrent, Some(FollowMode::Disabled));
+
+    server.shutdown().await;
+}
 
 // ===========================================================================
 // Test 1: BT Progress save/load roundtrip

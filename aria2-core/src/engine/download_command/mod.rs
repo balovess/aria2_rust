@@ -104,6 +104,9 @@ impl DownloadCommand {
             vec![uri.to_string()],
             options.clone(),
         )));
+        if options.uses_memory_download() {
+            group.recover().mark_in_memory_download();
+        }
         Self::new_with_group(group, uri, options, output_dir, output_name)
     }
 
@@ -114,6 +117,9 @@ impl DownloadCommand {
         output_dir: Option<&str>,
         output_name: Option<&str>,
     ) -> Result<Self> {
+        if options.uses_memory_download() {
+            group.recover().mark_in_memory_download();
+        }
         Self::new_with_group_and_resolved_addresses(
             group,
             uri,

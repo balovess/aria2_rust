@@ -54,6 +54,38 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert("secure-falloc".to_string(), "true".to_string());
     }
 
+    // --- Integrity / Metalink selection ---
+    if opts.check_integrity {
+        map.insert("check-integrity".to_string(), "true".to_string());
+    }
+    if opts.hash_check_only {
+        map.insert("hash-check-only".to_string(), "true".to_string());
+    }
+    if let Some(ref v) = opts.metalink_version {
+        map.insert("metalink-version".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.metalink_language {
+        map.insert("metalink-language".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.metalink_os {
+        map.insert("metalink-os".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.metalink_location {
+        map.insert("metalink-location".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.metalink_preferred_protocol {
+        map.insert("metalink-preferred-protocol".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.select_file {
+        map.insert("select-file".to_string(), v.clone());
+    }
+    if opts.metalink_enable_unique_protocol {
+        map.insert(
+            "metalink-enable-unique-protocol".to_string(),
+            "true".to_string(),
+        );
+    }
+
     // --- Checksum ---
     if let Some((ref algo, ref val)) = opts.checksum {
         map.insert("checksum".to_string(), format!("{}={}", algo, val));

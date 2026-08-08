@@ -10,7 +10,7 @@ use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
-use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use aria2_core::request::request_group::{GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
 #[cfg(feature = "metalink")]
@@ -57,165 +57,21 @@ impl App {
             return Err("No download inputs provided".to_string());
         }
 
-        let dir = self.get_opt_str("dir").await;
-        let out = self.get_opt_str("out").await;
-        let dl_limit = self
-            .get_opt_i64("max-download-limit")
+        let options = self.download_options().await;
+        let global_dl = self
+            .get_opt_i64("max-overall-download-limit")
             .await
-            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
-        let ul_limit = self
-            .get_opt_i64("max-upload-limit")
+            .and_then(|v| (v > 0).then_some(v as u64));
+        let global_ul = self
+            .get_opt_i64("max-overall-upload-limit")
             .await
-            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
-
-        let split = self
-            .get_opt_i64("split")
-            .await
-            .and_then(|v| if v > 0 { Some(v as u16) } else { None });
-        let max_conn = self
-            .get_opt_i64("max-connection-per-server")
-            .await
-            .and_then(|v| if v > 0 { Some(v as u16) } else { None });
-        let seed_time = self
-            .get_opt_str("seed-time")
-            .await
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|&v| v > 0.0);
-        let seed_ratio = self
-            .get_opt_str("seed-ratio")
-            .await
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|&r| r > 0.0);
-        let checksum = self.get_opt_str("checksum").await.and_then(|v| {
-            if let Some((algo, val)) = v.split_once('=') {
-                Some((algo.trim().to_string(), val.trim().to_string()))
-            } else {
-                None
-            }
-        });
-
-        let options = DownloadOptions {
-            split,
-            max_connection_per_server: max_conn,
-            max_download_limit: dl_limit,
-            max_upload_limit: ul_limit,
-            dir: dir.clone(),
-            out: out.clone(),
-            seed_time,
-            seed_ratio,
-            checksum,
-            cookie_file: self.get_opt_str("load-cookies").await,
-            cookies: self.get_opt_str("cookie").await,
-            bt_force_encrypt: self.get_opt_bool("bt-force-encrypt").await.unwrap_or(false),
-            bt_require_crypto: self
-                .get_opt_bool("bt-require-crypto")
-                .await
-                .unwrap_or(false),
-            enable_dht: self.get_opt_bool("enable-dht").await.unwrap_or(true),
-            dht_listen_port: self
-                .get_opt_i64("dht-listen-port")
-                .await
-                .and_then(|v| if v > 0 { Some(v as u16) } else { None }),
-            dht_entry_point: None,
-            enable_public_trackers: self
-                .get_opt_bool("enable-public-trackers")
-                .await
-                .unwrap_or(true),
-            bt_piece_selection_strategy: self
-                .get_opt_str("bt-piece-selection-strategy")
-                .await
-                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_STRATEGY.to_string()),
-            bt_endgame_threshold: self
-                .get_opt_i64("bt-endgame-threshold")
-                .await
-                .map(|v| {
-                    if v > 0 {
-                        v as u32
-                    } else {
-                        crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32
-                    }
-                })
-                .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
-            max_retries: self
-                .get_opt_i64("max-retries")
-                .await
-                .map(|v| {
-                    if v >= 0 {
-                        v as u32
-                    } else {
-                        crate::constants::DEFAULT_MAX_RETRIES
-                    }
-                })
-                .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
-            retry_wait: self
-                .get_opt_i64("retry-wait")
-                .await
-                .map(|v| {
-                    if v > 0 {
-                        v as u64
-                    } else {
-                        crate::constants::DEFAULT_RETRY_WAIT_SECS
-                    }
-                })
-                .unwrap_or(crate::constants::DEFAULT_RETRY_WAIT_SECS),
-            http_proxy: self.get_opt_str("http-proxy").await,
-            all_proxy: self.get_opt_str("all-proxy").await,
-            https_proxy: self.get_opt_str("https-proxy").await,
-            ftp_proxy: self.get_opt_str("ftp-proxy").await,
-            no_proxy: self.get_opt_str("no-proxy").await,
-            dht_file_path: self.get_opt_str("dht-file-path").await,
-            // Choking algorithm configuration (opt-in)
-            bt_max_upload_slots: self
-                .get_opt_i64("bt-max-upload-slots")
-                .await
-                .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
-            bt_optimistic_unchoke_interval: self
-                .get_opt_i64("bt-optimistic-unchoke-interval")
-                .await
-                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
-            bt_snubbed_timeout: self
-                .get_opt_i64("bt-snubbed-timeout")
-                .await
-                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
-            // G2: Piece selection priority mode
-            bt_prioritize_piece: self
-                .get_opt_str("bt-prioritize-piece")
-                .await
-                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_PRIORITY.to_string()),
-            // uTP (UDP Transport Protocol - BEP 29)
-            enable_utp: self.get_opt_bool("enable-utp").await.unwrap_or(false),
-            utp_listen_port: self
-                .get_opt_i64("utp-listen-port")
-                .await
-                .and_then(|v| if v > 0 { Some(v as u16) } else { None }),
-            header: self
-                .get_opt_str("header")
-                .await
-                .map(|s| {
-                    s.split('\n')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            user_agent: self.get_opt_str("user-agent").await,
-            referer: self.get_opt_str("referer").await,
-            ..Default::default()
-        };
+            .and_then(|v| (v > 0).then_some(v as u64));
 
         let mut engine_lock = self.engine.lock().await;
         let engine = engine_lock
             .as_mut()
             .ok_or_else(|| "Engine not initialized".to_string())?;
 
-        let global_dl = self
-            .get_opt_i64("max-overall-download-limit")
-            .await
-            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
-        let global_ul = self
-            .get_opt_i64("max-overall-upload-limit")
-            .await
-            .and_then(|v| if v > 0 { Some(v as u64) } else { None });
         if global_dl.is_some() || global_ul.is_some() {
             use aria2_core::rate_limiter::RateLimiterConfig;
             engine.set_global_rate_limiter(RateLimiterConfig::new(global_dl, global_ul));
@@ -350,6 +206,9 @@ impl App {
                 vec![initial_uri],
                 options.clone(),
             )));
+            if options.uses_memory_download() {
+                group.recover().mark_in_memory_download();
+            }
             #[cfg(feature = "bittorrent")]
             if matches!(input.input_type, InputType::TorrentFile) {
                 let data = input

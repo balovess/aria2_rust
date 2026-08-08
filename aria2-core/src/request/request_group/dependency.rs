@@ -21,6 +21,9 @@ use std::path::PathBuf;
 #[cfg(feature = "bittorrent")]
 use std::sync::RwLock;
 
+#[cfg(feature = "bittorrent")]
+use crate::download::{DownloadContext, file_entry::FileEntry};
+
 /// A dependency that must be resolved before a download can start.
 ///
 /// Mirrors the C++ `Dependency` base class and its `virtual bool resolve()`
@@ -93,10 +96,28 @@ impl CompletionDependency {
 /// A completion dependency that installs a parsed torrent context into the
 /// payload group before allowing promotion.
 #[cfg(feature = "bittorrent")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BtFileMapping {
+    /// The torrent-relative path stored in `FileEntry::original_name`.
+    pub original_name: String,
+    /// Metalink-selected output path.
+    pub path: String,
+    /// Direct mirrors belonging to the Metalink file.
+    pub uris: Vec<String>,
+    /// Per-server connection limit copied to the resolved torrent entry.
+    pub max_connection_per_server: usize,
+    /// Whether all URIs for the entry must use one protocol.
+    pub unique_protocol: bool,
+}
+
+#[cfg(feature = "bittorrent")]
 pub struct BtDependency {
     depends_on_gid: GroupId,
     completed: Arc<std::sync::atomic::AtomicBool>,
     payload: Arc<RwLock<RequestGroup>>,
+    /// Metadata source group for Metalink's memory pre-download path.
+    metadata_source: Option<Arc<RwLock<RequestGroup>>>,
+    file_mappings: Vec<BtFileMapping>,
     torrent_data: Arc<RwLock<Option<Vec<u8>>>>,
     metadata_path: Option<PathBuf>,
     output_path: PathBuf,
@@ -123,6 +144,14 @@ impl std::fmt::Debug for BtDependency {
             .debug_struct("BtDependency")
             .field("depends_on_gid", &self.depends_on_gid)
             .field("payload_gid", &self.payload.recover().gid())
+            .field(
+                "metadata_source_gid",
+                &self
+                    .metadata_source
+                    .as_ref()
+                    .map(|source| source.recover().gid()),
+            )
+            .field("file_mappings", &self.file_mappings)
             .field("metadata_path", &self.metadata_path)
             .field("output_path", &self.output_path)
             .field("metadata_info", &self.metadata_info)
@@ -211,12 +240,60 @@ impl BtDependency {
             depends_on_gid,
             completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             payload,
+            metadata_source: None,
+            file_mappings: Vec::new(),
             torrent_data: Arc::new(RwLock::new(torrent_data)),
             metadata_path,
             output_path,
             metadata_info,
             fallback_uris,
         }
+    }
+
+    /// Create a dependency whose prerequisite stores torrent bytes in memory.
+    ///
+    /// This is the Rust equivalent of Metalink2RequestGroup attaching
+    /// `MemoryPreDownloadHandler` to the torrent metaurl request group.
+    pub fn new_memory_with_fallback(
+        depends_on_gid: GroupId,
+        payload: Arc<RwLock<RequestGroup>>,
+        metadata_source: Arc<RwLock<RequestGroup>>,
+        output_path: PathBuf,
+        metadata_info: MetadataInfo,
+        fallback_uris: Vec<String>,
+    ) -> Self {
+        let mut dependency = Self::from_source(
+            depends_on_gid,
+            payload,
+            None,
+            None,
+            output_path,
+            metadata_info,
+            fallback_uris,
+        );
+        dependency.metadata_source = Some(metadata_source);
+        dependency
+    }
+
+    /// Attach Metalink-to-torrent file mappings to this dependency.
+    pub fn with_file_mappings(mut self, file_mappings: Vec<BtFileMapping>) -> Self {
+        self.file_mappings = file_mappings;
+        self
+    }
+
+    /// Return direct mirrors retained for Metalink fallback.
+    pub fn fallback_uris(&self) -> &[String] {
+        &self.fallback_uris
+    }
+
+    /// Return the selected Metalink-to-torrent file mappings.
+    pub fn file_mappings(&self) -> &[BtFileMapping] {
+        &self.file_mappings
+    }
+
+    /// Whether the prerequisite stores its torrent bytes in memory.
+    pub fn uses_memory_source(&self) -> bool {
+        self.metadata_source.is_some() || self.torrent_data.recover().is_some()
     }
 
     /// Configure the path written by the prerequisite metadata task.
@@ -241,7 +318,17 @@ impl BtDependency {
         }
 
         if matches!(prerequisite_status, DownloadStatus::Complete) {
-            if let Some(metadata_path) = self.metadata_path()
+            if let Some(source) = &self.metadata_source {
+                if let Some(data) = source.recover().in_memory_data() {
+                    if let Err(error) = self.resolve_metadata_bytes(data) {
+                        return self.fallback_or_fail(error);
+                    }
+                } else {
+                    return self.fallback_or_fail(
+                        "in-memory torrent metadata source has no data".to_string(),
+                    );
+                }
+            } else if let Some(metadata_path) = self.metadata_path()
                 && let Err(error) = self.resolve_metadata_file(metadata_path)
             {
                 return self.fallback_or_fail(error);
@@ -323,7 +410,10 @@ impl BtDependency {
             self.output_path.to_string_lossy().into_owned(),
         )
         .map_err(|error| error.to_string())?;
+        let mut ctx = ctx;
+        apply_file_mappings(&mut ctx, &self.file_mappings)?;
         let payload = self.payload.recover();
+        payload.set_bt_metadata_data(data.clone());
         payload.set_bt_metadata(
             meta.num_pieces() as u32,
             meta.info.piece_length,
@@ -335,6 +425,44 @@ impl BtDependency {
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
+}
+
+#[cfg(feature = "bittorrent")]
+fn apply_file_mappings(
+    context: &mut DownloadContext,
+    mappings: &[BtFileMapping],
+) -> Result<(), String> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let entries = context.get_file_entries_mut();
+    if entries.len() == 1 && mappings.len() == 1 && mappings[0].original_name.is_empty() {
+        apply_file_mapping(&mut entries[0], &mappings[0]);
+        return Ok(());
+    }
+
+    for entry in entries.iter_mut() {
+        entry.set_requested(false);
+    }
+
+    for mapping in mappings {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.original_name() == mapping.original_name)
+            .ok_or_else(|| format!("No entry '{}' in torrent metadata", mapping.original_name))?;
+        apply_file_mapping(entry, mapping);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bittorrent")]
+fn apply_file_mapping(entry: &mut FileEntry, mapping: &BtFileMapping) {
+    entry.set_requested(true);
+    entry.set_path(mapping.path.clone());
+    entry.set_uris(&mapping.uris);
+    entry.set_max_connection_per_server(mapping.max_connection_per_server);
+    entry.set_unique_protocol(mapping.unique_protocol);
 }
 
 #[cfg(feature = "bittorrent")]

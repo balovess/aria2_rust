@@ -62,6 +62,9 @@ impl FtpDownloadCommand {
             vec![uri.to_string()],
             options.clone(),
         )));
+        if options.uses_memory_download() {
+            group.recover().mark_in_memory_download();
+        }
         Self::new_with_group(group, output_dir, output_name)
     }
 
@@ -88,6 +91,10 @@ impl FtpDownloadCommand {
             (uri, opts)
         };
 
+        if options.uses_memory_download() {
+            group.recover().mark_in_memory_download();
+        }
+
         let (host, port, username, password, remote_path) = Self::parse_uri(&uri)?;
 
         let dir = output_dir
@@ -103,7 +110,9 @@ impl FtpDownloadCommand {
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
         // Check if file exists for resume support
-        let resume_offset = if path.exists() {
+        let resume_offset = if group.recover().is_in_memory_download() {
+            0
+        } else if path.exists() {
             std::fs::metadata(&path).ok().map(|m| m.len()).unwrap_or(0)
         } else {
             0

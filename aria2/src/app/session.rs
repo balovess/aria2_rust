@@ -6,10 +6,16 @@
 //! - Mapping session entries to download options
 
 use super::App;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use aria2_core::request::request_group::{BtDependency, BtFileMapping, MetadataInfo, RequestGroup};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::session::active_session::ActiveSessionManager;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use aria2_core::session::session_entry::SessionEntry;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::path::PathBuf;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -83,6 +89,26 @@ impl App {
             // Map SessionEntry options to DownloadOptions
             let opts = Self::map_entry_to_download_options(&entry.options);
 
+            #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+            if let Some(payload_gid) = standard_graph_payload_gid(entry) {
+                match self
+                    .restore_standard_metalink_graph(entry, payload_gid, opts.clone())
+                    .await
+                {
+                    Ok(count) => {
+                        restored_count += count;
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(
+                            gid = %entry.gid,
+                            error = %error,
+                            "Failed to restore Metalink graph entry; falling back to plain session task"
+                        );
+                    }
+                }
+            }
+
             info!(
                 "Restoring download task: GID={:x}, URIs={:?}, progress={}/{}",
                 entry.gid, entry.uris, entry.completed_length, entry.total_length
@@ -125,6 +151,131 @@ impl App {
             restored_count
         );
         Ok(restored_count)
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    async fn restore_standard_metalink_graph(
+        &self,
+        entry: &SessionEntry,
+        payload_gid: GroupId,
+        payload_options: DownloadOptions,
+    ) -> std::result::Result<usize, String> {
+        let metadata_gid = GroupId::new(entry.gid);
+        if metadata_gid == payload_gid {
+            return Err("metadata and payload GIDs must differ".to_string());
+        }
+        let metadata_uri = entry
+            .options
+            .get("aria2-rust-metadata-uri")
+            .cloned()
+            .or_else(|| entry.uris.first().cloned())
+            .filter(|uri| !uri.is_empty())
+            .ok_or_else(|| "Metalink graph entry has no metadata URI".to_string())?;
+
+        let metadata_path = entry
+            .options
+            .get("aria2-rust-metadata-path")
+            .cloned()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let name = metadata_uri
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("metadata.torrent");
+                PathBuf::from(payload_options.dir.as_deref().unwrap_or(".")).join(name)
+            });
+        let output_name = entry
+            .options
+            .get("aria2-rust-output-name")
+            .cloned()
+            .or_else(|| payload_options.out.clone())
+            .ok_or_else(|| "Metalink graph entry has no payload output name".to_string())?;
+        let payload_path =
+            PathBuf::from(payload_options.dir.as_deref().unwrap_or(".")).join(&output_name);
+        let metadata_info = MetadataInfo::new(metadata_gid, &metadata_uri)
+            .with_metadata_path(metadata_path.to_string_lossy());
+
+        let fallback_uris =
+            decode_session_uris(entry.options.get("aria2-rust-fallback-uris")).unwrap_or_default();
+        let file_mappings = decode_session_mappings(entry.options.get("aria2-rust-file-mappings"))
+            .unwrap_or_default();
+        let memory_source = entry
+            .options
+            .get("aria2-rust-metadata-memory")
+            .is_some_and(|value| value == "true");
+
+        let mut metadata_options = payload_options.clone();
+        metadata_options.follow_torrent =
+            Some(aria2_core::request::request_group::FollowMode::Disabled);
+        metadata_options.follow_metalink =
+            Some(aria2_core::request::request_group::FollowMode::Disabled);
+        metadata_options.dir = metadata_path
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned());
+        metadata_options.out = metadata_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        let metadata = Arc::new(RwLock::new(RequestGroup::new(
+            metadata_gid,
+            vec![metadata_uri.clone()],
+            metadata_options,
+        )));
+        if memory_source {
+            metadata.recover().mark_in_memory_download();
+        }
+        metadata.recover().set_belongs_to_gid(payload_gid);
+
+        let payload = Arc::new(RwLock::new(RequestGroup::new(
+            payload_gid,
+            vec![format!("bt://{}", metadata_gid.to_hex_string())],
+            payload_options,
+        )));
+        payload.recover().set_output_name(output_name);
+        payload.recover().set_metadata_info(metadata_info.clone());
+        let dependency = if memory_source {
+            BtDependency::new_memory_with_fallback(
+                metadata_gid,
+                Arc::clone(&payload),
+                Arc::clone(&metadata),
+                payload_path,
+                metadata_info,
+                fallback_uris,
+            )
+        } else {
+            BtDependency::new_file_with_fallback(
+                metadata_gid,
+                Arc::clone(&payload),
+                metadata_path,
+                payload_path,
+                metadata_info,
+                fallback_uris,
+            )
+        }
+        .with_file_mappings(file_mappings);
+        payload.recover().set_dependency(Box::new(dependency));
+        payload.recover().set_total_length(entry.total_length);
+        payload
+            .recover()
+            .set_completed_length(entry.completed_length);
+        if entry.paused || entry.status == "paused" {
+            metadata
+                .recover_mut()
+                .pause()
+                .map_err(|error| error.to_string())?;
+            payload
+                .recover_mut()
+                .pause()
+                .map_err(|error| error.to_string())?;
+        }
+
+        let manager = self.request_man.read().await;
+        if manager.find_group(metadata_gid).is_some() || manager.find_group(payload_gid).is_some() {
+            return Err("Metalink graph GID already exists".to_string());
+        }
+        manager.add_group_arc(metadata);
+        manager.add_group_arc(payload);
+        Ok(2)
     }
 
     /// Save active session on application shutdown.
@@ -186,4 +337,32 @@ impl App {
     ) -> DownloadOptions {
         DownloadOptions::from_option_strings(options)
     }
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn standard_graph_payload_gid(entry: &SessionEntry) -> Option<GroupId> {
+    entry
+        .options
+        .get("aria2-rust-payload-gid")
+        .and_then(|value| GroupId::from_hex_string(value))
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn decode_session_bytes(value: Option<&String>) -> Option<Vec<u8>> {
+    use base64::Engine;
+
+    let value = value?;
+    base64::engine::general_purpose::STANDARD.decode(value).ok()
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn decode_session_uris(value: Option<&String>) -> Option<Vec<String>> {
+    let bytes = decode_session_bytes(value)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+fn decode_session_mappings(value: Option<&String>) -> Option<Vec<BtFileMapping>> {
+    let bytes = decode_session_bytes(value)?;
+    serde_json::from_slice(&bytes).ok()
 }

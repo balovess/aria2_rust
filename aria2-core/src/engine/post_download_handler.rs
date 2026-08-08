@@ -166,7 +166,6 @@ pub fn run_post_download_processing_with_allocator(
                     for child in &groups {
                         let child_group = child.recover();
                         child_group.set_following_gid(info.gid);
-                        child_group.set_belongs_to_gid(info.gid);
                         let metadata_info = info
                             .base_uri
                             .as_deref()
@@ -281,7 +280,13 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
 
             (group.content_type(), fp, base_uri, in_mem, data)
         } else {
-            (None, None, None, false, None)
+            (
+                group.content_type(),
+                None,
+                None,
+                group.is_in_memory_download(),
+                group.in_memory_data(),
+            )
         };
 
     CompletedDownloadInfo {

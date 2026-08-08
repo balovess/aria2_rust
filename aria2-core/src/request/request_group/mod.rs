@@ -26,9 +26,9 @@ mod tests;
 // Import paths like `crate::request::request_group::RequestGroup` still work.
 pub use bt_peer_snapshot::BtPeerSnapshot;
 #[cfg(feature = "bittorrent")]
-pub use dependency::BtDependency;
-#[cfg(feature = "bittorrent")]
 pub use dependency::BtDependencyResolution;
+#[cfg(feature = "bittorrent")]
+pub use dependency::{BtDependency, BtFileMapping};
 pub use dependency::{CompletionDependency, Dependency, NoDependency};
 pub use download_result::{DownloadResult, FileEntry, UriEntry};
 pub use group::RequestGroup;

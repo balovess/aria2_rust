@@ -25,8 +25,41 @@ pub(crate) fn build_download_context_from_meta(
 ) -> crate::error::Result<crate::download::DownloadContext> {
     use crate::download::DownloadContext;
     use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+    use crate::download::file_entry::FileEntry;
 
-    let mut ctx = DownloadContext::new(meta.info.piece_length, meta.total_size(), path);
+    let mut ctx = if meta.is_single_file() {
+        DownloadContext::new(meta.info.piece_length, meta.total_size(), path)
+    } else {
+        let base_dir = std::path::Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut entries = Vec::with_capacity(meta.info.files.as_ref().map_or(0, Vec::len));
+        let mut offset = 0u64;
+        for torrent_file in meta.info.files.as_deref().unwrap_or_default() {
+            let original_name = torrent_file.path.join("/");
+            let file_path = base_dir.join(std::path::Path::new(&original_name));
+            let mut entry = FileEntry::new(
+                file_path.to_string_lossy().into_owned(),
+                torrent_file.length,
+                offset,
+                Vec::new(),
+            );
+            entry.set_original_name(original_name.clone());
+            entry.set_suffix_path(original_name);
+            entries.push(entry);
+            offset = offset.saturating_add(torrent_file.length);
+        }
+        let mut context = DownloadContext::new_default();
+        context.set_piece_length(meta.info.piece_length);
+        context.set_file_entries(entries);
+        context
+    };
+    if meta.is_single_file()
+        && let Some(entry) = ctx.get_file_entries_mut().first_mut()
+    {
+        entry.set_original_name(meta.info.name.clone());
+        entry.set_suffix_path(meta.info.name.clone());
+    }
     let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
     ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
 
@@ -83,7 +116,41 @@ impl BtDownloadCommand {
         }
         command.group = group;
         command.progress = command.group.recover().progress.clone();
+        command.apply_external_context_paths()?;
         Ok(command)
+    }
+
+    /// Apply paths from an externally prepared context, such as a Metalink
+    /// torrent dependency. Torrent piece offsets stay unchanged while the
+    /// destination files follow the Metalink mapping.
+    fn apply_external_context_paths(&mut self) -> Result<()> {
+        let paths = self
+            .group
+            .recover()
+            .get_download_context()
+            .map(|context| {
+                context
+                    .get_file_entries()
+                    .iter()
+                    .map(|entry| std::path::PathBuf::from(entry.path()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(layout) = self.multi_file_layout.as_mut() {
+            if paths.len() == layout.num_files() {
+                for (index, path) in paths.into_iter().enumerate() {
+                    layout
+                        .set_file_absolute_path(index, path)
+                        .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+                }
+            }
+        } else if let Some(path) = paths.into_iter().next()
+            && !path.as_os_str().is_empty()
+        {
+            self.output_path = path;
+        }
+        Ok(())
     }
 
     pub fn new(

@@ -46,7 +46,11 @@ impl Command for DownloadCommand {
             )));
         }
 
-        let memory_download = self.group.recover().options().uses_memory_download();
+        // MemoryPreDownloadHandler semantics are represented explicitly on
+        // the group. Follow options also live on payload groups, so deriving
+        // this from DownloadOptions would incorrectly turn a normal payload
+        // into an in-memory source download.
+        let memory_download = self.group.recover().is_in_memory_download();
         if memory_download {
             return self.execute_in_memory(&uri).await;
         }
@@ -474,10 +478,33 @@ impl DownloadCommand {
     async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
         self.check_cancelled()?;
 
+        // A JSON/session restore may already carry the completed metadata
+        // bytes. Reuse them before opening the network source; this preserves
+        // `follow-*=mem` across a restart and keeps a completed metadata
+        // prerequisite from becoming an unnecessary second download.
+        if let Some(data) = self.group.recover().in_memory_data() {
+            let completed = data.len() as u64;
+            let group = self.group.recover();
+            group.set_total_length(completed);
+            group.set_completed_length(completed);
+            if group.content_type().is_none() {
+                group.set_content_type("application/octet-stream");
+            }
+            group.set_in_memory_data(data);
+            drop(group);
+            self.completed_bytes = completed;
+            self.completed = true;
+            self.group.recover_mut().complete()?;
+            return Ok(());
+        }
+
         let url = reqwest::Url::parse(uri).ok();
         let cookie_header = url
             .as_ref()
-            .map(|url| self.create_cookie_helper().build_cookie_header_from_url(url))
+            .map(|url| {
+                self.create_cookie_helper()
+                    .build_cookie_header_from_url(url)
+            })
             .filter(|header| !header.is_empty());
 
         let mut request = self.client.get(uri);
@@ -526,11 +553,9 @@ impl DownloadCommand {
         while let Some(chunk) = stream.next().await {
             self.check_cancelled()?;
             let chunk = chunk.map_err(|error| {
-                Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure {
-                        message: error.to_string(),
-                    },
-                )
+                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
+                    message: error.to_string(),
+                })
             })?;
             completed = completed.saturating_add(chunk.len() as u64);
             data.extend_from_slice(&chunk);

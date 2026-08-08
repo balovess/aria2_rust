@@ -394,11 +394,17 @@ impl MetalinkDownloadCommand {
                 .map_err(|e| {
                     Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {e}")))
                 })?;
-        let file = doc.files.get(file_index).ok_or_else(|| {
+        let mut file = doc.files.get(file_index).cloned().ok_or_else(|| {
             Aria2Error::Fatal(FatalError::Config(
                 "Metalink file index out of range".to_string(),
             ))
         })?;
+        // The manager stores raw Metalink bytes so the task can be rebuilt
+        // after a restart. Reapply the same resource normalization used when
+        // the group was created; otherwise location/protocol preferences are
+        // silently lost at execution time.
+        crate::engine::metalink_to_request_group::MetalinkToRequestGroup::new()
+            .normalize_file_for_runtime(&mut file, options);
         let dir = options.dir.as_deref().unwrap_or(".");
         let output_name = group
             .recover()

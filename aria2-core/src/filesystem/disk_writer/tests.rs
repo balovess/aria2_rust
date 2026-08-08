@@ -42,6 +42,17 @@ async fn test_byte_array_disk_writer() {
 }
 
 #[tokio::test]
+async fn test_sequential_download_writer_memory_mode_never_opens_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.torrent");
+
+    let mut writer = new_sequential_download_writer(&path, true, 99, Some(6));
+    writer.write(b"abcdef").await.unwrap();
+    assert_eq!(writer.finalize().await.unwrap(), b"abcdef");
+    assert!(!path.exists());
+}
+
+#[tokio::test]
 async fn test_seekable_writer_basic() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_seekable.bin");

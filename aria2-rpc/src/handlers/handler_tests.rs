@@ -10,6 +10,7 @@ use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
 use crate::types::{SessionInfo, StatusInfo, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 #[tokio::test]
 async fn test_handle_add_torrent() {
@@ -57,6 +58,81 @@ async fn test_handle_add_metalink() {
         "addMetalink should return non-empty GID array"
     );
     assert_eq!(engine.task_count().await, 1);
+}
+
+#[tokio::test]
+async fn test_add_metalink_direct_only_applies_filters_and_priority() {
+    let engine = RpcEngine::new();
+    let metalink_xml = r#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><files><file name="first.bin"><url location="de" priority="1">https://de.example/first.bin</url></file><file name="second.bin"><url location="de" priority="1">https://de.example/second.bin</url><url location="us" priority="100">https://us.example/second.bin</url></file></files></metalink>"#;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(metalink_xml.as_bytes());
+    let req = JsonRpcRequest::new(
+        "aria2.addMetalink",
+        serde_json::json!([
+            encoded,
+            {
+                "select-file": "2",
+                "metalink-location": "us",
+                "dir": "target/rpc-metalink"
+            }
+        ]),
+    )
+    .with_id(1);
+
+    let response = engine.handle_request(&req).await;
+    let gids: Vec<String> = serde_json::from_value(response.result.expect("RPC result")).unwrap();
+    assert_eq!(
+        gids.len(),
+        1,
+        "select-file must be applied before GID creation"
+    );
+
+    let group_man = engine
+        .group_man
+        .as_ref()
+        .expect("test manager")
+        .read()
+        .await;
+    let group = group_man
+        .group_by_hex(&gids[0])
+        .expect("direct Metalink group should be registered");
+    let group = group.recover();
+    assert_eq!(group.output_name().as_deref(), Some("second.bin"));
+    assert_eq!(
+        group.uris(),
+        &[
+            "https://us.example/second.bin".to_string(),
+            "https://de.example/second.bin".to_string()
+        ]
+    );
+    assert_eq!(group.options().select_file.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn test_add_metalink_position_inserts_the_whole_result() {
+    let engine = RpcEngine::new();
+    let first = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!([["https://example.test/first.bin"]]),
+    )
+    .with_id(1);
+    let _ = engine.handle_request(&first).await;
+
+    let xml = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="second.bin"><url>https://example.test/second.bin</url></file></metalink>"#;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
+    let request =
+        JsonRpcRequest::new("aria2.addMetalink", serde_json::json!([encoded, {}, 0])).with_id(2);
+    let response = engine.handle_request(&request).await;
+    let gids: Vec<String> = serde_json::from_value(response.result.expect("RPC result")).unwrap();
+    assert_eq!(gids.len(), 1);
+
+    let group_man = engine
+        .group_man
+        .as_ref()
+        .expect("test manager")
+        .read()
+        .await;
+    let waiting = group_man.get_waiting_groups();
+    assert_eq!(waiting[0].recover().gid().to_hex_string(), gids[0]);
 }
 
 #[tokio::test]

@@ -277,6 +277,9 @@ impl Aria2RustSession {
                 uris,
                 options.clone(),
             )));
+            if options.uses_memory_download() {
+                group.recover().mark_in_memory_download();
+            }
             if options.pause {
                 group
                     .recover_mut()

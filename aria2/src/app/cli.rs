@@ -323,6 +323,30 @@ pub struct GeneralArgs {
     )]
     pub hash_check_only: Option<bool>,
 
+    /// Auto-handle Metalink documents (true/false/mem)
+    #[arg(long = "follow-metalink")]
+    pub follow_metalink: Option<String>,
+
+    /// Preferred Metalink file version
+    #[arg(long = "metalink-version")]
+    pub metalink_version: Option<String>,
+
+    /// Preferred Metalink file language
+    #[arg(long = "metalink-language")]
+    pub metalink_language: Option<String>,
+
+    /// Preferred Metalink file operating system
+    #[arg(long = "metalink-os")]
+    pub metalink_os: Option<String>,
+
+    /// Preferred Metalink server location(s)
+    #[arg(long = "metalink-location")]
+    pub metalink_location: Option<String>,
+
+    /// Preferred Metalink download protocol
+    #[arg(long = "metalink-preferred-protocol")]
+    pub metalink_preferred_protocol: Option<String>,
+
     /// Enable parameterized URI support (e.g. {a,b})
     #[arg(
         long = "parameterized-uri",

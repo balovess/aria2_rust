@@ -601,6 +601,22 @@ impl DownloadOptions {
             || self.follow_metalink.is_some_and(FollowMode::is_memory)
     }
 
+    /// Build per-download options from typed configuration values.
+    ///
+    /// Configuration managers use [`OptionValue`](crate::config::OptionValue)
+    /// while session files and RPC option maps use strings. Converting both
+    /// through this seam keeps the download engine independent of the source
+    /// of the options and gives every caller the same default handling.
+    pub fn from_option_values(
+        options: &std::collections::HashMap<String, crate::config::OptionValue>,
+    ) -> Self {
+        let string_options = options
+            .iter()
+            .filter_map(|(key, value)| (!value.is_none()).then(|| (key.clone(), value.to_string())))
+            .collect();
+        Self::from_option_strings(&string_options)
+    }
+
     /// Build per-download options from aria2's kebab-case option map.
     ///
     /// This is the shared conversion seam for CLI/session/FFI callers. The
@@ -609,23 +625,28 @@ impl DownloadOptions {
     /// values fall back to the type's default, while validation of user-facing
     /// configuration remains the responsibility of `ConfigManager`.
     pub fn from_option_strings(options: &std::collections::HashMap<String, String>) -> Self {
+        let positive_u16 = |key: &str| {
+            options
+                .get(key)
+                .and_then(|v| v.parse::<u16>().ok())
+                .filter(|value| *value > 0)
+        };
+        let positive_u64 = |key: &str| {
+            options
+                .get(key)
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+        };
+
         Self {
-            split: options.get("split").and_then(|v| v.parse::<u16>().ok()),
-            max_connection_per_server: options
-                .get("max-connection-per-server")
-                .and_then(|v| v.parse::<u16>().ok()),
-            max_download_limit: options
-                .get("max-download-limit")
-                .and_then(|v| v.parse::<u64>().ok()),
-            max_upload_limit: options
-                .get("max-upload-limit")
-                .and_then(|v| v.parse::<u64>().ok()),
+            split: positive_u16("split"),
+            max_connection_per_server: positive_u16("max-connection-per-server"),
+            max_download_limit: positive_u64("max-download-limit"),
+            max_upload_limit: positive_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),
             out: options.get("out").cloned(),
             file_allocation: options.get("file-allocation").cloned(),
-            mmap_threshold: options
-                .get("mmap-threshold")
-                .and_then(|v| v.parse::<u64>().ok()),
+            mmap_threshold: positive_u64("mmap-threshold"),
             secure_falloc: options
                 .get("secure-falloc")
                 .map(|v| v == "true")
@@ -633,12 +654,19 @@ impl DownloadOptions {
             check_integrity: options
                 .get("check-integrity")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(false)
+                || options
+                    .get("hash-check-only")
+                    .map(|v| v == "true")
+                    .unwrap_or(false),
             hash_check_only: options
                 .get("hash-check-only")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
+            seed_time: options
+                .get("seed-time")
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|value| *value > 0.0),
             seed_ratio: options
                 .get("seed-ratio")
                 .and_then(|v| v.parse::<f64>().ok()),
@@ -671,9 +699,7 @@ impl DownloadOptions {
                 .get("enable-dht")
                 .map(|v| v != "false")
                 .unwrap_or(true),
-            dht_listen_port: options
-                .get("dht-listen-port")
-                .and_then(|v| v.parse::<u16>().ok()),
+            dht_listen_port: positive_u16("dht-listen-port"),
             dht_entry_point: options.get("dht-entry-point").and_then(|v| {
                 let entries = v
                     .split(',')
@@ -706,6 +732,7 @@ impl DownloadOptions {
                 .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
             max_retries: options
                 .get("max-retries")
+                .or_else(|| options.get("max-tries"))
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
             retry_wait: options
@@ -739,9 +766,7 @@ impl DownloadOptions {
                 .get("enable-utp")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            utp_listen_port: options
-                .get("utp-listen-port")
-                .and_then(|v| v.parse::<u16>().ok()),
+            utp_listen_port: positive_u16("utp-listen-port"),
             header: options
                 .get("header")
                 .map(|v| {
@@ -760,23 +785,15 @@ impl DownloadOptions {
             metalink_location: options.get("metalink-location").cloned(),
             metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),
             select_file: options.get("select-file").cloned(),
-            piece_length: options
-                .get("piece-length")
-                .and_then(|v| v.parse::<u64>().ok()),
+            piece_length: positive_u64("piece-length"),
             metalink_enable_unique_protocol: options
                 .get("metalink-enable-unique-protocol")
                 .map(|v| v != "false")
                 .unwrap_or(true),
-            timeout: options.get("timeout").and_then(|v| v.parse::<u64>().ok()),
-            connect_timeout: options
-                .get("connect-timeout")
-                .and_then(|v| v.parse::<u64>().ok()),
-            startup_idle_time: options
-                .get("startup-idle-time")
-                .and_then(|v| v.parse::<u64>().ok()),
-            lowest_speed_limit: options
-                .get("lowest-speed-limit")
-                .and_then(|v| v.parse::<u64>().ok()),
+            timeout: positive_u64("timeout"),
+            connect_timeout: positive_u64("connect-timeout"),
+            startup_idle_time: positive_u64("startup-idle-time"),
+            lowest_speed_limit: positive_u64("lowest-speed-limit"),
             ftp_pasv: options
                 .get("ftp-pasv")
                 .map(|v| v != "false")
@@ -880,4 +897,31 @@ impl DownloadOptions {
 /// an entry with the given name.
 fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DownloadOptions, FollowMode};
+    use std::collections::HashMap;
+
+    #[test]
+    fn follow_mode_preserves_all_wire_values() {
+        assert_eq!(FollowMode::parse("true"), Some(FollowMode::Follow));
+        assert_eq!(FollowMode::parse("false"), Some(FollowMode::Disabled));
+        assert_eq!(FollowMode::parse("mem"), Some(FollowMode::Memory));
+        assert_eq!(FollowMode::parse("invalid"), None);
+        assert_eq!(FollowMode::Memory.as_str(), "mem");
+    }
+
+    #[test]
+    fn option_map_keeps_memory_follow_mode() {
+        let mut values = HashMap::new();
+        values.insert("follow-torrent".to_string(), "mem".to_string());
+        values.insert("follow-metalink".to_string(), "false".to_string());
+
+        let options = DownloadOptions::from_option_strings(&values);
+        assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
+        assert_eq!(options.follow_metalink, Some(FollowMode::Disabled));
+        assert!(options.uses_memory_download());
+    }
 }

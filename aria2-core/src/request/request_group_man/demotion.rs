@@ -389,7 +389,9 @@ impl super::RequestGroupMan {
         completed_gid: crate::request::request_group::GroupId,
         prerequisite_status: DownloadStatus,
     ) {
-        let mut failed_payloads = Vec::new();
+        #[cfg(feature = "bittorrent")]
+        let mut failed_payloads: Vec<(crate::request::request_group::GroupId, String)> = Vec::new();
+
         for group in self.reserved.iter_snapshot() {
             let (payload_gid, dependency) = {
                 let g = group.recover();
@@ -435,6 +437,7 @@ impl super::RequestGroupMan {
             }
         }
 
+        #[cfg(feature = "bittorrent")]
         for (gid, error) in failed_payloads {
             self.fail_reserved_group(
                 gid,

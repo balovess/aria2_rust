@@ -143,12 +143,12 @@ impl super::RequestGroup {
 
     /// Set uploaded length using atomic store (lock-free).
     pub fn set_uploaded_length(&self, val: u64) {
-        self.uploaded_length.store(val, Ordering::Relaxed);
+        self.progress.set_upload_length(val);
     }
 
     /// Get uploaded length using atomic load (lock-free).
     pub fn get_uploaded_length(&self) -> u64 {
-        self.uploaded_length.load(Ordering::Relaxed)
+        self.progress.upload_length()
     }
 
     /// Set download speed cache using atomic store (lock-free).
