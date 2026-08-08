@@ -163,6 +163,21 @@ fn test_option_def_parse_list() {
 }
 
 #[test]
+fn test_option_def_parse_enum_rejects_unknown_choice() {
+    let def = OptionDef {
+        name: "uri-selector".into(),
+        opt_type: OptionType::Enum,
+        allowed_values: &["inorder", "feedback", "adaptive"],
+        ..Default::default()
+    };
+    assert_eq!(
+        def.parse_value("feedback").unwrap().as_str(),
+        Some("feedback")
+    );
+    assert!(def.parse_value("unknown").is_err());
+}
+
+#[test]
 fn test_option_def_parse_empty_uses_default() {
     let def = OptionDef {
         name: "dir".into(),

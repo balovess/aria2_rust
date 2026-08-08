@@ -2,6 +2,7 @@ pub mod netrc;
 pub mod option;
 pub mod option_definitions;
 pub mod parser;
+pub mod runtime;
 pub mod uri_list;
 
 use std::collections::HashMap;
@@ -14,6 +15,10 @@ pub use option::{
     RegexValidator, UrlValidator,
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
+pub use runtime::{
+    ChangeableKind, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
+    RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_global_option_changeable, is_option_changeable,
+};
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
 
 /// Emitted when a global option value changes via `set_global_option`.

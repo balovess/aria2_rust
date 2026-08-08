@@ -592,6 +592,16 @@ async fn e2e_option_parse_failures_match_aria2_execution_error() {
     )
     .await;
     assert_error_code(&change_global, 1);
+
+    let change_global_enum = rpc_error_call(
+        &client,
+        &base,
+        "aria2.changeGlobalOption",
+        json![[{"uri-selector": "not-a-selector"}]],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_error_code(&change_global_enum, 1);
 }
 
 #[tokio::test]

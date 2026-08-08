@@ -97,6 +97,7 @@ impl crate::config::OptionRegistry {
             name: "bt-min-crypto-level".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("plain".into()),
+            allowed_values: &["plain", "arc4"],
             description: "Min crypto level (plain/arc4)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -192,6 +193,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Enum,
             short_name: Some('M'),
             default_value: OptionValue::Str("true".into()),
+            allowed_values: &["true", "false", "mem"],
             description: "Auto-handle .torrent (true/false/mem)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()

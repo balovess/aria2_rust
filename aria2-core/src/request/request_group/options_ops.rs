@@ -4,6 +4,7 @@
 //! download options at runtime (e.g. via `aria2.changeOption`), and
 //! the `set_rate_limiter` / `set_download_context` methods.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::rate_limiter::RateLimiter;
@@ -53,6 +54,47 @@ fn rpc_option_u16(value: &serde_json::Value, key: &str) -> Result<u16, String> {
 fn rpc_option_u32(value: &serde_json::Value, key: &str) -> Result<u32, String> {
     let value = rpc_option_u64(value, key)?;
     u32::try_from(value).map_err(|_| format!("Option '{}' is too large", key))
+}
+
+fn registry_option_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| rpc_option_string(value, key))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| values.join(",")),
+        _ => rpc_option_string(value, key),
+    }
+}
+
+/// Validate a known aria2 option that has no dedicated `DownloadOptions`
+/// field yet. Keeping this fallback behind the core registry prevents RPC
+/// adapters from accepting arbitrary keys while preserving the wire value for
+/// later execution integration.
+fn validate_unmapped_rpc_option(key: &str, value: &serde_json::Value) -> Result<bool, String> {
+    if matches!(
+        crate::config::is_option_changeable(key, false),
+        crate::config::ChangeableKind::NotChangeable
+    ) {
+        return Ok(false);
+    }
+    let registry = crate::config::OptionRegistry::new();
+    let Some(definition) = registry.get(key) else {
+        return Ok(false);
+    };
+    let raw = registry_option_string(value, key)?;
+    definition
+        .parse_value(&raw)
+        .map(|_| true)
+        .map_err(|error| format!("Option '{}': {}", key, error))
+}
+
+/// Runtime option changes partitioned by the lifecycle phase in which aria2
+/// applies them. This is an internal core seam shared by RPC and C adapters.
+#[derive(Debug, Default)]
+pub(crate) struct RuntimeOptionChanges {
+    pub(crate) immediate: HashMap<String, serde_json::Value>,
+    pub(crate) pending: HashMap<String, serde_json::Value>,
 }
 
 fn apply_rpc_option(
@@ -325,6 +367,14 @@ impl super::RequestGroup {
             .unwrap_or_default()
     }
 
+    /// Return the task-level overrides that have actually been applied.
+    pub fn runtime_options(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        self.runtime_options
+            .read()
+            .map(|options| options.clone())
+            .unwrap_or_default()
+    }
+
     // ── Runtime Option Updates ──────────────────────────────────────────
 
     /// Update a single runtime-changeable option by key (using aria2's
@@ -339,7 +389,11 @@ impl super::RequestGroup {
     /// immediately on the live download.
     pub fn validate_option_update(key: &str, value: &serde_json::Value) -> Result<bool, String> {
         let mut options = super::DownloadOptions::default();
-        apply_rpc_option(&mut options, key, value)
+        if apply_rpc_option(&mut options, key, value)? {
+            Ok(true)
+        } else {
+            validate_unmapped_rpc_option(key, value)
+        }
     }
 
     /// Apply a runtime option while preserving parse failures for RPC callers.
@@ -354,7 +408,9 @@ impl super::RequestGroup {
 
         let opts = Arc::make_mut(&mut self.options);
         let applied = apply_rpc_option(opts, key, &value)?;
-        debug_assert!(applied);
+        if !applied {
+            debug_assert!(validate_unmapped_rpc_option(key, &value)?);
+        }
 
         match key {
             "max-download-limit" => {
@@ -376,7 +432,14 @@ impl super::RequestGroup {
             }
             _ => {}
         }
-        Ok(applied)
+        if applied || validate_unmapped_rpc_option(key, &value)? {
+            if let Ok(mut runtime_options) = self.runtime_options.write() {
+                runtime_options.insert(key.to_string(), value);
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Compatibility wrapper for internal callers that only need to know

@@ -19,6 +19,17 @@ pub struct MetalinkRequestGraph {
     pub metadata_path: PathBuf,
 }
 
+struct BuildInput<'a> {
+    metadata_uri: &'a str,
+    payload_name: &'a str,
+    options: &'a DownloadOptions,
+    metadata_gid: GroupId,
+    payload_gid: GroupId,
+    fallback_uris: Vec<String>,
+    file_mappings: Vec<BtFileMapping>,
+    memory_source: bool,
+}
+
 impl MetalinkRequestGraph {
     /// Construct a metadata group and a dependency-gated payload group.
     pub fn new(
@@ -48,16 +59,16 @@ impl MetalinkRequestGraph {
         payload_gid: GroupId,
         fallback_uris: Vec<String>,
     ) -> Result<Self> {
-        Self::build(
+        Self::build(BuildInput {
             metadata_uri,
             payload_name,
             options,
             metadata_gid,
             payload_gid,
             fallback_uris,
-            Vec::new(),
-            false,
-        )
+            file_mappings: Vec::new(),
+            memory_source: false,
+        })
     }
 
     /// Construct a Metalink torrent graph whose metadata prerequisite is
@@ -89,16 +100,16 @@ impl MetalinkRequestGraph {
         payload_gid: GroupId,
         fallback_uris: Vec<String>,
     ) -> Result<Self> {
-        Self::build(
+        Self::build(BuildInput {
             metadata_uri,
             payload_name,
             options,
             metadata_gid,
             payload_gid,
             fallback_uris,
-            Vec::new(),
-            true,
-        )
+            file_mappings: Vec::new(),
+            memory_source: true,
+        })
     }
 
     /// Construct a memory-backed graph with explicit Metalink-to-torrent
@@ -112,7 +123,7 @@ impl MetalinkRequestGraph {
         fallback_uris: Vec<String>,
         file_mappings: Vec<BtFileMapping>,
     ) -> Result<Self> {
-        Self::build(
+        Self::build(BuildInput {
             metadata_uri,
             payload_name,
             options,
@@ -120,20 +131,21 @@ impl MetalinkRequestGraph {
             payload_gid,
             fallback_uris,
             file_mappings,
-            true,
-        )
+            memory_source: true,
+        })
     }
 
-    fn build(
-        metadata_uri: &str,
-        payload_name: &str,
-        options: &DownloadOptions,
-        metadata_gid: GroupId,
-        payload_gid: GroupId,
-        fallback_uris: Vec<String>,
-        file_mappings: Vec<BtFileMapping>,
-        memory_source: bool,
-    ) -> Result<Self> {
+    fn build(input: BuildInput<'_>) -> Result<Self> {
+        let BuildInput {
+            metadata_uri,
+            payload_name,
+            options,
+            metadata_gid,
+            payload_gid,
+            fallback_uris,
+            file_mappings,
+            memory_source,
+        } = input;
         if metadata_uri.is_empty() || payload_name.is_empty() {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                 "Metalink torrent graph requires metadata URI and payload name".to_string(),

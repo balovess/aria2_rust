@@ -178,6 +178,7 @@ impl crate::config::OptionRegistry {
             name: "uri-selector".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("feedback".into()),
+            allowed_values: &["inorder", "feedback", "adaptive"],
             description: "URI selection algorithm (feedback/inorder/adaptive)".into(),
             category: OptionCategory::General,
             ..Default::default()
@@ -186,6 +187,7 @@ impl crate::config::OptionRegistry {
             name: "stream-piece-selector".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("default".into()),
+            allowed_values: &["default", "inorder", "random", "geom"],
             description: "Piece selection algorithm (default/inorder/geom/random)".into(),
             category: OptionCategory::General,
             ..Default::default()

@@ -460,6 +460,54 @@ async fn test_change_global_option_invalid_value_is_execution_error() {
     let error = resp.error.expect("invalid option value must fail");
     assert_eq!(error.code, 1);
     assert!(error.message.contains("max-overall-download-limit"));
+
+    let req = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{"max-concurrent-downloads": u64::MAX}]),
+    )
+    .with_id(2);
+    let resp = engine.handle_request(&req).await;
+    assert_eq!(
+        resp.error.expect("overflowing option value must fail").code,
+        1
+    );
+
+    let req = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{"uri-selector": "not-a-selector"}]),
+    )
+    .with_id(3);
+    let resp = engine.handle_request(&req).await;
+    let error = resp.error.expect("invalid enum value must fail");
+    assert_eq!(error.code, 1);
+    assert!(error.message.contains("uri-selector"));
+}
+
+#[tokio::test]
+async fn test_change_global_option_matches_original_changeability_policy() {
+    let engine = RpcEngine::new();
+    let req = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{
+            "save-session": "session.txt",
+            "no-conf": "true"
+        }]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success());
+
+    let req = JsonRpcRequest::new("aria2.getGlobalOption", serde_json::json!([])).with_id(2);
+    let resp = engine.handle_request(&req).await;
+    let options = resp.result.expect("global options response");
+    assert_eq!(
+        options.get("save-session").and_then(|v| v.as_str()),
+        Some("session.txt")
+    );
+    assert_eq!(
+        options.get("no-conf").and_then(|v| v.as_str()),
+        Some("false")
+    );
 }
 
 #[tokio::test]
@@ -478,7 +526,9 @@ async fn test_change_option_accepts_valid_keys() {
     let valid_changes = serde_json::json!({
         "max-download-limit": 1048576,
         "max-upload-limit": 512000,
-        "bt-max-peers": 60
+        "bt-max-peers": 60,
+        "bt-force-encryption": "true",
+        "allow-overwrite": "true"
     });
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
@@ -507,6 +557,15 @@ async fn test_change_option_accepts_valid_keys() {
     assert!(
         opts.contains_key("bt-max-peers"),
         "bt-max-peers should be stored"
+    );
+    assert_eq!(
+        opts.get("bt-force-encryption")
+            .and_then(|value| value.as_str()),
+        Some("true")
+    );
+    assert_eq!(
+        opts.get("allow-overwrite").and_then(|value| value.as_str()),
+        Some("true")
     );
 }
 

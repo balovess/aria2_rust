@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use aria2_core::config::OptionRegistry;
+use aria2_core::config::{OptionRegistry, is_global_option_changeable};
 use aria2_core::request::request_group::{
     ChangeableKind, RequestGroup, is_option_changeable, option_value_to_string,
 };
@@ -18,125 +18,6 @@ use crate::rpc_helpers::normalize_rpc_options;
 ///
 /// Extracted from the C++ aria2 `OptionHandlerFactory.cc` — all options
 /// with `setChangeGlobalOption(true)`. Keep in sync with the original.
-const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
-    // General
-    "allow-overwrite",
-    "allow-piece-length-change",
-    "always-resume",
-    "async-dns",
-    "auto-file-renaming",
-    "check-integrity",
-    "conditional-get",
-    "continue",
-    "dir",
-    "download-result",
-    "enable-mmap",
-    "file-allocation",
-    "force-save",
-    "save-not-found",
-    "hash-check-only",
-    "keep-unfinished-download-result",
-    "max-concurrent-downloads",
-    "max-download-limit",
-    "max-overall-download-limit",
-    "max-overall-upload-limit",
-    "max-upload-limit",
-    "min-split-size",
-    "no-conf",
-    "optimize-concurrent-downloads",
-    "preview",
-    "reuse-uri",
-    "save-session-interval",
-    "server-stat-if",
-    "server-stat-of",
-    "split",
-    "stream-piece-selector",
-    "timeout",
-    "uri-selector",
-    "use-server-stat",
-    // HTTP/FTP
-    "connect-timeout",
-    "dry-run",
-    "lowest-speed-limit",
-    "max-connection-per-server",
-    "max-file-not-found",
-    "max-tries",
-    "no-netrc",
-    "proxy-method",
-    "retry-wait",
-    "ftp-type",
-    "ftp-reuse-connection",
-    "http-auth-challenge",
-    "http-no-cache",
-    "http-user",
-    "http-passwd",
-    "http-proxy",
-    "https-proxy",
-    "ftp-proxy",
-    "all-proxy",
-    "no-proxy",
-    "user-agent",
-    "referer",
-    "header",
-    "cookie-file",
-    "cookies",
-    // BitTorrent
-    "bt-detach-seed-only",
-    "bt-enable-hook-after-hash-check",
-    "bt-enable-lpd",
-    "bt-force-encrypt",
-    "bt-hash-check-seed",
-    "bt-load-saved-metadata",
-    "bt-max-peers",
-    "bt-max-upload-slots",
-    "bt-min-crypto-level",
-    "bt-prioritize-piece",
-    "bt-remove-unselected-file",
-    "bt-request-peer-speed-limit",
-    "bt-require-crypto",
-    "bt-save-metadata",
-    "bt-seed-unverified",
-    "bt-stop-timeout",
-    "bt-tracker-connect-timeout",
-    "bt-tracker-interval",
-    "bt-tracker-timeout",
-    "dht-file-path",
-    "dht-file-path6",
-    "dht-listen-port",
-    "dht-entry-point",
-    "enable-dht",
-    "enable-dht6",
-    "enable-public-trackers",
-    "enable-utp",
-    "follow-torrent",
-    "listen-port",
-    "max-overall-upload-limit",
-    "peer-agent",
-    "peer-id-prefix",
-    "seed-ratio",
-    "seed-time",
-    "utp-listen-port",
-    // Metalink
-    "follow-metalink",
-    "metalink-preferred-protocol",
-    "metalink-version",
-    "metalink-language",
-    "metalink-os",
-    // RPC
-    "rpc-max-request-size",
-    // Checksum
-    "checksum",
-    // Advanced
-    "auto-save-interval",
-    "disk-cache",
-    "follow-torrent",
-    "max-download-result",
-    "no-file-allocation-limit",
-    "piece-length",
-    "show-console-readout",
-    "show-files",
-];
-
 fn parse_non_negative_u64(value: &serde_json::Value, option: &str) -> Result<u64, JsonRpcError> {
     if let Some(value) = value.as_u64() {
         return Ok(value);
@@ -200,6 +81,16 @@ fn parse_rate_limit_for_option_change(
     })
 }
 
+fn parse_non_negative_u64_for_option_change(
+    value: &serde_json::Value,
+    option: &str,
+) -> Result<u64, JsonRpcError> {
+    parse_non_negative_u64(value, option).map_err(|error| match error {
+        JsonRpcError::InvalidParams(message) => JsonRpcError::RpcExecution(message),
+        other => other,
+    })
+}
+
 fn validate_registered_option(
     registry: &OptionRegistry,
     key: &str,
@@ -245,7 +136,7 @@ impl RpcEngine {
         // C++ aria2 silently ignores unknown and non-changeable options.
         let new_opts: HashMap<String, serde_json::Value> = new_opts
             .into_iter()
-            .filter(|(key, _)| RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&key.as_str()))
+            .filter(|(key, _)| is_global_option_changeable(key))
             .collect();
 
         // Parse before mutating shared state. C++ propagates option handler
@@ -261,7 +152,10 @@ impl RpcEngine {
                 // engine even though the static registry uses a positive
                 // command-line lower bound for this option.
                 "max-concurrent-downloads" => {
-                    parse_non_negative_u64(value, key)?;
+                    let value = parse_non_negative_u64_for_option_change(value, key)?;
+                    u32::try_from(value).map_err(|_| {
+                        JsonRpcError::RpcExecution(format!("Option '{}' is too large", key))
+                    })?;
                 }
                 _ => validate_registered_option(&registry, key, value)?,
             }
@@ -301,10 +195,10 @@ impl RpcEngine {
         if let Some(value) = new_opts.get("max-concurrent-downloads")
             && let Some(tx) = &self.engine_cmd_tx
         {
-            let max = parse_non_negative_u64(value, "max-concurrent-downloads")?;
+            let max = parse_non_negative_u64_for_option_change(value, "max-concurrent-downloads")?;
             use aria2_core::engine::engine_command::EngineCommand;
             let max = u32::try_from(max).map_err(|_| {
-                JsonRpcError::InvalidParams(
+                JsonRpcError::RpcExecution(
                     "Option 'max-concurrent-downloads' is too large".to_string(),
                 )
             })?;
@@ -352,7 +246,32 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Step 1: per-task overrides.
+        // Read options that have actually been applied to the live group.
+        // Pending changes are intentionally absent until the group restarts;
+        // this matches C++ getOption rather than exposing a queued value.
+        let group_exists = if let Some(group_man) = self.group_man.as_ref() {
+            let group_man = group_man.read().await;
+            if let Some(group) = group_man.group_by_hex(&gid) {
+                let runtime_options = group.recover().runtime_options();
+                if !runtime_options.is_empty() {
+                    let wire_opts = normalize_rpc_options(&runtime_options);
+                    return Ok(JsonRpcResponse::success(
+                        req.id.clone().unwrap_or_default(),
+                        serde_json::to_value(wire_opts).map_err(|e| {
+                            JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                        })?,
+                    ));
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Legacy task-local storage is retained for adapters that do not own
+        // a RequestGroupMan (and for pre-existing callers).
         let task_opts = self.task_opts.read().await;
         if let Some(opts) = task_opts.get(&gid)
             && !opts.is_empty()
@@ -365,24 +284,19 @@ impl RpcEngine {
                 })?,
             ));
         }
-        // Release the task_opts read lock before awaiting on group_man to
-        // avoid holding it across an await point and keep lock hold times short.
         drop(task_opts);
 
-        // Step 2: fall back to global options if the task is known to the
-        // shared RequestGroupMan.
-        if let Some(group_man) = self.group_man.as_ref() {
-            let task_exists = group_man.read().await.group_by_hex(&gid).is_some();
-            if task_exists {
-                let global_opts = self.global_opts.read().await;
-                let wire_opts = normalize_rpc_options(&global_opts);
-                return Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(wire_opts).map_err(|e| {
-                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                    })?,
-                ));
-            }
+        // Fall back to global options if the task is known to the shared
+        // RequestGroupMan.
+        if group_exists {
+            let global_opts = self.global_opts.read().await;
+            let wire_opts = normalize_rpc_options(&global_opts);
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                serde_json::to_value(wire_opts).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                })?,
+            ));
         }
 
         // Step 3: task does not exist anywhere.
@@ -445,9 +359,6 @@ impl RpcEngine {
             }
         }
 
-        let mut applied = immediate.clone();
-        applied.extend(pending.clone());
-
         // Apply immediate options to the running RequestGroup.
         if !immediate.is_empty()
             && let Some(ref group_man) = self.group_man
@@ -482,12 +393,13 @@ impl RpcEngine {
             }
         }
 
-        // Persist all changes in task_opts for getOption retrieval and
-        // session reload.
-        if !applied.is_empty() {
+        // Keep only immediate changes in the legacy adapter-side cache. The
+        // RequestGroup runtime map is the source of truth once a group exists;
+        // pending values become visible there only after restart/application.
+        if !immediate.is_empty() {
             let mut task_opts = self.task_opts.write().await;
             let entry = task_opts.entry(gid).or_insert_with(HashMap::new);
-            for (k, v) in applied {
+            for (k, v) in immediate {
                 entry.insert(k, v);
             }
         }

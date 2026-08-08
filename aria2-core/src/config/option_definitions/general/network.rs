@@ -63,6 +63,7 @@ impl crate::config::OptionRegistry {
             name: "event-poll".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("select".into()),
+            allowed_values: &["epoll", "kqueue", "port", "libuv", "poll", "select"],
             description: "Event poll method (epoll/kqueue/port/poll/select)".into(),
             category: OptionCategory::General,
             ..Default::default()

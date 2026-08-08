@@ -204,15 +204,13 @@ impl RpcEngine {
             None => req,
         };
 
-        let resp = if is_multicall {
+        if is_multicall {
             self.handle_multicall(dispatch_req, token.as_deref())
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone()))
         } else {
             self.dispatch_single(dispatch_req).await
-        };
-
-        resp
+        }
     }
 
     /// Dispatch one already-authenticated, token-stripped JSON-RPC request.

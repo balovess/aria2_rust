@@ -392,8 +392,8 @@ workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
 
 - `cargo fmt --all -- --check`, core all-feature check, and workspace
   all-target/all-feature Clippy with `-D warnings` passed.
-- Package-level all-feature suites passed: aria2-protocol 872, aria2-rpc 361,
-  aria2 254. Core executed 3,411 tests with 11 ignored and 0 failed before a
+- Package-level all-feature suites passed: aria2-protocol 872, aria2-rpc 371
+  (0 failed), aria2 254. Core executed 3,411 tests with 11 ignored and 0 failed before a
   Windows 600-second aggregate command timeout; the last BitTorrent target
   was then run separately with 21 passed and 2 ignored.
 - Node.js typecheck/build and full binding suite passed (123/123). Python
@@ -432,3 +432,26 @@ tests, and the aria2 C++ performance baseline remain open in
   dependency direction, direct URI fallback, metadata parse failure without a
   fallback, relative URI base propagation, and the absence of payload
   self-locking through dependency storage.
+
+#### RPC compatibility seam and option parsing checkpoint
+
+- Compared the RPC option mutation path with
+  `aria2_original/src/RpcMethod.cc` and
+  `aria2_original/src/RpcMethodImpl.cc`: unknown and non-changeable keys are
+  ignored; selected option-handler parse failures are execution errors with
+  code `1`, rather than JSON-RPC `-32602`.
+- The original 120-name `setChangeGlobalOption(true)` policy and the
+  task-level active/reserved `changeOption` policy are centralized in
+  `aria2-core/src/config/runtime.rs`; the RPC crate no longer owns a second
+  whitelist, and `request_group` only preserves the historical re-export
+  path for callers.
+- JSON value normalization and typed string/size/integer/boolean/enum parsing
+  live in core. Enum choice sets are attached to `OptionDef`, so config, RPC,
+  and C API paths share the same validation seam.
+- Regression coverage includes core no-partial-update tests, handler tests,
+  and real HTTP E2E checks for invalid `changeOption` and
+  `changeGlobalOption` values.
+- `cargo test -p aria2-rpc --all-features --tests -- --test-threads=1`:
+  **372 passed / 0 failed**. This proves the RPC test scope only; the
+  workspace aggregate and complete original browser-client interoperability
+  matrix remain open.

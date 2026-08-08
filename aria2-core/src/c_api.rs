@@ -25,7 +25,7 @@ use crate::engine::engine_command::EngineCommand;
 use crate::error::Result;
 use crate::rate_limiter::RateLimiterConfig;
 use crate::request::request_group::{
-    DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
+    ChangeableKind, DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
 };
 use crate::request::request_group_man::RequestGroupMan;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -400,7 +400,9 @@ impl Aria2RustSession {
         else {
             return self.fail(format!("GID {gid} not found"), INVALID_ARGUMENT);
         };
-        let mut changes = HashMap::new();
+        let is_active = group.recover().status().is_active();
+        let mut immediate = HashMap::new();
+        let mut pending = HashMap::new();
         for (name, value) in options {
             let Some(definition) = self.config.registry().get(&name) else {
                 continue;
@@ -409,24 +411,40 @@ impl Aria2RustSession {
                 Ok(value) => value,
                 Err(error) => return self.fail(error, INVALID_ARGUMENT),
             };
-            if crate::request::request_group::is_option_changeable(
-                &name,
-                matches!(group.recover().status(), DownloadStatus::Active),
-            ) == crate::request::request_group::ChangeableKind::NotChangeable
-            {
-                continue;
+            match crate::request::request_group::is_option_changeable(&name, is_active) {
+                ChangeableKind::Immediate => {
+                    immediate.insert(name, (&parsed).into());
+                }
+                ChangeableKind::Pending => {
+                    pending.insert(name, (&parsed).into());
+                }
+                ChangeableKind::NotChangeable => continue,
             }
-            changes.insert(name, (&parsed).into());
         }
-        if changes.is_empty() {
+        if immediate.is_empty() && pending.is_empty() {
             return 0;
         }
-        let update_result = {
-            let manager = self.runtime.block_on(self.request_man.read());
-            manager.update_group_options(&GroupId::new(gid).to_hex_string(), changes)
-        };
-        if let Err(error) = update_result {
-            return self.fail(error, INVALID_ARGUMENT);
+        if !immediate.is_empty() {
+            let update_result = {
+                let manager = self.runtime.block_on(self.request_man.read());
+                manager.update_group_options(&GroupId::new(gid).to_hex_string(), immediate)
+            };
+            if let Err(error) = update_result {
+                return self.fail(error, INVALID_ARGUMENT);
+            }
+        }
+        if !pending.is_empty() {
+            group.recover().set_pending_options(pending);
+            if is_active {
+                let pause_result = {
+                    let manager = self.runtime.block_on(self.request_man.read());
+                    manager.pause_group(GroupId::new(gid))
+                };
+                if let Err(error) = pause_result {
+                    return self.fail(error.to_string(), INVALID_ARGUMENT);
+                }
+                group.recover().request_restart();
+            }
         }
         0
     }

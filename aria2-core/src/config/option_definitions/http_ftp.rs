@@ -106,6 +106,7 @@ impl crate::config::OptionRegistry {
             name: "proxy-method".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("get".into()),
+            allowed_values: &["get", "tunnel"],
             description: "Proxy method (get/tunnel)".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -392,6 +393,7 @@ impl crate::config::OptionRegistry {
             name: "min-tls-version".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("TLSv1.2".into()),
+            allowed_values: &["TLSv1.1", "TLSv1.2", "TLSv1.3"],
             description: "Minimum TLS version (TLSv1.1/TLSv1.2/TLSv1.3)".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -445,6 +447,7 @@ impl crate::config::OptionRegistry {
             name: "ftp-type".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("binary".into()),
+            allowed_values: &["binary", "ascii"],
             description: "FTP transfer type (binary/ascii)".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

@@ -63,6 +63,15 @@ impl fmt::Display for DownloadStatus {
 }
 
 impl DownloadStatus {
+    /// Whether a download currently owns an active execution slot.
+    ///
+    /// `is_active` intentionally also includes `Waiting` for callers that
+    /// need the live, non-terminal task set. Runtime option compatibility
+    /// needs the narrower meaning used by aria2's active request list.
+    pub fn is_running(&self) -> bool {
+        matches!(self, DownloadStatus::Active)
+    }
+
     pub fn is_active(&self) -> bool {
         matches!(self, DownloadStatus::Active | DownloadStatus::Waiting)
     }

@@ -24,6 +24,10 @@ mod tests;
 
 // Re-export all public types so the external API remains unchanged.
 // Import paths like `crate::request::request_group::RequestGroup` still work.
+pub use crate::config::runtime::{
+    ChangeableKind, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
+    is_option_changeable,
+};
 pub use bt_peer_snapshot::BtPeerSnapshot;
 #[cfg(feature = "bittorrent")]
 pub use dependency::BtDependencyResolution;
@@ -35,10 +39,7 @@ pub use group::RequestGroup;
 pub use group_id::GroupId;
 pub use halt_reason::{DownloadControlFlags, HaltReason};
 pub use metadata_info::MetadataInfo;
-pub use options::{
-    ChangeableKind, DownloadOptions, FollowMode, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
-    RUNTIME_CHANGEABLE_OPTIONS, is_option_changeable, option_value_to_string,
-};
+pub use options::{DownloadOptions, FollowMode, option_value_to_string};
 pub use progress::AtomicProgress;
 pub use result_code::DownloadResultCode;
 pub use status::DownloadStatus;

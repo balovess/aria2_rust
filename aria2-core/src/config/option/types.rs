@@ -236,6 +236,11 @@ pub struct OptionDef {
     pub category: OptionCategory,
     pub min: Option<i64>,
     pub max: Option<u64>,
+    /// Exact wire values accepted for `OptionType::Enum`.
+    ///
+    /// An empty slice keeps custom definitions backward-compatible and means
+    /// that the enum is open-ended until its owner supplies a choice set.
+    pub allowed_values: &'static [&'static str],
     pub deprecated: bool,
     pub hidden: bool,
     /// If set, multiple calls to `set_raw` for this option will append values
@@ -255,6 +260,7 @@ impl Default for OptionDef {
             category: OptionCategory::General,
             min: None,
             max: None,
+            allowed_values: &[],
             deprecated: false,
             hidden: false,
             cumulative_delimiter: None,
@@ -297,12 +303,24 @@ impl OptionDef {
         &self.description
     }
 
+    pub fn allowed_values(&self) -> &[&'static str] {
+        self.allowed_values
+    }
+
     pub fn parse_value(&self, s: &str) -> Result<OptionValue, String> {
         if s.is_empty() {
             return Ok(self.default_value.clone());
         }
         match self.opt_type {
-            OptionType::String | OptionType::Path | OptionType::Enum => {
+            OptionType::String | OptionType::Path => Ok(OptionValue::Str(s.to_string())),
+            OptionType::Enum => {
+                if !self.allowed_values.is_empty() && !self.allowed_values.contains(&s) {
+                    return Err(format!(
+                        "invalid choice '{}', allowed values: {}",
+                        s,
+                        self.allowed_values.join(", ")
+                    ));
+                }
                 Ok(OptionValue::Str(s.to_string()))
             }
             OptionType::Integer => s

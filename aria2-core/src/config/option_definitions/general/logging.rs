@@ -20,15 +20,17 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Enum,
             short_name: Some('L'),
             default_value: OptionValue::Str("debug".into()),
-            description: "Log level (trace/debug/info/warn/error)".into(),
+            allowed_values: &["debug", "info", "notice", "warn", "error"],
+            description: "Log level (debug/info/notice/warn/error)".into(),
             category: OptionCategory::General,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "console-log-level".into(),
             opt_type: OptionType::Enum,
-            default_value: OptionValue::Str("info".into()),
-            description: "Console log level (trace/debug/info/warn/error)".into(),
+            default_value: OptionValue::Str("notice".into()),
+            allowed_values: &["debug", "info", "notice", "warn", "error"],
+            description: "Console log level (debug/info/notice/warn/error)".into(),
             category: OptionCategory::General,
             ..Default::default()
         });

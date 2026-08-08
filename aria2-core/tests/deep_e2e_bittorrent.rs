@@ -125,13 +125,15 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
         1,
         "torrent metadata should create one child"
     );
-    let child = children[0].recover();
-    assert_eq!(child.uris(), &[tracker_url.to_string()]);
-    assert_eq!(child.get_bt_num_pieces(), 2);
-    assert_eq!(child.get_bt_piece_length(), 512);
-    assert_eq!(child.following_gid(), Some(GroupId::new(0x700)));
-    assert!(child.belongs_to_gid().is_none());
-    assert_eq!(child.options().follow_torrent, Some(FollowMode::Disabled));
+    {
+        let child = children[0].recover();
+        assert_eq!(child.uris(), &[tracker_url.to_string()]);
+        assert_eq!(child.get_bt_num_pieces(), 2);
+        assert_eq!(child.get_bt_piece_length(), 512);
+        assert_eq!(child.following_gid(), Some(GroupId::new(0x700)));
+        assert!(child.belongs_to_gid().is_none());
+        assert_eq!(child.options().follow_torrent, Some(FollowMode::Disabled));
+    }
 
     server.shutdown().await;
 }

@@ -526,6 +526,18 @@ fn test_update_option_new_runtime_changeable() {
     assert!(group.update_option("bt-force-encrypt", serde_json::json!("true")));
     assert!(group.options().bt_force_encrypt);
 
+    // Canonical reserved options without a dedicated execution field still
+    // use the shared registry validator and remain visible after applying.
+    assert!(group.update_option("allow-overwrite", serde_json::json!("true")));
+    assert_eq!(
+        group.runtime_options().get("allow-overwrite"),
+        Some(&serde_json::json!("true"))
+    );
+    assert!(
+        group
+            .try_update_option("allow-overwrite", serde_json::json!("maybe"))
+            .is_err()
+    );
     // A recognized key with an invalid value must be observable by RPC
     // callers and must not partially update the group.
     let previous_limit = group.options().max_download_limit;

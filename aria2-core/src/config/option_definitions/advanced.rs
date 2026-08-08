@@ -11,6 +11,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Enum,
             short_name: Some('f'),
             default_value: OptionValue::Str("trunc".into()),
+            allowed_values: &["none", "prealloc", "falloc", "trunc", "mmap"],
             description: "File allocation method (none/prealloc/falloc/trunc/mmap)".into(),
             category: OptionCategory::Advanced,
             ..Default::default()

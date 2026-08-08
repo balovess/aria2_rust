@@ -62,6 +62,13 @@ pub struct RequestGroup {
     pub(super) output_name: std::sync::RwLock<Option<String>>,
     /// Download options — shared via `Arc` for cheap cloning.
     pub(super) options: Arc<DownloadOptions>,
+    /// Successfully applied task-level runtime overrides.
+    ///
+    /// The typed fields in [`DownloadOptions`] remain the execution source for
+    /// implemented options. This map preserves canonical options that are
+    /// validated at the runtime seam but do not yet have a dedicated execution
+    /// field, so adapters never report success and silently lose the value.
+    pub(super) runtime_options: std::sync::RwLock<HashMap<String, serde_json::Value>>,
     /// Options deferred until the current command generation is restarted.
     pub pending_options: std::sync::RwLock<HashMap<String, serde_json::Value>>,
     /// Current download status.
@@ -206,6 +213,7 @@ impl RequestGroup {
             uris,
             output_name: std::sync::RwLock::new(None),
             options: Arc::new(options),
+            runtime_options: std::sync::RwLock::new(HashMap::new()),
             pending_options: std::sync::RwLock::new(HashMap::new()),
             status: std::sync::RwLock::new(super::status::DownloadStatus::Waiting),
             segments: std::sync::RwLock::new(Vec::new()),

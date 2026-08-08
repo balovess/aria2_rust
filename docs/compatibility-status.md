@@ -33,8 +33,8 @@ units catalogued in docs/MIGRATION.md measure audit coverage only.
 | DHT and trackers | aria2-protocol/src/bittorrent/dht/ | PARTIAL | Production paths and tests now use the protocol crate as the single canonical DHT implementation; the former `aria2-core/src/dht/` source tree is no longer exported. Complete live-network evidence is still missing. |
 | Metalink | aria2-protocol/src/metalink/, aria2-core/src/engine/metalink_* | PARTIAL | V3/V4 parsing, filtering, resource downloads, manager-owned GID allocation, relative-URI base propagation, and metadata/payload graph terminal states have focused regression coverage. Same-metaurl multi-file grouping, full `follow-torrent=mem` semantics, session graph restoration, and live protocol interoperability remain open. |
 | Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Main checksum and session paths work; integrity entry lifecycle, piece storage callbacks, and tail cleanup still contain deferred paths. |
-| RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces exist; 361 RPC tests and 123 Node binding tests pass in the current run. Full original-client interoperability remains unverified. Runtime global rate updates are wired through the engine command seam. |
-| CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | Core parsing exists; option inventory and C++ default/changeability parity still require generated comparison and E2E proof. |
+| RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces, token/Basic authentication, aria2-compatible error/status mapping, and real HTTP E2E coverage exist. `cargo test -p aria2-rpc --all-features --tests -- --test-threads=1` passes 372 tests. Full original-client interoperability, including the browser-extension matrix, remains unverified. |
+| CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | Core parsing exists; enum choice validation and the runtime global-change policy now have a canonical core seam, but the complete option inventory/default/changeability parity still requires generated comparison and E2E proof. |
 | Public C API/ABI | aria2_original/src/aria2api.cc, src/includes/aria2/aria2.h | PARTIAL | `aria2-core/src/c_api.rs` and `bindings/c/` provide a tested opaque-handle `extern "C"`/cdylib migration interface. It is intentionally source-level and is not binary-compatible with the original C++ classes or STL ABI. |
 
 ## Verification Evidence
@@ -48,7 +48,7 @@ cargo clippy -p aria2-core --all-targets --all-features -- -D warnings PASS
 cargo clippy --workspace --all-targets --all-features -- -D warnings PASS
 cargo test -p aria2-core --all-features c_api --lib   PASS
 cargo test -p aria2-protocol --all-features -j 1        872 passed, 4 ignored
-cargo test -p aria2-rpc --all-features -j 1             361 passed, 1 ignored
+cargo test -p aria2-rpc --all-features --tests -- --test-threads=1 372 passed, 0 failed
 cargo test -p aria2 --all-features -j 1                 254 passed, 5 ignored
 cargo build -p aria2 --all-features -j 1                PASS
 npm run typecheck                                        PASS
@@ -56,6 +56,17 @@ npm run build                                            PASS
 ARIA2_RUST_BIN=target/debug/aria2c.exe npm test          123 passed
 PYTHONPATH=.codex-python-deps python -m pytest ...       136 passed
 ~~~
+
+Latest RPC compatibility checkpoint (2026-08-08): unknown and non-changeable
+options are ignored as in `aria2_original`; a recognized option with an
+invalid value returns execution error `code=1` and HTTP 400 for JSON-RPC.
+The checkpoint includes 206 library tests, 17 integration tests, and all
+HTTP/WebSocket/XML-RPC/stress targets in the 372-test command above. The
+active/reserved task changeability policy is centralized with the global
+policy in `aria2-core/src/config/runtime.rs`; `request_group` only preserves
+the historical re-export path. This is a RPC-scope result only; it does not
+establish workspace-wide completion or full compatibility with every original
+browser client.
 
 The core all-features test targets executed 3,411 tests with 11 ignored and
 0 failures before the Windows 600-second command limit expired while the
@@ -95,10 +106,16 @@ consolidation work explicitly:
 | Engine command creation | `aria2-core/src/engine/task_spawner.rs` | Keep protocol selection and construction behind this deep module; the engine loop only owns lifecycle accounting and admission. |
 | Global bandwidth limits | `RateLimiter` shared through `Arc` | One token-bucket state is shared by active and future commands; RPC updates also refresh `RequestGroupMan`'s reporting snapshot. |
 | DHT | `aria2-protocol/src/bittorrent/dht/` | Keep the protocol crate as the canonical implementation; do not revive the unexported duplicate core tree. |
+| RPC option parsing | `aria2-core/src/config/runtime.rs`, `config/option/types.rs`, and `request/request_group/options_ops.rs` | Keep original runtime changeability, enum choices, and typed string/size/integer/boolean parsing in core. RPC handlers normalize transport values, select the core policy, and map parse failures to aria2 execution errors; do not add another option whitelist or parser in the RPC crate. |
 | HTTP/FTP transport | core orchestration plus protocol transport | Existing layers are useful adapters but are not yet one canonical implementation; remove pass-through duplication only after behavior comparison and live interoperability coverage. |
 | Integrity | core streaming/control-file paths plus Metalink verifier | Preserve separate algorithm-specific adapters for now; unify lifecycle callbacks after the remaining TODO/no-op paths have regression coverage. |
 
 ## Acceptance Gate
+
+The external compatibility boundary is strict: RPC/JSON-RPC/XML-RPC/WebSocket
+wire shapes, authentication, parameters, errors, HTTP status codes, and
+observable lifecycle behavior must match `aria2_original`. Internal Rust
+architecture and performance are free to improve only behind that boundary.
 
 The migration is not complete until the matrix is backed by reproducible
 tests for default, BitTorrent, Metalink, SFTP, RPC, CLI, session/resume, and

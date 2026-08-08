@@ -38,6 +38,7 @@ impl crate::config::OptionRegistry {
             name: "download-result".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("default".into()),
+            allowed_values: &["default", "full", "hide"],
             description: "Download result output format (default/full/hide)".into(),
             category: OptionCategory::General,
             ..Default::default()

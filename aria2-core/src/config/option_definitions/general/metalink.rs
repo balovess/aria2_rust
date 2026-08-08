@@ -67,6 +67,7 @@ impl crate::config::OptionRegistry {
             name: "follow-metalink".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("true".into()),
+            allowed_values: &["true", "false", "mem"],
             description: "Auto-handle Metalink files (true/false/mem)".into(),
             category: OptionCategory::General,
             ..Default::default()
@@ -75,6 +76,7 @@ impl crate::config::OptionRegistry {
             name: "metalink-preferred-protocol".into(),
             opt_type: OptionType::Enum,
             default_value: OptionValue::Str("none".into()),
+            allowed_values: &["http", "https", "ftp", "none"],
             description: "Preferred protocol for Metalink (http/https/ftp/none)".into(),
             category: OptionCategory::General,
             ..Default::default()
