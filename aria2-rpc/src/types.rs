@@ -38,6 +38,34 @@ fn serialize_opt_u16_as_string<S: Serializer>(v: &Option<u16>, s: S) -> Result<S
     }
 }
 
+/// Serialize an optional status error code as a string. Method results such
+/// as `changePosition` remain numeric and therefore must not use a global
+/// number-to-string postprocessor.
+fn serialize_opt_i32_as_string<S: Serializer>(v: &Option<i32>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(n) => s.serialize_str(&n.to_string()),
+        None => s.serialize_none(),
+    }
+}
+
+fn deserialize_opt_i32_from_string_or_num<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<i32>, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        Str(String),
+        Num(i32),
+        Null,
+    }
+    match StringOrNum::deserialize(d)? {
+        StringOrNum::Str(s) => s.parse::<i32>().map(Some).map_err(Error::custom),
+        StringOrNum::Num(n) => Ok(Some(n)),
+        StringOrNum::Null => Ok(None),
+    }
+}
+
 /// Serialize a `usize` as a string (for GlobalStat counts).
 fn serialize_usize_as_string<S: Serializer>(v: &usize, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&v.to_string())
@@ -227,7 +255,12 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub connections: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_opt_i32_as_string",
+        deserialize_with = "deserialize_opt_i32_from_string_or_num",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub error_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,

@@ -731,8 +731,8 @@ async fn e2e_system_list_methods_returns_array() {
 
     let methods = resp["result"].as_array().unwrap();
     assert!(
-        methods.len() >= 37,
-        "should list at least 37 methods, got {}",
+        methods.len() >= 36,
+        "should list at least the 36 original methods, got {}",
         methods.len()
     );
 

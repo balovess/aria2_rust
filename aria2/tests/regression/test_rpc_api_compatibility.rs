@@ -1,6 +1,6 @@
 //! RPC API regression tests for aria2-rust.
 //!
-//! These tests verify that all 37 RPC methods return values in the expected format
+//! These tests verify that all 36 original RPC methods return values in the expected format
 //! and maintain compatibility with the original aria2 RPC specification.
 
 use aria2_rpc::engine::RpcEngine;
@@ -709,14 +709,14 @@ async fn regression_change_uri_modifies_list() {
     assert_eq!(result.len(), 2);
     // changeUri returns [delCount, addCount] matching original aria2
     assert_eq!(
-        result[0].as_str(),
-        Some("1"),
-        "delCount should be 1 (1 URI removed)"
+        result[0].as_i64(),
+        Some(1),
+        "delCount should be the JSON integer 1 (1 URI removed)"
     );
     assert_eq!(
-        result[1].as_str(),
-        Some("1"),
-        "addCount should be 1 (1 URI added)"
+        result[1].as_i64(),
+        Some(1),
+        "addCount should be the JSON integer 1 (1 URI added)"
     );
 }
 
@@ -745,10 +745,10 @@ async fn regression_change_position_modifies_position() {
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
-    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+    let result: i64 = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(
-        result, "2",
-        "Should return the new absolute position as string"
+        result, 2,
+        "Should return the new absolute position as a JSON integer"
     );
 }
 
@@ -942,7 +942,7 @@ async fn regression_list_methods_returns_36_methods() {
 
     assert_success(&resp);
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(methods.len(), 37, "Should return exactly 37 methods");
+    assert_eq!(methods.len(), 36, "Should return exactly the 36 original methods");
 
     // Verify key methods are present
     assert!(methods.contains(&"aria2.addUri".to_string()));

@@ -253,26 +253,32 @@ pub fn parse_request(data: &[u8]) -> Result<Vec<JsonRpcRequest>, JsonRpcError> {
     let parsed: serde_json::Value =
         serde_json::from_slice(data).map_err(|e| JsonRpcError::ParseError(e.to_string()))?;
 
-    if let Ok(req) = serde_json::from_value::<JsonRpcRequest>(parsed.clone()) {
-        req.validate()?;
-        return Ok(vec![req]);
-    }
-
-    if let Ok(batch) = serde_json::from_value::<Vec<JsonRpcRequest>>(parsed) {
-        if batch.is_empty() {
-            return Err(JsonRpcError::InvalidRequest(
-                "batch request cannot be empty".to_string(),
-            ));
-        }
-        for req in &batch {
+    match parsed {
+        serde_json::Value::Object(object) => {
+            let req = serde_json::from_value::<JsonRpcRequest>(serde_json::Value::Object(object))
+                .map_err(|e| JsonRpcError::InvalidRequest(e.to_string()))?;
             req.validate()?;
+            Ok(vec![req])
         }
-        return Ok(batch);
+        serde_json::Value::Array(items) => {
+            if items.is_empty() {
+                return Err(JsonRpcError::InvalidRequest(
+                    "batch request cannot be empty".to_string(),
+                ));
+            }
+            let mut batch = Vec::with_capacity(items.len());
+            for item in items {
+                let req = serde_json::from_value::<JsonRpcRequest>(item)
+                    .map_err(|e| JsonRpcError::InvalidRequest(e.to_string()))?;
+                req.validate()?;
+                batch.push(req);
+            }
+            Ok(batch)
+        }
+        _ => Err(JsonRpcError::InvalidRequest(
+            "request must be an object or batch array".to_string(),
+        )),
     }
-
-    Err(JsonRpcError::ParseError(
-        "invalid request format".to_string(),
-    ))
 }
 
 pub fn parse_single_request(data: &[u8]) -> Result<JsonRpcRequest, JsonRpcError> {
@@ -330,6 +336,12 @@ mod tests {
     fn test_invalid_method() {
         let raw = r#"{"jsonrpc":"2.0","id":1,"method":""}"#;
         let err = parse_request(raw.as_bytes()).unwrap_err();
+        assert_eq!(err.code(), -32600);
+    }
+
+    #[test]
+    fn test_valid_json_scalar_is_invalid_request() {
+        let err = parse_request(b"42").unwrap_err();
         assert_eq!(err.code(), -32600);
     }
 

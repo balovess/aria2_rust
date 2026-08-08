@@ -13,6 +13,34 @@ use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 
 #[tokio::test]
+async fn test_add_uri_preserves_memory_follow_mode_from_rpc_options() {
+    let engine = RpcEngine::new();
+    let request = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!([
+            ["https://example.test/source.torrent"],
+            {"follow-torrent": "mem"}
+        ]),
+    )
+    .with_id(1);
+
+    let response = engine.handle_request(&request).await;
+    let gid: String = serde_json::from_value(response.result.expect("RPC result")).unwrap();
+    let group = engine
+        .group_man
+        .as_ref()
+        .expect("test manager")
+        .read()
+        .await
+        .group_by_hex(&gid)
+        .expect("RPC group should be registered");
+    assert_eq!(
+        group.recover().options().follow_torrent,
+        Some(aria2_core::request::request_group::FollowMode::Memory)
+    );
+}
+
+#[tokio::test]
 async fn test_handle_add_torrent() {
     let engine = RpcEngine::new();
     let fake_torrent_bencode = "d8:announce40:http://tracker.example.com/announce4:info6:lengthi1000e12:piece lengthi32768e6:pieces20:00000000000000000000000ee";
@@ -355,15 +383,15 @@ async fn test_change_uri_adds_uris() {
 
     let result = change_resp.result.unwrap();
     let arr = result.as_array().unwrap();
-    // Handler returns [delCount, addCount]; wire format: all numbers as strings
+    // aria2 returns [delCount, addCount] as JSON integers.
     assert_eq!(
-        arr[0].as_str(),
-        Some("0"),
+        arr[0].as_i64(),
+        Some(0),
         "First element should be delCount (0 deletions)"
     );
     assert_eq!(
-        arr[1].as_str(),
-        Some("2"),
+        arr[1].as_i64(),
+        Some(2),
         "Second element should be addCount (2 URIs added)"
     );
 }
@@ -642,14 +670,14 @@ async fn test_multicall_invalid_entries_match_cpp_errors_and_continue() {
     assert!(resp.is_success());
     let results = resp.result.unwrap().as_array().unwrap().clone();
     assert_eq!(results.len(), 3);
-    assert_eq!(results[0]["code"], "1");
+    assert_eq!(results[0]["code"], 1);
     assert!(
         results[0]["message"]
             .as_str()
             .unwrap()
             .contains("expected struct")
     );
-    assert_eq!(results[1]["code"], "-32600");
+    assert_eq!(results[1]["code"], -32600);
     assert!(
         results[1]["message"]
             .as_str()
@@ -895,8 +923,8 @@ async fn test_change_position_move_uri() {
         "changePosition should succeed for valid positions"
     );
 
-    let result: String = serde_json::from_value(change_resp.result.unwrap()).unwrap();
-    assert_eq!(result, "0", "Should return new position 0");
+    let result: i64 = serde_json::from_value(change_resp.result.unwrap()).unwrap();
+    assert_eq!(result, 0, "Should return new position 0");
 }
 
 #[tokio::test]

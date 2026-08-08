@@ -110,6 +110,7 @@ impl MetalinkDownloadCommand {
             .map(|u| u.url.clone())
             .collect();
         let group = RequestGroup::new(gid, urls, options.clone());
+        group.set_output_name(file.name.clone());
 
         let client = build_http_client()?;
 
@@ -240,6 +241,7 @@ impl MetalinkDownloadCommand {
                 .map(|u| u.url.clone())
                 .collect();
             let group = RequestGroup::new(gid, urls, options.clone());
+            group.set_output_name(file.name.clone());
 
             let file_info = FileDownloadInfo {
                 expected_size: file.size,
@@ -347,6 +349,7 @@ impl MetalinkDownloadCommand {
         }
 
         let group = RequestGroup::new(gid, urls, options.clone());
+        group.set_output_name(file.name.clone());
 
         let file_info = FileDownloadInfo {
             expected_size: file.size,

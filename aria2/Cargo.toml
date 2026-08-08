@@ -37,6 +37,7 @@ tracing.workspace = true
 colored = "2.0"
 serde_json.workspace = true
 thiserror.workspace = true
+base64.workspace = true
 clap = { version = "4.5", features = ["derive", "color", "wrap_help", "env"] }
 clap_complete = "4.5"
 mimalloc = "0.1"
@@ -48,7 +49,6 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile.workspace = true
-base64.workspace = true
 
 [features]
 default = ["http", "bittorrent", "rpc"]

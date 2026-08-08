@@ -235,6 +235,70 @@ impl XmlRpcValue {
     pub fn to_xml(&self) -> String {
         value_to_xml(self, 0)
     }
+
+    /// Convert an XML-RPC value to the JSON value shape consumed by the
+    /// shared RPC engine. Binary XML-RPC values remain base64 strings because
+    /// aria2's JSON methods use base64 for uploaded torrent/Metalink data.
+    pub fn to_json_value(&self) -> Result<serde_json::Value, XmlRpcError> {
+        match &self.inner {
+            XmlRpcValueInner::Int(value) => Ok(serde_json::json!(value)),
+            XmlRpcValueInner::Boolean(value) => Ok(serde_json::json!(value)),
+            XmlRpcValueInner::String_(value) | XmlRpcValueInner::DateTime(value) => {
+                Ok(serde_json::Value::String(value.clone()))
+            }
+            XmlRpcValueInner::Double(value) => serde_json::Number::from_f64(*value)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| XmlRpcError::InvalidParams("invalid non-finite double".into())),
+            XmlRpcValueInner::Base64(data) => Ok(serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(data),
+            )),
+            XmlRpcValueInner::Array(values) => values
+                .iter()
+                .map(Self::to_json_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array),
+            XmlRpcValueInner::Struct(members) => {
+                let mut object = serde_json::Map::with_capacity(members.len());
+                for member in members {
+                    object.insert(member.name.clone(), member.value.to_json_value()?);
+                }
+                Ok(serde_json::Value::Object(object))
+            }
+            XmlRpcValueInner::Nil => Ok(serde_json::Value::Null),
+        }
+    }
+
+    /// Construct an XML-RPC value from a JSON-RPC response value.
+    pub fn from_json_value(value: serde_json::Value) -> Result<Self, XmlRpcError> {
+        match value {
+            serde_json::Value::Null => Ok(Self::nil()),
+            serde_json::Value::Bool(value) => Ok(Self::bool_(value)),
+            serde_json::Value::String(value) => Ok(Self::string(value)),
+            serde_json::Value::Number(value) => {
+                if let Some(integer) = value.as_i64() {
+                    Ok(Self::int(integer))
+                } else if let Some(double) = value.as_f64() {
+                    Ok(Self::double(double))
+                } else {
+                    Err(XmlRpcError::InvalidParams(
+                        "JSON number is outside XML-RPC integer range".into(),
+                    ))
+                }
+            }
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .map(Self::from_json_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::array),
+            serde_json::Value::Object(object) => object
+                .into_iter()
+                .map(|(name, value)| {
+                    Self::from_json_value(value).map(|value| XmlRpcMember::new(name, value))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::struct_),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

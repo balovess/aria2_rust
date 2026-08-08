@@ -27,7 +27,6 @@ impl RpcEngine {
             "aria2.forcePause",
             "aria2.forcePauseAll",
             "aria2.unpause",
-            "aria2.forceUnpause",
             "aria2.unpauseAll",
             // Status queries
             "aria2.tellStatus",
@@ -104,7 +103,7 @@ mod tests {
         assert!(resp.is_success());
 
         let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-        assert_eq!(methods.len(), 37);
+        assert_eq!(methods.len(), 36);
         assert!(methods.contains(&"aria2.addUri".to_string()));
         assert!(methods.contains(&"aria2.shutdown".to_string()));
         assert!(methods.contains(&"aria2.forceShutdown".to_string()));

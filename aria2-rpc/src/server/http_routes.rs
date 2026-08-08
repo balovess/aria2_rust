@@ -183,9 +183,12 @@ impl RpcServer {
         let app = Router::new()
             .route("/jsonrpc", post(handle_jsonrpc))
             .route("/jsonrpc", get(handle_jsonrpc_or_ws)) // GET + WebSocket upgrade
-            .route("/rpc", post(handle_jsonrpc))
+            .route("/rpc", post(handle_xmlrpc))
             .route("/ws", get(ws_handler)) // WebSocket upgrade (backward compat)
             .route("/", get(root_handler))
+            .layer(axum::extract::DefaultBodyLimit::max(
+                self.config.max_request_size,
+            ))
             .layer(cors_layer)
             .with_state(state);
 
@@ -315,15 +318,91 @@ async fn root_handler() -> impl axum::response::IntoResponse {
 /// Handle JSON-RPC POST requests
 async fn handle_jsonrpc(
     axum::extract::State(state): axum::extract::State<RpcState>,
-    axum::Json(req): axum::Json<crate::json_rpc::JsonRpcRequest>,
+    body: axum::body::Bytes,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::StatusCode;
-    use axum::response::Json;
+    use crate::json_rpc::{JsonRpcBatchResponse, parse_request};
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
 
-    // Process request using the shared persistent engine
-    let response = state.engine.handle_request(&req).await;
+    let response_body = match parse_request(&body) {
+        Ok(requests) if requests.len() == 1 => state.engine.handle_request(&requests[0]).await
+            .to_string()
+            .unwrap_or_else(|error| format!("{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":\"{}\"}}}}", error)),
+        Ok(requests) => {
+            let mut responses = Vec::with_capacity(requests.len());
+            for request in &requests {
+                responses.push(state.engine.handle_request(request).await);
+            }
+            JsonRpcBatchResponse(responses)
+                .to_string()
+                .unwrap_or_else(|error| format!("{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":\"{}\"}}}}", error))
+        }
+        Err(error) => error
+            .into_response(None)
+            .to_string()
+            .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}".to_string()),
+    };
 
-    (StatusCode::OK, Json(response))
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        response_body,
+    )
+        .into_response()
+}
+
+/// Handle the original aria2 XML-RPC endpoint at `/rpc`.
+async fn handle_xmlrpc(
+    axum::extract::State(state): axum::extract::State<RpcState>,
+    body: axum::body::Bytes,
+) -> impl axum::response::IntoResponse {
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
+    use crate::json_rpc::JsonRpcRequest;
+    use crate::xml_rpc::{XmlRpcResponse, XmlRpcValue, parse_request};
+
+    let response = match parse_request(&body) {
+        Ok(request) => {
+            let params = request
+                .params
+                .iter()
+                .map(XmlRpcValue::to_json_value)
+                .collect::<Result<Vec<_>, _>>();
+            match params {
+                Ok(params) => {
+                    let json_request = JsonRpcRequest::new(
+                        request.method_name,
+                        serde_json::Value::Array(params),
+                    )
+                    .with_id(serde_json::Value::String("xmlrpc".into()));
+                    let json_response = state.engine.handle_request(&json_request).await;
+                    match json_response.result {
+                        Some(result) => XmlRpcValue::from_json_value(result)
+                            .map(XmlRpcResponse::single)
+                            .unwrap_or_else(|error| {
+                                XmlRpcResponse::fault(-32603, &error.to_string())
+                            }),
+                        None => {
+                            let error = json_response
+                                .error
+                                .map(|error| (error.code, error.message))
+                                .unwrap_or((-32603, "Missing RPC response".into()));
+                            XmlRpcResponse::fault(error.0, &error.1)
+                        }
+                    }
+                }
+                Err(error) => XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
+            }
+        }
+        Err(error) => XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
+    };
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/xml")],
+        response.to_xml(),
+    )
+        .into_response()
 }
 
 /// Handle GET requests at `/jsonrpc`.

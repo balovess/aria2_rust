@@ -221,6 +221,33 @@ async fn e2e_post_invalid_json() {
 }
 
 #[tokio::test]
+async fn e2e_xmlrpc_get_version() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let body = r#"<?xml version="1.0"?><methodCall><methodName>aria2.getVersion</methodName><params/></methodCall>"#;
+
+    let response = client
+        .post(format!("{base}/rpc"))
+        .header("content-type", "text/xml")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/xml")
+    );
+    let text = response.text().await.unwrap();
+    assert!(text.contains("<methodResponse>"));
+    assert!(text.contains("<name>version</name>"));
+}
+
+#[tokio::test]
 async fn e2e_unknown_rpc_method() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();

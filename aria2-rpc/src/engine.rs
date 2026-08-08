@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
-use super::rpc_helpers::{split_auth_token, to_aria2_wire_format};
+use super::rpc_helpers::split_auth_token;
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, SessionInfo, TaskOptions};
 use super::websocket::EventPublisher;
@@ -204,7 +204,7 @@ impl RpcEngine {
             None => req,
         };
 
-        let mut resp = if is_multicall {
+        let resp = if is_multicall {
             self.handle_multicall(dispatch_req, token.as_deref())
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone()))
@@ -212,14 +212,6 @@ impl RpcEngine {
             self.dispatch_single(dispatch_req).await
         };
 
-        // Apply aria2 wire format: convert all numbers to strings and booleans to
-        // "true"/"false" strings, matching the original aria2 JSON-RPC response format.
-        // `to_aria2_wire_format` recurses through nested arrays and objects, so the
-        // `[[result]]` payload produced by system.multicall is converted exactly the
-        // same way a top-level response would be.
-        if let Some(result) = resp.result.take() {
-            resp.result = Some(to_aria2_wire_format(result));
-        }
         resp
     }
 
