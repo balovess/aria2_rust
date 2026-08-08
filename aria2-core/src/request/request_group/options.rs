@@ -172,6 +172,55 @@ pub enum ChangeableKind {
     NotChangeable,
 }
 
+/// How a metadata file should be handled after it is downloaded.
+///
+/// `None` on [`DownloadOptions`] means that the option was not explicitly
+/// supplied and the aria2 default applies.  When supplied, the wire values
+/// are `true`, `false`, and `mem`; keeping `mem` as a distinct enum variant is
+/// necessary because it changes the disk-writer lifecycle, not just handler
+/// selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowMode {
+    /// Follow the downloaded metadata and keep the source file on disk.
+    Follow,
+    /// Do not follow the downloaded metadata.
+    Disabled,
+    /// Follow metadata from an in-memory buffer without creating a source file.
+    Memory,
+}
+
+impl FollowMode {
+    /// Parse an aria2 option value. Invalid values are rejected so callers
+    /// can preserve the configured default instead of silently changing mode.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(Self::Follow),
+            "false" | "0" => Some(Self::Disabled),
+            "mem" => Some(Self::Memory),
+            _ => None,
+        }
+    }
+
+    /// Return the canonical aria2 wire representation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Follow => "true",
+            Self::Disabled => "false",
+            Self::Memory => "mem",
+        }
+    }
+
+    /// Whether the metadata post-download handler should be installed.
+    pub const fn follows(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Whether the source should be downloaded into memory.
+    pub const fn is_memory(self) -> bool {
+        matches!(self, Self::Memory)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub split: Option<u16>,
@@ -374,13 +423,13 @@ pub struct DownloadOptions {
     /// when a .torrent file is downloaded. Default: `true`.
     /// Maps to C++ `PREF_FOLLOW_TORRENT` (true = follow, false = just save,
     /// "mem" = in-memory-only follow).
-    pub follow_torrent: Option<bool>,
+    pub follow_torrent: Option<FollowMode>,
 
     /// Whether to follow Metalink downloads by creating child request groups
     /// when a Metalink document is downloaded. Default: `true`.
     /// Maps to C++ `PREF_FOLLOW_METALINK` (true = follow, false = just save,
     /// "mem" = in-memory-only follow).
-    pub follow_metalink: Option<bool>,
+    pub follow_metalink: Option<FollowMode>,
 
     // ------------------------------------------------------------------
     // HTTP authentication options (C++ PREF_HTTP_AUTH_CHALLENGE, PREF_HTTP_USER, etc.)
@@ -542,6 +591,260 @@ impl Default for DownloadOptions {
 }
 
 impl DownloadOptions {
+    /// Whether this source should use the C++ memory pre-download semantics.
+    ///
+    /// Either metadata option can request memory-backed handling. This keeps
+    /// the decision at the source-download boundary while the post-download
+    /// handler still decides whether the bytes are BitTorrent or Metalink.
+    pub fn uses_memory_download(&self) -> bool {
+        self.follow_torrent.is_some_and(FollowMode::is_memory)
+            || self.follow_metalink.is_some_and(FollowMode::is_memory)
+    }
+
+    /// Build per-download options from aria2's kebab-case option map.
+    ///
+    /// This is the shared conversion seam for CLI/session/FFI callers. The
+    /// input intentionally contains strings because that is the wire format
+    /// used by aria2 configuration files and the original C++ API. Invalid
+    /// values fall back to the type's default, while validation of user-facing
+    /// configuration remains the responsibility of `ConfigManager`.
+    pub fn from_option_strings(options: &std::collections::HashMap<String, String>) -> Self {
+        Self {
+            split: options.get("split").and_then(|v| v.parse::<u16>().ok()),
+            max_connection_per_server: options
+                .get("max-connection-per-server")
+                .and_then(|v| v.parse::<u16>().ok()),
+            max_download_limit: options
+                .get("max-download-limit")
+                .and_then(|v| v.parse::<u64>().ok()),
+            max_upload_limit: options
+                .get("max-upload-limit")
+                .and_then(|v| v.parse::<u64>().ok()),
+            dir: options.get("dir").cloned(),
+            out: options.get("out").cloned(),
+            file_allocation: options.get("file-allocation").cloned(),
+            mmap_threshold: options
+                .get("mmap-threshold")
+                .and_then(|v| v.parse::<u64>().ok()),
+            secure_falloc: options
+                .get("secure-falloc")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            check_integrity: options
+                .get("check-integrity")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            hash_check_only: options
+                .get("hash-check-only")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
+            seed_ratio: options
+                .get("seed-ratio")
+                .and_then(|v| v.parse::<f64>().ok()),
+            checksum: options.get("checksum").and_then(|v| {
+                v.split_once('=')
+                    .map(|(algo, hash)| (algo.trim().to_string(), hash.trim().to_string()))
+            }),
+            cookie_file: options
+                .get("load-cookies")
+                .or_else(|| options.get("cookie-file"))
+                .cloned(),
+            cookies: options
+                .get("cookie")
+                .or_else(|| options.get("cookies"))
+                .cloned(),
+            bt_max_peers: options
+                .get("bt-max-peers")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(55),
+            bt_force_encrypt: options
+                .get("bt-force-encrypt")
+                .or_else(|| options.get("bt-force-encryption"))
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            bt_require_crypto: options
+                .get("bt-require-crypto")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            enable_dht: options
+                .get("enable-dht")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            dht_listen_port: options
+                .get("dht-listen-port")
+                .and_then(|v| v.parse::<u16>().ok()),
+            dht_entry_point: options.get("dht-entry-point").and_then(|v| {
+                let entries = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                (!entries.is_empty()).then_some(entries)
+            }),
+            bt_tracker: options.get("bt-tracker").and_then(|v| {
+                let entries = v
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                (!entries.is_empty()).then_some(entries)
+            }),
+            enable_public_trackers: options
+                .get("enable-public-trackers")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            bt_piece_selection_strategy: options
+                .get("bt-piece-selection-strategy")
+                .cloned()
+                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_STRATEGY.to_string()),
+            bt_endgame_threshold: options
+                .get("bt-endgame-threshold")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
+            max_retries: options
+                .get("max-retries")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
+            retry_wait: options
+                .get("retry-wait")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(crate::constants::DEFAULT_RETRY_WAIT_SECS),
+            http_proxy: options.get("http-proxy").cloned(),
+            all_proxy: options.get("all-proxy").cloned(),
+            https_proxy: options.get("https-proxy").cloned(),
+            ftp_proxy: options.get("ftp-proxy").cloned(),
+            no_proxy: options.get("no-proxy").cloned(),
+            dht_file_path: options.get("dht-file-path").cloned(),
+            bt_max_upload_slots: options
+                .get("bt-max-upload-slots")
+                .and_then(|v| v.parse::<u32>().ok()),
+            bt_optimistic_unchoke_interval: options
+                .get("bt-optimistic-unchoke-interval")
+                .and_then(|v| v.parse::<u64>().ok()),
+            bt_snubbed_timeout: options
+                .get("bt-snubbed-timeout")
+                .and_then(|v| v.parse::<u64>().ok()),
+            bt_prioritize_piece: options
+                .get("bt-prioritize-piece")
+                .cloned()
+                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_PRIORITY.to_string()),
+            bt_detach_seed_only: options
+                .get("bt-detach-seed-only")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            enable_utp: options
+                .get("enable-utp")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            utp_listen_port: options
+                .get("utp-listen-port")
+                .and_then(|v| v.parse::<u16>().ok()),
+            header: options
+                .get("header")
+                .map(|v| {
+                    v.split([',', '\n'])
+                        .map(str::trim)
+                        .filter(|entry| !entry.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            user_agent: options.get("user-agent").cloned(),
+            referer: options.get("referer").cloned(),
+            metalink_version: options.get("metalink-version").cloned(),
+            metalink_language: options.get("metalink-language").cloned(),
+            metalink_os: options.get("metalink-os").cloned(),
+            metalink_location: options.get("metalink-location").cloned(),
+            metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),
+            select_file: options.get("select-file").cloned(),
+            piece_length: options
+                .get("piece-length")
+                .and_then(|v| v.parse::<u64>().ok()),
+            metalink_enable_unique_protocol: options
+                .get("metalink-enable-unique-protocol")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            timeout: options.get("timeout").and_then(|v| v.parse::<u64>().ok()),
+            connect_timeout: options
+                .get("connect-timeout")
+                .and_then(|v| v.parse::<u64>().ok()),
+            startup_idle_time: options
+                .get("startup-idle-time")
+                .and_then(|v| v.parse::<u64>().ok()),
+            lowest_speed_limit: options
+                .get("lowest-speed-limit")
+                .and_then(|v| v.parse::<u64>().ok()),
+            ftp_pasv: options
+                .get("ftp-pasv")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            remote_time: options
+                .get("remote-time")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            dry_run: options.get("dry-run").map(|v| v == "true").unwrap_or(false),
+            ftp_reuse_connection: options
+                .get("ftp-reuse-connection")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            realtime_chunk_checksum: options
+                .get("realtime-chunk-checksum")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            bt_stop_timeout: options
+                .get("bt-stop-timeout")
+                .and_then(|v| v.parse::<u64>().ok()),
+            disable_ipv6: options
+                .get("disable-ipv6")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            listen_port: options.get("listen-port").cloned(),
+            bt_enable_lpd: options
+                .get("bt-enable-lpd")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            bt_lpd_interface: options.get("bt-lpd-interface").cloned(),
+            enable_rpc: options
+                .get("enable-rpc")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            pause: options.get("pause").map(|v| v == "true").unwrap_or(false),
+            follow_torrent: options
+                .get("follow-torrent")
+                .and_then(|v| FollowMode::parse(v)),
+            follow_metalink: options
+                .get("follow-metalink")
+                .and_then(|v| FollowMode::parse(v)),
+            http_auth_challenge: options
+                .get("http-auth-challenge")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            http_user: options.get("http-user").cloned(),
+            http_passwd: options.get("http-passwd").cloned(),
+            ftp_user: options.get("ftp-user").cloned(),
+            ftp_passwd: options.get("ftp-passwd").cloned(),
+            ssh_host_key_md: options.get("ssh-host-key-md").cloned(),
+            no_netrc: options
+                .get("no-netrc")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            netrc_path: options.get("netrc-path").cloned(),
+            conditional_get: options
+                .get("conditional-get")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            on_download_start: options.get("on-download-start").cloned(),
+            on_download_complete: options.get("on-download-complete").cloned(),
+            on_download_error: options.get("on-download-error").cloned(),
+            on_download_pause: options.get("on-download-pause").cloned(),
+            on_download_stop: options.get("on-download-stop").cloned(),
+            on_bt_download_complete: options.get("on-bt-download-complete").cloned(),
+        }
+    }
+
     /// Parse the raw `header` list into `(name, value)` pairs, splitting each
     /// `"Name: Value"` entry on the first `:`. When `user_agent` or `referer`
     /// are set, they are appended as `User-Agent` / `Referer` pairs (unless an

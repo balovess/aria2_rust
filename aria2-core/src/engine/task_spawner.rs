@@ -16,8 +16,8 @@ use crate::error::Aria2Error;
 use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
-use crate::selector::server_stat_man::ServerStatMan;
 use crate::util::rwlock_ext::RwLockRecover;
+use tokio_util::sync::CancellationToken;
 
 /// Spawns a download command as a tokio task and wires up the completion
 /// channel. Returns the `JoinHandle` for task management.
@@ -32,17 +32,14 @@ use crate::util::rwlock_ext::RwLockRecover;
 ///
 /// After the task completes, sends `(GID, generation, TaskResult)` via the completion
 /// channel so the engine can decrement `num_commands` and check for demotion.
-pub async fn spawn_download_task(
+pub fn spawn_download_task(
     group: Arc<std::sync::RwLock<RequestGroup>>,
     _ftp_pool: Arc<FtpConnectionPool>,
     _dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
     global_limiter: Option<RateLimiter>,
     generation: u64,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, u64, TaskResult)>,
-) -> Option<(
-    tokio::task::JoinHandle<()>,
-    tokio::sync::oneshot::Sender<()>,
-)> {
+) -> Option<(tokio::task::JoinHandle<()>, CancellationToken)> {
     let gid = group.recover().gid();
     let uris = group.recover().uris().to_vec();
     let options = group.recover().options_arc();
@@ -60,99 +57,36 @@ pub async fn spawn_download_task(
         }
     };
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let shutdown = CancellationToken::new();
+    let task_shutdown = shutdown.clone();
+    let dns_cache = _dns_cache;
+    let completion_tx = completion_tx.clone();
 
-    // Metalink owns mirror ordering and torrent fallback. Dispatch it before
-    // resolving the first mirror: one unavailable mirror must not prevent the
-    // command from trying the remaining mirrors or the torrent fallback.
-    #[cfg(feature = "metalink")]
-    if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
-        let mut cmd = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source(
-            Arc::clone(&group), &metalink_data, file_index, &options,
-        );
-        if let Ok(ref mut command) = cmd
-            && let Some(limiter) = global_limiter.clone()
-        {
-            command.set_global_limiter(limiter);
-        }
-        let mut cmd: Box<dyn Command> = match cmd {
-            Ok(command) => Box::new(command),
-            Err(error) => {
-                warn!(gid = gid.value(), error = %error, "Failed to create Metalink command");
-                group.recover().dec_commands();
-                return None;
-            }
-        };
-        let completion_tx = completion_tx.clone();
-        let handle = tokio::spawn(async move {
-            let task_result = match tokio::select! {
-                result = cmd.execute() => result,
-                _ = &mut shutdown_rx => {
-                    cmd.shutdown().await;
-                    Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
-                }
-            } {
-                Ok(()) => TaskResult::Success,
-                Err(error) => TaskResult::Failed(error),
-            };
-            let _ = completion_tx.send((gid, generation, task_result));
-        });
-        return Some((handle, shutdown_tx));
-    }
-
-    // Resolve the origin before constructing the command. This keeps DNS failures
-    // on the same structured completion path as other command failures and lets
-    // the engine apply NameResolveError consistently.
-    if let Some((hostname, port)) = direct_origin(&first_uri) {
-        let dns_result = {
-            let mut cache = _dns_cache.lock().await;
-            let result = cache.resolve(&hostname, port).await;
-            drop(cache);
-            result
-        };
-        if let Err(error) = dns_result {
-            let protocol = url::Url::parse(&first_uri)
-                .map(|url| url.scheme().to_string())
-                .unwrap_or_default();
-            let stat_man = ServerStatMan::shared();
-            stat_man.get_or_create_with_protocol(&hostname, &protocol);
-            stat_man.mark_failure_with_protocol(&hostname, &protocol, 0);
-            warn!(gid = gid.value(), error = %error, "DNS resolution failed before command start");
-            let completion_tx = completion_tx.clone();
-            let handle = tokio::spawn(async move {
-                let _ = completion_tx.send((gid, generation, TaskResult::Failed(error)));
-            });
-            return Some((handle, shutdown_tx));
-        }
-    }
-
-    // Create the appropriate command based on URI scheme.
-    let cmd_result = create_command_for_uri(
-        &first_uri,
-        Arc::clone(&group),
-        &options,
-        global_limiter,
-        &_dns_cache,
-    )
-    .await;
-
-    let mut cmd: Box<dyn Command> = match cmd_result {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(gid = gid.value(), error = %e, "Failed to create command for URI");
-            group.recover().dec_commands();
-            return None;
-        }
-    };
-
-    debug!(gid = gid.value(), "Spawning download task for group");
-
-    // Spawn the task. It sends completion via channel when done.
+    // Command construction may perform DNS resolution and build protocol
+    // clients. Keep that work in the tracked task so the single-threaded
+    // engine loop can continue processing pause/remove commands while a
+    // resolver or a slow protocol constructor is waiting.
     let handle = tokio::spawn(async move {
         let result = tokio::select! {
-            result = cmd.execute() => result,
-            _ = &mut shutdown_rx => {
-                cmd.shutdown().await;
+            command_result = create_command_for_group(
+                Arc::clone(&group),
+                first_uri,
+                options,
+                global_limiter,
+                dns_cache,
+            ) => {
+                match command_result {
+                    Ok(mut cmd) => tokio::select! {
+                        result = cmd.execute() => result,
+                        _ = task_shutdown.cancelled() => {
+                            cmd.shutdown().await;
+                            Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
+                        }
+                    },
+                    Err(error) => Err(error),
+                }
+            }
+            _ = task_shutdown.cancelled() => {
                 Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
             }
         };
@@ -184,7 +118,7 @@ pub async fn spawn_download_task(
         }
     });
 
-    Some((handle, shutdown_tx))
+    Some((handle, shutdown))
 }
 
 fn direct_origin(uri: &str) -> Option<(String, u16)> {
@@ -197,6 +131,38 @@ fn direct_origin(uri: &str) -> Option<(String, u16)> {
         parsed.host_str()?.to_string(),
         parsed.port_or_known_default()?,
     ))
+}
+
+/// Build the protocol command inside the tracked task.
+///
+/// Metalink commands need their source metadata before URI dispatch, while
+/// the other protocols share the regular scheme factory. Keeping both paths
+/// here ensures command construction remains cancellable and never blocks the
+/// engine loop on DNS or client setup.
+async fn create_command_for_group(
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    first_uri: String,
+    options: Arc<DownloadOptions>,
+    global_limiter: Option<RateLimiter>,
+    dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+) -> crate::error::Result<Box<dyn Command>> {
+    #[cfg(feature = "metalink")]
+    if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
+        let base_uri = group.recover().metalink_base_uri();
+        let mut command = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source(
+            Arc::clone(&group),
+            &metalink_data,
+            file_index,
+            &options,
+            base_uri.as_deref(),
+        )?;
+        if let Some(limiter) = global_limiter {
+            command.set_global_limiter(limiter);
+        }
+        return Ok(Box::new(command));
+    }
+
+    create_command_for_uri(&first_uri, group, &options, global_limiter, &dns_cache).await
 }
 
 /// Create the appropriate `Command` implementation for a URI.

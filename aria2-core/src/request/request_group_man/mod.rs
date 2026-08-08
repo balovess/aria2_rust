@@ -372,6 +372,29 @@ impl RequestGroupMan {
         }
     }
 
+    /// Remove a reserved dependency payload that cannot ever be promoted.
+    ///
+    /// This is deliberately separate from `fail_spawned_group`: no command
+    /// exists yet, so leaving the group in `reserved` would make it appear as
+    /// waiting forever and prevent the engine from reaching an idle state.
+    pub(super) fn fail_reserved_group(&self, gid: GroupId, message: &str) -> bool {
+        let Some(group) = self.reserved.remove_by_gid(gid) else {
+            warn!(gid = gid.value(), "Failed reserved group not found");
+            return false;
+        };
+
+        group.recover().mark_error_with_code(
+            crate::request::request_group::DownloadResultCode::BittorrentParseError,
+            message.to_string(),
+        );
+        self.stopped.add(group.recover().create_download_result());
+        info!(
+            gid = gid.value(),
+            "Recorded failed reserved dependency group"
+        );
+        true
+    }
+
     // ── Pause/Unpause ───────────────────────────────────────────────────
 
     pub fn pause_group(&self, gid: GroupId) -> Result<()> {
@@ -890,6 +913,61 @@ mod tests {
         let promoted = man.fill_from_reserver();
         assert_eq!(promoted.len(), 1);
         assert_eq!(promoted[0].recover().gid(), payload_gid);
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn test_failed_metadata_with_direct_fallback_releases_payload() {
+        let man = RequestGroupMan::new();
+        let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new_with_fallback(
+            "https://example.test/file.torrent",
+            "file.bin",
+            &DownloadOptions::default(),
+            GroupId::new(30),
+            GroupId::new(31),
+            vec!["https://mirror.test/file.bin".to_string()],
+        )
+        .unwrap();
+        man.add_metalink_graph(graph).unwrap();
+
+        man.resolve_dependencies_for_status(
+            GroupId::new(30),
+            DownloadStatus::Error("metadata unavailable".to_string()),
+        );
+
+        let payload = man.find_group(GroupId::new(31)).expect("payload retained");
+        assert!(payload.recover().is_dependency_resolved());
+        assert_eq!(
+            payload.recover().uris(),
+            &["https://mirror.test/file.bin".to_string()]
+        );
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn test_failed_torrent_only_metadata_is_stopped_as_error() {
+        let man = RequestGroupMan::new();
+        let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+            "https://example.test/file.torrent",
+            "file.bin",
+            &DownloadOptions::default(),
+            GroupId::new(40),
+            GroupId::new(41),
+        )
+        .unwrap();
+        man.add_metalink_graph(graph).unwrap();
+
+        man.resolve_dependencies_for_status(
+            GroupId::new(40),
+            DownloadStatus::Error("metadata unavailable".to_string()),
+        );
+
+        assert!(man.find_group(GroupId::new(41)).is_none());
+        assert_eq!(
+            man.find_stopped_result(&GroupId::new(41).to_hex_string())
+                .map(|result| result.code),
+            Some(crate::request::request_group::DownloadResultCode::BittorrentParseError)
+        );
     }
 
     #[test]

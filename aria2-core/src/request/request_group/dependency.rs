@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "bittorrent")]
+use super::DownloadStatus;
 use super::GroupId;
 #[cfg(feature = "bittorrent")]
 use super::{MetadataInfo, RequestGroup};
@@ -99,6 +101,19 @@ pub struct BtDependency {
     metadata_path: Option<PathBuf>,
     output_path: PathBuf,
     metadata_info: MetadataInfo,
+    /// Direct HTTP/FTP mirrors to use when the torrent metaurl fails.
+    fallback_uris: Vec<String>,
+}
+
+#[cfg(feature = "bittorrent")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BtDependencyResolution {
+    /// Metadata was parsed and injected, or direct mirrors were selected.
+    Resolved,
+    /// The prerequisite is not terminal yet.
+    Waiting,
+    /// No usable fallback exists for the payload.
+    Failed(String),
 }
 
 #[cfg(feature = "bittorrent")]
@@ -111,6 +126,7 @@ impl std::fmt::Debug for BtDependency {
             .field("metadata_path", &self.metadata_path)
             .field("output_path", &self.output_path)
             .field("metadata_info", &self.metadata_info)
+            .field("fallback_uris", &self.fallback_uris)
             .finish()
     }
 }
@@ -137,6 +153,7 @@ impl BtDependency {
             None,
             output_path,
             metadata_info,
+            Vec::new(),
         )
     }
 
@@ -156,6 +173,28 @@ impl BtDependency {
             Some(metadata_path),
             output_path,
             metadata_info,
+            Vec::new(),
+        )
+    }
+
+    /// Create a file-backed dependency with direct mirrors available as a
+    /// fallback when the torrent metadata cannot be downloaded or parsed.
+    pub fn new_file_with_fallback(
+        depends_on_gid: GroupId,
+        payload: Arc<RwLock<RequestGroup>>,
+        metadata_path: PathBuf,
+        output_path: PathBuf,
+        metadata_info: MetadataInfo,
+        fallback_uris: Vec<String>,
+    ) -> Self {
+        Self::from_source(
+            depends_on_gid,
+            payload,
+            None,
+            Some(metadata_path),
+            output_path,
+            metadata_info,
+            fallback_uris,
         )
     }
 
@@ -166,6 +205,7 @@ impl BtDependency {
         metadata_path: Option<PathBuf>,
         output_path: PathBuf,
         metadata_info: MetadataInfo,
+        fallback_uris: Vec<String>,
     ) -> Self {
         Self {
             depends_on_gid,
@@ -175,6 +215,7 @@ impl BtDependency {
             metadata_path,
             output_path,
             metadata_info,
+            fallback_uris,
         }
     }
 
@@ -186,6 +227,55 @@ impl BtDependency {
     /// Return the configured metadata file path.
     pub fn metadata_path(&self) -> Option<&std::path::Path> {
         self.metadata_path.as_deref()
+    }
+
+    /// Resolve the dependency after its prerequisite reaches a terminal
+    /// state. A failed metadata path is recoverable only when direct mirrors
+    /// were retained by the Metalink graph.
+    pub fn resolve_after_prerequisite(
+        &self,
+        prerequisite_status: &DownloadStatus,
+    ) -> BtDependencyResolution {
+        if self.resolve() {
+            return BtDependencyResolution::Resolved;
+        }
+
+        if matches!(prerequisite_status, DownloadStatus::Complete) {
+            if let Some(metadata_path) = self.metadata_path()
+                && let Err(error) = self.resolve_metadata_file(metadata_path)
+            {
+                return self.fallback_or_fail(error);
+            }
+            return if self.resolve() {
+                BtDependencyResolution::Resolved
+            } else {
+                self.fallback_or_fail("torrent metadata source is unavailable".to_string())
+            };
+        }
+
+        self.fallback_or_fail(format!(
+            "metadata prerequisite ended in {}",
+            prerequisite_status
+        ))
+    }
+
+    fn fallback_or_fail(&self, reason: String) -> BtDependencyResolution {
+        if !self.fallback_uris.is_empty() {
+            self.payload
+                .recover_mut()
+                .replace_uris(self.fallback_uris.clone());
+            self.completed
+                .store(true, std::sync::atomic::Ordering::Release);
+            tracing::warn!(
+                payload_gid = self.payload.recover().gid().value(),
+                error = %reason,
+                fallback_count = self.fallback_uris.len(),
+                "Torrent metadata failed; falling back to direct Metalink mirrors"
+            );
+            BtDependencyResolution::Resolved
+        } else {
+            BtDependencyResolution::Failed(reason)
+        }
     }
 
     /// Resolve downloaded metadata from the file written by the prerequisite group.
@@ -382,6 +472,61 @@ mod tests {
             group.metadata_info().expect("metadata provenance").gid(),
             Some(GroupId::new(1))
         );
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn bt_dependency_falls_back_after_failed_prerequisite() {
+        let payload = Arc::new(RwLock::new(RequestGroup::new(
+            GroupId::new(12),
+            vec!["bt://payload".to_string()],
+            DownloadOptions::default(),
+        )));
+        let dependency = BtDependency::new_file_with_fallback(
+            GroupId::new(11),
+            Arc::clone(&payload),
+            PathBuf::from("missing.torrent"),
+            PathBuf::from("payload.bin"),
+            MetadataInfo::new(GroupId::new(11), "https://example.test/payload.torrent"),
+            vec!["https://mirror.test/payload.bin".to_string()],
+        );
+
+        assert_eq!(
+            dependency.resolve_after_prerequisite(&DownloadStatus::Error(
+                "metadata request failed".to_string()
+            )),
+            BtDependencyResolution::Resolved
+        );
+        assert!(dependency.resolve());
+        assert_eq!(
+            payload.recover().uris(),
+            &["https://mirror.test/payload.bin".to_string()]
+        );
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn bt_dependency_without_fallback_reports_terminal_failure() {
+        let payload = Arc::new(RwLock::new(RequestGroup::new(
+            GroupId::new(13),
+            vec!["bt://payload".to_string()],
+            DownloadOptions::default(),
+        )));
+        let dependency = BtDependency::new_file(
+            GroupId::new(11),
+            Arc::clone(&payload),
+            PathBuf::from("missing.torrent"),
+            PathBuf::from("payload.bin"),
+            MetadataInfo::new(GroupId::new(11), "https://example.test/payload.torrent"),
+        );
+
+        assert!(matches!(
+            dependency.resolve_after_prerequisite(&DownloadStatus::Error(
+                "metadata request failed".to_string()
+            )),
+            BtDependencyResolution::Failed(_)
+        ));
+        assert!(!dependency.resolve());
     }
 
     #[test]

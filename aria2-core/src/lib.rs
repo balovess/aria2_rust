@@ -78,6 +78,7 @@
 //! ```
 
 pub mod auth;
+pub mod c_api;
 pub mod checksum;
 pub mod colorized_stream;
 pub mod config;

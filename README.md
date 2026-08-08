@@ -206,6 +206,14 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
+Verification snapshot (2026-08-08): the protocol, RPC, and CLI crates pass
+their all-feature package test suites; the core all-feature targets executed
+3,411 passing tests with 11 ignored and 0 failures before a Windows build
+timeout while the final target was starting. Node.js binding tests pass 123/123
+and Python binding tests pass 136/136 with a real `aria2c` binary. The single
+workspace aggregate command is still a build-time timeout on this host, so
+these results do not mean the migration is complete.
+
 The project is organized as a Cargo workspace with 4 crates:
 
 ```
@@ -419,31 +427,36 @@ For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-gui
 
 ## Compatibility with Original aria2
 
-| Feature | Status | Notes |
+The table below records implemented code paths, not full compatibility. The
+authoritative status is the module matrix in
+[docs/compatibility-status.md](docs/compatibility-status.md); an implemented
+path can still be `PARTIAL` or `UNVERIFIED` there.
+
+| Feature | Path state | Notes |
 |---------|--------|-------|
-| CLI arguments | ✅ Core | ~50 most-used options |
-| Configuration file (`aria2.conf`) | ✅ | Same syntax format |
-| Environment variables | ✅ | `ARIA2_*` prefix mapping |
-| JSON-RPC API | ✅ | 37 methods returned by `system.listMethods` |
-| XML-RPC API | ✅ | Full methodCall/response/fault support |
-| WebSocket events | ✅ | 6 notifications returned by `system.listNotifications` |
-| URI list file (`-i`) | ✅ | Mirror + inline options |
-| NetRC auth | ✅ | machine/default/macdef parsing |
-| Session save/load | ✅ | Round-trip consistent |
-| Metalink V3/V4 | ✅ | Full parsing |
-| BitTorrent DHT | ✅ | KRPC + routing table + bootstrap |
-| FTP/SFTP | ✅ | Passive mode + auth |
-| Rate limiting | ✅ | Token bucket algorithm |
-| Cookie management | ✅ | Netscape format persistence |
-| MSE/PE encryption | ✅ Complete | BEP14 handshake |
-| Magnet link support | ✅ Complete | ut_metadata fetching |
-| RarestFirst piece | ✅ Complete | Full implementation |
-| Endgame mode | ✅ Complete | Last-piece optimization |
-| DHT persistence | ✅ Complete | dht.dat serialization |
-| uTP Protocol | ✅ Complete | Not in original aria2 C++ |
-| Web Seeds | ✅ Complete | BEP 19 |
-| LPD | ✅ Complete | Local Peer Discovery |
-| Seeding Mode | ✅ Complete | Upload support |
+| CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
+| Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
+| Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
+| JSON-RPC API | Implemented path | 37 methods returned by `system.listMethods`; interoperability remains open |
+| XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
+| WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
+| URI list file (`-i`) | Implemented path | Mirror + inline options |
+| NetRC auth | Implemented path | machine/default/macdef parsing |
+| Session save/load | Implemented path | Round-trip tests exist; complete control-file parity remains open |
+| Metalink V3/V4 | Implemented path | Parsing and downloads exist; torrent metaurl lifecycle is partial |
+| BitTorrent DHT | Implemented path | KRPC + routing table + bootstrap; live interoperability remains open |
+| FTP/SFTP | Implemented path | Passive mode + auth; live-server evidence remains open |
+| Rate limiting | Implemented path | Shared token bucket and runtime updates are tested |
+| Cookie management | Implemented path | Netscape and SQLite parsing paths exist |
+| MSE/PE encryption | Implemented path | BEP14 handshake |
+| Magnet link support | Implemented path | ut_metadata fetching |
+| RarestFirst piece | Implemented path | Piece selection implementation and tests |
+| Endgame mode | Implemented path | Last-piece optimization |
+| DHT persistence | Implemented path | `dht.dat` serialization |
+| uTP Protocol | Extension path | Not in original aria2 C++ |
+| Web Seeds | Implemented path | BEP 19 |
+| LPD | Implemented path | Local Peer Discovery |
+| Seeding Mode | Implemented path | Upload support |
 
 **Known gaps and verification status:**
 - This table is a capability inventory, not a release compatibility claim.

@@ -13,7 +13,7 @@ use crate::engine::download_event_hooks::{
     DownloadEvent, DownloadEventContext, DownloadEventHooks, determine_stop_event,
 };
 use crate::engine::post_download_handler::{
-    build_handler_chain, extract_download_info, run_post_download_processing,
+    build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,
 };
 use crate::request::request_group::DownloadStatus;
 use crate::request::request_group::GroupId;
@@ -270,8 +270,11 @@ impl super::RequestGroupMan {
             // ── Resolve dependencies ────────────────────────────────────
             // When a download completes successfully, resolve any
             // CompletionDependency waiting on this GID.
-            if matches!(status, DownloadStatus::Complete) {
-                self.resolve_dependencies_for(gid);
+            if matches!(
+                status,
+                DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
+            ) {
+                self.resolve_dependencies_for_status(gid, status.clone());
             }
 
             // ── Fire download event hooks ───────────────────────────────
@@ -346,7 +349,9 @@ impl super::RequestGroupMan {
         let handler_refs: Vec<&dyn crate::engine::post_download_handler::PostDownloadHandler> =
             handlers.iter().map(|h| h.as_ref()).collect();
 
-        let child_groups = run_post_download_processing(&info, &handler_refs);
+        let mut allocate_gid = || self.generate_gid();
+        let child_groups =
+            run_post_download_processing_with_allocator(&info, &handler_refs, &mut allocate_gid);
 
         // Set followed_by_gids on the parent group.
         // C++: `requestGroup->followedBy(std::begin(newRgs), std::end(newRgs))`.
@@ -370,20 +375,38 @@ impl super::RequestGroupMan {
     /// inside `fillRequestGroupFromReserver` when it encounters a
     /// dependency whose prerequisite has finished.
     pub fn resolve_dependencies_for(&self, completed_gid: crate::request::request_group::GroupId) {
+        self.resolve_dependencies_for_status(completed_gid, DownloadStatus::Complete);
+    }
+
+    /// Resolve dependencies after a prerequisite reaches any terminal state.
+    ///
+    /// A failed metadata download must wake its payload just as a successful
+    /// one does: payloads with direct mirrors fall back to those mirrors, while
+    /// torrent-only payloads are recorded as a terminal error instead of
+    /// remaining in the reserved queue forever.
+    pub fn resolve_dependencies_for_status(
+        &self,
+        completed_gid: crate::request::request_group::GroupId,
+        prerequisite_status: DownloadStatus,
+    ) {
+        let mut failed_payloads = Vec::new();
         for group in self.reserved.iter_snapshot() {
-            let g = group.recover();
-            let dep_guard = g.dependency.recover();
-            if let Some(ref dep) = *dep_guard {
+            let (payload_gid, dependency) = {
+                let g = group.recover();
+                (g.gid(), g.dependency.recover().as_ref().cloned())
+            };
+            if let Some(dep) = dependency {
                 // Resolve generic completion dependencies when the
                 // prerequisite group reaches stopped/completed state.
                 if let Some(completion_dep) =
                     dep.as_any()
                         .downcast_ref::<crate::request::request_group::CompletionDependency>()
                     && completion_dep.depends_on_gid == completed_gid
+                    && matches!(prerequisite_status, DownloadStatus::Complete)
                 {
                     completion_dep.mark_resolved();
                     debug!(
-                        gid = g.gid().value(),
+                        gid = payload_gid.value(),
                         depends_on = completed_gid.value(),
                         "Resolved completion dependency"
                     );
@@ -394,17 +417,29 @@ impl super::RequestGroupMan {
                     .as_any()
                     .downcast_ref::<crate::request::request_group::BtDependency>()
                     && bt_dep.depends_on_gid() == completed_gid
-                    && let Some(metadata_path) = bt_dep.metadata_path()
-                    && let Err(error) = bt_dep.resolve_metadata_file(metadata_path)
                 {
-                    warn!(
-                        gid = g.gid().value(),
-                        depends_on = completed_gid.value(),
-                        error = %error,
-                        "Failed to resolve torrent metadata dependency"
-                    );
+                    match bt_dep.resolve_after_prerequisite(&prerequisite_status) {
+                        crate::request::request_group::BtDependencyResolution::Resolved => {
+                            debug!(
+                                gid = payload_gid.value(),
+                                depends_on = completed_gid.value(),
+                                "Resolved BitTorrent metadata dependency"
+                            );
+                        }
+                        crate::request::request_group::BtDependencyResolution::Failed(error) => {
+                            failed_payloads.push((payload_gid, error));
+                        }
+                        crate::request::request_group::BtDependencyResolution::Waiting => {}
+                    }
                 }
             }
+        }
+
+        for (gid, error) in failed_payloads {
+            self.fail_reserved_group(
+                gid,
+                &format!("BitTorrent metadata dependency failed: {error}"),
+            );
         }
     }
 }

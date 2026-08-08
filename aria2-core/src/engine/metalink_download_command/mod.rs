@@ -180,10 +180,23 @@ impl MetalinkDownloadCommand {
         output_dir: Option<&str>,
         gid_start: u64,
     ) -> Result<Vec<MetalinkFileInfo>> {
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
-            .map_err(|e| {
-            Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
-        })?;
+        Self::create_multi_file_with_base_uri(metalink_bytes, options, output_dir, None, gid_start)
+    }
+
+    /// Create per-file commands while resolving relative Metalink URLs
+    /// against the source document URI.
+    pub fn create_multi_file_with_base_uri(
+        metalink_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        base_uri: Option<&str>,
+        gid_start: u64,
+    ) -> Result<Vec<MetalinkFileInfo>> {
+        let doc =
+            aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, base_uri)
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
+                })?;
 
         if doc.files.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -374,18 +387,24 @@ impl MetalinkDownloadCommand {
         metalink_bytes: &[u8],
         file_index: usize,
         options: &DownloadOptions,
+        base_uri: Option<&str>,
     ) -> Result<Self> {
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
-            .map_err(|e| {
-            Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {e}")))
-        })?;
+        let doc =
+            aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, base_uri)
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {e}")))
+                })?;
         let file = doc.files.get(file_index).ok_or_else(|| {
             Aria2Error::Fatal(FatalError::Config(
                 "Metalink file index out of range".to_string(),
             ))
         })?;
         let dir = options.dir.as_deref().unwrap_or(".");
-        let path = std::path::PathBuf::from(dir).join(&file.name);
+        let output_name = group
+            .recover()
+            .output_name()
+            .unwrap_or_else(|| file.name.clone());
+        let path = std::path::PathBuf::from(dir).join(output_name);
         let sorted_urls: Vec<UrlEntry> = file.get_sorted_urls().into_iter().cloned().collect();
         let file_info = FileDownloadInfo {
             expected_size: file.size,

@@ -285,7 +285,7 @@ impl SessionPersistence {
         let uris: Vec<String> = resume_data.uris.iter().map(|u| u.uri.clone()).collect();
 
         // Build DownloadOptions from stored state
-        let mut options = DownloadOptions::default();
+        let mut options = DownloadOptions::from_option_strings(&resume_data.options);
         if let Some(value) = resume_data.options.get("ssh-host-key-md") {
             options.ssh_host_key_md = Some(value.clone());
         }

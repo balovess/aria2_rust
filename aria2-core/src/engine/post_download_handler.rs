@@ -29,7 +29,9 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::error::Aria2Error;
-use crate::request::request_group::{DownloadOptions, GroupId, MetadataInfo, RequestGroup};
+use crate::request::request_group::{
+    DownloadOptions, FollowMode, GroupId, MetadataInfo, RequestGroup,
+};
 
 /// Metadata extracted from a completed download for handler matching.
 ///
@@ -78,6 +80,18 @@ pub trait PostDownloadHandler: Send + Sync + std::fmt::Debug {
         info: &CompletedDownloadInfo,
     ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error>;
 
+    /// Create child groups using an allocator owned by the request-group
+    /// manager. The default preserves the original handler contract for
+    /// callers that do not manage a queue, while handlers that create
+    /// multiple graph nodes can override it to obtain collision-free GIDs.
+    fn create_child_groups_with_allocator(
+        &self,
+        info: &CompletedDownloadInfo,
+        _allocate_gid: &mut dyn FnMut() -> GroupId,
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
+        self.create_child_groups(info)
+    }
+
     /// Handler name for logging.
     fn name(&self) -> &'static str;
 }
@@ -101,6 +115,24 @@ pub fn run_post_download_processing(
     info: &CompletedDownloadInfo,
     handlers: &[&dyn PostDownloadHandler],
 ) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
+    let mut next_gid = info.gid.value().saturating_add(1);
+    let mut allocate_gid = || {
+        let gid = GroupId::new(next_gid);
+        next_gid = next_gid.saturating_add(1);
+        gid
+    };
+    run_post_download_processing_with_allocator(info, handlers, &mut allocate_gid)
+}
+
+/// Run post-download processing with a manager-owned GID allocator.
+///
+/// The engine uses this entry point so a handler cannot create child groups
+/// with IDs that collide with RPC/session-restored downloads.
+pub fn run_post_download_processing_with_allocator(
+    info: &CompletedDownloadInfo,
+    handlers: &[&dyn PostDownloadHandler],
+    allocate_gid: &mut dyn FnMut() -> GroupId,
+) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
     debug!(
         gid = info.gid.value(),
         content_type = ?info.content_type,
@@ -116,7 +148,7 @@ pub fn run_post_download_processing(
                 "Post-download handler matched"
             );
 
-            match handler.create_child_groups(info) {
+            match handler.create_child_groups_with_allocator(info, allocate_gid) {
                 Ok(groups) => {
                     if groups.is_empty() {
                         debug!(
@@ -186,20 +218,28 @@ pub fn build_handler_chain(options: &DownloadOptions) -> Vec<Box<dyn PostDownloa
     #[allow(unused_mut)]
     let mut handlers: Vec<Box<dyn PostDownloadHandler>> = Vec::new();
 
-    // BitTorrent handler: enabled when follow-torrent is true
+    // BitTorrent handler: enabled for true and mem, disabled only for false.
     // C++: if(option_->getAsBool(PREF_FOLLOW_TORRENT) ||
     //          option_->get(PREF_FOLLOW_TORRENT) == V_MEM)
-    if options.follow_torrent.unwrap_or(true) {
+    if options
+        .follow_torrent
+        .unwrap_or(FollowMode::Follow)
+        .follows()
+    {
         #[cfg(feature = "bittorrent")]
         handlers.push(Box::new(
             super::bt_torrent_post_download_handler::BtTorrentPostDownloadHandler::new(),
         ));
     }
 
-    // Metalink handler: enabled when follow-metalink is true
+    // Metalink handler: enabled for true and mem, disabled only for false.
     // C++: if(option_->getAsBool(PREF_FOLLOW_METALINK) ||
     //          option_->get(PREF_FOLLOW_METALINK) == V_MEM)
-    if options.follow_metalink.unwrap_or(true) {
+    if options
+        .follow_metalink
+        .unwrap_or(FollowMode::Follow)
+        .follows()
+    {
         #[cfg(feature = "metalink")]
         handlers.push(Box::new(
             super::metalink_post_download_handler::MetalinkPostDownloadHandler::new(),
@@ -232,15 +272,14 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
                     .or_else(|| entry.remaining_uris().front().cloned())
             });
 
-            // In-memory download detection: check if the BT attribute is set
-            // and the base_path is empty (magnet metadata download).
-            // C++: `requestGroup->inMemoryDownload()` checks a flag set
-            // during metadata exchange.
-            let in_mem = dctx.first_file_path().is_none() || dctx.get_base_path().is_empty();
+            // C++ uses an explicit RequestGroup flag set by the memory
+            // pre-download handler. Do not infer this from an empty path:
+            // an ordinary download can have a path-less context while it is
+            // still being initialized.
+            let in_mem = group.is_in_memory_download();
+            let data = group.in_memory_data();
 
-            let data = None; // In-memory data extraction is deferred to the handler
-
-            (None, fp, base_uri, in_mem, data)
+            (group.content_type(), fp, base_uri, in_mem, data)
         } else {
             (None, None, None, false, None)
         };

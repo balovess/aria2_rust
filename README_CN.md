@@ -15,7 +15,11 @@
 
 ***
 
-**aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的完整 Rust 重写版本。支持 HTTP/HTTPS、FTP/SFTP、BitTorrent、Metalink 协议，提供 JSON-RPC/XML-RPC/WebSocket 远程控制接口。
+**aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
+实现，当前仍在以 `aria2_original` 为基准进行兼容迁移。支持
+HTTP/HTTPS、FTP/SFTP、BitTorrent、Metalink 协议，并提供
+JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
+[docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 
 ## 特性
 
@@ -333,6 +337,10 @@ cargo bench --bench config_bench
 
 ## 与原版 aria2 的兼容性
 
+下表表示代码路径已实现，不等同于完整兼容。模块级 `PARTIAL`、
+`UNVERIFIED`、`MISSING` 状态和验收证据以
+[兼容性矩阵](docs/compatibility-status.md) 为准。
+
 | 功能                  | 状态    | 说明                              |
 | ------------------- | ----- | ------------------------------- |
 | CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
@@ -365,6 +373,10 @@ cargo bench --bench config_bench
 - HTTPS RPC 已有 TLS 配置、服务器实现和专门测试；更广泛的客户端/服务器互操作测试仍在跟踪。
 - IPv6 DHT 已有 CLI 和协议层支持；完整网络互操作覆盖仍在跟踪。
 - 仍需逐项对照 `aria2_original` 验证更多 CLI/运行时选项行为。
+- 公共 `extern "C"`/cdylib ABI 尚未实现。
+- Metalink torrent `metaurl` 依赖生命周期、完整性回调路径和部分协议互操作仍未闭环。
+- 尚未建立与 aria2 C++ 的可比性能基线；Rust-only 基准不能证明优于原版。
+- Windows 上 workspace all-features 聚合测试仍可能在构建阶段超时，不能据此宣称一次性全量通过。
 
 ## 许可证
 
@@ -378,4 +390,3 @@ Copyright (C) 2024 aria2-rust contributors.
 - [Tokio](https://tokio.rs/) — Rust 异步运行时
 - [Reqwest](https://docs.rs/reqwest/) — HTTP 客户端基础
 - [Axum](https://docs.rs/axum/) — RPC 服务器的 Web 框架
-

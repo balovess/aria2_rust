@@ -22,9 +22,10 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::engine::metalink_download_command::MetalinkDownloadCommand;
+use crate::engine::metalink_to_request_group::MetalinkToRequestGroup;
 use crate::engine::post_download_handler::{CompletedDownloadInfo, PostDownloadHandler};
 use crate::error::{Aria2Error, Result};
-use crate::request::request_group::{DownloadOptions, RequestGroup};
+use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Known Metalink MIME content types.
@@ -146,9 +147,10 @@ impl MetalinkPostDownloadHandler {
             "Metalink post-download handler: creating request groups"
         );
 
-        let file_infos = MetalinkDownloadCommand::create_multi_file(
+        let file_infos = MetalinkDownloadCommand::create_multi_file_with_base_uri(
             metalink_data,
             options,
+            options.dir.as_deref(),
             base_uri,
             1, // GID start
         )?;
@@ -211,6 +213,20 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
         &self,
         info: &CompletedDownloadInfo,
     ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
+        let mut next_gid = 1;
+        let mut allocate_gid = || {
+            let gid = GroupId::new(next_gid);
+            next_gid = next_gid.saturating_add(1);
+            gid
+        };
+        self.create_child_groups_with_allocator(info, &mut allocate_gid)
+    }
+
+    fn create_child_groups_with_allocator(
+        &self,
+        info: &CompletedDownloadInfo,
+        allocate_gid: &mut dyn FnMut() -> GroupId,
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
         // Read the Metalink data from the completed download
         let metalink_data = Self::read_metalink_data(info)?;
 
@@ -223,24 +239,37 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
 
         // Prevent infinite loops: child groups don't re-trigger
         // the Metalink handler. C++: dctx->setAcceptMetalink(false)
-        child_options.follow_metalink = Some(false);
+        child_options.follow_metalink = Some(FollowMode::Disabled);
 
-        let commands =
-            self.get_next_request_groups(&metalink_data, info.base_uri.as_deref(), &child_options)?;
+        // Manager-owned resource groups preserve the parsed file index and
+        // base URI for command construction. Torrent-only entries must use a
+        // metadata/payload graph; flattening them into a payload with no URI
+        // loses the torrent prerequisite and can never be spawned.
+        let mut converter = MetalinkToRequestGroup::new();
+        if let Some(base_uri) = info.base_uri.as_deref() {
+            converter = converter.with_base_uri(base_uri);
+        }
+        let mut gids = std::iter::from_fn(|| Some(allocate_gid()));
+        let mut child_groups = converter.create_resource_groups_from_bytes(
+            &metalink_data,
+            &child_options,
+            &mut gids,
+        )?;
 
-        // Extract RequestGroup from each MetalinkDownloadCommand.
-        // C++: `groups.insert(groups.end(), newRgs.begin(), newRgs.end())`
-        let mut child_groups = Vec::with_capacity(commands.len());
-        for cmd in commands {
-            let group = cmd.into_group();
+        #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+        for graph in
+            converter.create_torrent_graphs_from_bytes(&metalink_data, &child_options, &mut gids)?
+        {
+            child_groups.push(graph.metadata);
+            child_groups.push(graph.payload);
+        }
 
+        for group in &child_groups {
             // If pause requested (PREF_PAUSE_METADATA), mark the child group.
             // C++: `rg->setPauseRequested(true)` when keepRunning && pause_metadata
             if self.pause_requested {
                 group.recover().control_flags.request_pause();
             }
-
-            child_groups.push(group);
         }
 
         info!(
@@ -322,5 +351,54 @@ mod tests {
             Some("application/octet-stream"),
             Some("download.meta4")
         ));
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn torrent_only_post_download_preserves_metadata_payload_graph() {
+        let path = std::env::temp_dir().join(format!(
+            "aria2-rust-metalink-post-{}.meta4",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            br#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><metaurl mediatype="application/x-bittorrent">https://example.test/payload.torrent</metaurl></file></metalink>"#,
+        )
+        .expect("write Metalink fixture");
+
+        let info = CompletedDownloadInfo {
+            content_type: Some("application/metalink4+xml".to_string()),
+            file_path: Some(path.to_string_lossy().into_owned()),
+            options: Arc::new(DownloadOptions::default()),
+            gid: GroupId::new(90),
+            in_memory_download: false,
+            in_memory_data: None,
+            base_uri: Some("https://example.test/releases/index.meta4".to_string()),
+        };
+        let handler = MetalinkPostDownloadHandler::new();
+        let mut next_gid = 100;
+        let mut allocate_gid = || {
+            let gid = GroupId::new(next_gid);
+            next_gid += 1;
+            gid
+        };
+        let groups = handler
+            .create_child_groups_with_allocator(&info, &mut allocate_gid)
+            .expect("torrent-only Metalink should create a graph");
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].recover().gid(), GroupId::new(100));
+        assert_eq!(groups[1].recover().gid(), GroupId::new(101));
+        assert_eq!(
+            groups[0].recover().uris(),
+            &["https://example.test/payload.torrent".to_string()]
+        );
+        assert_eq!(
+            groups[1].recover().uris(),
+            &["bt://0000000000000064".to_string()]
+        );
+        assert!(!groups[1].recover().is_dependency_resolved());
+
+        let _ = std::fs::remove_file(path);
     }
 }

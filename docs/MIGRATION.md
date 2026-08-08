@@ -367,3 +367,68 @@ workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
   matrix 通过。
 - **环境限制**：Python binding 测试尚未执行。当前虚拟环境的 launcher
   指向不存在的 Python 安装，需要修复解释器后再纳入 acceptance gate。
+
+### 2026-08-08
+
+#### Engine lifecycle and shared rate-limit seam
+
+- `task_spawner::spawn_download_task` now returns synchronously after creating
+  a tracked Tokio task. DNS resolution and protocol command construction stay
+  inside that task, so the engine loop can continue processing lifecycle
+  commands while setup is waiting.
+- The shutdown seam is now a `CancellationToken` shared by the task and
+  `RunningDownload`; removal, force halt, timeout cleanup, and final teardown
+  all use the same cancellation path and bounded join wait.
+- `EngineCommand::SetGlobalRateLimit` updates one shared `RateLimiter` and the
+  `RequestGroupMan` reporting snapshot. The regression test covers both views,
+  including contexts that had no limiter before the runtime update.
+- The current ownership decisions and remaining duplication work are recorded
+  in the `Architecture And Duplication Register` in
+  `docs/compatibility-status.md`. The DHT protocol crate remains canonical;
+  HTTP/FTP transport layers are deliberately not collapsed until live
+  behavior comparison proves which adapter owns each responsibility.
+
+#### Verification checkpoint
+
+- `cargo fmt --all -- --check`, core all-feature check, and workspace
+  all-target/all-feature Clippy with `-D warnings` passed.
+- Package-level all-feature suites passed: aria2-protocol 872, aria2-rpc 361,
+  aria2 254. Core executed 3,411 tests with 11 ignored and 0 failed before a
+  Windows 600-second aggregate command timeout; the last BitTorrent target
+  was then run separately with 21 passed and 2 ignored.
+- Node.js typecheck/build and full binding suite passed (123/123). Python
+  binding tests passed (136/136) using the bundled Python runtime plus an
+  isolated temporary dependency directory and a real `aria2c` binary.
+- The one-shot `cargo test --workspace --all-features -j 1` command did not
+  reach its test phase before the Windows build timeout. It is therefore not
+  recorded as a green workspace aggregate run.
+
+#### Acceptance status
+
+This checkpoint closes the lifecycle/rate-limit regression but does not close
+the migration. A source-level opaque-handle C ABI is now present in
+`aria2-core/src/c_api.rs` and `bindings/c/`; it is not a binary-compatible
+replacement for the original C++ classes and STL ABI. Metalink now owns GID
+allocation and preserves the manager-owned source/base URI while building
+metadata/payload graphs. Its explicit metadata-success,
+direct-mirror-fallback, and terminal-failure states are covered by focused
+tests. Same-metaurl multi-file grouping, full `follow-torrent=mem` semantics,
+session graph restoration, integrity lifecycle TODO/no-op paths, live
+SFTP/FTP/DHT/BitTorrent Metalink interoperability, complete CLI/RPC
+original-client comparison, duplicate transport ownership, ignored network
+tests, and the aria2 C++ performance baseline remain open in
+`docs/compatibility-status.md`.
+
+#### C API and Metalink verification checkpoint
+
+- `cargo fmt --all -- --check` passed after the FFI safety-contract cleanup.
+- `cargo clippy -p aria2-core --all-targets --all-features -- -D warnings`
+  passed. The C ABI entry points document pointer ownership and nullability;
+  no lint is disabled for the new interface.
+- `cargo test -p aria2-core --all-features c_api --lib` is the focused C API
+  lifecycle/control regression command. It covers library/session lifecycle,
+  asynchronous queue observation, and stop-state polling.
+- Metalink graph tests cover manager-owned GID allocation, metadata-to-payload
+  dependency direction, direct URI fallback, metadata parse failure without a
+  fallback, relative URI base propagation, and the absence of payload
+  self-locking through dependency storage.

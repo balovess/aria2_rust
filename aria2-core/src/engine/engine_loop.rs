@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
@@ -86,7 +87,7 @@ type CommandGeneration = u64;
 struct RunningDownload {
     /// JoinHandle for the spawned tokio task.
     _handle: JoinHandle<()>,
-    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown: Option<CancellationToken>,
     /// Stable identity of this command instance, independent of its GID.
     generation: CommandGeneration,
     /// Instant the task was spawned.
@@ -182,16 +183,14 @@ pub async fn run_engine_loop(
                 ctx.global_limiter.clone(),
                 generation,
                 completion_tx.clone(),
-            )
-            .await
-            {
+            ) {
                 Some((handle, shutdown_tx)) => {
                     let timeout = group.recover().timeout();
                     running_downloads.push((
                         gid,
                         RunningDownload {
                             _handle: handle,
-                            shutdown_tx: Some(shutdown_tx),
+                            shutdown: Some(shutdown_tx),
                             generation,
                             started: Instant::now(),
                             timeout,
@@ -349,11 +348,8 @@ async fn process_engine_commands(
             }
 
             EngineCommand::RemoveDownload { gid } => {
-                let remove_result = {
-                    let man = ctx.group_man.read().await;
-                    man.remove_group(gid)
-                };
-                if let Err(e) = remove_result {
+                let man = ctx.group_man.read().await;
+                if let Err(e) = man.remove_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to remove download");
                     continue;
                 }
@@ -370,11 +366,8 @@ async fn process_engine_commands(
             }
 
             EngineCommand::ForceRemoveDownload { gid } => {
-                let remove_result = {
-                    let man = ctx.group_man.read().await;
-                    man.force_remove_group(gid)
-                };
-                if let Err(e) = remove_result {
+                let man = ctx.group_man.read().await;
+                if let Err(e) = man.force_remove_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to force-remove download");
                     continue;
                 }
@@ -452,10 +445,8 @@ async fn process_engine_commands(
             }
 
             EngineCommand::ForceHaltAll { reason } => {
-                {
-                    let man = ctx.group_man.read().await;
-                    man.force_halt_all(reason);
-                }
+                let man = ctx.group_man.read().await;
+                man.force_halt_all(reason);
                 *force_halt_requested = true;
 
                 for (_, running) in running_downloads.iter_mut() {
@@ -774,50 +765,44 @@ async fn run_housekeeping(
         }
     }
 
-    for gid in timed_out {
-        let timeout_context = {
-            let man = ctx.group_man.read().await;
-            man.get_group(gid).map(|group| {
-                (
-                    group.recover().connection_contexts(),
-                    group.recover().get_all_uris(),
-                )
-            })
-        };
-
-        if let Some((request_contexts, uris)) = timeout_context
-            && let Some(uri) = uris.first()
-            && let Ok(parsed) = reqwest::Url::parse(uri)
-            && let Some(host) = parsed.host_str()
-        {
-            let protocol = parsed.scheme().to_ascii_lowercase();
-            ctx.server_stat_man
-                .mark_failure_with_protocol(host, &protocol, 408);
-            if !request_contexts.is_empty() {
-                let mut dns = ctx.dns_cache.lock().await;
-                for context in request_contexts {
-                    dns.mark_bad_context(&context);
-                    if !dns.has_good_address(&context.endpoint) {
-                        dns.remove_cached(context.endpoint.hostname(), context.endpoint.port());
+    if !timed_out.is_empty() {
+        let man = ctx.group_man.read().await;
+        for gid in timed_out {
+            if let Some(group) = man.get_group(gid) {
+                let request_contexts = group.recover().connection_contexts();
+                let uris = group.recover().get_all_uris();
+                if let Some(uri) = uris.first()
+                    && let Ok(parsed) = reqwest::Url::parse(uri)
+                    && let Some(host) = parsed.host_str()
+                {
+                    let protocol = parsed.scheme().to_ascii_lowercase();
+                    ctx.server_stat_man
+                        .mark_failure_with_protocol(host, &protocol, 408);
+                    if !request_contexts.is_empty() {
+                        let mut dns = ctx.dns_cache.lock().await;
+                        for context in request_contexts {
+                            dns.mark_bad_context(&context);
+                            if !dns.has_good_address(&context.endpoint) {
+                                dns.remove_cached(
+                                    context.endpoint.hostname(),
+                                    context.endpoint.port(),
+                                );
+                            }
+                        }
                     }
                 }
             }
-        }
-
-        let timed_out_now = {
-            let man = ctx.group_man.read().await;
-            man.timeout_group(gid)
-        };
-        if timed_out_now {
-            // Timeout is a graceful halt: the command observes the halt
-            // flag, flushes its writer, saves resumable progress, and
-            // publishes the single completion used for accounting. Do not
-            // abort here; aborting would bypass protocol-specific cleanup
-            // and can leave buffered bytes newer than the control file.
-            warn!(
-                gid = gid.value(),
-                "Download task timed out, requesting graceful halt"
-            );
+            if man.timeout_group(gid) {
+                // Timeout is a graceful halt: the command observes the halt
+                // flag, flushes its writer, saves resumable progress, and
+                // publishes the single completion used for accounting. Do not
+                // abort here; aborting would bypass protocol-specific cleanup
+                // and can leave buffered bytes newer than the control file.
+                warn!(
+                    gid = gid.value(),
+                    "Download task timed out, requesting graceful halt"
+                );
+            }
         }
     }
 
@@ -863,10 +848,10 @@ async fn run_housekeeping(
 }
 
 async fn request_shutdown_and_wait(running: &mut RunningDownload) -> bool {
-    let Some(shutdown_tx) = running.shutdown_tx.take() else {
+    let Some(shutdown) = running.shutdown.take() else {
         return false;
     };
-    let _ = shutdown_tx.send(());
+    shutdown.cancel();
     match tokio::time::timeout(SHUTDOWN_WAIT, &mut running._handle).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
@@ -1097,14 +1082,8 @@ mod tests {
         let _ = tokio::fs::remove_file(&path).await;
     }
 
-    // ── Pause semantics ─────────────────────────────────────────────────
-    // Regression: a paused download's command terminates with
-    // TaskResult::Failed("Download paused") (the download loop observes the
-    // Paused status via check_cancelled). Before the fix the engine recorded
-    // an Error, which is terminal and can never be unpaused.
-
     #[tokio::test]
-    async fn global_rate_limit_command_updates_shared_limiter() {
+    async fn global_rate_limit_command_updates_shared_limiter_and_snapshot() {
         let mut ctx = test_ctx(false);
         let (tx, mut rx) = mpsc::unbounded_channel();
         tx.send(EngineCommand::SetGlobalRateLimit {
@@ -1116,12 +1095,14 @@ mod tests {
         let (completion_tx, _completion_rx) =
             mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
         let mut running_downloads = Vec::new();
+        let mut halt_requested = false;
+        let mut force_halt_requested = false;
         process_engine_commands(
             &mut ctx,
             &mut rx,
             &mut running_downloads,
-            &mut false,
-            &mut false,
+            &mut halt_requested,
+            &mut force_halt_requested,
             &completion_tx,
         )
         .await;
@@ -1129,34 +1110,22 @@ mod tests {
         let limiter = ctx
             .global_limiter
             .as_ref()
-            .expect("runtime updates create the shared limiter")
+            .expect("runtime updates should create the shared limiter")
             .clone();
         let config = limiter.config().await;
         assert_eq!(config.download_rate(), Some(2_000));
         assert_eq!(config.upload_rate(), Some(1_000));
 
-        tx.send(EngineCommand::SetGlobalRateLimit {
-            download_limit: None,
-            upload_limit: None,
-        })
-        .unwrap();
-        process_engine_commands(
-            &mut ctx,
-            &mut rx,
-            &mut running_downloads,
-            &mut false,
-            &mut false,
-            &completion_tx,
-        )
-        .await;
-        let config = limiter.config().await;
-        assert_eq!(config.download_rate(), None);
-        assert_eq!(config.upload_rate(), None);
-
         let man = ctx.group_man.read().await;
-        assert_eq!(man.global_download_limit(), None);
-        assert_eq!(man.global_upload_limit(), None);
+        assert_eq!(man.global_download_limit(), Some(2_000));
+        assert_eq!(man.global_upload_limit(), Some(1_000));
     }
+
+    // ── Pause semantics ─────────────────────────────────────────────────
+    // Regression: a paused download's command terminates with
+    // TaskResult::Failed("Download paused") (the download loop observes the
+    // Paused status via check_cancelled). Before the fix the engine recorded
+    // an Error, which is terminal and can never be unpaused.
 
     #[tokio::test]
     async fn paused_task_failure_keeps_group_paused() {

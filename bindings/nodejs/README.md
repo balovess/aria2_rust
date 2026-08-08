@@ -1,10 +1,12 @@
 # @aria2-rust/client
 
-Production-grade Node.js/TypeScript SDK for aria2-rust JSON-RPC & WebSocket interface. Complete RPC coverage with full type safety, automatic reconnection, and comprehensive test suite.
+Node.js/TypeScript SDK for the aria2-rust JSON-RPC and WebSocket interface.
+The client surface is tested against the current server; full original-client
+compatibility remains tracked in the repository compatibility matrix.
 
 ## Features
 
-- ✅ **Complete RPC Coverage** - 34 aria2 RPC methods (94% coverage)
+- ✅ **RPC Client Surface** - Task, status, option, session, and event methods
 - ✅ **Dual Transport** - HTTP JSON-RPC and WebSocket support
 - ✅ **Type Safe** - Full TypeScript types with strict mode
 - ✅ **Error Handling** - Structured error hierarchy

@@ -136,6 +136,140 @@ impl MetalinkToRequestGroup {
         self
     }
 
+    /// Parse the C++ `PREF_SELECT_FILE` syntax used by Metalink.
+    ///
+    /// The returned values are 1-based positions in the filtered Metalink
+    /// entry list, matching `Metalink2RequestGroup::createRequestGroup()`.
+    fn parse_select_files(value: &str) -> Result<Vec<usize>> {
+        let mut result = Vec::new();
+        for segment in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((start, end)) = segment.split_once('-') {
+                let start = start.trim().parse::<usize>().map_err(|_| {
+                    Aria2Error::MetalinkParse(format!("invalid select-file segment `{segment}`"))
+                })?;
+                let end = end.trim().parse::<usize>().map_err(|_| {
+                    Aria2Error::MetalinkParse(format!("invalid select-file segment `{segment}`"))
+                })?;
+                if start == 0 || end < start {
+                    return Err(Aria2Error::MetalinkParse(format!(
+                        "invalid select-file segment `{segment}`"
+                    )));
+                }
+                result.extend(start..=end);
+            } else {
+                let index = segment.parse::<usize>().map_err(|_| {
+                    Aria2Error::MetalinkParse(format!("invalid select-file segment `{segment}`"))
+                })?;
+                if index == 0 {
+                    return Err(Aria2Error::MetalinkParse(format!(
+                        "invalid select-file segment `{segment}`"
+                    )));
+                }
+                result.push(index);
+            }
+        }
+        result.sort_unstable();
+        result.dedup();
+        Ok(result)
+    }
+
+    /// Return the effective select-file positions, giving explicit builder
+    /// configuration precedence over the per-download option.
+    fn effective_select_files(&self, options: &DownloadOptions) -> Result<Vec<usize>> {
+        if !self.select_files.is_empty() {
+            return Ok(self.select_files.clone());
+        }
+        options
+            .select_file
+            .as_deref()
+            .map(Self::parse_select_files)
+            .transpose()
+            .map(|segments| segments.unwrap_or_default())
+    }
+
+    /// Parse, query, select, and normalize Metalink entries once for all
+    /// manager-owned construction paths.
+    ///
+    /// Keeping this operation behind one internal seam prevents the resource
+    /// and torrent graph paths from silently disagreeing about filters,
+    /// priorities, or source indices.
+    fn prepare_files(
+        &self,
+        doc: &MetalinkDocument,
+        options: &DownloadOptions,
+    ) -> Result<Vec<(usize, MetalinkFile)>> {
+        let version = if self.version.is_empty() {
+            options.metalink_version.as_deref().unwrap_or("")
+        } else {
+            self.version.as_str()
+        };
+        let language = if self.language.is_empty() {
+            options.metalink_language.as_deref().unwrap_or("")
+        } else {
+            self.language.as_str()
+        };
+        let os = if self.os.is_empty() {
+            options.metalink_os.as_deref().unwrap_or("")
+        } else {
+            self.os.as_str()
+        };
+
+        let queried: Vec<(usize, MetalinkFile)> = doc
+            .query_entries(version, language, os)
+            .into_iter()
+            .filter_map(|index| doc.files.get(index).cloned().map(|file| (index, file)))
+            .collect();
+        let select_files = self.effective_select_files(options)?;
+        let mut files: Vec<(usize, MetalinkFile)> = if select_files.is_empty() {
+            queried
+        } else {
+            // C++ applies select-file after queryEntry(), so indices refer to
+            // the filtered list rather than the original XML positions.
+            select_files
+                .into_iter()
+                .filter_map(|position| queried.get(position - 1).cloned())
+                .collect()
+        };
+
+        let locations: Vec<String> = if self.locations.is_empty() {
+            options
+                .metalink_location
+                .as_deref()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|location| !location.is_empty())
+                        .map(str::to_ascii_lowercase)
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            self.locations.clone()
+        };
+        let preferred_protocol = self
+            .preferred_protocol
+            .as_deref()
+            .or(options.metalink_preferred_protocol.as_deref())
+            .filter(|protocol| !protocol.eq_ignore_ascii_case("none"));
+        let priority_boost = -LOWEST_PRIORITY;
+
+        for (_, file) in &mut files {
+            file.drop_unsupported_resources();
+            if !locations.is_empty() {
+                let location_refs: Vec<&str> = locations.iter().map(String::as_str).collect();
+                file.set_location_priority(&location_refs, priority_boost);
+            }
+            if let Some(protocol) = preferred_protocol {
+                file.set_protocol_priority(protocol, priority_boost);
+            }
+            file.reorder_metaurls_by_priority();
+        }
+
+        files.retain(|(_, file)| !file.urls.is_empty() || !file.meta_urls.is_empty());
+        Ok(files)
+    }
+
     /// Generate download commands from a Metalink file on disk.
     ///
     /// Reads the file, parses it, and creates one `MetalinkDownloadCommand`
@@ -179,7 +313,20 @@ impl MetalinkToRequestGroup {
                 ))
             })?;
 
-        MetalinkRequestGraph::new(metadata_uri, &file.name, options, metadata_gid, payload_gid)
+        let fallback_uris = file
+            .get_sorted_urls()
+            .into_iter()
+            .filter(|url| url.is_non_p2p())
+            .map(|url| url.url.clone())
+            .collect();
+        MetalinkRequestGraph::new_with_fallback(
+            metadata_uri,
+            &file.name,
+            options,
+            metadata_gid,
+            payload_gid,
+            fallback_uris,
+        )
     }
 
     /// Return whether a selected file mixes direct resources with torrent metaurls.
@@ -234,26 +381,20 @@ impl MetalinkToRequestGroup {
     ) -> Result<Vec<Arc<RwLock<crate::request::request_group::RequestGroup>>>> {
         let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
             .map_err(Aria2Error::MetalinkParse)?;
-        let version = if self.version.is_empty() {
-            options.metalink_version.as_deref().unwrap_or("")
-        } else {
-            &self.version
-        };
-        let language = if self.language.is_empty() {
-            options.metalink_language.as_deref().unwrap_or("")
-        } else {
-            &self.language
-        };
-        let os = if self.os.is_empty() {
-            options.metalink_os.as_deref().unwrap_or("")
-        } else {
-            &self.os
-        };
         let mut groups = Vec::new();
-        for index in doc.query_entries(version, language, os) {
-            let Some(file) = doc.files.get(index) else {
+        for (index, file) in self.prepare_files(&doc, options)? {
+            // With BitTorrent enabled, the first torrent metaurl owns the
+            // whole Metalink group. It must not also become an independent
+            // direct-resource group; the graph path below supplies its
+            // metadata prerequisite and any direct fallback mirrors.
+            let has_torrent_dependency = cfg!(feature = "bittorrent")
+                && file
+                    .meta_urls
+                    .first()
+                    .is_some_and(|metaurl| metaurl.mediatype.is_torrent());
+            if has_torrent_dependency {
                 continue;
-            };
+            }
             let urls: Vec<String> = file
                 .get_sorted_urls()
                 .into_iter()
@@ -275,6 +416,9 @@ impl MetalinkToRequestGroup {
             group
                 .recover()
                 .set_metalink_source(metalink_data.to_vec(), index);
+            group
+                .recover()
+                .set_metalink_base_uri(self.base_uri.as_deref());
             group.recover().set_output_name(file.name.clone());
             groups.push(group);
         }
@@ -291,38 +435,32 @@ impl MetalinkToRequestGroup {
     ) -> Result<Vec<MetalinkRequestGraph>> {
         let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
             .map_err(Aria2Error::MetalinkParse)?;
-        let version = if self.version.is_empty() {
-            options.metalink_version.as_deref().unwrap_or("")
-        } else {
-            self.version.as_str()
-        };
-        let language = if self.language.is_empty() {
-            options.metalink_language.as_deref().unwrap_or("")
-        } else {
-            self.language.as_str()
-        };
-        let os = if self.os.is_empty() {
-            options.metalink_os.as_deref().unwrap_or("")
-        } else {
-            self.os.as_str()
-        };
-        let indices = doc.query_entries(version, language, os);
-        let files: Vec<MetalinkFile> = indices
-            .into_iter()
-            .filter_map(|index| doc.files.get(index).cloned())
-            .filter(|file| {
-                !file.meta_urls.is_empty()
-                    && file.meta_urls.iter().all(|metaurl| {
-                        metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
-                    })
-            })
-            .collect();
-        if files.is_empty() {
+        let prepared = self.prepare_files(&doc, options)?;
+        let mut source_files = Vec::new();
+        for (_, file) in prepared {
+            if file
+                .meta_urls
+                .first()
+                .is_some_and(|metaurl| metaurl.mediatype.is_torrent())
+            {
+                source_files.push(file);
+            }
+        }
+        if source_files.is_empty() {
             return Ok(Vec::new());
         }
-        files
+        let groups = group_entry_by_metaurl_name(&source_files);
+        groups
             .into_iter()
-            .map(|file| {
+            .filter(|(metaurl, _)| !metaurl.is_empty())
+            .map(|(metadata_uri, indices)| {
+                let first = &source_files[indices[0]];
+                let fallback_uris = indices
+                    .iter()
+                    .flat_map(|&index| source_files[index].get_sorted_urls())
+                    .filter(|url| url.is_non_p2p())
+                    .map(|url| url.url.clone())
+                    .collect();
                 let metadata_gid = gids.next().ok_or_else(|| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(
                         "Metalink graph GID allocator exhausted".to_string(),
@@ -333,7 +471,14 @@ impl MetalinkToRequestGroup {
                         "Metalink graph GID allocator exhausted".to_string(),
                     ))
                 })?;
-                self.create_torrent_graph(&file, options, metadata_gid, payload_gid)
+                MetalinkRequestGraph::new_with_fallback(
+                    &metadata_uri,
+                    &first.name,
+                    options,
+                    metadata_gid,
+                    payload_gid,
+                    fallback_uris,
+                )
             })
             .collect()
     }
@@ -417,83 +562,10 @@ impl MetalinkToRequestGroup {
         doc: MetalinkDocument,
         options: &DownloadOptions,
     ) -> Result<Vec<MetalinkDownloadCommand>> {
-        // Step 1: Query entries by version/language/os
-        // (mirrors C++ metalink_helper::parseAndQuery which calls
-        //  Metalinker::queryEntry after parsing)
-        let matching_indices = doc.query_entries(&self.version, &self.language, &self.os);
-
-        // Step 2: Apply select-file filtering
-        // (mirrors C++ parseIntSegments(PREF_SELECT_FILE))
-        let mut filtered_doc = if self.select_files.is_empty() {
-            // Use query results
-            let filtered: Vec<MetalinkFile> = matching_indices
-                .iter()
-                .map(|&i| doc.files[i].clone())
-                .collect();
-            if filtered.is_empty() {
-                info!("No Metalink entries match the given filters");
-                return Ok(Vec::new());
-            }
-            MetalinkDocument {
-                version: doc.version,
-                files: filtered,
-                generator: doc.generator.clone(),
-                origin: doc.origin.clone(),
-                published: doc.published.clone(),
-                base_uri: doc.base_uri.clone(),
-            }
-        } else {
-            let selected = doc.select_files(&self.select_files);
-            // Apply query filter on top of select-file
-            let filtered: Vec<MetalinkFile> = matching_indices
-                .into_iter()
-                .filter(|&i| i < selected.files.len())
-                .map(|i| selected.files[i].clone())
-                .collect();
-            if filtered.is_empty() {
-                info!("No Metalink entries match the given filters after select-file");
-                return Ok(Vec::new());
-            }
-            MetalinkDocument {
-                version: doc.version,
-                files: filtered,
-                generator: doc.generator,
-                origin: doc.origin,
-                published: doc.published,
-                base_uri: doc.base_uri,
-            }
-        };
-
-        // Step 3: Drop unsupported resources and skip empty entries
-        // (mirrors C++ entry->dropUnsupportedResource() + empty check)
-        let priority_boost = -LOWEST_PRIORITY; // Mirrors C++ -MetalinkResource::getLowestPriority()
-        for file in &mut filtered_doc.files {
-            file.drop_unsupported_resources();
-
-            // Step 4: Apply location priority
-            // (mirrors C++ entry->setLocationPriority(locations, -getLowestPriority()))
-            if !self.locations.is_empty() {
-                let loc_refs: Vec<&str> = self.locations.iter().map(|s| s.as_str()).collect();
-                file.set_location_priority(&loc_refs, priority_boost);
-            }
-
-            // Step 5: Apply protocol priority
-            // (mirrors C++ entry->setProtocolPriority(protocol, -getLowestPriority()))
-            if let Some(ref proto) = self.preferred_protocol {
-                file.set_protocol_priority(proto, priority_boost);
-            }
-
-            // Step 6: Reorder metaurls by priority
-            // (mirrors C++ std::mem_fn(&MetalinkEntry::reorderMetaurlsByPriority))
-            file.reorder_metaurls_by_priority();
-        }
-
-        // Skip entries with no resources AND no metaurls
-        // (mirrors C++ `if(entry->resources.empty() && entry->metaurls.empty()) continue;`)
-        let files: Vec<MetalinkFile> = filtered_doc
-            .files
+        let files: Vec<MetalinkFile> = self
+            .prepare_files(&doc, options)?
             .into_iter()
-            .filter(|f| !f.urls.is_empty() || !f.meta_urls.is_empty())
+            .map(|(_, file)| file)
             .collect();
 
         if files.is_empty() {
@@ -538,7 +610,7 @@ impl MetalinkToRequestGroup {
                 let file_infos = MetalinkDownloadCommand::create_multi_file_for_single(
                     &file_clone,
                     options,
-                    filtered_doc.base_uri.as_deref(),
+                    doc.base_uri.as_deref(),
                     gid_start,
                 )?;
 
@@ -668,6 +740,37 @@ mod tests {
         assert!(commands.is_empty());
     }
 
+    #[test]
+    fn select_file_option_uses_query_result_positions() {
+        let options = DownloadOptions {
+            select_file: Some("2".to_string()),
+            ..DownloadOptions::default()
+        };
+        let commands = MetalinkToRequestGroup::new()
+            .generate_from_bytes(&make_multi_file_metalink(), &options)
+            .expect("select-file should be accepted");
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0]
+                .output_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("second.bin")
+        );
+    }
+
+    #[test]
+    fn select_file_range_keeps_only_requested_entries() {
+        let options = DownloadOptions {
+            select_file: Some("1-2".to_string()),
+            ..DownloadOptions::default()
+        };
+        let commands = MetalinkToRequestGroup::new()
+            .generate_from_bytes(&make_multi_file_metalink(), &options)
+            .expect("select-file range should be accepted");
+        assert_eq!(commands.len(), 2);
+    }
+
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
     #[test]
     fn create_torrent_graphs_allocates_metadata_and_payload_pairs() {
@@ -703,9 +806,35 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "metalink")]
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
     #[test]
-    fn mixed_resource_group_keeps_one_fallback_source() {
+    fn shared_torrent_metaurl_creates_one_graph_with_all_fallbacks() {
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="first.bin"><size>10</size><url>https://example.test/first.bin</url><metaurl name="first.bin" mediatype="torrent">https://example.test/shared.torrent</metaurl></file><file name="second.bin"><size>20</size><url>https://example.test/second.bin</url><metaurl name="second.bin" mediatype="torrent">https://example.test/shared.torrent</metaurl></file></metalink>"#;
+        let converter = MetalinkToRequestGroup::new();
+        let options = DownloadOptions::default();
+        let mut gids = [
+            crate::request::request_group::GroupId::new(90),
+            crate::request::request_group::GroupId::new(91),
+        ]
+        .into_iter();
+        let graphs = converter
+            .create_torrent_graphs_from_bytes(data, &options, &mut gids)
+            .expect("shared torrent metaurl should create one graph");
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(
+            graphs[0].metadata.recover().uris(),
+            &["https://example.test/shared.torrent"]
+        );
+        assert_eq!(
+            graphs[0].payload.recover().gid(),
+            crate::request::request_group::GroupId::new(91)
+        );
+        assert!(!graphs[0].payload.recover().is_dependency_resolved());
+    }
+
+    #[cfg(all(feature = "metalink", not(feature = "bittorrent")))]
+    #[test]
+    fn mixed_resource_group_is_retained_without_bittorrent_support() {
         let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://example.test/payload.bin</url><metaurl mediatype="torrent">https://example.test/payload.torrent</metaurl></file></metalink>"#;
         let converter = MetalinkToRequestGroup::new();
         let mut gids = [crate::request::request_group::GroupId::new(90)].into_iter();
@@ -721,6 +850,30 @@ mod tests {
         assert_eq!(
             groups[0].recover().uris(),
             &["https://example.test/payload.bin"]
+        );
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn mixed_resource_and_torrent_entry_uses_graph_fallback() {
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://example.test/payload.bin</url><metaurl mediatype="torrent">https://example.test/payload.torrent</metaurl></file></metalink>"#;
+        let converter = MetalinkToRequestGroup::new();
+        let mut gids = [
+            crate::request::request_group::GroupId::new(92),
+            crate::request::request_group::GroupId::new(93),
+        ]
+        .into_iter();
+        let graphs = converter
+            .create_torrent_graphs_from_bytes(data, &DownloadOptions::default(), &mut gids)
+            .expect("mixed Metalink should create a graph");
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(
+            graphs[0].metadata.recover().gid(),
+            crate::request::request_group::GroupId::new(92)
+        );
+        assert_eq!(
+            graphs[0].payload.recover().uris(),
+            &["bt://000000000000005c"]
         );
     }
 

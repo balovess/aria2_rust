@@ -15,7 +15,8 @@ use aria2_rpc::websocket::{DownloadEvent, EventPublisher, NotificationBatcher};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::net::TcpListener;
+use tokio::sync::{RwLock, Semaphore, oneshot};
 
 /// Test 1000 concurrent RPC requests using RpcEngine
 /// Verifies:
@@ -409,6 +410,22 @@ async fn test_stress_rpc_auth_concurrent() {
 /// Verifies state transitions work correctly under concurrent load
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_stress_task_lifecycle_operations() {
+    // Keep the first promoted request alive so this test exercises lifecycle
+    // ordering rather than racing a connection-refused error and demotion.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let mut accepted_tx = Some(accepted_tx);
+        while let Ok((socket, _)) = listener.accept().await {
+            if let Some(accepted_tx) = accepted_tx.take() {
+                let _ = accepted_tx.send(());
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(socket);
+        }
+    });
+
     let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
     let mut download_engine = DownloadEngine::new(1);
     download_engine.set_request_group_man(Arc::clone(&group_man));
@@ -430,7 +447,7 @@ async fn test_stress_task_lifecycle_operations() {
     for i in 0..100 {
         let request = JsonRpcRequest::new(
             "aria2.addUri",
-            json!([format!("http://test.com/lifecycle{}.bin", i)]),
+            json!([format!("http://127.0.0.1:{port}/lifecycle{}.bin", i)]),
         )
         .with_id(i);
 
@@ -442,6 +459,15 @@ async fn test_stress_task_lifecycle_operations() {
     }
 
     assert_eq!(gids.len(), 100, "Should create 100 tasks");
+
+    // Wait until the first promoted request has established a real TCP
+    // connection. Port readiness alone is insufficient: without this
+    // barrier, the lifecycle calls can race the engine's first promotion and
+    // observe a transiently unavailable GID.
+    tokio::time::timeout(Duration::from_secs(2), accepted_rx)
+        .await
+        .expect("the first promoted download should connect to the fixture")
+        .expect("the lifecycle fixture should report its first accepted connection");
 
     // Now perform concurrent lifecycle operations on all tasks
     let mut handles = Vec::new();
@@ -473,10 +499,11 @@ async fn test_stress_task_lifecycle_operations() {
             let remove_resp = engine_clone.handle_request(&remove_req).await;
 
             (
-                pause_resp.is_success(),
-                unpause_resp.is_success(),
-                status_resp.is_success(),
-                remove_resp.is_success(),
+                gid_clone,
+                pause_resp,
+                unpause_resp,
+                status_resp,
+                remove_resp,
             )
         }));
     }
@@ -487,10 +514,33 @@ async fn test_stress_task_lifecycle_operations() {
     let all_success = results
         .iter()
         .filter_map(|r| r.as_ref().ok())
-        .filter(|(p, u, s, r)| *p && *u && *s && *r)
+        .filter(|(_, p, u, s, r)| {
+            p.is_success() && u.is_success() && s.is_success() && r.is_success()
+        })
         .count();
 
-    assert_eq!(all_success, 100, "All lifecycle operations should succeed");
+    let failures: Vec<_> = results
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .filter(|(_, p, u, s, r)| {
+            !(p.is_success() && u.is_success() && s.is_success() && r.is_success())
+        })
+        .map(|(gid, p, u, s, r)| {
+            let error = |response: &aria2_rpc::json_rpc::JsonRpcResponse| {
+                response
+                    .error
+                    .as_ref()
+                    .map(|e| format!("{}: {}", e.code, e.message))
+                    .unwrap_or_else(|| "success".to_string())
+            };
+            (gid.clone(), error(p), error(u), error(s), error(r))
+        })
+        .collect();
+
+    assert_eq!(
+        all_success, 100,
+        "All lifecycle operations should succeed; failures={failures:?}"
+    );
 
     // `remove` is asynchronous; wait for the real engine loop to finalize all
     // completion notifications and demote the groups to stopped results.
@@ -504,6 +554,7 @@ async fn test_stress_task_lifecycle_operations() {
 
     let _ = shutdown_tx.send(());
     engine_task.abort();
+    server_task.abort();
 
     println!(
         "Task lifecycle stress test: 100 tasks, 400 operations in {}ms",

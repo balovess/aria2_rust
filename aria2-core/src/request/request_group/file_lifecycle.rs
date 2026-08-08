@@ -3,7 +3,7 @@
 //! Mirrors C++ `RequestGroup::closeFile()`, `saveControlFile()`,
 //! `removeControlFile()`, and `releaseRuntimeResource()`.
 
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -122,7 +122,7 @@ impl super::RequestGroup {
     /// Mirrors C++ `RequestGroup::dependsOn()`. Used by Metalink downloads
     /// to chain child downloads that wait for the parent to complete.
     pub fn set_dependency(&self, dep: Box<dyn super::dependency::Dependency>) {
-        *self.dependency.recover_mut() = Some(dep);
+        *self.dependency.recover_mut() = Some(Arc::from(dep));
     }
 
     /// Check whether this group's dependency is resolved.

@@ -18,7 +18,7 @@ use tracing::{debug, info};
 
 use crate::engine::post_download_handler::{CompletedDownloadInfo, PostDownloadHandler};
 use crate::error::Aria2Error;
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Known BitTorrent content types.
@@ -107,6 +107,22 @@ impl BtTorrentPostDownloadHandler {
         parent_gid: GroupId,
         options: &DownloadOptions,
     ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
+        let child_gid = GroupId::new(parent_gid.value().saturating_mul(1000).saturating_add(1));
+        self.create_request_group_from_torrent_with_gid(
+            torrent_data,
+            parent_gid,
+            child_gid,
+            options,
+        )
+    }
+
+    fn create_request_group_from_torrent_with_gid(
+        &self,
+        torrent_data: &[u8],
+        parent_gid: GroupId,
+        child_gid: GroupId,
+        options: &DownloadOptions,
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
         use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
 
         // Parse the bencode metainfo.
@@ -153,15 +169,15 @@ impl BtTorrentPostDownloadHandler {
             uris.push(magnet);
         }
 
-        // Create a new RequestGroup for the torrent download.
-        // C++ allocates a new GID; we generate one from the parent.
-        let child_gid = GroupId::new(parent_gid.value() * 1000 + 1);
+        // Create a new RequestGroup for the torrent download. The engine path
+        // supplies a manager-owned GID; the legacy helper above retains a
+        // deterministic fallback for standalone callers.
         let mut child_options = options.clone();
 
         // Prevent infinite loops: child torrent groups don't re-trigger
         // the BT post-download handler. C++: child groups don't get
         // postDownloadHandlers added.
-        child_options.follow_torrent = Some(false);
+        child_options.follow_torrent = Some(FollowMode::Disabled);
 
         let child_group = RequestGroup::new(child_gid, uris, child_options);
         child_group.set_belongs_to_gid(parent_gid);
@@ -236,6 +252,37 @@ impl PostDownloadHandler for BtTorrentPostDownloadHandler {
         }
 
         self.create_request_group_from_torrent(&torrent_data, info.gid, &info.options)
+    }
+
+    fn create_child_groups_with_allocator(
+        &self,
+        info: &CompletedDownloadInfo,
+        allocate_gid: &mut dyn FnMut() -> GroupId,
+    ) -> std::result::Result<Vec<Arc<std::sync::RwLock<RequestGroup>>>, Aria2Error> {
+        let torrent_data = if info.in_memory_download {
+            info.in_memory_data
+                .as_ref()
+                .ok_or_else(|| Aria2Error::Parse("In-memory download has no data".to_string()))?
+                .clone()
+        } else {
+            let path = info.file_path.as_ref().ok_or_else(|| {
+                Aria2Error::Io("File-based torrent download has no file path".to_string())
+            })?;
+            std::fs::read(path).map_err(|e| {
+                Aria2Error::Io(format!("Failed to read torrent file '{}': {}", path, e))
+            })?
+        };
+
+        if torrent_data.is_empty() {
+            return Err(Aria2Error::Parse("Torrent file is empty".to_string()));
+        }
+
+        self.create_request_group_from_torrent_with_gid(
+            &torrent_data,
+            info.gid,
+            allocate_gid(),
+            &info.options,
+        )
     }
 
     fn name(&self) -> &'static str {

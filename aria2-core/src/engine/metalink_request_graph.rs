@@ -28,6 +28,26 @@ impl MetalinkRequestGraph {
         metadata_gid: GroupId,
         payload_gid: GroupId,
     ) -> Result<Self> {
+        Self::new_with_fallback(
+            metadata_uri,
+            payload_name,
+            options,
+            metadata_gid,
+            payload_gid,
+            Vec::new(),
+        )
+    }
+
+    /// Construct a graph that can fall back to direct Metalink mirrors when
+    /// its torrent metaurl cannot be downloaded or parsed.
+    pub fn new_with_fallback(
+        metadata_uri: &str,
+        payload_name: &str,
+        options: &DownloadOptions,
+        metadata_gid: GroupId,
+        payload_gid: GroupId,
+        fallback_uris: Vec<String>,
+    ) -> Result<Self> {
         if metadata_uri.is_empty() || payload_name.is_empty() {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                 "Metalink torrent graph requires metadata URI and payload name".to_string(),
@@ -57,21 +77,23 @@ impl MetalinkRequestGraph {
             options.clone(),
         )));
 
-        payload.recover().set_following_gid(metadata_gid);
-        payload.recover().set_belongs_to_gid(metadata_gid);
-        metadata.recover().add_followed_by_gid(payload_gid);
+        // C++ Metalink2RequestGroup links the metadata group back to the
+        // payload with belongsTo(payload_gid). `following`/`followedBy` are
+        // reserved for post-download parent/child chains.
+        metadata.recover().set_belongs_to_gid(payload_gid);
 
         let metadata_info = MetadataInfo::new(metadata_gid, metadata_uri)
             .with_metadata_path(metadata_path.to_string_lossy());
         payload.recover().set_metadata_info(metadata_info.clone());
         payload
             .recover()
-            .set_dependency(Box::new(BtDependency::new_file(
+            .set_dependency(Box::new(BtDependency::new_file_with_fallback(
                 metadata_gid,
                 Arc::clone(&payload),
                 metadata_path.clone(),
                 payload_path,
                 metadata_info,
+                fallback_uris,
             )));
 
         Ok(Self {
@@ -151,13 +173,11 @@ mod tests {
         assert_eq!(graph.metadata.recover().gid(), GroupId::new(10));
         assert_eq!(graph.payload.recover().gid(), GroupId::new(11));
         assert_eq!(
-            graph.payload.recover().following_gid(),
-            Some(GroupId::new(10))
+            graph.metadata.recover().belongs_to_gid(),
+            Some(GroupId::new(11))
         );
-        assert_eq!(
-            graph.payload.recover().belongs_to_gid(),
-            Some(GroupId::new(10))
-        );
+        assert!(graph.payload.recover().following_gid().is_none());
+        assert!(graph.payload.recover().belongs_to_gid().is_none());
         assert!(!graph.payload.recover().is_dependency_resolved());
         assert_eq!(
             graph

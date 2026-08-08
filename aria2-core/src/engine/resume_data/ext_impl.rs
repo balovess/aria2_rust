@@ -105,6 +105,12 @@ impl ResumeDataExt for ResumeData {
         if let Some(ref out) = options.out {
             options_map.insert("out".to_string(), out.clone());
         }
+        if let Some(mode) = options.follow_torrent {
+            options_map.insert("follow-torrent".to_string(), mode.as_str().to_string());
+        }
+        if let Some(mode) = options.follow_metalink {
+            options_map.insert("follow-metalink".to_string(), mode.as_str().to_string());
+        }
         if let Some(seed_time) = options.seed_time {
             options_map.insert("seed-time".to_string(), seed_time.to_string());
         }

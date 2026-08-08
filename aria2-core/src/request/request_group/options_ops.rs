@@ -27,6 +27,14 @@ impl super::RequestGroup {
         &self.uris
     }
 
+    /// Replace the initial URI set before a download context is attached.
+    ///
+    /// Dependency fallbacks use this to remove the synthetic `bt://` dispatch
+    /// URI after torrent metadata failed and continue with direct mirrors.
+    pub fn replace_uris(&mut self, uris: Vec<String>) {
+        self.uris = uris;
+    }
+
     /// Set a per-group output filename, used by Metalink entries.
     pub fn set_output_name(&self, name: impl Into<String>) {
         *self.output_name.recover_mut() = Some(name.into());

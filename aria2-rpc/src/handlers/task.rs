@@ -10,7 +10,7 @@ use aria2_core::checksum::checksum::Checksum;
 use aria2_core::constants as core_constants;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
 use aria2_core::request::request_group_man::ChangePositionMode;
 use aria2_core::session::save_session_command::SaveSessionCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
@@ -372,6 +372,11 @@ impl RpcEngine {
         {
             return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
         }
+        // Commit the externally visible transition before returning the RPC
+        // response. The original aria2 contract changes a paused group to
+        // WAITING synchronously, then requests a queue check. The engine
+        // command below performs that scheduling pass and is idempotent when
+        // it observes the already-resumed group.
         if let Some(group_man) = &self.group_man {
             group_man
                 .write()
@@ -684,7 +689,9 @@ impl RpcEngine {
         let engine_cmd_tx = self
             .engine_cmd_tx
             .as_ref()
-            .ok_or_else(|| JsonRpcError::InternalError("Engine command channel is required".into()))?
+            .ok_or_else(|| {
+                JsonRpcError::InternalError("Engine command channel is required".into())
+            })?
             .clone();
 
         let group = {
@@ -693,9 +700,8 @@ impl RpcEngine {
             let man = group_man.write().await;
             man.add_group_with_gid(gid, uris, dl_options)
                 .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
-            man.group_by_id(gid).ok_or_else(|| {
-                JsonRpcError::InternalError("Group not found after insert".into())
-            })?
+            man.group_by_id(gid)
+                .ok_or_else(|| JsonRpcError::InternalError("Group not found after insert".into()))?
         };
 
         if let Err(error) = engine_cmd_tx.send(EngineCommand::AddDownload { group }) {
@@ -865,6 +871,17 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
     let get_u64 = |k: &str| opts.get(k).and_then(|v| v.as_u64());
     let get_f64 = |k: &str| opts.get(k).and_then(|v| v.as_f64());
     let get_bool = |k: &str| opts.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let get_follow_mode = |k: &str| {
+        opts.get(k).and_then(|value| match value {
+            serde_json::Value::String(value) => FollowMode::parse(value),
+            serde_json::Value::Bool(value) => Some(if *value {
+                FollowMode::Follow
+            } else {
+                FollowMode::Disabled
+            }),
+            _ => None,
+        })
+    };
 
     let header: Vec<String> = match opts.get("header") {
         Some(serde_json::Value::Array(arr)) => arr
@@ -1032,8 +1049,8 @@ fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) ->
             .unwrap_or(false),
         pause: opts.get("pause").and_then(|v| v.as_bool()).unwrap_or(false),
         // Follow options
-        follow_torrent: opts.get("follow-torrent").and_then(|v| v.as_bool()),
-        follow_metalink: opts.get("follow-metalink").and_then(|v| v.as_bool()),
+        follow_torrent: get_follow_mode("follow-torrent"),
+        follow_metalink: get_follow_mode("follow-metalink"),
         // Event hooks
         on_download_start: get_str("on-download-start"),
         on_download_complete: get_str("on-download-complete"),

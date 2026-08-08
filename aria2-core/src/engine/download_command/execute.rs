@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -43,6 +44,11 @@ impl Command for DownloadCommand {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                 "Download URI is empty".into(),
             )));
+        }
+
+        let memory_download = self.group.recover().options().uses_memory_download();
+        if memory_download {
+            return self.execute_in_memory(&uri).await;
         }
 
         debug!(
@@ -455,5 +461,101 @@ impl Command for DownloadCommand {
         Some(Duration::from_secs(
             constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS,
         ))
+    }
+}
+
+impl DownloadCommand {
+    /// Download a metadata source into a memory buffer.
+    ///
+    /// This is the Rust equivalent of aria2's memory pre-download handler:
+    /// the response is streamed into an owned `Vec<u8>`, no output path is
+    /// opened, and the post-download handler consumes the buffer before the
+    /// parent group is demoted.
+    async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
+        self.check_cancelled()?;
+
+        let url = reqwest::Url::parse(uri).ok();
+        let cookie_header = url
+            .as_ref()
+            .map(|url| self.create_cookie_helper().build_cookie_header_from_url(url))
+            .filter(|header| !header.is_empty());
+
+        let mut request = self.client.get(uri);
+        if let Some(cookie_header) = cookie_header {
+            request = request.header("Cookie", cookie_header);
+        }
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
+
+        let response = request.send().await.map_err(|error| {
+            Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
+                message: error.to_string(),
+            })
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            if status.is_server_error() {
+                return Err(Aria2Error::Recoverable(
+                    crate::error::RecoverableError::ServerError {
+                        code: status.as_u16(),
+                    },
+                ));
+            }
+            return Err(Aria2Error::Recoverable(
+                crate::error::RecoverableError::HttpProtocolError {
+                    message: format!("HTTP error: {status}"),
+                },
+            ));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let expected_length = response.content_length().unwrap_or(0);
+        let mut data = if expected_length > 0 {
+            Vec::with_capacity(expected_length.min(usize::MAX as u64) as usize)
+        } else {
+            Vec::new()
+        };
+        let mut stream = response.bytes_stream();
+        let mut completed = 0u64;
+
+        while let Some(chunk) = stream.next().await {
+            self.check_cancelled()?;
+            let chunk = chunk.map_err(|error| {
+                Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure {
+                        message: error.to_string(),
+                    },
+                )
+            })?;
+            completed = completed.saturating_add(chunk.len() as u64);
+            data.extend_from_slice(&chunk);
+            self.progress.set_completed_length(completed);
+            self.group.recover().update_progress(completed);
+        }
+
+        let total_length = if expected_length > 0 {
+            expected_length
+        } else {
+            completed
+        };
+        let group = self.group.recover();
+        group.set_total_length(total_length);
+        group.set_completed_length(completed);
+        group.mark_in_memory_download();
+        if let Some(content_type) = content_type {
+            group.set_content_type(content_type);
+        }
+        group.set_in_memory_data(data);
+        drop(group);
+
+        self.completed_bytes = completed;
+        self.completed = true;
+        self.group.recover_mut().complete()?;
+        Ok(())
     }
 }

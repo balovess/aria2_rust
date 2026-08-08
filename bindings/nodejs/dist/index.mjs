@@ -71,14 +71,16 @@ var HttpTransport = class {
         body: JSON.stringify(request),
         signal: controller.signal
       });
-      if (!response.ok) {
-        throw new ConnectionError(`HTTP ${response.status}: ${response.statusText}`);
-      }
-      const data = await response.json();
-      if (data.error) {
-        if (data.error.code === 1) {
-          throw new RpcError(data.error.message, data.error.code);
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        if (!response.ok) {
+          throw new ConnectionError(`HTTP ${response.status}: ${response.statusText}`);
         }
+        throw new ConnectionError("Invalid JSON response");
+      }
+      if (data.error) {
         throw new RpcError(data.error.message, data.error.code);
       }
       return data.result;

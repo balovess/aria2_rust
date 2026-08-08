@@ -231,6 +231,7 @@ impl DownloadResult {
         self.upload_speed = group.upload_speed();
         self.dir = group.options().dir.clone().unwrap_or_default();
         self.info_hash = group.info_hash_hex().unwrap_or_default();
+        self.in_memory_download = group.is_in_memory_download();
     }
 }
 

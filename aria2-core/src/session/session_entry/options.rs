@@ -171,6 +171,14 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert("referer".to_string(), v.clone());
     }
 
+    // --- Metadata follow modes ---
+    if let Some(mode) = opts.follow_torrent {
+        map.insert("follow-torrent".to_string(), mode.as_str().to_string());
+    }
+    if let Some(mode) = opts.follow_metalink {
+        map.insert("follow-metalink".to_string(), mode.as_str().to_string());
+    }
+
     // --- Event hooks ---
     if let Some(ref v) = opts.on_download_start {
         map.insert("on-download-start".to_string(), v.clone());

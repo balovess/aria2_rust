@@ -139,7 +139,7 @@ pub struct RequestGroup {
 
     /// Optional dependency that must be resolved before this group
     /// can be promoted from reserved to active.
-    pub dependency: std::sync::RwLock<Option<Box<dyn super::dependency::Dependency>>>,
+    pub dependency: std::sync::RwLock<Option<Arc<dyn super::dependency::Dependency>>>,
 
     /// GID of the parent download that spawned this one.
     ///
@@ -173,11 +173,25 @@ pub struct RequestGroup {
     #[cfg(feature = "bittorrent")]
     pub bt_metadata_data: std::sync::RwLock<Option<Vec<u8>>>,
 
+    /// Whether this group uses the C++ `MemoryPreDownloadHandler` semantics.
+    ///
+    /// This is separate from protocol-specific metadata slots because the
+    /// flag describes the source download lifecycle, not the type of bytes
+    /// eventually parsed by a post-download handler.
+    pub in_memory_download: AtomicBool,
+    /// Bytes collected by an in-memory source download.
+    pub in_memory_data: std::sync::RwLock<Option<Vec<u8>>>,
+    /// Content-Type observed for the source response.
+    pub content_type: std::sync::RwLock<Option<String>>,
+
     /// Raw Metalink document and selected file index for manager-owned fallback execution.
     #[cfg(feature = "metalink")]
     pub metalink_data: std::sync::RwLock<Option<Vec<u8>>>,
     #[cfg(feature = "metalink")]
     pub metalink_file_index: std::sync::RwLock<Option<usize>>,
+    /// Base URI used when the Metalink source was parsed.
+    #[cfg(feature = "metalink")]
+    pub metalink_base_uri: std::sync::RwLock<Option<String>>,
 }
 
 impl RequestGroup {
@@ -227,10 +241,15 @@ impl RequestGroup {
             metadata_info: std::sync::RwLock::new(None),
             #[cfg(feature = "bittorrent")]
             bt_metadata_data: std::sync::RwLock::new(None),
+            in_memory_download: AtomicBool::new(false),
+            in_memory_data: std::sync::RwLock::new(None),
+            content_type: std::sync::RwLock::new(None),
             #[cfg(feature = "metalink")]
             metalink_data: std::sync::RwLock::new(None),
             #[cfg(feature = "metalink")]
             metalink_file_index: std::sync::RwLock::new(None),
+            #[cfg(feature = "metalink")]
+            metalink_base_uri: std::sync::RwLock::new(None),
         }
     }
 }

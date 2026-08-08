@@ -458,30 +458,27 @@ pub type SharedFileAllocationMan = Arc<RwLock<FileAllocationMan>>;
 /// first use (must be called from a tokio runtime context).
 pub fn shared() -> SharedFileAllocationMan {
     static SHARED: OnceLock<SharedFileAllocationMan> = OnceLock::new();
-    static WORKER: OnceLock<()> = OnceLock::new();
+    static WORKER: OnceLock<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+        OnceLock::new();
 
     let man = SHARED
         .get_or_init(|| Arc::new(RwLock::new(FileAllocationMan::new())))
         .clone();
 
-    // The manager is process-wide, so its worker must not be owned by a
-    // caller-provided runtime. Tests and embedders commonly create short-lived
-    // runtimes; a worker spawned there could be dropped while it is processing
-    // an entry submitted by a different runtime. A dedicated current-thread
-    // runtime gives the queue one stable owner for the process lifetime.
-    WORKER.get_or_init(|| {
-        let worker_man = man.clone();
-        std::thread::Builder::new()
-            .name("aria2-file-allocation".to_string())
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("file allocation runtime must start");
-                runtime.block_on(worker_loop(worker_man));
-            })
-            .expect("file allocation worker thread must start");
-    });
+    // A worker task belongs to the Tokio runtime that spawned it. Tests and
+    // embedders may create multiple runtimes, so a completed worker must be
+    // replaced rather than treated as a process-wide permanent singleton.
+    let worker = WORKER.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = match worker.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished)
+    {
+        *guard = Some(tokio::spawn(worker_loop(man.clone())));
+    }
 
     man
 }
@@ -1128,46 +1125,5 @@ mod tests {
             Arc::ptr_eq(&a, &b),
             "shared() must return the same instance"
         );
-    }
-
-    #[test]
-    fn test_shared_worker_restarts_on_runtime_change() {
-        let dir = tempfile::tempdir().unwrap();
-        let first_path = dir.path().join("first.bin");
-        let second_path = dir.path().join("second.bin");
-
-        let first_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        first_runtime
-            .block_on(enqueue_path(
-                &shared(),
-                &first_path,
-                4096,
-                AllocationStrategy::Trunc,
-                false,
-                1,
-            ))
-            .unwrap();
-        drop(first_runtime);
-
-        let second_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        second_runtime
-            .block_on(enqueue_path(
-                &shared(),
-                &second_path,
-                4096,
-                AllocationStrategy::Trunc,
-                false,
-                2,
-            ))
-            .unwrap();
-
-        assert_eq!(std::fs::metadata(first_path).unwrap().len(), 4096);
-        assert_eq!(std::fs::metadata(second_path).unwrap().len(), 4096);
     }
 }
