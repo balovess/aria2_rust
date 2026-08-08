@@ -4,13 +4,14 @@
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::rpc_helpers::normalize_rpc_options;
 use crate::types::{DownloadStatus, FileInfo, StatusInfo, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::checksum::checksum::Checksum;
 use aria2_core::constants as core_constants;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::request::request_group_man::ChangePositionMode;
 use aria2_core::session::save_session_command::SaveSessionCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
@@ -726,7 +727,7 @@ impl RpcEngine {
         }
 
         let mut task_opts = self.task_opts.write().await;
-        task_opts.insert(gid_str.clone(), merged_options);
+        task_opts.insert(gid_str.clone(), normalize_rpc_options(&merged_options));
         // C++ aria2 notification only includes gid (no files field)
         let _ = self.event_publisher.publish(
             EventType::DownloadStart,
@@ -873,218 +874,11 @@ impl RpcEngine {
     }
 }
 
-/// Convert RPC option map (from `aria2.addUri` params) to `DownloadOptions`.
+/// Convert RPC option values through the shared aria2 string parser.
 ///
-/// Handles both array and newline-separated string forms of `header`.
+/// The public RPC wire format uses strings for options. The core adapter also
+/// accepts numeric/boolean JSON values for existing Rust callers and
+/// canonicalizes them before parsing.
 fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) -> DownloadOptions {
-    let get_str = |k: &str| opts.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
-    let get_u16 = |k: &str| opts.get(k).and_then(|v| v.as_u64()).map(|n| n as u16);
-    let get_u32 = |k: &str| opts.get(k).and_then(|v| v.as_u64()).map(|n| n as u32);
-    let get_u64 = |k: &str| opts.get(k).and_then(|v| v.as_u64());
-    let get_f64 = |k: &str| opts.get(k).and_then(|v| v.as_f64());
-    let get_bool = |k: &str| opts.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-    let get_follow_mode = |k: &str| {
-        opts.get(k).and_then(|value| match value {
-            serde_json::Value::Bool(enabled) => Some(FollowMode::from_bool(*enabled)),
-            serde_json::Value::String(mode) => FollowMode::parse(mode),
-            _ => None,
-        })
-    };
-
-    let header: Vec<String> = match opts.get("header") {
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
-        Some(serde_json::Value::String(s)) => s
-            .split('\n')
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-        _ => vec![],
-    };
-
-    let checksum = get_str("checksum").and_then(|v| {
-        if let Some((algo, val)) = v.split_once('=') {
-            Some((algo.trim().to_string(), val.trim().to_string()))
-        } else {
-            None
-        }
-    });
-
-    let dht_entry_point = get_str("dht-entry-point").map(|v| {
-        v.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-
-    DownloadOptions {
-        // Basic
-        split: get_u16("split"),
-        max_connection_per_server: get_u16("max-connection-per-server"),
-        max_download_limit: get_u64("max-download-limit"),
-        max_upload_limit: get_u64("max-upload-limit"),
-        dir: get_str("dir"),
-        out: get_str("out"),
-        seed_time: get_f64("seed-time"),
-        seed_ratio: get_f64("seed-ratio"),
-        // File allocation
-        file_allocation: get_str("file-allocation"),
-        mmap_threshold: get_u64("mmap-threshold"),
-        secure_falloc: get_bool("secure-falloc"),
-        check_integrity: get_bool("check-integrity"),
-        hash_check_only: get_bool("hash-check-only"),
-        // Checksum
-        checksum,
-        // Cookies
-        cookie_file: get_str("cookie-file"),
-        cookies: get_str("cookies"),
-        // BT
-        bt_max_peers: get_u64("bt-max-peers").unwrap_or(55) as usize,
-        bt_force_encrypt: opts
-            .get("bt-force-encryption")
-            .and_then(|v| v.as_bool())
-            .or_else(|| opts.get("bt-force-encrypt").and_then(|v| v.as_bool()))
-            .unwrap_or(false),
-        bt_require_crypto: get_bool("bt-require-crypto"),
-        enable_dht: opts
-            .get("enable-dht")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        dht_listen_port: get_u16("dht-listen-port"),
-        dht_entry_point,
-        bt_tracker: opts.get("bt-tracker").and_then(|v| {
-            if let Some(arr) = v.as_array() {
-                Some(
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .filter(|s| !s.is_empty())
-                        .collect(),
-                )
-            } else {
-                v.as_str().map(|s| {
-                    s.split([',', '\n'])
-                        .map(|x| x.trim().to_string())
-                        .filter(|x| !x.is_empty())
-                        .collect()
-                })
-            }
-        }),
-        enable_public_trackers: opts
-            .get("enable-public-trackers")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        bt_piece_selection_strategy: get_str("bt-piece-selection-strategy").unwrap_or_default(),
-        bt_endgame_threshold: get_u32("bt-endgame-threshold").unwrap_or(0),
-        bt_max_upload_slots: get_u32("bt-max-upload-slots"),
-        bt_optimistic_unchoke_interval: get_u64("bt-optimistic-unchoke-interval"),
-        bt_snubbed_timeout: get_u64("bt-snubbed-timeout"),
-        bt_prioritize_piece: get_str("bt-prioritize-piece").unwrap_or_default(),
-        bt_detach_seed_only: get_bool("bt-detach-seed-only"),
-        enable_utp: get_bool("enable-utp"),
-        utp_listen_port: get_u16("utp-listen-port"),
-        // Retry
-        max_retries: get_u32("max-tries")
-            .or_else(|| get_u32("max-retries"))
-            .unwrap_or(0),
-        retry_wait: get_u64("retry-wait").unwrap_or(0),
-        // DHT file
-        dht_file_path: get_str("dht-file-path"),
-        // Proxy
-        http_proxy: get_str("http-proxy"),
-        all_proxy: get_str("all-proxy"),
-        https_proxy: get_str("https-proxy"),
-        ftp_proxy: get_str("ftp-proxy"),
-        no_proxy: get_str("no-proxy"),
-        // HTTP headers
-        header,
-        user_agent: get_str("user-agent"),
-        referer: get_str("referer"),
-        // Metalink
-        metalink_version: get_str("metalink-version"),
-        metalink_language: get_str("metalink-language"),
-        metalink_os: get_str("metalink-os"),
-        metalink_location: get_str("metalink-location"),
-        metalink_preferred_protocol: get_str("metalink-preferred-protocol"),
-        select_file: get_str("select-file"),
-        piece_length: get_u64("piece-length"),
-        metalink_enable_unique_protocol: opts
-            .get("metalink-enable-unique-protocol")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        // FTP
-        timeout: get_u64("timeout"),
-        connect_timeout: get_u64("connect-timeout"),
-        startup_idle_time: get_u64("startup-idle-time"),
-        lowest_speed_limit: get_u64("lowest-speed-limit"),
-        ftp_pasv: opts
-            .get("ftp-pasv")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        remote_time: opts
-            .get("remote-time")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        dry_run: opts
-            .get("dry-run")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        ftp_reuse_connection: opts
-            .get("ftp-reuse-connection")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        // Download
-        realtime_chunk_checksum: opts
-            .get("realtime-chunk-checksum")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        bt_stop_timeout: get_u64("bt-stop-timeout"),
-        // BitTorrent extended
-        disable_ipv6: opts
-            .get("disable-ipv6")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        listen_port: get_str("listen-port"),
-        bt_enable_lpd: opts
-            .get("bt-enable-lpd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        bt_lpd_interface: get_str("bt-lpd-interface"),
-        enable_rpc: opts
-            .get("enable-rpc")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        pause: opts.get("pause").and_then(|v| v.as_bool()).unwrap_or(false),
-        // Follow options
-        follow_torrent: get_follow_mode("follow-torrent"),
-        follow_metalink: get_follow_mode("follow-metalink"),
-        // Event hooks
-        on_download_start: get_str("on-download-start"),
-        on_download_complete: get_str("on-download-complete"),
-        on_download_error: get_str("on-download-error"),
-        on_download_pause: get_str("on-download-pause"),
-        on_download_stop: get_str("on-download-stop"),
-        on_bt_download_complete: get_str("on-bt-download-complete"),
-        // HTTP authentication
-        http_auth_challenge: opts
-            .get("http-auth-challenge")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        http_user: get_str("http-user"),
-        http_passwd: get_str("http-passwd"),
-        ftp_user: get_str("ftp-user"),
-        ftp_passwd: get_str("ftp-passwd"),
-        ssh_host_key_md: get_str("ssh-host-key-md"),
-        no_netrc: opts
-            .get("no-netrc")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        netrc_path: get_str("netrc-path"),
-        // Conditional GET
-        conditional_get: opts
-            .get("conditional-get")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    }
+    DownloadOptions::from_rpc_options(opts)
 }

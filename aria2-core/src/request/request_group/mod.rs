@@ -37,7 +37,7 @@ pub use halt_reason::{DownloadControlFlags, HaltReason};
 pub use metadata_info::MetadataInfo;
 pub use options::{
     ChangeableKind, DownloadOptions, FollowMode, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
-    RUNTIME_CHANGEABLE_OPTIONS, is_option_changeable,
+    RUNTIME_CHANGEABLE_OPTIONS, is_option_changeable, option_value_to_string,
 };
 pub use progress::AtomicProgress;
 pub use result_code::DownloadResultCode;

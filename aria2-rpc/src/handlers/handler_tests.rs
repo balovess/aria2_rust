@@ -89,6 +89,7 @@ async fn test_handle_add_metalink() {
 }
 
 #[tokio::test]
+#[cfg(feature = "metalink")]
 async fn test_add_metalink_direct_only_applies_filters_and_priority() {
     let engine = RpcEngine::new();
     let metalink_xml = r#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><files><file name="first.bin"><url location="de" priority="1">https://de.example/first.bin</url></file><file name="second.bin"><url location="de" priority="1">https://de.example/second.bin</url><url location="us" priority="100">https://us.example/second.bin</url></file></files></metalink>"#;
@@ -409,7 +410,7 @@ async fn test_unpause_fires_download_start_event() {
 }
 
 #[tokio::test]
-async fn test_change_option_rejects_unknown_key() {
+async fn test_change_option_ignores_unknown_key() {
     let engine = RpcEngine::new();
     let add_req =
         JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
@@ -422,12 +423,43 @@ async fn test_change_option_rejects_unknown_key() {
     )
     .with_id(2);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_error(), "changeOption with unknown key should fail");
-    assert_eq!(
-        resp.error.unwrap().code,
-        -32602,
-        "error code should be InvalidParams (-32602)"
+    assert!(
+        resp.is_success(),
+        "changeOption with unknown key should be ignored"
     );
+}
+
+#[tokio::test]
+async fn test_change_option_invalid_value_is_execution_error() {
+    let engine = RpcEngine::new();
+    let add_req =
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+    let add_resp = engine.handle_request(&add_req).await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid, {"max-download-limit": "badvalue"}]),
+    )
+    .with_id(2);
+    let resp = engine.handle_request(&req).await;
+    let error = resp.error.expect("invalid option value must fail");
+    assert_eq!(error.code, 1);
+    assert!(error.message.contains("max-download-limit"));
+}
+
+#[tokio::test]
+async fn test_change_global_option_invalid_value_is_execution_error() {
+    let engine = RpcEngine::new();
+    let req = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{"max-overall-download-limit": "badvalue"}]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    let error = resp.error.expect("invalid option value must fail");
+    assert_eq!(error.code, 1);
+    assert!(error.message.contains("max-overall-download-limit"));
 }
 
 #[tokio::test]
@@ -479,7 +511,7 @@ async fn test_change_option_accepts_valid_keys() {
 }
 
 #[tokio::test]
-async fn test_change_option_rejects_startup_only_key() {
+async fn test_change_option_ignores_startup_only_key() {
     let engine = RpcEngine::new();
     let add_req =
         JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
@@ -488,7 +520,7 @@ async fn test_change_option_rejects_startup_only_key() {
 
     // `pause` is explicitly excluded from runtime-changeable options
     // (matching original C++ aria2 exclusion list), so changeOption must
-    // reject it with InvalidParams.
+    // ignore it and return OK.
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
         serde_json::json!([gid, {"pause": "true"}]),
@@ -496,13 +528,8 @@ async fn test_change_option_rejects_startup_only_key() {
     .with_id(2);
     let resp = engine.handle_request(&req).await;
     assert!(
-        resp.is_error(),
-        "changeOption with a startup-only key should fail"
-    );
-    assert_eq!(
-        resp.error.unwrap().code,
-        -32602,
-        "error code should be InvalidParams (-32602)"
+        resp.is_success(),
+        "changeOption with a startup-only key should be ignored"
     );
 }
 

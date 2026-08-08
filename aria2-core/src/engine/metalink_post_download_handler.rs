@@ -250,19 +250,25 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
             converter = converter.with_base_uri(base_uri);
         }
         let mut gids = std::iter::from_fn(|| Some(allocate_gid()));
-        let mut child_groups = converter.create_resource_groups_from_bytes(
+        let child_groups = converter.create_resource_groups_from_bytes(
             &metalink_data,
             &child_options,
             &mut gids,
         )?;
 
         #[cfg(all(feature = "metalink", feature = "bittorrent"))]
-        for graph in
-            converter.create_torrent_graphs_from_bytes(&metalink_data, &child_options, &mut gids)?
-        {
-            child_groups.push(graph.metadata);
-            child_groups.push(graph.payload);
-        }
+        let child_groups = {
+            let mut child_groups = child_groups;
+            for graph in converter.create_torrent_graphs_from_bytes(
+                &metalink_data,
+                &child_options,
+                &mut gids,
+            )? {
+                child_groups.push(graph.metadata);
+                child_groups.push(graph.payload);
+            }
+            child_groups
+        };
 
         for group in &child_groups {
             // If pause requested (PREF_PAUSE_METADATA), mark the child group.

@@ -518,6 +518,39 @@ fn test_update_option_new_runtime_changeable() {
     assert!(group.update_option("seed-ratio", serde_json::json!(2.0)));
     assert_eq!(group.options().seed_ratio, Some(2.0));
 
+    // RPC clients send option values as strings, including aria2 size suffixes.
+    assert!(group.update_option("max-download-limit", serde_json::json!("100K")));
+    assert_eq!(group.options().max_download_limit, Some(100 * 1024));
+    assert!(group.update_option("max-tries", serde_json::json!("7")));
+    assert_eq!(group.options().max_retries, 7);
+    assert!(group.update_option("bt-force-encrypt", serde_json::json!("true")));
+    assert!(group.options().bt_force_encrypt);
+
+    // A recognized key with an invalid value must be observable by RPC
+    // callers and must not partially update the group.
+    let previous_limit = group.options().max_download_limit;
+    let error = group
+        .try_update_option("max-download-limit", serde_json::json!("badvalue"))
+        .expect_err("invalid size must be rejected");
+    assert!(error.contains("max-download-limit"));
+    assert_eq!(group.options().max_download_limit, previous_limit);
+
+    let previous_retries = group.options().max_retries;
+    assert!(
+        group
+            .try_update_option("max-tries", serde_json::json!("not-a-number"))
+            .is_err()
+    );
+    assert_eq!(group.options().max_retries, previous_retries);
+
+    let previous_dht = group.options().enable_dht;
+    assert!(
+        group
+            .try_update_option("enable-dht", serde_json::json!("maybe"))
+            .is_err()
+    );
+    assert_eq!(group.options().enable_dht, previous_dht);
+
     // Unknown option returns false
     assert!(!group.update_option("unknown-option", serde_json::json!(1)));
 }

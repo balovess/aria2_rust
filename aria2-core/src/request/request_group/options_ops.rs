@@ -9,6 +9,238 @@ use std::sync::Arc;
 use crate::rate_limiter::RateLimiter;
 use crate::util::rwlock_ext::RwLockRecover;
 
+fn rpc_option_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
+    super::options::option_value_to_string(value)
+        .ok_or_else(|| format!("Option '{}' must be a string", key))
+}
+
+fn rpc_option_u64(value: &serde_json::Value, key: &str) -> Result<u64, String> {
+    rpc_option_string(value, key)?
+        .parse()
+        .map_err(|_| format!("Option '{}' must be a non-negative integer", key))
+}
+
+fn rpc_option_size(value: &serde_json::Value, key: &str) -> Result<u64, String> {
+    let raw = rpc_option_string(value, key)?;
+    crate::config::OptionValue::parse_size_str_checked(&raw)
+        .map_err(|error| format!("Option '{}': {}", key, error))
+}
+
+fn rpc_option_f64(value: &serde_json::Value, key: &str) -> Result<f64, String> {
+    let number = rpc_option_string(value, key)?
+        .parse::<f64>()
+        .map_err(|_| format!("Option '{}' must be a number", key))?;
+    if number.is_finite() {
+        Ok(number)
+    } else {
+        Err(format!("Option '{}' must be a finite number", key))
+    }
+}
+
+fn rpc_option_bool(value: &serde_json::Value, key: &str) -> Result<bool, String> {
+    match rpc_option_string(value, key)?.as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("Option '{}' must be either 'true' or 'false'", key)),
+    }
+}
+
+fn rpc_option_u16(value: &serde_json::Value, key: &str) -> Result<u16, String> {
+    let value = rpc_option_u64(value, key)?;
+    u16::try_from(value).map_err(|_| format!("Option '{}' is too large", key))
+}
+
+fn rpc_option_u32(value: &serde_json::Value, key: &str) -> Result<u32, String> {
+    let value = rpc_option_u64(value, key)?;
+    u32::try_from(value).map_err(|_| format!("Option '{}' is too large", key))
+}
+
+fn apply_rpc_option(
+    opts: &mut super::DownloadOptions,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<bool, String> {
+    match key {
+        "split" => {
+            let value = rpc_option_u16(value, key)?;
+            if value == 0 {
+                return Err(format!("Option '{}' must be greater than zero", key));
+            }
+            opts.split = Some(value);
+            Ok(true)
+        }
+        "max-download-limit" => {
+            opts.max_download_limit = Some(rpc_option_size(value, key)?);
+            Ok(true)
+        }
+        "max-upload-limit" => {
+            opts.max_upload_limit = Some(rpc_option_size(value, key)?);
+            Ok(true)
+        }
+        "max-tries" | "max-retries" => {
+            opts.max_retries = rpc_option_u32(value, key)?;
+            Ok(true)
+        }
+        "retry-wait" => {
+            let value = rpc_option_u64(value, key)?;
+            if value > 600 {
+                return Err(format!("Option '{}' must be between 0 and 600", key));
+            }
+            opts.retry_wait = value;
+            Ok(true)
+        }
+        "header" => {
+            opts.header = match value {
+                serde_json::Value::Array(values) => values
+                    .iter()
+                    .map(|value| rpc_option_string(value, key))
+                    .collect::<Result<Vec<_>, _>>()?,
+                serde_json::Value::String(value) => value
+                    .split('\n')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => return Err(format!("Option '{}' must be a string or array", key)),
+            };
+            Ok(true)
+        }
+        "user-agent" | "referer" | "dir" | "out" | "file-allocation" | "cookie-file"
+        | "cookies" | "dht-file-path" | "http-proxy" | "all-proxy" | "https-proxy"
+        | "ftp-proxy" | "no-proxy" => {
+            let value = rpc_option_string(value, key)?;
+            match key {
+                "user-agent" => opts.user_agent = Some(value),
+                "referer" => opts.referer = Some(value),
+                "dir" => opts.dir = Some(value),
+                "out" => opts.out = Some(value),
+                "file-allocation" => opts.file_allocation = Some(value),
+                "cookie-file" => opts.cookie_file = Some(value),
+                "cookies" => opts.cookies = Some(value),
+                "dht-file-path" => opts.dht_file_path = Some(value),
+                "http-proxy" => opts.http_proxy = Some(value),
+                "all-proxy" => opts.all_proxy = Some(value),
+                "https-proxy" => opts.https_proxy = Some(value),
+                "ftp-proxy" => opts.ftp_proxy = Some(value),
+                "no-proxy" => opts.no_proxy = Some(value),
+                _ => unreachable!("string option handled above"),
+            }
+            Ok(true)
+        }
+        "max-connection-per-server" => {
+            let value = rpc_option_u16(value, key)?;
+            if value == 0 {
+                return Err(format!("Option '{}' must be greater than zero", key));
+            }
+            opts.max_connection_per_server = Some(value);
+            Ok(true)
+        }
+        "bt-max-peers" => {
+            opts.bt_max_peers = usize::try_from(rpc_option_u64(value, key)?)
+                .map_err(|_| format!("Option '{}' is too large", key))?;
+            Ok(true)
+        }
+        "bt-max-upload-slots" => {
+            opts.bt_max_upload_slots = Some(rpc_option_u32(value, key)?);
+            Ok(true)
+        }
+        "bt-snubbed-timeout" => {
+            opts.bt_snubbed_timeout = Some(rpc_option_u64(value, key)?);
+            Ok(true)
+        }
+        "bt-optimistic-unchoke-interval" => {
+            opts.bt_optimistic_unchoke_interval = Some(rpc_option_u64(value, key)?);
+            Ok(true)
+        }
+        "bt-endgame-threshold" => {
+            opts.bt_endgame_threshold = rpc_option_u32(value, key)?;
+            Ok(true)
+        }
+        "seed-time" | "seed-ratio" => {
+            let value = rpc_option_f64(value, key)?;
+            if value < 0.0 {
+                return Err(format!("Option '{}' must not be negative", key));
+            }
+            if key == "seed-time" {
+                opts.seed_time = Some(value);
+            } else {
+                opts.seed_ratio = Some(value);
+            }
+            Ok(true)
+        }
+        "bt-detach-seed-only" => {
+            opts.bt_detach_seed_only = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "mmap-threshold" => {
+            opts.mmap_threshold = Some(rpc_option_size(value, key)?);
+            Ok(true)
+        }
+        "secure-falloc" => {
+            opts.secure_falloc = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "checksum" => {
+            let value = rpc_option_string(value, key)?;
+            let (algorithm, digest) = value
+                .split_once('=')
+                .filter(|(algorithm, digest)| !algorithm.is_empty() && !digest.is_empty())
+                .ok_or_else(|| format!("Option '{}' must be in HASH=VALUE form", key))?;
+            opts.checksum = Some((algorithm.to_string(), digest.to_string()));
+            Ok(true)
+        }
+        "bt-force-encryption" | "bt-force-encrypt" => {
+            opts.bt_force_encrypt = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "bt-require-crypto" => {
+            opts.bt_require_crypto = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "enable-dht" => {
+            opts.enable_dht = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "dht-listen-port" => {
+            opts.dht_listen_port = Some(rpc_option_u16(value, key)?);
+            Ok(true)
+        }
+        "dht-entry-point" => {
+            opts.dht_entry_point = match value {
+                serde_json::Value::Array(values) => Some(
+                    values
+                        .iter()
+                        .map(|value| rpc_option_string(value, key))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                _ => Some(vec![rpc_option_string(value, key)?]),
+            };
+            Ok(true)
+        }
+        "enable-public-trackers" => {
+            opts.enable_public_trackers = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "bt-piece-selection-strategy" => {
+            opts.bt_piece_selection_strategy = rpc_option_string(value, key)?;
+            Ok(true)
+        }
+        "bt-prioritize-piece" => {
+            opts.bt_prioritize_piece = rpc_option_string(value, key)?;
+            Ok(true)
+        }
+        "enable-utp" => {
+            opts.enable_utp = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "utp-listen-port" => {
+            opts.utp_listen_port = Some(rpc_option_u16(value, key)?);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 impl super::RequestGroup {
     // ── Basic Accessors ─────────────────────────────────────────────────
 
@@ -99,253 +331,58 @@ impl super::RequestGroup {
     /// kebab-case option names, e.g. `"max-download-limit"`).
     ///
     /// Returns `true` if the option was recognized and updated, `false` if the
-    /// key is not a runtime-changeable option.
+    /// key is not a runtime-changeable option. Invalid values are reported by
+    /// [`Self::try_update_option`] and are intentionally not hidden here.
     ///
     /// For `max-download-limit` / `max-upload-limit`, the stored
     /// `RateLimiter` (if any) is also updated so the change takes effect
     /// immediately on the live download.
-    pub fn update_option(&mut self, key: &str, value: serde_json::Value) -> bool {
+    pub fn validate_option_update(key: &str, value: &serde_json::Value) -> Result<bool, String> {
+        let mut options = super::DownloadOptions::default();
+        apply_rpc_option(&mut options, key, value)
+    }
+
+    /// Apply a runtime option while preserving parse failures for RPC callers.
+    pub fn try_update_option(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<bool, String> {
+        if !Self::validate_option_update(key, &value)? {
+            return Ok(false);
+        }
+
         let opts = Arc::make_mut(&mut self.options);
+        let applied = apply_rpc_option(opts, key, &value)?;
+        debug_assert!(applied);
+
         match key {
-            "split" => {
-                if let Some(v) = value.as_u64() {
-                    opts.split = Some(v as u16);
-                    tracing::warn!(
-                        new_split = v,
-                        "split changed but will take effect on download restart/retry, \
-                         not mid-download (current segments unchanged)"
-                    );
-                }
-                true
-            }
             "max-download-limit" => {
-                let rate = value.as_u64();
-                opts.max_download_limit = rate;
                 if let Some(ref limiter) = *self.rate_limiter.recover() {
-                    limiter.set_download_rate(rate);
+                    limiter.set_download_rate(opts.max_download_limit);
                 }
-                true
             }
             "max-upload-limit" => {
-                let rate = value.as_u64();
-                opts.max_upload_limit = rate;
                 if let Some(ref limiter) = *self.rate_limiter.recover() {
-                    limiter.set_upload_rate(rate);
+                    limiter.set_upload_rate(opts.max_upload_limit);
                 }
-                true
             }
-            "max-tries" | "max-retries" => {
-                if let Some(v) = value.as_u64() {
-                    opts.max_retries = v as u32;
-                }
-                true
+            "split" => {
+                tracing::warn!(
+                    new_split = opts.split,
+                    "split changed but will take effect on download restart/retry, \
+                     not mid-download (current segments unchanged)"
+                );
             }
-            "retry-wait" => {
-                if let Some(v) = value.as_u64() {
-                    opts.retry_wait = v;
-                }
-                true
-            }
-            "header" => {
-                match &value {
-                    serde_json::Value::Array(arr) => {
-                        opts.header = arr
-                            .iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect();
-                    }
-                    serde_json::Value::String(s) => {
-                        opts.header = s
-                            .split('\n')
-                            .map(|l| l.trim().to_string())
-                            .filter(|l| !l.is_empty())
-                            .collect();
-                    }
-                    _ => {}
-                }
-                true
-            }
-            "user-agent" => {
-                opts.user_agent = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "referer" => {
-                opts.referer = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "max-connection-per-server" => {
-                if let Some(v) = value.as_u64() {
-                    opts.max_connection_per_server = Some(v as u16);
-                }
-                true
-            }
-            "bt-max-peers" => {
-                if let Some(v) = value.as_u64() {
-                    opts.bt_max_peers = v as usize;
-                }
-                true
-            }
-            "bt-max-upload-slots" => {
-                if let Some(v) = value.as_u64() {
-                    opts.bt_max_upload_slots = Some(v as u32);
-                }
-                true
-            }
-            "bt-snubbed-timeout" => {
-                if let Some(v) = value.as_u64() {
-                    opts.bt_snubbed_timeout = Some(v);
-                }
-                true
-            }
-            "bt-optimistic-unchoke-interval" => {
-                if let Some(v) = value.as_u64() {
-                    opts.bt_optimistic_unchoke_interval = Some(v);
-                }
-                true
-            }
-            "bt-endgame-threshold" => {
-                if let Some(v) = value.as_u64() {
-                    opts.bt_endgame_threshold = v as u32;
-                }
-                true
-            }
-            "seed-time" => {
-                if let Some(v) = value.as_f64() {
-                    opts.seed_time = Some(v);
-                }
-                true
-            }
-            "seed-ratio" => {
-                if let Some(v) = value.as_f64() {
-                    opts.seed_ratio = Some(v);
-                }
-                true
-            }
-            "bt-detach-seed-only" => {
-                if let Some(v) = value.as_bool() {
-                    opts.bt_detach_seed_only = v;
-                }
-                true
-            }
-            "dir" => {
-                opts.dir = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "out" => {
-                opts.out = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "file-allocation" => {
-                if let Some(s) = value.as_str() {
-                    opts.file_allocation = Some(s.to_string());
-                }
-                true
-            }
-            "mmap-threshold" => {
-                opts.mmap_threshold = value.as_u64();
-                true
-            }
-            "secure-falloc" => {
-                opts.secure_falloc = value.as_bool().unwrap_or(false);
-                true
-            }
-            "checksum" => {
-                if let Some(s) = value.as_str()
-                    && let Some((algo, hash)) = s.split_once('=')
-                {
-                    opts.checksum = Some((algo.to_string(), hash.to_string()));
-                }
-                true
-            }
-            "cookie-file" => {
-                opts.cookie_file = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "cookies" => {
-                opts.cookies = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "bt-force-encryption" | "bt-force-encrypt" => {
-                opts.bt_force_encrypt = value.as_bool().unwrap_or(false);
-                true
-            }
-            "bt-require-crypto" => {
-                opts.bt_require_crypto = value.as_bool().unwrap_or(false);
-                true
-            }
-            "enable-dht" => {
-                opts.enable_dht = value.as_bool().unwrap_or(true);
-                true
-            }
-            "dht-listen-port" => {
-                opts.dht_listen_port = value.as_u64().map(|v| v as u16);
-                true
-            }
-            "dht-entry-point" => {
-                match &value {
-                    serde_json::Value::String(s) => {
-                        opts.dht_entry_point = Some(vec![s.to_string()]);
-                    }
-                    serde_json::Value::Array(arr) => {
-                        opts.dht_entry_point = Some(
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect(),
-                        );
-                    }
-                    _ => {}
-                }
-                true
-            }
-            "enable-public-trackers" => {
-                opts.enable_public_trackers = value.as_bool().unwrap_or(true);
-                true
-            }
-            "bt-piece-selection-strategy" => {
-                if let Some(s) = value.as_str() {
-                    opts.bt_piece_selection_strategy = s.to_string();
-                }
-                true
-            }
-            "bt-prioritize-piece" => {
-                if let Some(s) = value.as_str() {
-                    opts.bt_prioritize_piece = s.to_string();
-                }
-                true
-            }
-            "enable-utp" => {
-                opts.enable_utp = value.as_bool().unwrap_or(false);
-                true
-            }
-            "utp-listen-port" => {
-                opts.utp_listen_port = value.as_u64().map(|v| v as u16);
-                true
-            }
-            "dht-file-path" => {
-                opts.dht_file_path = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "http-proxy" => {
-                opts.http_proxy = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "all-proxy" => {
-                opts.all_proxy = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "https-proxy" => {
-                opts.https_proxy = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "ftp-proxy" => {
-                opts.ftp_proxy = value.as_str().map(|s| s.to_string());
-                true
-            }
-            "no-proxy" => {
-                opts.no_proxy = value.as_str().map(|s| s.to_string());
-                true
-            }
-            _ => false,
+            _ => {}
         }
+        Ok(applied)
+    }
+
+    /// Compatibility wrapper for internal callers that only need to know
+    /// whether a key is recognized. RPC-facing code should use
+    /// [`Self::try_update_option`] so invalid values cannot be swallowed.
+    pub fn update_option(&mut self, key: &str, value: serde_json::Value) -> bool {
+        self.try_update_option(key, value).unwrap_or(false)
     }
 }

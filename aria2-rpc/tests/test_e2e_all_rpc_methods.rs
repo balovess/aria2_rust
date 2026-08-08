@@ -19,7 +19,7 @@ mod common;
 
 use common::{start_test_server, start_test_server_with_max_concurrent};
 
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -36,8 +36,13 @@ fn rpc_body(method: &str, params: Value) -> Value {
     })
 }
 
-/// Send a JSON-RPC request, assert 200, return the JSON response.
-async fn rpc_call(client: &Client, base_url: &str, method: &str, params: Value) -> Value {
+/// Send a JSON-RPC request and return both the HTTP status and JSON body.
+async fn rpc_call_with_status(
+    client: &Client,
+    base_url: &str,
+    method: &str,
+    params: Value,
+) -> (reqwest::StatusCode, Value) {
     let resp = client
         .post(format!("{base_url}/jsonrpc"))
         .json(&rpc_body(method, params))
@@ -46,9 +51,31 @@ async fn rpc_call(client: &Client, base_url: &str, method: &str, params: Value) 
         .expect("POST /jsonrpc failed");
     let status = resp.status();
     let body: Value = resp.json().await.expect("invalid JSON response");
+    (status, body)
+}
+
+/// Send a successful JSON-RPC request and return the JSON response.
+async fn rpc_call(client: &Client, base_url: &str, method: &str, params: Value) -> Value {
+    let (status, body) = rpc_call_with_status(client, base_url, method, params).await;
     assert_eq!(
         status, 200,
         "expected 200 for {method}, got {status}: {body}"
+    );
+    body
+}
+
+/// Send an erroring JSON-RPC request and assert aria2's HTTP mapping.
+async fn rpc_error_call(
+    client: &Client,
+    base_url: &str,
+    method: &str,
+    params: Value,
+    expected_status: reqwest::StatusCode,
+) -> Value {
+    let (status, body) = rpc_call_with_status(client, base_url, method, params).await;
+    assert_eq!(
+        status, expected_status,
+        "unexpected HTTP status for {method}: {body}"
     );
     body
 }
@@ -189,7 +216,14 @@ async fn e2e_remove_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.remove", json![["deadbeefdeadbeef"]]).await;
+    let resp = rpc_error_call(
+        &client,
+        &base,
+        "aria2.remove",
+        json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
+    )
+    .await;
     assert_error_code(&resp, 1); // RpcExecution for unknown GID
 }
 
@@ -310,11 +344,12 @@ async fn e2e_tell_status_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.tellStatus",
         json![["nonexistentgid1234"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);
@@ -390,7 +425,7 @@ async fn e2e_change_position_returns_position() {
         ),
         "status should be a valid live task state: {status}"
     );
-    let resp = rpc_call(
+    let (status, resp) = rpc_call_with_status(
         &client,
         &base,
         "aria2.changePosition",
@@ -400,9 +435,11 @@ async fn e2e_change_position_returns_position() {
 
     assert_jsonrpc_format(&resp, "aria2-changePosition");
     if resp.get("error").is_some() {
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
         assert_eq!(resp["error"]["code"], 1);
         return;
     }
+    assert_eq!(status, reqwest::StatusCode::OK);
     assert_success(&resp);
     // Returns the new absolute position
     assert!(
@@ -513,12 +550,12 @@ async fn e2e_change_option_returns_ok() {
 }
 
 #[tokio::test]
-async fn e2e_change_option_non_runtime_rejected() {
+async fn e2e_change_option_non_runtime_is_ignored() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
     let gid = add_uri(&client, &base, "http://127.0.0.1:1/change-option-invalid").await;
-    // "nonexistent-option" is not a runtime-changeable option
+    // Unknown options are ignored by C++ aria2's option gatherer.
     let resp = rpc_call(
         &client,
         &base,
@@ -527,7 +564,34 @@ async fn e2e_change_option_non_runtime_rejected() {
     )
     .await;
 
-    assert_error_code(&resp, -32602); // InvalidParams
+    assert_success(&resp);
+}
+
+#[tokio::test]
+async fn e2e_option_parse_failures_match_aria2_execution_error() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let gid = add_uri(&client, &base, "http://127.0.0.1:1/change-option-bad-value").await;
+
+    let change_option = rpc_error_call(
+        &client,
+        &base,
+        "aria2.changeOption",
+        json![[&gid, {"max-download-limit": "badvalue"}]],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_error_code(&change_option, 1);
+
+    let change_global = rpc_error_call(
+        &client,
+        &base,
+        "aria2.changeGlobalOption",
+        json![[{"max-overall-download-limit": "badvalue"}]],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_error_code(&change_global, 1);
 }
 
 #[tokio::test]
@@ -606,11 +670,12 @@ async fn e2e_get_peers_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.getPeers",
         json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);
@@ -640,7 +705,14 @@ async fn e2e_get_uris_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getUris", json![["deadbeefdeadbeef"]]).await;
+    let resp = rpc_error_call(
+        &client,
+        &base,
+        "aria2.getUris",
+        json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
+    )
+    .await;
     assert_error_code(&resp, 1);
 }
 
@@ -670,11 +742,12 @@ async fn e2e_get_files_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.getFiles",
         json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);
@@ -701,11 +774,12 @@ async fn e2e_get_servers_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.getServers",
         json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);
@@ -1097,7 +1171,7 @@ async fn e2e_full_lifecycle_all_methods() {
     assert_success(&unpause);
 
     // 12. changePosition
-    let pos = rpc_call(
+    let (pos_status, pos) = rpc_call_with_status(
         &client,
         &base,
         "aria2.changePosition",
@@ -1105,8 +1179,10 @@ async fn e2e_full_lifecycle_all_methods() {
     )
     .await;
     if pos.get("error").is_some() {
+        assert_eq!(pos_status, reqwest::StatusCode::BAD_REQUEST);
         assert_eq!(pos["error"]["code"], 1);
     } else {
+        assert_eq!(pos_status, reqwest::StatusCode::OK);
         assert_success(&pos);
     }
 
@@ -1153,7 +1229,14 @@ async fn e2e_unknown_method_returns_method_not_found() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.nonexistentMethod", json!([])).await;
+    let resp = client
+        .post(format!("{base}/jsonrpc"))
+        .json(&rpc_body("aria2.nonexistentMethod", json!([])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp: Value = resp.json().await.unwrap();
     assert_jsonrpc_format(&resp, "aria2-nonexistentMethod");
     assert_error_code(&resp, 1);
 }
@@ -1180,7 +1263,14 @@ async fn e2e_pause_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.pause", json![["deadbeefdeadbeef"]]).await;
+    let resp = rpc_error_call(
+        &client,
+        &base,
+        "aria2.pause",
+        json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
+    )
+    .await;
     assert_error_code(&resp, 1);
 }
 
@@ -1189,11 +1279,12 @@ async fn e2e_get_option_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.getOption",
         json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);
@@ -1204,11 +1295,12 @@ async fn e2e_change_position_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.changePosition",
         json![["deadbeefdeadbeef", 0, "POS_SET"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);
@@ -1219,11 +1311,12 @@ async fn e2e_change_uri_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.changeUri",
         json![["deadbeefdeadbeef", 1, [], ["http://x.com"]]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);
@@ -1234,11 +1327,12 @@ async fn e2e_remove_download_result_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.removeDownloadResult",
         json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
     assert_error_code(&resp, 1);

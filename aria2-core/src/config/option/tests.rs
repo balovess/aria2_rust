@@ -174,6 +174,16 @@ fn test_option_def_parse_empty_uses_default() {
     assert_eq!(v.as_str().unwrap(), "/tmp");
 }
 
+#[test]
+fn test_option_value_parse_size_rejects_invalid_input() {
+    assert_eq!(
+        OptionValue::parse_size_str_checked("1.5M").unwrap(),
+        1_572_864
+    );
+    assert!(OptionValue::parse_size_str_checked("badvalue").is_err());
+    assert!(OptionValue::parse_size_str_checked("-1K").is_err());
+}
+
 // ==================== Registry Tests ====================
 
 #[test]

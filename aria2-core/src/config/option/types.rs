@@ -171,7 +171,16 @@ impl OptionValue {
     }
 
     pub fn parse_size_str(s: &str) -> u64 {
+        Self::parse_size_str_checked(s).unwrap_or(0)
+    }
+
+    /// Parse an aria2 size value such as `128K` or `2M` without hiding
+    /// malformed input behind the value zero.
+    pub fn parse_size_str_checked(s: &str) -> Result<u64, String> {
         let s = s.trim();
+        if s.is_empty() {
+            return Err("size must not be empty".to_string());
+        }
         let (num_part, suffix) = if s.len() > 1 {
             let last_char = s.chars().last().unwrap();
             match last_char {
@@ -184,10 +193,17 @@ impl OptionValue {
         } else {
             (s, 1u64)
         };
-        num_part
+        let number = num_part
             .parse::<f64>()
-            .map(|n| (n * suffix as f64) as u64)
-            .unwrap_or(0)
+            .map_err(|_| format!("invalid size '{}'", s))?;
+        if !number.is_finite() || number < 0.0 {
+            return Err(format!("invalid size '{}'", s));
+        }
+        let bytes = number * suffix as f64;
+        if bytes > u64::MAX as f64 {
+            return Err(format!("size '{}' is too large", s));
+        }
+        Ok(bytes as u64)
     }
 
     pub fn to_size_string(bytes: u64) -> String {
@@ -305,7 +321,9 @@ impl OptionDef {
                     Ok(OptionValue::Int(n))
                 })
                 .map_err(|e| format!("invalid integer '{}': {}", s, e))?,
-            OptionType::Size => Ok(OptionValue::Int(OptionValue::parse_size_str(s) as i64)),
+            OptionType::Size => OptionValue::parse_size_str_checked(s)
+                .map(|value| OptionValue::Int(value as i64))
+                .map_err(|error| error.to_string()),
             OptionType::Float => s
                 .parse::<f64>()
                 .map(OptionValue::Float)

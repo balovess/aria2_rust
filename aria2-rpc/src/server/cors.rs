@@ -22,6 +22,11 @@ impl CorsConfig {
     /// Special value "*" allows all origins (wildcard mode).
     /// Multiple origins can be specified as "http://localhost:8080,https://example.com"
     pub fn with_allowed_origins(origins: Vec<String>) -> Self {
+        let origins = origins
+            .into_iter()
+            .map(|origin| origin.trim().to_string())
+            .filter(|origin| !origin.is_empty())
+            .collect::<Vec<_>>();
         let allow_origin = if origins.len() == 1 && origins[0] == "*" {
             "*".to_string()
         } else {
@@ -44,21 +49,34 @@ impl CorsConfig {
             return Self::default();
         }
 
-        let origins: Vec<String> = if trimmed == crate::constants::CORS_DEFAULT_ORIGIN {
-            vec![crate::constants::CORS_DEFAULT_ORIGIN.to_string()]
-        } else {
-            trimmed
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        };
+        let origins = trimmed
+            .split(',')
+            .map(str::trim)
+            .map(str::to_string)
+            .collect();
 
         Self::with_allowed_origins(origins)
     }
 
     pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
-        self.allow_origin = origin.into();
+        let origin = origin.into();
+        self.allowed_origins = origin
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_string)
+            .collect();
+        self.allow_origin = origin;
+        self
+    }
+
+    pub fn with_methods(mut self, methods: impl Into<String>) -> Self {
+        self.allow_methods = methods.into();
+        self
+    }
+
+    pub fn with_headers(mut self, headers: impl Into<String>) -> Self {
+        self.allow_headers = headers.into();
         self
     }
 
@@ -89,20 +107,32 @@ impl CorsConfig {
         }
     }
 
+    pub(crate) fn is_wildcard(&self) -> bool {
+        self.allowed_origins
+            .iter()
+            .any(|origin| origin == crate::constants::CORS_DEFAULT_ORIGIN)
+    }
+
+    pub(crate) fn allowed_origins(&self) -> &[String] {
+        &self.allowed_origins
+    }
+
     /// Generate CORS headers for a response
     ///
     /// Returns None if the origin is not allowed.
     /// Returns Some(headers) with appropriate CORS headers if allowed.
     pub fn headers_for_origin(&self, origin: Option<&str>) -> Option<Vec<(&'static str, String)>> {
         let origin_str = match origin {
-            Some(o) if self.allows_origin(Some(o)) => o.to_string(),
+            Some(o) if self.allows_origin(Some(o)) => {
+                if self.is_wildcard() && !self.allow_credentials {
+                    crate::constants::CORS_DEFAULT_ORIGIN.to_string()
+                } else {
+                    o.to_string()
+                }
+            }
             None if self.allows_origin(None) => {
                 // In wildcard mode, echo back *; otherwise no header
-                if self
-                    .allowed_origins
-                    .iter()
-                    .any(|s| s == crate::constants::CORS_DEFAULT_ORIGIN)
-                {
+                if self.is_wildcard() {
                     crate::constants::CORS_DEFAULT_ORIGIN.to_string()
                 } else {
                     return Some(vec![]); // Allow but don't set specific origin

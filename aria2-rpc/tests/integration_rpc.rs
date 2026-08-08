@@ -371,14 +371,14 @@ async fn test_change_option_propagates_to_running_group() {
 }
 
 #[tokio::test]
-async fn test_change_option_rejects_startup_only_with_group_man() {
+async fn test_change_option_ignores_startup_only_with_group_man() {
     let (man, gid_hex) = setup_group_man_with_group().await;
     let engine = RpcEngine::new().with_group_man(man);
 
     // `enable-rpc` is NOT in either RUNTIME_CHANGEABLE_OPTIONS or
     // RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS (it has no setChangeOption
-    // or setChangeOptionForReserved in C++), so changeOption must reject
-    // it with InvalidParams even when a running group exists.
+    // or setChangeOptionForReserved in C++), so changeOption must ignore it
+    // and still return OK even when a group exists.
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
         serde_json::json!([gid_hex, {"enable-rpc": "true"}]),
@@ -386,21 +386,15 @@ async fn test_change_option_rejects_startup_only_with_group_man() {
     .with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(
-        resp.is_error(),
-        "changeOption with a non-changeable key should fail"
-    );
-    assert_eq!(
-        resp.error.unwrap().code,
-        -32602,
-        "error code should be InvalidParams (-32602)"
+        resp.is_success(),
+        "changeOption with a non-changeable key should be ignored"
     );
 }
 
 #[tokio::test]
-async fn test_change_option_unknown_gid_stores_in_task_opts() {
-    // When group_man is set but the GID is not registered (task not started
-    // yet), changeOption should still succeed and store in task_opts so the
-    // change applies when the task starts later.
+async fn test_change_option_unknown_gid_returns_execution_error() {
+    // C++ aria2 resolves the GID before gathering options, so an unknown
+    // download cannot be staged through changeOption.
     let man = Arc::new(RwLock::new(RequestGroupMan::new()));
     let engine = RpcEngine::new().with_group_man(man);
 
@@ -411,27 +405,6 @@ async fn test_change_option_unknown_gid_stores_in_task_opts() {
     )
     .with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(
-        resp.is_success(),
-        "changeOption for unregistered GID should be stored in task_opts"
-    );
-
-    // getOption should return the stored value.
-    let get_req =
-        JsonRpcRequest::new("aria2.getOption", serde_json::json!([unknown_gid])).with_id(2);
-    let get_resp = engine.handle_request(&get_req).await;
-    assert!(get_resp.is_success());
-    let opts: HashMap<String, serde_json::Value> =
-        serde_json::from_value(get_resp.result.unwrap()).unwrap();
-    // Wire format: all numbers are serialized as strings to match original aria2.
-    let max_retries_val = opts.get("max-retries").unwrap();
-    assert!(
-        max_retries_val.is_string(),
-        "max-retries should be a string in wire format"
-    );
-    assert_eq!(
-        max_retries_val.as_str(),
-        Some("7"),
-        "getOption should return the stored max-retries"
-    );
+    assert!(resp.is_error());
+    assert_eq!(resp.error.unwrap().code, 1);
 }

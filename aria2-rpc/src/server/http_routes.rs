@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
+use super::auth::AuthConfig;
 use super::config::ServerConfig;
+use super::cors::CorsConfig;
 use super::tls::{TlsConfig, TlsError};
 use super::ws_session::{handle_ws_socket, ws_handler};
 use crate::engine::RpcEngine;
@@ -35,10 +37,18 @@ impl RpcServer {
             None
         };
 
+        let engine = if let Some(token) = config.auth.token.as_deref() {
+            Arc::new(
+                RpcEngine::new().with_auth_middleware(super::auth::RpcAuthMiddleware::new(token)),
+            )
+        } else {
+            Arc::new(RpcEngine::new())
+        };
+
         Ok(Self {
             config,
             tls_acceptor,
-            engine: Arc::new(RpcEngine::new()),
+            engine,
         })
     }
 
@@ -159,25 +169,22 @@ impl RpcServer {
     /// ```
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::{
-            Router,
-            http::{Method, header},
+            Router, middleware,
             routing::{get, post},
         };
         use std::net::SocketAddr;
         use tokio::net::TcpListener;
-        use tower_http::cors::{Any, CorsLayer};
 
         // Create shared state with the persistent RPC engine
         let state = RpcState {
             engine: self.engine.clone(),
             max_request_size: self.config.max_request_size,
+            auth: self.config.auth.clone(),
         };
 
-        // Build CORS layer
-        let cors_layer = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+        // Build the configured CORS layer once. The layer is immutable and
+        // shared by all connections, while origin matching remains per request.
+        let cors_layer = build_cors_layer(&self.config.cors);
 
         // Build router
         let app = Router::new()
@@ -188,6 +195,10 @@ impl RpcServer {
             .route("/", get(root_handler))
             .layer(axum::extract::DefaultBodyLimit::max(
                 self.config.max_request_size,
+            ))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                http_auth_middleware,
             ))
             .layer(cors_layer)
             .with_state(state);
@@ -281,8 +292,260 @@ impl RpcServer {
 #[derive(Clone)]
 pub struct RpcState {
     pub(crate) engine: Arc<RpcEngine>,
+    /// HTTP Basic Auth configuration. Token auth remains in `RpcEngine` and
+    /// is carried in the JSON/XML-RPC parameter contract.
+    pub(crate) auth: AuthConfig,
     /// Maximum allowed size for a single WebSocket frame/message in bytes.
     pub(crate) max_request_size: usize,
+}
+
+/// Convert the public CORS configuration into tower-http's request-aware
+/// layer. `AllowOrigin::list` mirrors an allowed origin back to the browser,
+/// while wildcard mode retains aria2's literal `*` response.
+fn build_cors_layer(config: &CorsConfig) -> tower_http::cors::CorsLayer {
+    use axum::http::{HeaderName, HeaderValue, Method};
+    use std::time::Duration;
+    use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, Any, CorsLayer};
+
+    let methods = if config.allow_methods.trim() == "*" {
+        AllowMethods::any()
+    } else {
+        AllowMethods::list(
+            config
+                .allow_methods
+                .split(',')
+                .filter_map(|method| method.trim().parse::<Method>().ok()),
+        )
+    };
+    let headers = if config.allow_headers.trim() == "*" {
+        AllowHeaders::any()
+    } else {
+        AllowHeaders::list(
+            config
+                .allow_headers
+                .split(',')
+                .filter_map(|header| header.trim().parse::<HeaderName>().ok()),
+        )
+    };
+    let max_age = aria2_core::constants::CORS_MAX_AGE
+        .parse::<u64>()
+        .unwrap_or_default();
+
+    let origin = if config.is_wildcard() {
+        if config.allow_credentials {
+            AllowOrigin::mirror_request()
+        } else {
+            Any.into()
+        }
+    } else {
+        AllowOrigin::list(
+            config
+                .allowed_origins()
+                .iter()
+                .filter_map(|origin| HeaderValue::from_str(origin).ok()),
+        )
+    };
+
+    CorsLayer::new()
+        .allow_origin(origin)
+        .allow_methods(methods)
+        .allow_headers(headers)
+        .allow_credentials(config.allow_credentials)
+        .max_age(Duration::from_secs(max_age))
+}
+
+/// Enforce HTTP Basic Auth at the transport seam. `OPTIONS` is deliberately
+/// exempt, matching aria2's CORS preflight behavior; RPC token auth still
+/// applies after a request reaches the JSON/XML engine.
+async fn http_auth_middleware(
+    axum::extract::State(state): axum::extract::State<RpcState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{Method, StatusCode, header};
+    use axum::response::IntoResponse;
+
+    let authorized = request.method() == Method::OPTIONS
+        || !state.auth.has_basic()
+        || state.auth.verify_authorization(
+            request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+        );
+
+    if authorized {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"aria2\"")],
+            "Unauthorized",
+        )
+            .into_response()
+    }
+}
+
+struct JsonGetRequest {
+    body: Vec<u8>,
+    callback: Option<String>,
+}
+
+/// Parse aria2's legacy JSON-RPC GET/JSONP query format.
+///
+/// The original server accepts `method`, `id`, and a URL-encoded Base64
+/// `params` value. When both `method` and `id` are omitted, the decoded params
+/// are treated as a complete batch request. `jsoncallback` wraps the response
+/// in a JavaScript callback.
+fn parse_json_get_query(query: &str) -> Result<JsonGetRequest, crate::json_rpc::JsonRpcError> {
+    use base64::Engine;
+    use serde_json::{Map, Value};
+
+    let mut method = None;
+    let mut id = None;
+    let mut params = None;
+    let mut callback = None;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "method" => method = Some(value.into_owned()),
+            "id" => id = Some(value.into_owned()),
+            "params" => params = Some(value.into_owned()),
+            "jsoncallback" => callback = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    let decoded_params = params
+        .map(|encoded| {
+            // Form decoding turns an unescaped '+' into a space. Tolerate it
+            // for clients that omitted URL encoding around standard Base64.
+            let encoded = encoded.replace(' ', "+");
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    crate::json_rpc::JsonRpcError::ParseError(format!(
+                        "invalid GET params base64: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
+
+    let body = match (method, id) {
+        (None, None) => decoded_params.ok_or_else(|| {
+            crate::json_rpc::JsonRpcError::ParseError("GET params are missing".into())
+        })?,
+        (method, id) => {
+            let mut request = Map::new();
+            if let Some(method) = method {
+                request.insert("method".into(), Value::String(method));
+            }
+            if let Some(id) = id {
+                request.insert("id".into(), Value::String(id));
+            }
+            if let Some(params) = decoded_params {
+                let params = serde_json::from_slice(&params).map_err(|error| {
+                    crate::json_rpc::JsonRpcError::ParseError(format!(
+                        "invalid GET params JSON: {error}"
+                    ))
+                })?;
+                request.insert("params".into(), params);
+            }
+            serde_json::to_vec(&Value::Object(request)).map_err(|error| {
+                crate::json_rpc::JsonRpcError::InternalError(format!(
+                    "failed to build GET request: {error}"
+                ))
+            })?
+        }
+    };
+
+    if let Some(callback) = callback.as_deref()
+        && !is_valid_jsonp_callback(callback)
+    {
+        return Err(crate::json_rpc::JsonRpcError::InvalidRequest(
+            "invalid jsoncallback".into(),
+        ));
+    }
+
+    Ok(JsonGetRequest { body, callback })
+}
+
+fn is_valid_jsonp_callback(callback: &str) -> bool {
+    callback.split('.').all(|segment| {
+        let mut chars = segment.chars();
+        matches!(chars.next(), Some('$' | '_' | 'a'..='z' | 'A'..='Z'))
+            && chars.all(|ch| matches!(ch, '$' | '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
+    }) && !callback.is_empty()
+}
+
+struct JsonRpcHttpResponse {
+    status: axum::http::StatusCode,
+    body: String,
+}
+
+fn http_status_for_jsonrpc_error(code: i32) -> axum::http::StatusCode {
+    use axum::http::StatusCode;
+
+    match code {
+        // aria2 maps execution failures and malformed requests to 400. Keep
+        // the standard MethodNotFound mapping available for callers that use
+        // -32601, although aria2's own unknown-method path uses code 1.
+        1 | -32600 => StatusCode::BAD_REQUEST,
+        -32601 => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn serialize_jsonrpc_response(response: crate::json_rpc::JsonRpcResponse) -> JsonRpcHttpResponse {
+    let status = response
+        .error
+        .as_ref()
+        .map(|error| http_status_for_jsonrpc_error(error.code))
+        .unwrap_or(axum::http::StatusCode::OK);
+    let body = response.to_string().unwrap_or_else(|error| {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
+            serde_json::Value::String(error.to_string())
+        )
+    });
+    JsonRpcHttpResponse { status, body }
+}
+
+async fn dispatch_jsonrpc_body(engine: &RpcEngine, body: &[u8]) -> JsonRpcHttpResponse {
+    use crate::json_rpc::{JsonRpcBatchResponse, parse_request};
+
+    match parse_request(body) {
+        Ok(requests) if requests.len() == 1 => {
+            serialize_jsonrpc_response(engine.handle_request(&requests[0]).await)
+        }
+        Ok(requests) => {
+            let mut responses = Vec::with_capacity(requests.len());
+            for request in &requests {
+                responses.push(engine.handle_request(request).await);
+            }
+            let body = JsonRpcBatchResponse(responses)
+                .to_string()
+                .unwrap_or_else(|error| {
+                    format!(
+                        "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
+                        serde_json::Value::String(error.to_string())
+                    )
+                });
+            // aria2 always returns HTTP 200 for a batch envelope, even when
+            // individual entries contain RPC errors.
+            JsonRpcHttpResponse {
+                status: axum::http::StatusCode::OK,
+                body,
+            }
+        }
+        Err(error) => serialize_jsonrpc_response(error.into_response(None)),
+    }
+}
+
+fn wrap_jsonp(body: String, callback: Option<&str>) -> String {
+    match callback {
+        Some(callback) => format!("{callback}({body})"),
+        None => body,
+    }
 }
 
 impl std::fmt::Debug for RpcServer {
@@ -320,33 +583,15 @@ async fn handle_jsonrpc(
     axum::extract::State(state): axum::extract::State<RpcState>,
     body: axum::body::Bytes,
 ) -> impl axum::response::IntoResponse {
-    use crate::json_rpc::{JsonRpcBatchResponse, parse_request};
-    use axum::http::{StatusCode, header};
+    use axum::http::header;
     use axum::response::IntoResponse;
 
-    let response_body = match parse_request(&body) {
-        Ok(requests) if requests.len() == 1 => state.engine.handle_request(&requests[0]).await
-            .to_string()
-            .unwrap_or_else(|error| format!("{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":\"{}\"}}}}", error)),
-        Ok(requests) => {
-            let mut responses = Vec::with_capacity(requests.len());
-            for request in &requests {
-                responses.push(state.engine.handle_request(request).await);
-            }
-            JsonRpcBatchResponse(responses)
-                .to_string()
-                .unwrap_or_else(|error| format!("{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":\"{}\"}}}}", error))
-        }
-        Err(error) => error
-            .into_response(None)
-            .to_string()
-            .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}".to_string()),
-    };
+    let response = dispatch_jsonrpc_body(&state.engine, &body).await;
 
     (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        response_body,
+        response.status,
+        [(header::CONTENT_TYPE, "application/json-rpc")],
+        response.body,
     )
         .into_response()
 }
@@ -356,12 +601,12 @@ async fn handle_xmlrpc(
     axum::extract::State(state): axum::extract::State<RpcState>,
     body: axum::body::Bytes,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::{StatusCode, header};
-    use axum::response::IntoResponse;
     use crate::json_rpc::JsonRpcRequest;
     use crate::xml_rpc::{XmlRpcResponse, XmlRpcValue, parse_request};
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
 
-    let response = match parse_request(&body) {
+    let (status, response) = match parse_request(&body) {
         Ok(request) => {
             let params = request
                 .params
@@ -370,13 +615,11 @@ async fn handle_xmlrpc(
                 .collect::<Result<Vec<_>, _>>();
             match params {
                 Ok(params) => {
-                    let json_request = JsonRpcRequest::new(
-                        request.method_name,
-                        serde_json::Value::Array(params),
-                    )
-                    .with_id(serde_json::Value::String("xmlrpc".into()));
+                    let json_request =
+                        JsonRpcRequest::new(request.method_name, serde_json::Value::Array(params))
+                            .with_id(serde_json::Value::String("xmlrpc".into()));
                     let json_response = state.engine.handle_request(&json_request).await;
-                    match json_response.result {
+                    let response = match json_response.result {
                         Some(result) => XmlRpcValue::from_json_value(result)
                             .map(XmlRpcResponse::single)
                             .unwrap_or_else(|error| {
@@ -389,16 +632,23 @@ async fn handle_xmlrpc(
                                 .unwrap_or((-32603, "Missing RPC response".into()));
                             XmlRpcResponse::fault(error.0, &error.1)
                         }
-                    }
+                    };
+                    (StatusCode::OK, response)
                 }
-                Err(error) => XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
+                Err(error) => (
+                    StatusCode::BAD_REQUEST,
+                    XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
+                ),
             }
         }
-        Err(error) => XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
+        ),
     };
 
     (
-        StatusCode::OK,
+        status,
         [(header::CONTENT_TYPE, "text/xml")],
         response.to_xml(),
     )
@@ -418,6 +668,7 @@ async fn handle_xmlrpc(
 async fn handle_jsonrpc_or_ws(
     axum::extract::State(state): axum::extract::State<RpcState>,
     ws: Option<axum::extract::ws::WebSocketUpgrade>,
+    query: axum::extract::RawQuery,
 ) -> impl axum::response::IntoResponse {
     use axum::http::StatusCode;
     use axum::response::Json;
@@ -436,7 +687,36 @@ async fn handle_jsonrpc_or_ws(
                 .on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
         }
         None => {
-            // Regular GET request
+            if let Some(query) = query.0.filter(|query| !query.is_empty()) {
+                let parsed = match parse_json_get_query(&query) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        let response = serialize_jsonrpc_response(error.into_response(None));
+                        return (
+                            response.status,
+                            [(axum::http::header::CONTENT_TYPE, "application/json-rpc")],
+                            response.body,
+                        )
+                            .into_response();
+                    }
+                };
+                let response = dispatch_jsonrpc_body(&state.engine, &parsed.body).await;
+                let content_type = if parsed.callback.is_some() {
+                    "text/javascript"
+                } else {
+                    "application/json-rpc"
+                };
+                return (
+                    response.status,
+                    [(axum::http::header::CONTENT_TYPE, content_type)],
+                    wrap_jsonp(response.body, parsed.callback.as_deref()),
+                )
+                    .into_response();
+            }
+
+            // Keep a small discovery response for the Rust server's no-query
+            // health-check extension. Original aria2 uses query parameters
+            // for GET JSON-RPC and JSONP requests.
             (
                 StatusCode::OK,
                 Json(json!({

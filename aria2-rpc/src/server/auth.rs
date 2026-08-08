@@ -29,7 +29,9 @@ impl AuthConfig {
         self.token.is_some()
     }
     pub fn has_basic(&self) -> bool {
-        self.username.is_some() && self.password.is_some()
+        self.username
+            .as_deref()
+            .is_some_and(|username| !username.is_empty())
     }
 
     pub fn verify_token(&self, provided: &str) -> bool {
@@ -41,18 +43,35 @@ impl AuthConfig {
 
     pub fn verify_basic(&self, encoded: &str) -> bool {
         let decoded = base64_decode(encoded).unwrap_or_default();
-        if let Some(colon_pos) = decoded.find(':') {
-            let (user, pass) = decoded.split_at(colon_pos);
-            let pass = &pass[1..];
-            match (&self.username, &self.password) {
-                // Password is a secret: compare in constant time. The username
-                // is not secret, so short-circuiting on it first is fine.
-                (Some(u), Some(p)) => u == user && constant_time_eq(p, pass),
-                _ => false,
-            }
-        } else {
-            false
-        }
+        let Some((user, pass)) = decoded.split_once(':') else {
+            return false;
+        };
+
+        let username_matches = self
+            .username
+            .as_deref()
+            .is_some_and(|expected| constant_time_eq(expected, user));
+        let password_matches = match self.password.as_deref() {
+            Some(expected) => constant_time_eq(expected, pass),
+            // aria2 accepts username-only Basic Auth when --rpc-passwd is not
+            // configured.
+            None => true,
+        };
+        username_matches && password_matches
+    }
+
+    /// Validate an HTTP `Authorization` header using aria2's Basic scheme.
+    ///
+    /// The authentication scheme is case-insensitive per HTTP, while the
+    /// base64 payload is decoded strictly using the standard alphabet.
+    pub fn verify_authorization(&self, header: Option<&str>) -> bool {
+        let Some(header) = header else {
+            return false;
+        };
+        let Some((scheme, encoded)) = header.trim().split_once(' ') else {
+            return false;
+        };
+        scheme.eq_ignore_ascii_case("Basic") && self.verify_basic(encoded.trim())
     }
 }
 
@@ -262,6 +281,8 @@ mod tests {
         assert!(auth.has_basic());
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"admin:pass123");
         assert!(auth.verify_basic(&encoded));
+        assert!(auth.verify_authorization(Some(&format!("Basic {encoded}"))));
+        assert!(auth.verify_authorization(Some(&format!("basic {encoded}"))));
         assert!(
             !auth.verify_basic(
                 base64::engine::general_purpose::STANDARD
@@ -269,6 +290,20 @@ mod tests {
                     .as_str()
             )
         );
+        assert!(!auth.verify_authorization(None));
+        assert!(!auth.verify_authorization(Some("Bearer token")));
+    }
+
+    #[test]
+    fn test_auth_config_username_only_basic_auth() {
+        let auth = AuthConfig {
+            username: Some("admin".into()),
+            password: None,
+            ..AuthConfig::default()
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"admin:anything");
+        assert!(auth.has_basic());
+        assert!(auth.verify_basic(&encoded));
     }
 
     #[test]
@@ -284,7 +319,7 @@ mod tests {
         let result = middleware.validate(Some("wrong-token"));
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.code(), -32001);
+        assert_eq!(err.code(), 1);
         assert!(err.to_string().contains("Invalid token"));
     }
 
@@ -325,7 +360,7 @@ mod tests {
         let result = middleware.validate(None);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.code(), -32001);
+        assert_eq!(err.code(), 1);
         assert!(err.to_string().contains("Token required"));
         assert!(
             middleware.is_auth_enabled(),

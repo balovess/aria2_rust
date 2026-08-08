@@ -191,19 +191,39 @@ impl App {
             .unwrap_or_else(|| crate::constants::DEFAULT_RPC_HOST.to_string());
 
         // Build authentication config
-        let auth = if let Some(secret) = self.get_opt_str("rpc-secret").await {
-            AuthConfig::default().with_token(&secret)
-        } else if let (Some(user), Some(pass)) = (
-            self.get_opt_str("rpc-user").await,
-            self.get_opt_str("rpc-passwd").await,
-        ) {
-            AuthConfig::default().with_basic_auth(&user, &pass)
+        let secret = self.get_opt_str("rpc-secret").await.unwrap_or_default();
+        let user = self.get_opt_str("rpc-user").await.unwrap_or_default();
+        let pass = self.get_opt_str("rpc-passwd").await;
+        let auth = if !secret.is_empty() {
+            AuthConfig::default().with_token(secret)
+        } else if !user.is_empty() {
+            AuthConfig {
+                username: Some(user),
+                password: pass,
+                ..AuthConfig::default()
+            }
         } else {
             AuthConfig::default()
         };
 
         // Build CORS config
-        let cors = if let Some(cors_domain) = self.get_opt_str("rpc-cors-domain").await {
+        let cors = if self
+            .get_opt_bool("rpc-allow-origin-all")
+            .await
+            .unwrap_or(false)
+        {
+            CorsConfig::default()
+        } else if let Some(allow_origin) = self
+            .get_opt_str("rpc-allow-origin")
+            .await
+            .filter(|origin| !origin.trim().is_empty())
+        {
+            CorsConfig::from_option_value(&allow_origin)
+        } else if let Some(cors_domain) = self
+            .get_opt_str("rpc-cors-domain")
+            .await
+            .filter(|domain| !domain.trim().is_empty())
+        {
             CorsConfig::from_option_value(&cors_domain)
         } else {
             CorsConfig::default()
@@ -217,8 +237,6 @@ impl App {
         // Build RPC engine with shared state (group_man + cmd_tx) so that
         // aria2.addUri starts real downloads and tellStatus/getGlobalStat
         // read live progress.
-        let secret = self.get_opt_str("rpc-secret").await.unwrap_or_default();
-
         // Collect user-set global options from ConfigManager and merge them
         // over the OptionRegistry defaults inside the RPC engine. User values
         // take precedence; null values fall back to defaults.

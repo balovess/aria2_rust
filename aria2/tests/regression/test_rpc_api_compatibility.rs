@@ -942,7 +942,11 @@ async fn regression_list_methods_returns_36_methods() {
 
     assert_success(&resp);
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(methods.len(), 36, "Should return exactly the 36 original methods");
+    assert_eq!(
+        methods.len(),
+        36,
+        "Should return exactly the 36 original methods"
+    );
 
     // Verify key methods are present
     assert!(methods.contains(&"aria2.addUri".to_string()));
@@ -1391,8 +1395,8 @@ async fn regression_multicall_subcall_bad_token_isolated() {
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);
 
-    assert_multicall_error_code(&resp, 0, -32001);
-    assert_multicall_error_code(&resp, 1, -32001);
+    assert_multicall_error_code(&resp, 0, 1);
+    assert_multicall_error_code(&resp, 1, 1);
     let ok = assert_multicall_ok(&resp, 2, "aria2.getVersion");
     assert!(ok.get("version").is_some());
 }
@@ -1442,7 +1446,7 @@ async fn regression_multicall_envelope_bad_token_rejected() {
         ]),
     );
     let resp = engine.handle_request(&req).await;
-    assert_error_code(&resp, -32001);
+    assert_error_code(&resp, 1);
 }
 
 /// Test: the wire-format post-processor reaches inside the `[[result]]`

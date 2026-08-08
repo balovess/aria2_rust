@@ -54,6 +54,20 @@ pub async fn start_test_server_with_max_concurrent(
     token: Option<&str>,
     max_concurrent: u32,
 ) -> (String, TestServerHandle) {
+    start_test_server_with_config(token, max_concurrent, ServerConfig::default()).await
+}
+
+/// Start an RPC server with an explicit server configuration.
+///
+/// The helper still owns the download-engine fixture and reserves a fresh
+/// port; the supplied configuration controls HTTP-facing behavior such as
+/// Basic Auth and CORS.
+#[allow(dead_code)]
+pub async fn start_test_server_with_config(
+    token: Option<&str>,
+    max_concurrent: u32,
+    config: ServerConfig,
+) -> (String, TestServerHandle) {
     // Ensure the ring crypto provider is installed before constructing clients.
     ensure_crypto_provider();
     // Find a random available port via a pre-bind probe.
@@ -64,9 +78,7 @@ pub async fn start_test_server_with_max_concurrent(
         .port();
     drop(listener); // release so the RPC server can claim it
 
-    let config = ServerConfig::default()
-        .with_host("127.0.0.1")
-        .with_port(port);
+    let config = config.with_host("127.0.0.1").with_port(port);
 
     let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
     let mut download_engine = DownloadEngine::new(1);
@@ -83,9 +95,9 @@ pub async fn start_test_server_with_max_concurrent(
         }
     });
 
-    // Wire auth onto the engine (ServerConfig.auth is decorative only;
-    // the actual check lives in RpcEngine::auth_middleware). Also configure a
-    // unique session path for each fixture.
+    // Wire token auth onto the engine, matching aria2's token-in-params
+    // contract. HTTP Basic Auth is enforced by RpcServer from ServerConfig.
+    // Also configure a unique session path for each fixture.
     static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
     let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let save_session_path = std::env::temp_dir().join(format!(
@@ -134,7 +146,12 @@ async fn wait_for_server_ready(base_url: &str) {
 
     while tokio::time::Instant::now() < deadline {
         match client.get(base_url).send().await {
-            Ok(resp) if resp.status().is_success() => return,
+            Ok(resp)
+                if resp.status().is_success()
+                    || resp.status() == reqwest::StatusCode::UNAUTHORIZED =>
+            {
+                return;
+            }
             Ok(resp) => {
                 last_err = format!("status={}", resp.status());
             }

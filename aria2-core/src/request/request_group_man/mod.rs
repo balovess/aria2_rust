@@ -520,7 +520,7 @@ impl RequestGroupMan {
 
         let mut g = group.recover_mut();
         for (key, value) in changes {
-            let applied = g.update_option(&key, value);
+            let applied = g.try_update_option(&key, value)?;
             if !applied {
                 return Err(format!("Option '{}' cannot be changed at runtime", key));
             }

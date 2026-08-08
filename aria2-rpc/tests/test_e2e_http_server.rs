@@ -13,13 +13,16 @@
 
 mod common;
 
-use common::start_test_server;
+use common::{start_test_server, start_test_server_with_config};
 use std::time::Duration;
 
+use aria2_rpc::server::{AuthConfig, CorsConfig, ServerConfig};
+use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::{Value, json};
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,6 +135,113 @@ async fn e2e_jsonrpc_get_info() {
 }
 
 #[tokio::test]
+async fn e2e_jsonrpc_get_query_compatibility() {
+    use base64::Engine;
+
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let params = base64::engine::general_purpose::STANDARD.encode("[]");
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("method", "aria2.getVersion")
+        .append_pair("id", "get-1")
+        .append_pair("params", &params)
+        .finish();
+
+    let response = client
+        .get(format!("{base}/jsonrpc?{query}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_TYPE],
+        "application/json-rpc"
+    );
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["id"], "get-1");
+    assert_result(&body);
+}
+
+#[tokio::test]
+async fn e2e_jsonp_get_query_compatibility() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let params = base64::engine::general_purpose::STANDARD.encode("[]");
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("method", "aria2.getVersion")
+        .append_pair("id", "jsonp-1")
+        .append_pair("params", &params)
+        .append_pair("jsoncallback", "aria2Callback")
+        .finish();
+
+    let response = client
+        .get(format!("{base}/jsonrpc?{query}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_TYPE],
+        "text/javascript"
+    );
+    let body = response.text().await.unwrap();
+    assert!(body.starts_with("aria2Callback({"));
+    assert!(body.ends_with("})"));
+    assert!(body.contains("\"id\":\"jsonp-1\""));
+}
+
+#[tokio::test]
+async fn e2e_jsonrpc_get_batch_query_compatibility() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let batch = json!([
+        {"jsonrpc": "2.0", "method": "aria2.getVersion", "id": "b1", "params": []},
+        {"jsonrpc": "2.0", "method": "aria2.getGlobalStat", "id": "b2", "params": []}
+    ]);
+    let params =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&batch).unwrap());
+
+    let response = client
+        .get(format!("{base}/jsonrpc?params={params}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body.as_array().map(Vec::len), Some(2));
+    assert_eq!(body[0]["id"], "b1");
+    assert_eq!(body[1]["id"], "b2");
+}
+
+#[tokio::test]
+async fn e2e_jsonrpc_get_errors_use_compatible_status_codes() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+
+    let invalid_base64 = client
+        .get(format!(
+            "{base}/jsonrpc?method=aria2.getVersion&params=not-base64"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_base64.status(), 500);
+    let invalid_base64_body: Value = invalid_base64.json().await.unwrap();
+    assert_error_code(&invalid_base64_body, -32700);
+
+    let invalid_callback = client
+        .get(format!(
+            "{base}/jsonrpc?method=aria2.getVersion&params=e30%3D&jsoncallback=bad%3Balert"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_callback.status(), 400);
+    let invalid_callback_body: Value = invalid_callback.json().await.unwrap();
+    assert_error_code(&invalid_callback_body, -32600);
+}
+
+#[tokio::test]
 async fn e2e_add_uri_via_post() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
@@ -175,16 +285,19 @@ async fn e2e_get_global_stat() {
 async fn e2e_rpc_endpoint_post() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
+    let body = r#"<?xml version="1.0"?><methodCall><methodName>aria2.getVersion</methodName><params/></methodCall>"#;
 
-    let resp = client
+    let response = client
         .post(format!("{base}/rpc"))
-        .json(&rpc_body("aria2.getVersion", json!([])))
+        .header("content-type", "text/xml")
+        .body(body)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: Value = resp.json().await.unwrap();
-    assert_result(&body);
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("<methodResponse>"));
+    assert!(body.contains("<name>version</name>"));
 }
 
 #[tokio::test]
@@ -212,12 +325,11 @@ async fn e2e_post_invalid_json() {
         .send()
         .await
         .unwrap();
-    // The server should reject invalid JSON with 400 Bad Request
-    assert!(
-        resp.status().as_u16() == 400 || resp.status().is_success(),
-        "expected 400 or 200, got {}",
-        resp.status()
-    );
+    // aria2 serializes the JSON-RPC parse error, but reports it as a server
+    // error at the HTTP layer.
+    assert_eq!(resp.status(), 500);
+    let body: Value = resp.json().await.unwrap();
+    assert_error_code(&body, -32700);
 }
 
 #[tokio::test]
@@ -252,7 +364,9 @@ async fn e2e_unknown_rpc_method() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.nonexistentMethod", json!([])).await;
+    let (status, resp) =
+        rpc_call_with_status(&client, &base, "aria2.nonexistentMethod", json!([])).await;
+    assert_eq!(status, 400);
     assert_error_code(&resp, 1);
 }
 
@@ -261,6 +375,104 @@ async fn e2e_unknown_rpc_method() {
 // =========================================================================
 
 const TEST_TOKEN: &str = "my-secret-token";
+
+fn basic_auth_header(username: &str, password: &str) -> String {
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))
+    )
+}
+
+#[tokio::test]
+async fn e2e_basic_auth_protects_json_xml_and_preflight() {
+    let config = ServerConfig::default()
+        .with_auth(AuthConfig::default().with_basic_auth("aria2", "basic-secret"));
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
+    let client = Client::new();
+
+    let denied = client
+        .post(format!("{base}/jsonrpc"))
+        .json(&rpc_body("aria2.getVersion", json!([])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401);
+    assert_eq!(
+        denied
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok()),
+        Some("Basic realm=\"aria2\"")
+    );
+
+    let authorized = client
+        .post(format!("{base}/jsonrpc"))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            basic_auth_header("aria2", "basic-secret"),
+        )
+        .json(&rpc_body("aria2.getVersion", json!([])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), 200);
+    let authorized_body: Value = authorized.json().await.unwrap();
+    assert_result(&authorized_body);
+
+    let xml = r#"<?xml version="1.0"?><methodCall><methodName>aria2.getVersion</methodName><params/></methodCall>"#;
+    let xml_denied = client
+        .post(format!("{base}/rpc"))
+        .header("content-type", "text/xml")
+        .body(xml)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(xml_denied.status(), 401);
+
+    let xml_authorized = client
+        .post(format!("{base}/rpc"))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            basic_auth_header("aria2", "basic-secret"),
+        )
+        .header("content-type", "text/xml")
+        .body(xml)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(xml_authorized.status(), 200);
+
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/jsonrpc"))
+        .header("Origin", "https://example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), 200);
+}
+
+#[tokio::test]
+async fn e2e_basic_auth_protects_websocket_upgrade() {
+    let config = ServerConfig::default()
+        .with_auth(AuthConfig::default().with_basic_auth("aria2", "basic-secret"));
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
+    let ws_url = base.replace("http://", "ws://");
+
+    let denied = connect_async(format!("{ws_url}/ws")).await;
+    assert!(
+        denied.is_err(),
+        "unauthenticated WebSocket upgrade must fail"
+    );
+
+    let mut request = format!("{ws_url}/ws").into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        basic_auth_header("aria2", "basic-secret").parse().unwrap(),
+    );
+    let (socket, _) = connect_async(request).await.unwrap();
+    drop(socket);
+}
 
 #[tokio::test]
 async fn e2e_auth_valid_token() {
@@ -282,14 +494,15 @@ async fn e2e_auth_wrong_token() {
     let (base, _guard) = start_test_server(Some(TEST_TOKEN)).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let (status, resp) = rpc_call_with_status(
         &client,
         &base,
         "aria2.getVersion",
         json![["token:wrong-token"]],
     )
     .await;
-    assert_error_code(&resp, -32001);
+    assert_eq!(status, 400);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -297,8 +510,9 @@ async fn e2e_auth_no_token() {
     let (base, _guard) = start_test_server(Some(TEST_TOKEN)).await;
     let client = Client::new();
 
-    let resp = rpc_call(&client, &base, "aria2.getVersion", json!([])).await;
-    assert_error_code(&resp, -32001);
+    let (status, resp) = rpc_call_with_status(&client, &base, "aria2.getVersion", json!([])).await;
+    assert_eq!(status, 400);
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]
@@ -359,6 +573,85 @@ async fn e2e_cors_wildcard() {
         .await
         .unwrap();
     assert!(resp.status().is_success());
+}
+
+#[tokio::test]
+async fn e2e_cors_uses_restricted_origin_and_preflight_config() {
+    let cors = CorsConfig::from_option_value("https://allowed.example");
+    let config = ServerConfig::default().with_cors(cors);
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
+    let client = Client::new();
+
+    let allowed = client
+        .post(format!("{base}/jsonrpc"))
+        .header("Origin", "https://allowed.example")
+        .json(&rpc_body("aria2.getVersion", json!([])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("https://allowed.example")
+    );
+
+    let blocked = client
+        .post(format!("{base}/jsonrpc"))
+        .header("Origin", "https://blocked.example")
+        .json(&rpc_body("aria2.getVersion", json!([])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), 200);
+    assert!(
+        blocked
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/jsonrpc"))
+        .header("Origin", "https://allowed.example")
+        .header("Access-Control-Request-Method", "POST")
+        .header(
+            "Access-Control-Request-Headers",
+            "content-type, authorization",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), 200);
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("https://allowed.example")
+    );
+    assert!(
+        preflight
+            .headers()
+            .get("access-control-allow-methods")
+            .is_some()
+    );
+
+    let blocked_preflight = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/jsonrpc"))
+        .header("Origin", "https://blocked.example")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_preflight.status(), 200);
+    assert!(
+        blocked_preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
 }
 
 // =========================================================================
@@ -699,13 +992,9 @@ async fn e2e_batch_valid() {
         .send()
         .await
         .unwrap();
-    // The server's POST handler only decodes a single JsonRpcRequest;
-    // batch arrays get 422 Unprocessable Entity (axum deserialization).
-    assert!(
-        resp.status().as_u16() == 200 || resp.status().as_u16() == 422,
-        "expected 200 or 422, got {}",
-        resp.status()
-    );
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body.as_array().map(Vec::len), Some(3));
 }
 
 #[tokio::test]
@@ -724,12 +1013,11 @@ async fn e2e_batch_mixed() {
         .send()
         .await
         .unwrap();
-    // Same 422 limitation as e2e_batch_valid above.
-    assert!(
-        resp.status().as_u16() == 200 || resp.status().as_u16() == 422,
-        "expected 200 or 422, got {}",
-        resp.status()
-    );
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body.as_array().map(Vec::len), Some(2));
+    assert_result(&body[0]);
+    assert_error_code(&body[1], 1);
 }
 
 // =========================================================================

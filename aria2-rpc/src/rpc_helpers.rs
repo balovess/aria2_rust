@@ -5,7 +5,7 @@
 //!
 //! # Features
 //!
-//! - Option key validation constants
+//! - Shared option value normalization
 //! - Response formatting helpers
 //! - Status filtering utilities
 //!
@@ -14,53 +14,19 @@
 //! Based on original aria2 C++ structure:
 //! - `src/RpcMethodImpl.cc` - Shared utility functions
 
-/// Valid option keys accepted by `aria2.changeOption`.
-///
-/// Only these keys are allowed when changing per-task options via RPC.
-/// Any other key will result in an InvalidParams error.
-pub const VALID_OPTION_KEYS: &[&str] = &[
-    "split",
-    "max-connection-per-server",
-    "max-download-limit",
-    "max-upload-limit",
-    "dir",
-    "out",
-    "seed-time",
-    "seed-ratio",
-    "bt-force-encrypt",
-    "bt-require-crypto",
-    "enable-dht",
-    "dht-listen-port",
-    "enable-public-trackers",
-    "bt-piece-selection-strategy",
-    "bt-endgame-threshold",
-    "max-retries",
-    "retry-wait",
-    "http-proxy",
-    "dht-file-path",
-    "bt-max-upload-slots",
-    "bt-optimistic-unchoke-interval",
-    "bt-snubbed-timeout",
-];
+use aria2_core::request::request_group::option_value_to_string;
 
-/// Validate that all provided option keys are in the whitelist
-///
-/// # Arguments
-/// * `keys` - Iterator of option key strings to validate
-///
-/// # Returns
-/// * `Ok(())` if all keys are valid
-/// * `Err(String)` with the first invalid key found
-pub fn validate_option_keys<'a, I>(keys: I) -> Result<(), String>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    for key in keys {
-        if !VALID_OPTION_KEYS.contains(&key) {
-            return Err(format!("Unknown option: {}", key));
-        }
-    }
-    Ok(())
+/// Normalize a map of RPC options to the string-valued map returned by aria2.
+pub fn normalize_rpc_options(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    options
+        .iter()
+        .filter_map(|(key, value)| {
+            option_value_to_string(value)
+                .map(|value| (key.clone(), serde_json::Value::String(value)))
+        })
+        .collect()
 }
 
 /// Generate session ID based on current timestamp
@@ -212,26 +178,6 @@ pub fn format_session_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_valid_option_keys_contains_common() {
-        assert!(VALID_OPTION_KEYS.contains(&"dir"));
-        assert!(VALID_OPTION_KEYS.contains(&"out"));
-        assert!(VALID_OPTION_KEYS.contains(&"split"));
-        assert!(VALID_OPTION_KEYS.contains(&"max-retries"));
-    }
-
-    #[test]
-    fn test_validate_option_keys_all_valid() {
-        let keys = ["dir", "split", "max-retries"];
-        assert!(validate_option_keys(keys.iter().copied()).is_ok());
-    }
-
-    #[test]
-    fn test_validate_option_keys_invalid_key() {
-        let keys = ["invalid-option"];
-        assert!(validate_option_keys(keys.iter().copied()).is_err());
-    }
 
     #[test]
     fn test_generate_session_id_format() {

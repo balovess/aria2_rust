@@ -21,6 +21,7 @@
 //! | `generate_from_bytes()` | `generate(groups, binaryStream, option, baseUri)` |
 //! | `create_request_groups()` | `createRequestGroup(groups, entries, option)` |
 
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 

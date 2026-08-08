@@ -613,7 +613,7 @@ mod tests {
         assert!(resp.is_error(), "Wrong token should be rejected");
         assert_eq!(
             resp.error.unwrap().code,
-            -32001,
+            1,
             "Should return Unauthorized error code"
         );
     }
@@ -629,7 +629,7 @@ mod tests {
             resp.is_error(),
             "Missing token should be rejected when auth is enabled"
         );
-        assert_eq!(resp.error.unwrap().code, -32001);
+        assert_eq!(resp.error.unwrap().code, 1);
     }
 
     #[tokio::test]

@@ -366,7 +366,7 @@ fn test_auth_middleware_invalid_token() {
     let result = middleware.validate(Some("wrong-token"));
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert_eq!(err.code(), -32001);
+    assert_eq!(err.code(), 1);
     assert!(err.to_string().contains("Invalid token"));
 }
 

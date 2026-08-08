@@ -21,7 +21,8 @@ pub const JSON_RPC_INVALID_REQUEST: i64 = -32600;
 pub const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
 pub const JSON_RPC_INVALID_PARAMS: i64 = -32602;
 pub const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
-pub const JSON_RPC_UNAUTHORIZED: i64 = -32001;
+// aria2 maps token authorization failures to its generic execution error.
+pub const JSON_RPC_UNAUTHORIZED: i64 = 1;
 
 // Session/GID
 pub const SESSION_ID_PREFIX: &str = "session-";

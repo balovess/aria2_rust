@@ -292,6 +292,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "tungstenite 0.20.1",
+ "url",
  "windows-sys 0.59.0",
 ]
 

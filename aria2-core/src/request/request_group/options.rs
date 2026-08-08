@@ -1,3 +1,5 @@
+use crate::config::OptionValue;
+
 /// Options that can be changed at runtime via `aria2.changeOption` for
 /// **active** downloads.
 ///
@@ -595,6 +597,26 @@ impl Default for DownloadOptions {
     }
 }
 
+/// Convert a JSON-RPC option value to the string representation used by
+/// aria2's option handlers.
+///
+/// JSON-RPC/XML-RPC callers normally provide strings. Numeric and boolean
+/// values are accepted by the Rust API as an extension, while arrays are
+/// joined for cumulative options such as `header`.
+pub fn option_value_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(option_value_to_string)
+            .collect::<Option<Vec<_>>>()
+            .map(|values| values.join("\n")),
+        serde_json::Value::Null | serde_json::Value::Object(_) => None,
+    }
+}
+
 impl DownloadOptions {
     /// Whether this source should use the C++ memory pre-download semantics.
     ///
@@ -622,6 +644,25 @@ impl DownloadOptions {
         Self::from_option_strings(&string_options)
     }
 
+    /// Build per-download options from an RPC option map.
+    ///
+    /// aria2's JSON-RPC and XML-RPC interfaces use strings for option values;
+    /// arrays are accepted for cumulative options such as `header` and are
+    /// joined with newlines before entering the shared string parser. Numeric
+    /// and boolean JSON values are accepted as a harmless extension for
+    /// existing Rust clients, then canonicalized to the same string form.
+    pub fn from_rpc_options(
+        options: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        let string_options = options
+            .iter()
+            .filter_map(|(key, value)| {
+                option_value_to_string(value).map(|value| (key.clone(), value))
+            })
+            .collect();
+        Self::from_option_strings(&string_options)
+    }
+
     /// Build per-download options from aria2's kebab-case option map.
     ///
     /// This is the shared conversion seam for CLI/session/FFI callers. The
@@ -636,6 +677,12 @@ impl DownloadOptions {
                 .and_then(|v| v.parse::<u16>().ok())
                 .filter(|value| *value > 0)
         };
+        let positive_size_u64 = |key: &str| {
+            options
+                .get(key)
+                .map(|v| OptionValue::parse_size_str(v))
+                .filter(|value| *value > 0)
+        };
         let positive_u64 = |key: &str| {
             options
                 .get(key)
@@ -646,12 +693,12 @@ impl DownloadOptions {
         Self {
             split: positive_u16("split"),
             max_connection_per_server: positive_u16("max-connection-per-server"),
-            max_download_limit: positive_u64("max-download-limit"),
-            max_upload_limit: positive_u64("max-upload-limit"),
+            max_download_limit: positive_size_u64("max-download-limit"),
+            max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),
             out: options.get("out").cloned(),
             file_allocation: options.get("file-allocation").cloned(),
-            mmap_threshold: positive_u64("mmap-threshold"),
+            mmap_threshold: positive_size_u64("mmap-threshold"),
             secure_falloc: options
                 .get("secure-falloc")
                 .map(|v| v == "true")
@@ -790,7 +837,7 @@ impl DownloadOptions {
             metalink_location: options.get("metalink-location").cloned(),
             metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),
             select_file: options.get("select-file").cloned(),
-            piece_length: positive_u64("piece-length"),
+            piece_length: positive_size_u64("piece-length"),
             metalink_enable_unique_protocol: options
                 .get("metalink-enable-unique-protocol")
                 .map(|v| v != "false")
@@ -798,7 +845,7 @@ impl DownloadOptions {
             timeout: positive_u64("timeout"),
             connect_timeout: positive_u64("connect-timeout"),
             startup_idle_time: positive_u64("startup-idle-time"),
-            lowest_speed_limit: positive_u64("lowest-speed-limit"),
+            lowest_speed_limit: positive_size_u64("lowest-speed-limit"),
             ftp_pasv: options
                 .get("ftp-pasv")
                 .map(|v| v != "false")
@@ -930,5 +977,24 @@ mod tests {
         assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
         assert_eq!(options.follow_metalink, Some(FollowMode::Disabled));
         assert!(options.uses_memory_download());
+    }
+
+    #[test]
+    fn rpc_option_map_uses_aria2_wire_strings() {
+        let mut values = HashMap::new();
+        values.insert("max-download-limit".to_string(), serde_json::json!("100K"));
+        values.insert("max-retries".to_string(), serde_json::json!("7"));
+        values.insert("follow-torrent".to_string(), serde_json::json!("mem"));
+        values.insert(
+            "header".to_string(),
+            serde_json::json!(["X-One: 1", "X-Two: 2"]),
+        );
+
+        let options = DownloadOptions::from_rpc_options(&values);
+
+        assert_eq!(options.max_download_limit, Some(100 * 1024));
+        assert_eq!(options.max_retries, 7);
+        assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
+        assert_eq!(options.header, vec!["X-One: 1", "X-Two: 2"]);
     }
 }
