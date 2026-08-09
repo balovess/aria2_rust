@@ -1,8 +1,9 @@
 # Compatibility Status
 
-Last verified: 2026-08-09
+Last verified: 2026-08-10
 Reference implementation: aria2_original/  
 Rust workspace version: 0.2.8
+Public compatibility identity: aria2 1.37.0
 
 This is the current status source for the migration. The file-level records
 under docs/migration/ and the historical plans under .trae/ are useful
@@ -55,6 +56,33 @@ substitutes for missing original behavior.
 | Public C API/ABI | aria2_original/src/aria2api.cc, src/includes/aria2/aria2.h | PARTIAL | `aria2-core/src/c_api.rs` and `bindings/c/` provide a tested opaque-handle `extern "C"`/cdylib migration interface. It is intentionally source-level and is not binary-compatible with the original C++ classes or STL ABI. |
 
 ## Verification Evidence
+
+### Current Compatibility Slice (2026-08-10)
+
+The project now uses two deliberately separate identities. The Cargo package
+version (`aria2-rust` 0.2.8 on this checkout) remains Rust build and diagnostic
+metadata. The public compatibility identity is `aria2` 1.37.0 and is the only
+identity emitted through the original CLI/RPC/protocol contracts.
+
+- `aria2.getVersion`, the `-v`/`--version` first line, default HTTP User-Agent,
+  BitTorrent tracker User-Agent, default peer agent, and BitTorrent extension
+  handshake now use the original 1.37.0 identity.
+- `user-agent`, `peer-agent`, and `peer-id-prefix` registry defaults use
+  `aria2/1.37.0`, `aria2/1.37.0`, and `A2-1-37-0-` respectively. The default
+  peer ID is generated once per process, is exactly 20 bytes, and retains the
+  entire original prefix before random bytes are appended.
+- `aria2.forceUnpause` is rejected as an unknown original RPC method and is
+  not advertised. The Rust-only root HTTP information endpoint and `/ws`
+  WebSocket alias were removed; `/` and `/ws` return 404, while `/jsonrpc`
+  remains the compatible JSONP/JSON-RPC and WebSocket route.
+
+This slice was checked with `cargo fmt --all -- --check`,
+`cargo test -p aria2-protocol --all-features --lib -j 1 -- --test-threads=1`
+(807 passed), the focused core identity regression, the prior complete
+all-features `aria2-rpc` test target (402 passed), the post-route-change
+HTTP/WebSocket target (46 passed), RPC Clippy, and the CLI version regression.
+It does not establish complete original-client or end-to-end download
+compatibility.
 
 Verified on 2026-08-09 with single-job builds where needed:
 
@@ -294,7 +322,7 @@ The XML-RPC adapter now also has source-backed HTTP contract coverage against
 `aria2_original/src/HttpServerBodyCommand.cc`: parser or XML value conversion
 failures return HTTP 400 with an empty body and no `Content-Type`, while a
 successfully parsed method execution failure returns HTTP 200 with an XML
-fault whose `faultCode` is `1`. The current all-features RPC target set is 401
+fault whose `faultCode` is `1`. The current all-features RPC target set is 402
 passed and 0 failed after this and later wire regressions were added.
 
 The XML-RPC value adapter was compared with
@@ -409,8 +437,8 @@ The same original WebSocket source keeps `rpc-max-request-size` inside its
 incremental JSON parser: an oversized non-control message yields JSON-RPC
 `-32700` and the session remains usable. The Rust upgrade routes previously
 applied this option as an Axum frame/message cap, which reset the socket before
-an aria2 response could be sent. Both `/jsonrpc` and `/ws` now pass the logical
-limit into the shared parser adapter instead. A lower transport-level default
+an aria2 response could be sent. `/jsonrpc` passes the logical limit into the
+shared parser adapter. A lower transport-level default
 limit remains a Rust implementation safety ceiling; it is separate from the
 aria2 option and does not affect the covered 1 KiB compatibility case.
 

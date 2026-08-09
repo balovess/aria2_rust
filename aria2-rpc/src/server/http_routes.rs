@@ -6,7 +6,7 @@ use super::auth::AuthConfig;
 use super::config::ServerConfig;
 use super::cors::CorsConfig;
 use super::tls::{TlsConfig, TlsError};
-use super::ws_session::{handle_ws_socket, ws_handler};
+use super::ws_session::handle_ws_socket;
 use crate::engine::RpcEngine;
 
 /// RPC HTTP server supporting both HTTP and HTTPS.
@@ -218,7 +218,6 @@ impl RpcServer {
             .route("/jsonrpc", post(handle_jsonrpc))
             .route("/jsonrpc", get(handle_jsonrpc_or_ws)) // GET + WebSocket upgrade
             .route("/rpc", post(handle_xmlrpc))
-            .route("/ws", get(ws_handler)) // WebSocket upgrade (backward compat)
             .layer(axum::extract::DefaultBodyLimit::max(
                 self.config.max_request_size,
             ))
@@ -837,11 +836,10 @@ async fn handle_xmlrpc(
 /// Supports WebSocket upgrades and aria2's legacy GET/JSONP transport.
 /// 1. **WebSocket upgrade** — If the request has `Upgrade: websocket` headers,
 ///    the connection is upgraded to WebSocket for real-time download events.
-/// 2. **Regular GET** — Returns an informational message.
+/// 2. **Regular GET** — Dispatches aria2's legacy GET/JSONP transport.
 ///
-/// This dual behavior is required because Aria2 Explorer initiates WebSocket
-/// connections at `/jsonrpc` (not `/ws`), while other clients may use GET for
-/// health checks or debugging.
+/// Upstream aria2 accepts WebSocket upgrades only at `/jsonrpc`; regular GET
+/// requests at that same path retain its legacy JSONP behavior.
 async fn handle_jsonrpc_or_ws(
     axum::extract::State(state): axum::extract::State<RpcState>,
     ws: Option<axum::extract::ws::WebSocketUpgrade>,
@@ -850,8 +848,7 @@ async fn handle_jsonrpc_or_ws(
     match ws {
         Some(upgrade) => {
             // WebSocket upgrade request from Aria2 Explorer or other clients.
-            // Preserve the same parser-limit behavior as the /ws route: an
-            // oversized RPC document receives a JSON-RPC parse error rather
+            // An oversized RPC document receives a JSON-RPC parse error rather
             // than a transport-level disconnect.
             let max_request_size = state.max_request_size;
             upgrade.on_upgrade(move |socket| {

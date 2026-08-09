@@ -4,27 +4,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::http_routes::RpcState;
 use crate::engine::RpcEngine;
 
 static NEXT_WS_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Handle WebSocket upgrade requests.
-///
-/// Upgrades HTTP connections to WebSocket protocol for real-time
-/// download event notifications (progress, completion, errors, etc.).
-pub async fn ws_handler(
-    axum::extract::State(state): axum::extract::State<RpcState>,
-    ws: axum::extract::ws::WebSocketUpgrade,
-) -> impl axum::response::IntoResponse {
-    // `rpc-max-request-size` is a JSON parser limit in aria2_original, not a
-    // WebSocket transport limit. Setting it on the upgrade would make Axum
-    // close an oversized client frame before we can return aria2's parse
-    // error and keep the connection usable. The WebSocket implementation's
-    // default finite transport limits remain the outer DoS safeguard.
-    let max_request_size = state.max_request_size;
-    ws.on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone(), max_request_size))
-}
 
 /// Handle an upgraded WebSocket connection.
 ///

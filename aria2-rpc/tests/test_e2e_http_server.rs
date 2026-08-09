@@ -547,13 +547,13 @@ async fn e2e_basic_auth_protects_websocket_upgrade() {
     let (base, _guard) = start_test_server_with_config(None, 5, config).await;
     let ws_url = base.replace("http://", "ws://");
 
-    let denied = connect_async(format!("{ws_url}/ws")).await;
+    let denied = connect_async(format!("{ws_url}/jsonrpc")).await;
     assert!(
         denied.is_err(),
         "unauthenticated WebSocket upgrade must fail"
     );
 
-    let mut request = format!("{ws_url}/ws").into_client_request().unwrap();
+    let mut request = format!("{ws_url}/jsonrpc").into_client_request().unwrap();
     request.headers_mut().insert(
         "Authorization",
         basic_auth_header("aria2", "basic-secret").parse().unwrap(),
@@ -803,17 +803,14 @@ async fn e2e_cors_uses_restricted_origin_and_preflight_config() {
 // =========================================================================
 
 #[tokio::test]
-async fn e2e_ws_upgrade_at_ws() {
+async fn e2e_ws_upgrade_at_non_original_path_is_rejected() {
     let (base, _guard) = start_test_server(None).await;
     let ws_url = base.replace("http://", "ws://");
 
-    let (ws, _) = connect_async(format!("{ws_url}/ws"))
-        .await
-        .expect("WebSocket upgrade at /ws should succeed");
-    let (_, rx) = ws.split();
-    // Just verify the connection stays open — we don't expect messages
-    // without subscribing. Close will time out, so we read without blocking.
-    drop(rx);
+    assert!(
+        connect_async(format!("{ws_url}/ws")).await.is_err(),
+        "upstream aria2 accepts WebSocket upgrades only at /jsonrpc"
+    );
 }
 
 #[tokio::test]
@@ -835,7 +832,7 @@ async fn e2e_ws_receive_event_add() {
     let client = Client::new();
 
     // Connect WS first
-    let (ws, _) = connect_async(format!("{ws_url}/ws"))
+    let (ws, _) = connect_async(format!("{ws_url}/jsonrpc"))
         .await
         .expect("WS upgrade failed");
     let (_, mut rx) = ws.split();
@@ -865,7 +862,7 @@ async fn e2e_ws_receive_event_pause() {
     let client = Client::new();
 
     // Connect WS
-    let (ws, _) = connect_async(format!("{ws_url}/ws"))
+    let (ws, _) = connect_async(format!("{ws_url}/jsonrpc"))
         .await
         .expect("WS upgrade failed");
     let (_, mut rx) = ws.split();
@@ -896,7 +893,7 @@ async fn e2e_ws_receive_event_complete() {
     let ws_url = base.replace("http://", "ws://");
     let client = Client::new();
 
-    let (ws, _) = connect_async(format!("{ws_url}/ws"))
+    let (ws, _) = connect_async(format!("{ws_url}/jsonrpc"))
         .await
         .expect("WS upgrade failed");
     let (_, mut rx) = ws.split();
@@ -1103,7 +1100,7 @@ async fn e2e_ws_jsonrpc_with_events() {
     let client = Client::new();
 
     // 1. Connect WS
-    let (ws, _) = connect_async(format!("{ws_url}/ws"))
+    let (ws, _) = connect_async(format!("{ws_url}/jsonrpc"))
         .await
         .expect("WS upgrade failed");
     let (mut tx, mut rx) = ws.split();
