@@ -160,7 +160,7 @@ async fn test_force_pause() {
     let add_req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.addUri".into(),
-        params: serde_json::json!(["http://example.com/file"]),
+        params: serde_json::json!([["http://example.com/file"]]),
         id: Some(serde_json::Value::String("add".into())),
     };
     let add_resp = engine.handle_request(&add_req).await;
@@ -234,7 +234,7 @@ async fn test_force_pause_all() {
         let add_req = JsonRpcRequest {
             version: Some("2.0".into()),
             method: "aria2.addUri".into(),
-            params: serde_json::json!([format!("http://example.com/file{}", i)]),
+            params: serde_json::json!([[format!("http://example.com/file{}", i)]]),
             id: Some(serde_json::Value::String(format!("add-{}", i))),
         };
         engine.handle_request(&add_req).await;

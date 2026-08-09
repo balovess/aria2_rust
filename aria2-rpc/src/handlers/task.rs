@@ -24,26 +24,30 @@ use std::collections::HashMap;
 /// the engine (and with it the RPC listener) goes away.
 const RPC_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
+fn optional_position(req: &JsonRpcRequest, index: usize) -> Result<Option<usize>, JsonRpcError> {
+    let Some(position) = req.get_optional_param::<i64>(index)? else {
+        return Ok(None);
+    };
+    if position < 0 {
+        return Err(JsonRpcError::RpcExecution(
+            "Position must be greater than or equal to 0.".into(),
+        ));
+    }
+    usize::try_from(position)
+        .map(Some)
+        .map_err(|_| JsonRpcError::RpcExecution("Position is out of range.".into()))
+}
+
 impl RpcEngine {
     /// Handle `aria2.addUri` - Add a new download task from URI(s).
     pub async fn handle_add_uri(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let uris: Vec<String> = if let Ok(arr) = req.get_param::<Vec<String>>(0) {
-            arr
-        } else if let Ok(single) = req.get_param::<String>(0) {
-            vec![single]
-        } else {
-            return Err(JsonRpcError::InvalidParams(
-                "param[0] must be a string or array of strings".into(),
-            ));
-        };
-        let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-        let position: Option<usize> = req
-            .get_param::<i64>(2)
-            .ok()
-            .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
+        let uris: Vec<String> = req.get_param(0)?;
+        let opts: HashMap<String, serde_json::Value> =
+            req.get_optional_param(1)?.unwrap_or_default();
+        let position = optional_position(req, 2)?;
         let gid = self.add_task(uris, opts).await?;
         if let Some(pos) = position {
             let pos_req = JsonRpcRequest::new(
@@ -66,37 +70,18 @@ impl RpcEngine {
     /// - param[2]: Options dict (optional)
     /// - param[3]: Position in queue (optional)
     ///
-    /// For backward compatibility, if param[1] is an object (not an array),
-    /// it is treated as the options dict (old 3-param style).
     pub async fn handle_add_torrent(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let torrent_data: String = req.get_param(0)?;
 
-        // Detect whether param[1] is URIs (array) or opts (object) for backward compatibility.
-        // Original: [torrent, uris?, opts?, pos?]
-        // Old Rust:  [torrent, opts?, pos?]
-        let (additional_uris, opts, position) = match req.get_param::<Vec<String>>(1) {
-            Ok(uris) => {
-                // 4-parameter signature: [torrent, uris, opts, pos]
-                let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(2);
-                let position: Option<usize> = req
-                    .get_param::<i64>(3)
-                    .ok()
-                    .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
-                (uris, opts, position)
-            }
-            Err(_) => {
-                // Backward compatible: param[1] is opts, param[2] is pos
-                let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-                let position: Option<usize> = req
-                    .get_param::<i64>(2)
-                    .ok()
-                    .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
-                (vec![], opts, position)
-            }
-        };
+        // Match the original positional signature exactly: [torrent, uris?,
+        // opts?, pos?]. A present value is validated at its documented slot.
+        let additional_uris: Vec<String> = req.get_optional_param(1)?.unwrap_or_default();
+        let opts: HashMap<String, serde_json::Value> =
+            req.get_optional_param(2)?.unwrap_or_default();
+        let position = optional_position(req, 3)?;
 
         let _dir = opts
             .get("dir")
@@ -161,11 +146,9 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let metalink_data: String = req.get_param(0)?;
-        let opts: HashMap<String, serde_json::Value> = req.get_param_or_default(1);
-        let position: Option<usize> = req
-            .get_param::<i64>(2)
-            .ok()
-            .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
+        let opts: HashMap<String, serde_json::Value> =
+            req.get_optional_param(1)?.unwrap_or_default();
+        let position = optional_position(req, 2)?;
 
         let decoded_bytes = if metalink_data.starts_with("data:") {
             base64::Engine::decode(
@@ -418,12 +401,11 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
+        let keys = crate::handlers::status::status_keys_for_request(req, 1)?;
         match self.get_status(&gid).await {
             Some(status) => Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
-                serde_json::to_value(status).map_err(|e| {
-                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                })?,
+                crate::handlers::status::status_to_json(status, &keys)?,
             )),
             None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
@@ -480,6 +462,7 @@ impl RpcEngine {
         }
         let del_uris: Vec<String> = req.get_param(2)?;
         let add_uris: Vec<String> = req.get_param(3)?;
+        let position = optional_position(req, 4)?;
         let group_man = self
             .group_man
             .as_ref()
@@ -491,7 +474,7 @@ impl RpcEngine {
         let result = group
             .write()
             .map_err(|_| JsonRpcError::InternalError("Failed to lock request group".into()))?
-            .change_uris(file_index as usize, &del_uris, &add_uris)
+            .change_uris(file_index as usize, &del_uris, &add_uris, position)
             .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -504,25 +487,18 @@ impl RpcEngine {
     /// Mirrors C++ `SaveSessionRpcMethod`: writes the session file and returns
     /// "OK" on success (or an error when no filename is configured).
     ///
-    /// - Optional `param[0]`: session file path. When omitted or empty, the
-    ///   engine's configured `--save-session` path is used.
+    /// The request's positional parameters are ignored. The engine's
+    /// configured `--save-session` path is always used.
     /// - The real `RequestGroup` state is serialized through the core manager.
     pub async fn handle_save_session(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        // Resolve the target path: an explicit param wins; otherwise fall back
-        // to the engine's configured save-session path (C++ reads PREF_SAVE_SESSION).
-        let param_path = req.get_param_or_default::<String>(0);
-        let target = if param_path.is_empty() {
-            self.save_session_path.clone()
-        } else {
-            Some(std::path::PathBuf::from(param_path))
-        };
-        let path = target.ok_or_else(|| {
-            JsonRpcError::RpcExecution(
-                "Filename is not given. Set --save-session or pass a path.".into(),
-            )
+        // C++ ignores request parameters and always reads PREF_SAVE_SESSION.
+        // Keep that seam exact so a client cannot redirect the server's
+        // session output by sending an extension-only argument.
+        let path = self.save_session_path.clone().ok_or_else(|| {
+            JsonRpcError::RpcExecution("Filename is not given. Set --save-session.".into())
         })?;
 
         // Wired engine: serialize the real RequestGroupMan via SaveSessionCommand.

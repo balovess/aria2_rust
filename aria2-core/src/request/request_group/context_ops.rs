@@ -199,12 +199,17 @@ impl super::RequestGroup {
         }
     }
 
-    /// Remove the requested URIs and append new URIs to the first requested file entry.
+    /// Remove the requested URIs and add new URIs to the first requested file entry.
+    ///
+    /// When `position` is present, additions are inserted at that zero-based
+    /// position in the same order as the input. This mirrors aria2's optional
+    /// `changeUri` position argument; deletion happens before insertion.
     pub fn change_uris(
         &mut self,
         file_index: usize,
         del_uris: &[String],
         add_uris: &[String],
+        position: Option<usize>,
     ) -> crate::error::Result<(usize, usize)> {
         let file_index = file_index.checked_sub(1).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument("file index must be at least 1".to_string())
@@ -229,7 +234,19 @@ impl super::RequestGroup {
             for uri in del_uris {
                 deleted += entry.remove_uri(uri) as usize;
             }
-            let added = entry.add_uris(add_uris);
+            let added = match position {
+                Some(mut position) => {
+                    let mut added = 0;
+                    for uri in add_uris {
+                        if entry.insert_uri(uri, position) {
+                            added += 1;
+                            position = position.saturating_add(1);
+                        }
+                    }
+                    added
+                }
+                None => entry.add_uris(add_uris),
+            };
             return Ok((deleted, added));
         }
 
@@ -247,8 +264,30 @@ impl super::RequestGroup {
                 true
             }
         });
-        self.uris.extend(add_uris.iter().cloned());
-        Ok((deleted, add_uris.len()))
+        let added = match position {
+            Some(mut position) => {
+                let mut added = 0;
+                for uri in add_uris {
+                    if url::Url::parse(uri).is_err() {
+                        continue;
+                    }
+                    let insert_position = position.min(self.uris.len());
+                    self.uris.insert(insert_position, uri.clone());
+                    position = position.saturating_add(1);
+                    added += 1;
+                }
+                added
+            }
+            None => add_uris
+                .iter()
+                .filter(|uri| url::Url::parse(uri).is_ok())
+                .map(|uri| {
+                    self.uris.push(uri.clone());
+                    1
+                })
+                .sum(),
+        };
+        Ok((deleted, added))
     }
 
     /// Return URI attempt results across all requested file entries.

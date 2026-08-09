@@ -1,12 +1,13 @@
 //! aria2-rust CLI entry point.
 //!
-//! Uses clap derive API for argument parsing. The `--help` and `--version`
-//! flags are handled by clap before `App::run` is called. The `completions`
-//! subcommand is handled early here and exits before the download engine starts.
+//! Uses clap derive API for argument parsing. The `--version` flag is handled
+//! by clap, while aria2's optional-argument `--help[=TAG|KEYWORD]` is rendered
+//! here before `App::run` so its selector can be preserved. The `completions`
+//! subcommand is also handled early and exits before the download engine starts.
 
 use aria2::app::App;
-use aria2::app::cli::{CliArgs, Commands};
-use clap::{CommandFactory, Parser};
+use aria2::app::cli::{CliArgs, Commands, render_help};
+use clap::CommandFactory;
 
 // Use mimalloc as the global allocator for better multi-threaded throughput.
 // On Windows, the system allocator has higher lock contention under concurrent
@@ -17,6 +18,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[tokio::main]
 async fn main() {
     let cli = CliArgs::parse();
+
+    if let Some(request) = cli.help.as_ref() {
+        print!("{}", render_help(request));
+        std::process::exit(0);
+    }
 
     // Handle `completions <SHELL>` subcommand early — print completion script
     // to stdout and exit 0 without starting the download engine.

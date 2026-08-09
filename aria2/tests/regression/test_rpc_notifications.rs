@@ -32,7 +32,7 @@ async fn notification_add_uri_fires_download_start() {
 
     let req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);
@@ -55,7 +55,7 @@ async fn notification_pause_fires_download_pause() {
     // Add a task first
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -86,7 +86,7 @@ async fn notification_remove_fires_download_stop() {
     // Add a task first
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -118,7 +118,7 @@ async fn notification_unpause_fires_download_start() {
     // Add a task first
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -172,7 +172,7 @@ async fn notification_force_remove_fires_download_stop() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -202,7 +202,7 @@ async fn notification_pause_all_fires_pause_for_each_task() {
     for i in 0..3 {
         let req = make_request(
             "aria2.addUri",
-            serde_json::json!([format!("http://example.com/file{}", i)]),
+            serde_json::json!([[format!("http://example.com/file{}", i)]]),
         );
         engine.handle_request(&req).await;
     }

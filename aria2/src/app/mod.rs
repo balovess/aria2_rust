@@ -83,7 +83,7 @@ impl App {
     /// 7. Runs the engine event loop
     /// 8. **Saves session on shutdown (if configured)**
     ///
-    /// `--help` / `--version` are handled by clap before `run` is called.
+    /// `--help[=TAG|KEYWORD]` / `--version` are handled before `run` is called.
     ///
     /// Returns exit code: `0` = success, `1` = error.
     pub async fn run(&mut self, cli: CliArgs) -> i32 {

@@ -130,7 +130,7 @@ fn parse_gid(resp: &Value) -> String {
 
 /// Add a URI and return the GID (shared helper for tests that need a download).
 async fn add_uri(client: &Client, base_url: &str, url: &str) -> String {
-    let resp = rpc_call(client, base_url, "aria2.addUri", json![[url]]).await;
+    let resp = rpc_call(client, base_url, "aria2.addUri", json!([[url]])).await;
     let gid = parse_gid(&resp);
     assert_eq!(gid.len(), 16, "GID must be 16 hex chars, got: {gid}");
     gid
@@ -177,7 +177,7 @@ async fn e2e_add_uri_returns_gid() {
         &client,
         &base,
         "aria2.addUri",
-        json![["http://127.0.0.1:1/test-add-uri"]],
+        json!([["http://127.0.0.1:1/test-add-uri"]]),
     )
     .await;
 

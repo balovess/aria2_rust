@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
+use crate::ftp::connection::{self, FtpControlStream, FtpDataStream, FtpsConfig};
 use crate::network::ConnectionContext;
 
 use crate::constants;
@@ -44,17 +45,18 @@ pub(crate) fn urlencoding_decode(s: &str) -> String {
 
 /// Raw FTP control connection handler
 pub(super) struct RawFtpControl {
-    reader: BufReader<tokio::net::TcpStream>,
+    reader: BufReader<FtpControlStream>,
     host: String,
     connection: ConnectionContext,
+    ftps_config: Option<FtpsConfig>,
 }
 
 impl RawFtpControl {
-    pub(super) async fn connect_at(
+    async fn connect_tcp_at(
         host: &str,
         port: u16,
         socket_addr: std::net::SocketAddr,
-    ) -> Result<Self> {
+    ) -> Result<(tokio::net::TcpStream, ConnectionContext)> {
         let addr = format!("{}:{}", host, port);
         debug!("Connecting to FTP server at {} via {}", addr, socket_addr);
 
@@ -65,29 +67,38 @@ impl RawFtpControl {
                     message: format!("FTP connect failed to {}:{}: {}", host, port, e),
                 })
             })?;
-        let connection = ConnectionContext::new(
-            host,
-            port,
-            stream.peer_addr().map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("FTP peer address unavailable: {}", e),
-                })
-            })?,
-        );
+        let peer_addr = stream.peer_addr().map_err(|e| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("FTP peer address unavailable: {}", e),
+            })
+        })?;
+        let connection = ConnectionContext::new(host, port, peer_addr);
 
-        // Set TCP keepalive and no-delay options
         stream.set_nodelay(true).map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("set_nodelay failed: {}", e),
             })
         })?;
 
-        let mut ctrl = Self {
+        Ok((stream, connection))
+    }
+
+    fn from_stream(
+        stream: FtpControlStream,
+        host: &str,
+        connection: ConnectionContext,
+        ftps_config: Option<FtpsConfig>,
+    ) -> Self {
+        Self {
             reader: BufReader::new(stream),
             host: host.to_string(),
             connection,
-        };
-        let welcome = ctrl
+            ftps_config,
+        }
+    }
+
+    async fn read_welcome(&mut self) -> Result<()> {
+        let welcome = self
             .read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS))
             .await?;
 
@@ -98,7 +109,83 @@ impl RawFtpControl {
             ))));
         }
 
+        Ok(())
+    }
+
+    pub(super) async fn connect_at(
+        host: &str,
+        port: u16,
+        socket_addr: std::net::SocketAddr,
+    ) -> Result<Self> {
+        let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
+        let mut ctrl = Self::from_stream(FtpControlStream::Plain(stream), host, connection, None);
+        ctrl.read_welcome().await?;
+
         info!("Connected to FTP server {}:{}", host, port);
+        Ok(ctrl)
+    }
+
+    /// Connect to an explicit FTPS endpoint and perform RFC 4217 setup.
+    pub(super) async fn connect_ftps_explicit_at(
+        host: &str,
+        port: u16,
+        socket_addr: std::net::SocketAddr,
+        config: &FtpsConfig,
+    ) -> Result<Self> {
+        let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
+        let mut plain = Self::from_stream(FtpControlStream::Plain(stream), host, connection, None);
+        plain.read_welcome().await?;
+
+        let Self {
+            reader,
+            host,
+            connection,
+            ..
+        } = plain;
+        let stream = match reader.into_inner() {
+            FtpControlStream::Plain(stream) => stream,
+            FtpControlStream::Tls(_) => unreachable!("fresh FTPS control stream is plain"),
+        };
+        let tls_stream = connection::upgrade_control_stream(stream, &host, config)
+            .await
+            .map_err(|error| {
+                Aria2Error::Network(format!("FTPS control upgrade failed: {}", error))
+            })?;
+
+        info!("FTPS control connection established with {}:{}", host, port);
+        Ok(Self::from_stream(
+            FtpControlStream::Tls(Box::new(tls_stream)),
+            &host,
+            connection,
+            Some(config.clone()),
+        ))
+    }
+
+    /// Connect to an implicit FTPS endpoint where TLS starts immediately.
+    pub(super) async fn connect_ftps_implicit_at(
+        host: &str,
+        port: u16,
+        socket_addr: std::net::SocketAddr,
+        config: &FtpsConfig,
+    ) -> Result<Self> {
+        let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
+        let tls_stream = connection::upgrade_data_stream(stream, host, config)
+            .await
+            .map_err(|error| {
+                Aria2Error::Network(format!("FTPS TLS handshake failed: {}", error))
+            })?;
+        let mut ctrl = Self::from_stream(
+            FtpControlStream::Tls(Box::new(tls_stream)),
+            host,
+            connection,
+            Some(config.clone()),
+        );
+        ctrl.read_welcome().await?;
+
+        info!(
+            "Implicit FTPS control connection established with {}:{}",
+            host, port
+        );
         Ok(ctrl)
     }
 
@@ -193,6 +280,22 @@ impl RawFtpControl {
 
     pub(super) fn connection_context(&self) -> &ConnectionContext {
         &self.connection
+    }
+
+    pub(super) async fn secure_data_stream(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> Result<FtpDataStream> {
+        if let Some(config) = &self.ftps_config {
+            let tls_stream = connection::upgrade_data_stream(stream, &self.host, config)
+                .await
+                .map_err(|error| {
+                    Aria2Error::Network(format!("FTPS data TLS handshake failed: {}", error))
+                })?;
+            Ok(FtpDataStream::Tls(Box::new(tls_stream)))
+        } else {
+            Ok(FtpDataStream::Plain(stream))
+        }
     }
 
     /// Send command and read response in one operation
@@ -331,10 +434,13 @@ impl RawFtpControl {
 
     /// Create an active-mode listener and advertise it with EPRT/PORT.
     pub(super) async fn enter_active_mode(&mut self) -> Result<tokio::net::TcpListener> {
-        let local_addr =
-            self.reader.get_ref().local_addr().map_err(|e| {
-                Aria2Error::Network(format!("FTP local address unavailable: {}", e))
-            })?;
+        let local_addr = self
+            .reader
+            .get_ref()
+            .get_ref()
+            .ok_or_else(|| Aria2Error::Network("FTP local address unavailable".into()))?
+            .local_addr()
+            .map_err(|e| Aria2Error::Network(format!("FTP local address unavailable: {}", e)))?;
         let listener = tokio::net::TcpListener::bind(match local_addr {
             std::net::SocketAddr::V4(_) => "0.0.0.0:0",
             std::net::SocketAddr::V6(_) => "[::]:0",

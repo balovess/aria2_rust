@@ -171,6 +171,33 @@ impl App {
         set_str!("interface", g.interface);
         set_str!("multiple-interface", g.multiple_interface);
         set_str!("gid", g.gid);
+        set_bool_true!("async-dns", g.async_dns);
+        set_str!("async-dns-server", g.async_dns_server);
+        set_bool_true!("enable-async-dns6", g.enable_async_dns6);
+        set_str!("event-poll", g.event_poll);
+        set_path!("server-stat-if", g.server_stat_if);
+        set_path!("server-stat-of", g.server_stat_of);
+        set_u64!("server-stat-timeout", g.server_stat_timeout);
+        set_path!("netrc-path", g.netrc_path);
+        set_bool_true!("show-files", g.show_files);
+        set_path!("torrent-file", g.torrent_file);
+        set_path!("metalink-file", g.metalink_file);
+        set_str!("checksum", g.checksum);
+        set_bool_true!("enable-mmap", g.enable_mmap);
+        set_str!("max-mmap-limit", g.max_mmap_limit);
+        set_bool_true!(
+            "metalink-enable-unique-protocol",
+            g.metalink_enable_unique_protocol
+        );
+        set_str!("metalink-base-uri", g.metalink_base_uri);
+        set_bool_true!("pause-metadata", g.pause_metadata);
+        set_str!("on-download-start", g.on_download_start);
+        set_str!("on-download-stop", g.on_download_stop);
+        set_str!("on-download-pause", g.on_download_pause);
+        set_str!("on-download-complete", g.on_download_complete);
+        set_str!("on-download-error", g.on_download_error);
+        set_bool_true!("show-console-readout", g.show_console_readout);
+        set_u64!("rlimit-nofile", g.rlimit_nofile);
 
         // --- HTTP/FTP options ---
         set_str!("all-proxy", h.all_proxy);
@@ -210,6 +237,9 @@ impl App {
             set_bool_true!("check-certificate", h.check_certificate);
         }
         set_path!("ca-certificate", h.ca_certificate);
+        set_path!("certificate", h.certificate);
+        set_path!("private-key", h.private_key);
+        set_str!("min-tls-version", h.min_tls_version);
         set_bool_true!("allow-overwrite", h.allow_overwrite);
         set_bool_true!("auto-file-renaming", h.auto_file_renaming);
         if h.no_continue.unwrap_or(false) {
@@ -236,6 +266,7 @@ impl App {
         set_bool_true!("ftp-pasv", h.ftp_pasv);
         set_bool_true!("ftp-reuse-connection", h.ftp_reuse_connection);
         set_str!("ftp-type", h.ftp_type);
+        set_str!("ssh-host-key-md", h.ssh_host_key_md);
 
         // --- BitTorrent options ---
         set_f64!("seed-time", b.seed_time);
@@ -289,6 +320,8 @@ impl App {
         set_u64!("dht-message-timeout", b.dht_message_timeout);
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);
+        set_str!("dht-entry-point6", b.dht_entry_point6);
+        set_path!("dht-file-path6", b.dht_file_path6);
         set_str!("peer-id-prefix", b.peer_id_prefix);
         set_str!("peer-agent", b.peer_agent);
         set_str!("select-file", b.select_file);
@@ -330,6 +363,13 @@ impl App {
         set_bool_true!("force-save", a.force_save);
         set_path!("server-stat-file", a.server_stat_file);
         set_u64!("save-server-stat-interval", a.save_server_stat_interval);
+        set_u64!("dscp", a.dscp);
+        set_str!("socket-recv-buffer-size", a.socket_recv_buffer_size);
+        set_u64!("max-resume-failure-tries", a.max_resume_failure_tries);
+        set_bool_true!(
+            "optimize-concurrent-downloads",
+            a.optimize_concurrent_downloads
+        );
 
         drop(conf);
 
@@ -368,6 +408,15 @@ impl App {
                 Err(e) => {
                     warn!("Failed to load input-file {}: {}", path, e);
                 }
+            }
+        }
+
+        // `-T`/`-M` are input selectors in the original CLI, not merely
+        // configuration values. Feed them through the same detector as
+        // positional metadata paths so the engine receives their file data.
+        for option_name in ["torrent-file", "metalink-file"] {
+            if let Some(path) = self.get_opt_str(option_name).await {
+                positional_uris.push(path);
             }
         }
 

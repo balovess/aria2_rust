@@ -155,6 +155,38 @@ impl JsonRpcRequest {
         }
     }
 
+    /// Return a positional parameter without changing its wire type.
+    ///
+    /// RPC handlers use this only when an optional parameter has multiple
+    /// valid positions. The value is borrowed so a handler can distinguish a
+    /// missing argument from a present argument with the wrong type without
+    /// silently accepting an extension-shaped request.
+    pub(crate) fn optional_param_value(&self, index: usize) -> Option<&serde_json::Value> {
+        match &self.params {
+            serde_json::Value::Array(params) => params.get(index),
+            serde_json::Value::Object(params) => params.get(&format!("p{index}")),
+            _ => None,
+        }
+    }
+
+    /// Read a positional or named parameter when it is present.
+    ///
+    /// Unlike [`Self::get_param_or_default`], a present value is still
+    /// type-checked. This preserves aria2's distinction between an omitted
+    /// optional argument and a supplied argument with an invalid type.
+    pub fn get_optional_param<T: serde::de::DeserializeOwned>(
+        &self,
+        index: usize,
+    ) -> Result<Option<T>, JsonRpcError> {
+        self.optional_param_value(index)
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, error))
+                })
+            })
+            .transpose()
+    }
+
     pub fn get_param_or_default<T: serde::de::DeserializeOwned + Default>(
         &self,
         index: usize,

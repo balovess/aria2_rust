@@ -328,25 +328,13 @@ impl RpcEngine {
                 "aria2.purgeDownloadResult is not supported by the core state model".into(),
             )
         })?;
-        if let Ok(gid) = req.get_param::<String>(0) {
-            let man = group_man.read().await;
-            if man.remove_stopped_result(&gid).is_some() {
-                return Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    "OK",
-                ));
-            }
-            Err(JsonRpcError::RpcExecution(format!(
-                "GID {} not found in download results",
-                gid
-            )))
-        } else {
-            group_man.read().await.purge_stopped_results();
-            Ok(JsonRpcResponse::success(
-                req.id.clone().unwrap_or_default(),
-                "OK",
-            ))
-        }
+        // The original method has no parameters and purges all retained
+        // results. It intentionally ignores the request object entirely.
+        group_man.read().await.purge_stopped_results();
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            "OK",
+        ))
     }
 
     /// Handle `aria2.getSessionInfo` - Get session identifier and start time.

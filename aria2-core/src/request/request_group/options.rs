@@ -177,6 +177,12 @@ pub struct DownloadOptions {
     /// Override `Referer` header. Also injected into the `header` list by
     /// [`DownloadOptions::parsed_headers`] when set.
     pub referer: Option<String>,
+    /// Verify TLS certificates for HTTPS and the FTPS extension.
+    pub check_certificate: bool,
+    /// Custom CA certificate bundle used by HTTPS/FTPS TLS adapters.
+    pub ca_certificate: Option<String>,
+    /// Minimum TLS version accepted by HTTPS/FTPS TLS adapters.
+    pub min_tls_version: Option<String>,
 
     // ------------------------------------------------------------------
     // Metalink options (C++ PREF_METALINK_*)
@@ -395,6 +401,9 @@ impl Default for DownloadOptions {
             header: Vec::new(),
             user_agent: None,
             referer: None,
+            check_certificate: true,
+            ca_certificate: None,
+            min_tls_version: None,
             // Metalink
             metalink_version: None,
             metalink_language: None,
@@ -729,6 +738,12 @@ impl DownloadOptions {
                 .unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),
+            check_certificate: options
+                .get("check-certificate")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            ca_certificate: options.get("ca-certificate").cloned(),
+            min_tls_version: options.get("min-tls-version").cloned(),
             metalink_version: options.get("metalink-version").cloned(),
             metalink_language: options.get("metalink-language").cloned(),
             metalink_os: options.get("metalink-os").cloned(),

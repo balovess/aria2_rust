@@ -134,6 +134,22 @@ impl RpcServer {
         )
     }
 
+    /// Bind the configured address before starting the serving task.
+    ///
+    /// Callers that own an application lifecycle can use this seam to report
+    /// an occupied port synchronously instead of keeping the process alive
+    /// with a background task that failed during startup.
+    pub async fn bind_listener(
+        &self,
+    ) -> Result<tokio::net::TcpListener, Box<dyn std::error::Error + Send + Sync>> {
+        use std::net::SocketAddr;
+
+        let addr: SocketAddr = self.addr().parse()?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!("RPC server listening on {}://{}", self.scheme(), addr);
+        Ok(listener)
+    }
+
     /// Get a reference to the server configuration.
     pub fn config(&self) -> &ServerConfig {
         &self.config
@@ -168,12 +184,24 @@ impl RpcServer {
     /// }
     /// ```
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = self.bind_listener().await?;
+        self.serve_on_listener(listener).await
+    }
+
+    /// Serve requests on a listener that was bound by the caller.
+    ///
+    /// This keeps listener ownership separate from router construction so an
+    /// application can complete its startup handshake before spawning the
+    /// long-lived server task.
+    pub async fn serve_on_listener(
+        &self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::{
             Router, middleware,
             routing::{get, post},
         };
         use std::net::SocketAddr;
-        use tokio::net::TcpListener;
 
         // Create shared state with the persistent RPC engine
         let state = RpcState {
@@ -202,13 +230,6 @@ impl RpcServer {
             ))
             .layer(cors_layer)
             .with_state(state);
-
-        // Parse address
-        let addr: SocketAddr = self.addr().parse()?;
-        tracing::info!("RPC server listening on {}://{}", self.scheme(), addr);
-
-        // Bind TCP listener
-        let listener = TcpListener::bind(addr).await?;
 
         // Serve with or without TLS
         if let Some(ref tls_acceptor) = self.tls_acceptor {

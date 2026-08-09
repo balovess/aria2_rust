@@ -40,7 +40,7 @@ async fn regression_add_uri_returns_gid_format() {
     let engine = RpcEngine::new();
     let req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let resp = engine.handle_request(&req).await;
 
@@ -69,6 +69,50 @@ async fn regression_add_uri_with_options() {
     assert_success(&resp);
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(gid.len(), 16);
+}
+
+/// Test: `addUri` keeps the original RPC parameter shape and requires a URI
+/// list at parameter zero.
+#[tokio::test]
+async fn regression_add_uri_rejects_single_uri_parameter() {
+    let engine = RpcEngine::new();
+    let req = make_request(
+        "aria2.addUri",
+        serde_json::json!(["http://example.com/file.zip"]),
+    );
+    let resp = engine.handle_request(&req).await;
+
+    assert_error_code(&resp, -32602);
+    assert_eq!(engine.task_count().await, 0);
+}
+
+/// Test: a supplied options parameter is type-checked instead of silently
+/// falling back to an empty dictionary.
+#[tokio::test]
+async fn regression_add_uri_rejects_non_dictionary_options() {
+    let engine = RpcEngine::new();
+    let req = make_request(
+        "aria2.addUri",
+        serde_json::json!([["http://example.com/file.zip"], "not-a-dictionary"]),
+    );
+    let resp = engine.handle_request(&req).await;
+
+    assert_error_code(&resp, -32602);
+    assert_eq!(engine.task_count().await, 0);
+}
+
+/// Test: negative addUri positions fail instead of being silently ignored.
+#[tokio::test]
+async fn regression_add_uri_rejects_negative_position() {
+    let engine = RpcEngine::new();
+    let req = make_request(
+        "aria2.addUri",
+        serde_json::json!([["http://example.com/file.zip"], {}, -1]),
+    );
+    let resp = engine.handle_request(&req).await;
+
+    assert_error_code(&resp, 1);
+    assert_eq!(engine.task_count().await, 0);
 }
 
 /// Test: aria2.addTorrent validates base64 torrent data.
@@ -100,6 +144,26 @@ async fn regression_add_torrent_rejects_invalid() {
     assert_error_code(&resp, -32602); // InvalidParams
 }
 
+/// Test: `addTorrent` rejects a present URI parameter with the wrong type
+/// instead of treating it as the legacy options position.
+#[tokio::test]
+#[cfg(feature = "bittorrent")]
+async fn regression_add_torrent_rejects_invalid_uri_parameter() {
+    let engine = RpcEngine::new();
+    let torrent = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"d8:announce42:http://example.com/announce",
+    );
+    let req = make_request(
+        "aria2.addTorrent",
+        serde_json::json!([torrent, "not-a-uri-list"]),
+    );
+    let resp = engine.handle_request(&req).await;
+
+    assert_error_code(&resp, -32602);
+    assert_eq!(engine.task_count().await, 0);
+}
+
 /// Test: aria2.addMetalink validates Metalink XML.
 #[tokio::test]
 #[cfg(feature = "metalink")]
@@ -123,7 +187,7 @@ async fn regression_remove_returns_gid_array() {
     // First add a task
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -159,7 +223,7 @@ async fn regression_force_remove_returns_ok() {
     // Add a task first
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -183,7 +247,7 @@ async fn regression_pause_changes_status() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -213,7 +277,7 @@ async fn regression_force_pause_returns_ok() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -237,7 +301,7 @@ async fn regression_unpause_restores_active() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -273,7 +337,7 @@ async fn regression_tell_status_format() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -292,6 +356,42 @@ async fn regression_tell_status_format() {
     assert_eq!(status.get("gid").unwrap().as_str().unwrap(), gid);
 }
 
+/// Test: status query `keys` parameters filter the aria2 wire object.
+#[tokio::test]
+async fn regression_status_keys_filter_fields() {
+    let engine = RpcEngine::new();
+    let add_req = make_request(
+        "aria2.addUri",
+        serde_json::json!([["http://example.com/file"]]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let status_req = make_request(
+        "aria2.tellStatus",
+        serde_json::json!([gid, ["gid", "status", "unknownField"]]),
+    );
+    let status_resp = engine.handle_request(&status_req).await;
+    assert_success(&status_resp);
+    let status = status_resp.result.unwrap();
+    let fields = status.as_object().unwrap();
+    assert_eq!(fields.len(), 2);
+    assert!(fields.contains_key("gid"));
+    assert!(fields.contains_key("status"));
+    assert!(!fields.contains_key("totalLength"));
+    assert!(!fields.contains_key("unknownField"));
+
+    let waiting_req = make_request("aria2.tellWaiting", serde_json::json!([0, 10, ["gid"]]));
+    let waiting_resp = engine.handle_request(&waiting_req).await;
+    assert_success(&waiting_resp);
+    let waiting = waiting_resp.result.unwrap();
+    assert_eq!(waiting.as_array().unwrap().len(), 1);
+    assert_eq!(
+        waiting[0].as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["gid"]
+    );
+}
+
 /// Test: aria2.tellActive returns array of StatusInfo.
 #[tokio::test]
 async fn regression_tell_active_returns_array() {
@@ -301,7 +401,7 @@ async fn regression_tell_active_returns_array() {
     for i in 0..3 {
         let req = make_request(
             "aria2.addUri",
-            serde_json::json!([format!("http://example.com/file{}", i)]),
+            serde_json::json!([[format!("http://example.com/file{}", i)]]),
         );
         engine.handle_request(&req).await;
     }
@@ -333,6 +433,27 @@ async fn regression_tell_waiting_pagination() {
     assert_success(&resp);
     let waiting: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert!(waiting.len() <= 10, "Should respect num parameter");
+}
+
+/// Test: aria2.tellWaiting supports negative offsets from the end of the queue.
+#[tokio::test]
+async fn regression_tell_waiting_negative_offset() {
+    let engine = RpcEngine::new();
+    let mut gids = Vec::new();
+    for index in 0..3 {
+        let add_req = make_request(
+            "aria2.addUri",
+            serde_json::json!([[format!("http://example.com/file-{index}")]]),
+        );
+        let add_resp = engine.handle_request(&add_req).await;
+        gids.push(serde_json::from_value::<String>(add_resp.result.unwrap()).unwrap());
+    }
+
+    let req = make_request("aria2.tellWaiting", serde_json::json!([-1, 1, ["gid"]]));
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+    let waiting = resp.result.unwrap();
+    assert_eq!(waiting[0]["gid"].as_str(), gids.last().map(String::as_str));
 }
 
 /// Test: aria2.tellStopped with pagination.
@@ -435,7 +556,7 @@ async fn regression_change_option_validates_keys() {
     // Add a task first
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -462,7 +583,7 @@ async fn regression_change_option_accepts_max_connection_per_server() {
     // Add a task first
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -540,7 +661,7 @@ async fn regression_get_files_format() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -573,7 +694,7 @@ async fn regression_get_servers_format() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -617,7 +738,7 @@ async fn regression_pause_all_format() {
     for i in 0..3 {
         let req = make_request(
             "aria2.addUri",
-            serde_json::json!([format!("http://example.com/file{}", i)]),
+            serde_json::json!([[format!("http://example.com/file{}", i)]]),
         );
         engine.handle_request(&req).await;
     }
@@ -644,7 +765,7 @@ async fn regression_force_pause_all_returns_ok() {
     for i in 0..2 {
         let req = make_request(
             "aria2.addUri",
-            serde_json::json!([format!("http://example.com/file{}", i)]),
+            serde_json::json!([[format!("http://example.com/file{}", i)]]),
         );
         engine.handle_request(&req).await;
     }
@@ -666,7 +787,7 @@ async fn regression_unpause_all_format() {
     for i in 0..2 {
         let req = make_request(
             "aria2.addUri",
-            serde_json::json!([format!("http://example.com/file{}", i)]),
+            serde_json::json!([[format!("http://example.com/file{}", i)]]),
         );
         let resp = engine.handle_request(&req).await;
         let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
@@ -729,6 +850,56 @@ async fn regression_change_uri_modifies_list() {
     );
 }
 
+/// Test: aria2.changeUri inserts new URIs at the optional zero-based position.
+#[tokio::test]
+async fn regression_change_uri_honors_position() {
+    let engine = RpcEngine::new();
+
+    let add_req = make_request(
+        "aria2.addUri",
+        serde_json::json!([["http://example.com/first", "http://example.com/last"]]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let change_req = make_request(
+        "aria2.changeUri",
+        serde_json::json!([
+            gid,
+            1,
+            [],
+            [
+                "http://example.com/inserted-a",
+                "http://example.com/inserted-b"
+            ],
+            0
+        ]),
+    );
+    let change_resp = engine.handle_request(&change_req).await;
+    assert_success(&change_resp);
+    assert_eq!(change_resp.result.unwrap(), serde_json::json!([0, 2]));
+
+    let uris_req = make_request("aria2.getUris", serde_json::json!([gid]));
+    let uris_resp = engine.handle_request(&uris_req).await;
+    assert_success(&uris_resp);
+    let uris = uris_resp.result.unwrap();
+    let uris: Vec<String> = uris
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["uri"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        uris,
+        vec![
+            "http://example.com/inserted-a",
+            "http://example.com/inserted-b",
+            "http://example.com/first",
+            "http://example.com/last",
+        ]
+    );
+}
+
 /// Test: aria2.changePosition modifies URI position.
 #[tokio::test]
 async fn regression_change_position_modifies_position() {
@@ -738,7 +909,7 @@ async fn regression_change_position_modifies_position() {
     for index in 1..=3 {
         let add_req = make_request(
             "aria2.addUri",
-            serde_json::json!([format!("http://uri{index}.example.com/file")]),
+            serde_json::json!([[format!("http://uri{index}.example.com/file")]]),
         );
         let add_resp = engine.handle_request(&add_req).await;
         let added_gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -817,25 +988,47 @@ async fn regression_get_session_info_format() {
 /// Test: aria2.saveSession returns "OK" with count.
 #[tokio::test]
 async fn regression_save_session_format() {
-    let engine = RpcEngine::new();
+    let session_path = std::env::temp_dir().join(format!(
+        "aria2_rpc_regression_session_{}.sess",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&session_path);
+    let engine = RpcEngine::new().with_save_session_path(session_path.clone());
 
     // Add a task
     let req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     engine.handle_request(&req).await;
 
-    let session_path = std::env::temp_dir().join("aria2_rpc_regression_session.sess");
-    let req = make_request(
-        "aria2.saveSession",
-        serde_json::json!([session_path.to_string_lossy()]),
-    );
+    let req = make_request("aria2.saveSession", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(result, "OK");
+    let _ = std::fs::remove_file(session_path);
+}
+
+/// Test: `saveSession` uses the configured filename; the original method does
+/// not accept a request-supplied path.
+#[tokio::test]
+async fn regression_save_session_ignores_extra_parameters() {
+    let directory = tempfile::tempdir().unwrap();
+    let configured = directory.path().join("configured.sess");
+    let explicit = directory.path().join("explicit.sess");
+    let engine = RpcEngine::new().with_save_session_path(configured.clone());
+
+    let req = make_request(
+        "aria2.saveSession",
+        serde_json::json!([explicit.to_string_lossy()]),
+    );
+    let resp = engine.handle_request(&req).await;
+
+    assert_success(&resp);
+    assert!(configured.exists());
+    assert!(!explicit.exists());
 }
 
 /// Test: aria2.shutdown returns "OK" with active count.
@@ -860,7 +1053,7 @@ async fn regression_force_shutdown_format() {
     for i in 0..2 {
         let req = make_request(
             "aria2.addUri",
-            serde_json::json!([format!("http://example.com/file{}", i)]),
+            serde_json::json!([[format!("http://example.com/file{}", i)]]),
         );
         engine.handle_request(&req).await;
     }
@@ -920,7 +1113,7 @@ async fn regression_remove_download_result_returns_ok() {
     // First add a task, then force-remove it to populate stopped_tasks
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -1101,7 +1294,7 @@ async fn regression_gid_format_matches_aria2() {
 
     let req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let resp = engine.handle_request(&req).await;
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
@@ -1118,7 +1311,7 @@ async fn regression_status_values_match_aria2() {
 
     let add_req = make_request(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file"]),
+        serde_json::json!([["http://example.com/file"]]),
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();

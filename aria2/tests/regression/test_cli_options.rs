@@ -6,9 +6,8 @@
 
 use std::path::PathBuf;
 
-use aria2::app::cli::{CliArgs, Commands};
+use aria2::app::cli::{CliArgs, Commands, HelpRequest, render_help};
 use aria2_core::config::{ConfigParser, OptionCategory, OptionRegistry, OptionType, OptionValue};
-use clap::Parser;
 
 /// Helper: parse CLI args via clap. Panics on parse error.
 fn parse(args: &[&str]) -> CliArgs {
@@ -542,23 +541,104 @@ fn regression_short_option_listen_port_range() {
     assert_eq!(cli.bittorrent.listen_port.as_deref(), Some("6881-6999"));
 }
 
-/// Test: -h does NOT set listen-port (it triggers the original help action).
-/// Verify that -h with a value is rejected because help takes no argument.
+/// Test: -h preserves aria2's optional help argument semantics.
 #[test]
 fn regression_h_does_not_set_listen_port() {
-    // -h triggers help; try_parse_from should return Err for -h with
-    // an extra positional value, OR succeed as help request.
-    // The key assertion: -h never sets listen_port.
-    let result = CliArgs::try_parse_from(["aria2c", "-h", "6881"]);
-    // clap will either show help (Err with DisplayHelp) or error.
-    // Either way, it should NOT produce a CliArgs where listen_port is set.
-    if let Ok(cli) = result {
-        assert!(
-            cli.bittorrent.listen_port.is_none(),
-            "-h must not set listen-port"
-        );
-    }
-    // If Err, that's also acceptable (clap exits with help or error).
+    let cli = CliArgs::try_parse_from(["aria2c", "-h", "6881"])
+        .expect("the optional help argument must not consume a space-separated token");
+    assert_eq!(cli.help, Some(HelpRequest::Basic));
+    assert_eq!(cli.uris, vec!["6881"]);
+    assert!(
+        cli.bittorrent.listen_port.is_none(),
+        "-h must not set listen-port"
+    );
+}
+
+/// Test: long help selectors are preserved as filters instead of being
+/// collapsed into clap's DisplayHelp action.
+#[test]
+fn regression_help_selector() {
+    let cli = parse(&["--help=#http"]);
+    assert_eq!(cli.help, Some(HelpRequest::Filter("#http".to_string())));
+
+    let cli = parse(&["-h=timeout"]);
+    assert_eq!(cli.help, Some(HelpRequest::Basic));
+
+    let cli = parse(&["-htimeout"]);
+    assert_eq!(cli.help, Some(HelpRequest::Filter("timeout".to_string())));
+}
+
+/// Test: process-level help rendering consumes selectors without loading a
+/// config file or starting the download engine.
+#[test]
+fn regression_help_rendering_filters_options() {
+    let timeout_help = render_help(&HelpRequest::Filter("timeout".to_string()));
+    assert!(timeout_help.contains("--timeout"));
+    assert!(!timeout_help.contains("--dir"));
+
+    let http_help = render_help(&HelpRequest::Filter("#http".to_string()));
+    assert!(http_help.contains("--http-proxy"));
+    assert!(!http_help.contains("--rpc-listen-port"));
+}
+
+/// Test: original public options added from the registry remain reachable
+/// through the CLI, including the original short file selectors.
+#[test]
+fn regression_original_public_option_entries() {
+    let cli = parse(&[
+        "--async-dns=false",
+        "--async-dns-server=127.0.0.1",
+        "--event-poll=select",
+        "-S",
+        "-T",
+        "sample.torrent",
+        "-M",
+        "sample.meta4",
+        "--certificate=client.pem",
+        "--private-key=client.key",
+        "--min-tls-version=TLSv1.2",
+        "--ssh-host-key-md=sha-1=deadbeef",
+        "--dht-entry-point6=seed.example:6881",
+        "--dht-file-path6=dht6.dat",
+        "--metalink-enable-unique-protocol=false",
+        "--metalink-base-uri=https://example.test/meta4",
+        "--on-download-start=hook-start",
+        "--pause-metadata",
+        "--show-console-readout=false",
+        "--dscp=46",
+        "--socket-recv-buffer-size=1M",
+        "--max-resume-failure-tries=3",
+        "--optimize-concurrent-downloads",
+    ]);
+
+    assert_eq!(cli.general.async_dns, Some(false));
+    assert_eq!(cli.general.async_dns_server.as_deref(), Some("127.0.0.1"));
+    assert_eq!(cli.general.event_poll.as_deref(), Some("select"));
+    assert_eq!(cli.general.show_files, Some(true));
+    assert_eq!(
+        cli.general.torrent_file,
+        Some(PathBuf::from("sample.torrent"))
+    );
+    assert_eq!(
+        cli.general.metalink_file,
+        Some(PathBuf::from("sample.meta4"))
+    );
+    assert_eq!(cli.http_ftp.certificate, Some(PathBuf::from("client.pem")));
+    assert_eq!(cli.http_ftp.private_key, Some(PathBuf::from("client.key")));
+    assert_eq!(
+        cli.http_ftp.ssh_host_key_md.as_deref(),
+        Some("sha-1=deadbeef")
+    );
+    assert_eq!(
+        cli.bittorrent.dht_entry_point6.as_deref(),
+        Some("seed.example:6881")
+    );
+    assert_eq!(cli.general.metalink_enable_unique_protocol, Some(false));
+    assert_eq!(cli.general.on_download_start.as_deref(), Some("hook-start"));
+    assert_eq!(cli.advanced.dscp, Some(46));
+    assert_eq!(cli.advanced.socket_recv_buffer_size.as_deref(), Some("1M"));
+    assert_eq!(cli.advanced.max_resume_failure_tries, Some(3));
+    assert_eq!(cli.advanced.optimize_concurrent_downloads, Some(true));
 }
 
 /// Test: --no-color flag exists and is parsed.

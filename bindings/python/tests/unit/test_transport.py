@@ -182,6 +182,24 @@ class TestSendRequest:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_rpc_error_body_is_decoded_before_non_2xx_status(self, transport):
+        respx.post("http://localhost:6800/jsonrpc").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": 1, "message": "GID not found"},
+                },
+            )
+        )
+        with pytest.raises(RpcError) as exc_info:
+            await transport.send_request("aria2.tellStatus", ["bad-gid"])
+        assert exc_info.value.code == 1
+        assert "GID not found" in str(exc_info.value)
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_auth_error_code_2_in_rpc_error(self, transport):
         respx.post("http://localhost:6800/jsonrpc").mock(
             return_value=httpx.Response(

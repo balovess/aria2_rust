@@ -113,6 +113,30 @@ impl FtpControlStream {
     }
 }
 
+/// FTP data stream that is either plain or protected by TLS.
+///
+/// The data channel has the same transport choices as the control channel,
+/// but it is kept as a separate type so callers cannot accidentally use a
+/// control-only abstraction for payload I/O.
+#[derive(Debug)]
+pub enum FtpDataStream {
+    /// Unencrypted data connection used by plain FTP.
+    Plain(TcpStream),
+    /// TLS-protected data connection negotiated by `PROT P`.
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl FtpDataStream {
+    /// Set TCP_NODELAY when the underlying stream is a plain TCP socket.
+    /// TLS streams are already configured before they are wrapped.
+    pub fn set_nodelay(&self, enabled: bool) -> std::io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.set_nodelay(enabled),
+            Self::Tls(stream) => stream.get_ref().0.set_nodelay(enabled),
+        }
+    }
+}
+
 /// FTP response struct
 #[derive(Debug, Clone)]
 pub struct FtpResponse {

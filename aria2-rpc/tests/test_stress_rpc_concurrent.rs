@@ -57,7 +57,7 @@ async fn test_stress_1000_concurrent_rpc_requests() {
 
             // Create request
             let params = if method == "aria2.addUri" {
-                json!([format!("http://example.com/file{}.zip", i)])
+                json!([[format!("http://example.com/file{}.zip", i)]])
             } else {
                 json!([])
             };
@@ -145,7 +145,7 @@ async fn test_stress_concurrent_add_uri_tasks() {
         handles.push(tokio::spawn(async move {
             let request = JsonRpcRequest::new(
                 "aria2.addUri",
-                json!([format!("http://test.com/download{}.bin", i)]),
+                json!([[format!("http://test.com/download{}.bin", i)]]),
             )
             .with_id(i);
 
@@ -447,7 +447,7 @@ async fn test_stress_task_lifecycle_operations() {
     for i in 0..100 {
         let request = JsonRpcRequest::new(
             "aria2.addUri",
-            json!([format!("http://127.0.0.1:{port}/lifecycle{}.bin", i)]),
+            json!([[format!("http://127.0.0.1:{port}/lifecycle{}.bin", i)]]),
         )
         .with_id(i);
 

@@ -113,8 +113,8 @@ impl RpcEngine {
 
     /// Chainable builder method to set the configured `--save-session` path.
     ///
-    /// `aria2.saveSession` uses this when the RPC request does not include an
-    /// explicit filename, mirroring C++ `SaveSessionRpcMethod` which reads the
+    /// `aria2.saveSession` always uses this configured path; request parameters
+    /// are ignored, mirroring C++ `SaveSessionRpcMethod` which reads the
     /// engine's `PREF_SAVE_SESSION` option.
     pub fn with_save_session_path(mut self, path: std::path::PathBuf) -> Self {
         self.save_session_path = Some(path);
@@ -423,7 +423,7 @@ mod tests {
         let engine = RpcEngine::new();
         let req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!(["http://example.com/file.iso"]),
+            serde_json::json!([["http://example.com/file.iso"]]),
         )
         .with_id(1);
         let resp = engine.handle_request(&req).await;
@@ -445,7 +445,7 @@ mod tests {
     async fn test_handle_pause_and_unpause() {
         let engine = RpcEngine::new();
         let add_req =
-            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
         let add_resp = engine.handle_request(&add_req).await;
         let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -462,7 +462,7 @@ mod tests {
     async fn test_handle_tell_status() {
         let engine = RpcEngine::new();
         let add_req =
-            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
         let add_resp = engine.handle_request(&add_req).await;
         let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 

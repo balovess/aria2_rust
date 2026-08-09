@@ -255,7 +255,7 @@ async fn e2e_add_uri_via_post() {
         &client,
         &base,
         "aria2.addUri",
-        json![["http://127.0.0.1:1/test"]],
+        json!([["http://127.0.0.1:1/test"]]),
     )
     .await;
 
@@ -747,7 +747,7 @@ async fn e2e_ws_receive_event_add() {
         &client,
         &base,
         "aria2.addUri",
-        json![["http://127.0.0.1:1/test-event-add"]],
+        json!([["http://127.0.0.1:1/test-event-add"]]),
     )
     .await;
     let _gid = parse_gid(&resp);
@@ -777,7 +777,7 @@ async fn e2e_ws_receive_event_pause() {
         &client,
         &base,
         "aria2.addUri",
-        json![["http://127.0.0.1:1/test-event-pause"]],
+        json!([["http://127.0.0.1:1/test-event-pause"]]),
     )
     .await;
     let gid = parse_gid(&add);
@@ -808,7 +808,7 @@ async fn e2e_ws_receive_event_complete() {
         &client,
         &base,
         "aria2.addUri",
-        json![["http://127.0.0.1:1/test-event-remove"]],
+        json!([["http://127.0.0.1:1/test-event-remove"]]),
     )
     .await;
     let gid = parse_gid(&add);
@@ -997,7 +997,7 @@ async fn e2e_ws_jsonrpc_with_events() {
         &client,
         &base,
         "aria2.addUri",
-        json![["http://127.0.0.1:1/ws-event-test"]],
+        json!([["http://127.0.0.1:1/ws-event-test"]]),
     )
     .await;
     let _gid = parse_gid(&add);
@@ -1134,7 +1134,7 @@ async fn e2e_full_lifecycle() {
         &client,
         &base,
         "aria2.addUri",
-        json![["http://127.0.0.1:1/lifecycle-test"]],
+        json!([["http://127.0.0.1:1/lifecycle-test"]]),
     )
     .await;
     let gid = parse_gid(&add);

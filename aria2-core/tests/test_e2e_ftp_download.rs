@@ -28,6 +28,33 @@ fn test_ftp_uri_parsing_bracketed_ipv6() {
 }
 
 #[tokio::test]
+async fn test_ftps_does_not_downgrade_to_plain_ftp() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftps://127.0.0.1:{}/files/small.bin", addr.port());
+
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(101),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("FTPS command should construct");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), cmd.execute()).await;
+    assert!(
+        result.is_ok(),
+        "an ftps:// request must reject a plaintext FTP server promptly"
+    );
+    assert!(
+        result.unwrap().is_err(),
+        "an ftps:// request must not downgrade to plaintext FTP"
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_ftp_download_small_file() {
     let server = start_server().await;
     let dir = tmp_dir();

@@ -138,8 +138,11 @@ async fn test_tell_status_returns_live_progress() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
     // Add a download
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://example.com/largefile.bin"])).with_id(1);
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        json!([["http://example.com/largefile.bin"]]),
+    )
+    .with_id(1);
     let resp = engine.handle_request(&add_req).await;
     assert!(resp.is_success());
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
@@ -195,8 +198,8 @@ async fn test_get_global_stat_aggregates_live_data() {
     assert_eq!(stat["numActive"].as_str(), Some("0"));
 
     // Add two downloads with different speeds
-    let add1 = JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(2);
-    let add2 = JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(3);
+    let add1 = JsonRpcRequest::new("aria2.addUri", json!([["http://a.com/f1"]])).with_id(2);
+    let add2 = JsonRpcRequest::new("aria2.addUri", json!([["http://b.com/f2"]])).with_id(3);
     let gid1: String =
         serde_json::from_value(engine.handle_request(&add1).await.result.unwrap()).unwrap();
     let gid2: String =
@@ -235,8 +238,8 @@ async fn test_tell_active_lists_active_downloads() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
     // Add two downloads
-    let add1 = JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(1);
-    let add2 = JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(2);
+    let add1 = JsonRpcRequest::new("aria2.addUri", json!([["http://a.com/f1"]])).with_id(1);
+    let add2 = JsonRpcRequest::new("aria2.addUri", json!([["http://b.com/f2"]])).with_id(2);
     let gid1: String =
         serde_json::from_value(engine.handle_request(&add1).await.result.unwrap()).unwrap();
     let _gid2: String =
@@ -274,7 +277,7 @@ async fn test_progress_changes_reflected_in_tell_status() {
     // Add a download
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        json!(["http://example.com/progressive.bin"]),
+        json!([["http://example.com/progressive.bin"]]),
     )
     .with_id(1);
     let resp = engine.handle_request(&add_req).await;
@@ -336,8 +339,8 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
 
     // Add a download — this registers the GID in RequestGroupMan but does
     // NOT create a task_opts entry (changeOption is never called).
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://example.com/fallback.bin"])).with_id(1);
+    let add_req = JsonRpcRequest::new("aria2.addUri", json!([["http://example.com/fallback.bin"]]))
+        .with_id(1);
     let resp = engine.handle_request(&add_req).await;
     assert!(resp.is_success());
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();

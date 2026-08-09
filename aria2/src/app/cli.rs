@@ -60,12 +60,39 @@
 //! A plain `bool` collapses the first and last case, which silently dropped
 //! `--continue=false` style overrides.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::str::FromStr;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{Arg, ArgAction, Args, CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 use super::App;
+
+/// The optional argument accepted by aria2's `-h`/`--help` option.
+///
+/// This is deliberately kept separate from the typed configuration option
+/// parser. Help is a process-level command, not a value that is applied to a
+/// download task or exposed through RPC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HelpRequest {
+    /// Show the default basic help section.
+    Basic,
+    /// Show help selected by an aria2 tag (`#http`) or option-name keyword.
+    Filter(String),
+}
+
+impl FromStr for HelpRequest {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty() {
+            Ok(Self::Basic)
+        } else {
+            Ok(Self::Filter(value.to_owned()))
+        }
+    }
+}
 
 // =========================================================================
 // Top-level CLI struct
@@ -83,6 +110,7 @@ use super::App;
     version,
     disable_help_flag = true,
     disable_version_flag = true,
+    disable_help_subcommand = true,
     about = "aria2-rust - The ultra fast download utility",
     long_about = None
 )]
@@ -111,9 +139,20 @@ pub struct CliArgs {
     #[arg(short = 'v', long = "version", action = ArgAction::Version)]
     pub version: Option<bool>,
 
-    /// Original aria2 help action (`-h`, `--help`).
-    #[arg(short = 'h', long = "help", action = ArgAction::Help)]
-    pub help: Option<bool>,
+    /// Original aria2 help action (`-h`, `--help[=TAG|KEYWORD]`).
+    ///
+    /// `require_equals` is important here: aria2's optional argument is only
+    /// consumed in the `--help=value` form, so `--help URI` leaves `URI` as a
+    /// positional input instead of treating it as a help filter.
+    #[arg(
+        short = 'h',
+        long = "help",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "",
+        value_name = "TAG|KEYWORD"
+    )]
+    pub help: Option<HelpRequest>,
 
     /// Verbose output
     #[arg(
@@ -144,6 +183,166 @@ pub struct CliArgs {
     pub command: Option<Commands>,
 }
 
+impl CliArgs {
+    /// Parse process arguments after preserving getopt's attached `-hVALUE`
+    /// optional-argument form. Clap otherwise treats the remainder as a short
+    /// option cluster (`-h` + `-V` + ...), which changes aria2's argv contract.
+    pub fn parse() -> Self {
+        <Self as Parser>::parse_from(normalize_short_help_args(std::env::args_os()))
+    }
+
+    /// Testable equivalent of [`Parser::try_parse_from`] with aria2 argv
+    /// normalization applied before clap sees the tokens.
+    pub fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+        <Self as Parser>::try_parse_from(normalize_short_help_args(args))
+    }
+}
+
+fn normalize_short_help_args<I>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    args.into_iter()
+        .map(|arg| {
+            let Some(value) = arg.to_str() else {
+                return arg;
+            };
+            let suffix = value.strip_prefix("-h").unwrap_or_default();
+            if suffix.starts_with('=') {
+                // getopt's short optional argument includes this '='. The
+                // original option_processing.cc then truncates at the first
+                // '=' and falls back to the basic help section.
+                OsString::from("-h")
+            } else if !suffix.is_empty() {
+                OsString::from(format!("-h={suffix}"))
+            } else {
+                arg
+            }
+        })
+        .collect()
+}
+
+/// Render help without entering the application lifecycle.
+///
+/// The original executable treats help filters as an output concern. Keeping
+/// that behaviour here prevents a help selector from being applied as a
+/// configuration option and gives tests a pure seam for the process-level
+/// command. Keyword filtering is exact on the public long option name; tag
+/// filtering uses the CLI's explicit option headings and the original tag
+/// names that have a direct Rust representation.
+pub fn render_help(request: &HelpRequest) -> String {
+    let mut command = CliArgs::command();
+
+    let filter = match request {
+        HelpRequest::Basic => "#basic",
+        HelpRequest::Filter(raw_filter) => normalize_help_filter(raw_filter),
+    };
+    command = command.mut_args(|arg| {
+        let visible = arg.get_long().is_some() || arg.get_short().is_some();
+        if visible && matches_help_filter(&arg, filter) {
+            arg
+        } else {
+            arg.hide(true)
+        }
+    });
+
+    command.render_help().to_string()
+}
+
+fn normalize_help_filter(raw_filter: &str) -> &str {
+    let filter = raw_filter.strip_prefix("--").unwrap_or(raw_filter);
+    filter
+        .split_once('=')
+        .map_or(filter, |(keyword, _)| keyword)
+}
+
+fn matches_help_filter(arg: &Arg, filter: &str) -> bool {
+    let name = arg.get_long().unwrap_or_default();
+    if let Some(tag) = filter.strip_prefix('#') {
+        return matches_help_tag(arg, name, tag);
+    }
+
+    name.contains(filter)
+}
+
+fn matches_help_tag(arg: &Arg, name: &str, tag: &str) -> bool {
+    match tag {
+        "all" => true,
+        "basic" => BASIC_HELP_OPTIONS.contains(&name),
+        "advanced" => arg.get_help_heading() == Some("Advanced options"),
+        "http" | "https" => {
+            arg.get_help_heading() == Some("HTTP/FTP options")
+                && (tag == "http" || name.contains("https") || name == "check-certificate")
+        }
+        "ftp" => arg.get_help_heading() == Some("HTTP/FTP options") && name.contains("ftp"),
+        "bittorrent" => arg.get_help_heading() == Some("BitTorrent options"),
+        "metalink" => name.contains("metalink") || name == "select-file",
+        "rpc" => arg.get_help_heading() == Some("RPC options"),
+        "cookie" => name.contains("cookie"),
+        "hook" => name.contains("hook") || name.starts_with("on-"),
+        "file" => name.contains("file") || matches!(name, "dir" | "out"),
+        "checksum" => name.contains("check") || name.contains("hash"),
+        "experimental" => name == "enable-utp",
+        "deprecated" => name == "dht-message-path",
+        "help" => name == "help",
+        _ => false,
+    }
+}
+
+// This list follows aria2's basic help surface. Options not represented by
+// the current CLI are naturally omitted from the generated output.
+const BASIC_HELP_OPTIONS: &[&str] = &[
+    "allow-piece-length-change",
+    "always-resume",
+    "bt-max-peers",
+    "check-integrity",
+    "continue",
+    "dht-listen-addr6",
+    "dht-listen-port",
+    "dir",
+    "enable-dht",
+    "enable-dht6",
+    "file-allocation",
+    "ftp-passwd",
+    "force-sequential",
+    "ftp-pasv",
+    "ftp-user",
+    "help",
+    "index-out",
+    "input-file",
+    "listen-port",
+    "load-cookies",
+    "log",
+    "max-connection-per-server",
+    "max-concurrent-downloads",
+    "max-overall-upload-limit",
+    "max-upload-limit",
+    "max-tries",
+    "min-split-size",
+    "no-netrc",
+    "out",
+    "parameterized-uri",
+    "quiet",
+    "save-session",
+    "save-session-interval",
+    "seed-ratio",
+    "seed-time",
+    "show-files",
+    "split",
+    "timeout",
+    "torrent-file",
+    "metalink-file",
+    "http-passwd",
+    "http-user",
+    "user-agent",
+    "version",
+];
+
 /// Subcommands supported by aria2c.
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -160,6 +359,7 @@ pub enum Commands {
 
 /// General options: directory, output, logging, UI, session management.
 #[derive(Args, Debug)]
+#[command(next_help_heading = "General options")]
 pub struct GeneralArgs {
     /// Save directory
     #[arg(short = 'd', long)]
@@ -522,6 +722,145 @@ pub struct GeneralArgs {
     /// Set GID for the first download
     #[arg(long = "gid")]
     pub gid: Option<String>,
+
+    /// Enable asynchronous DNS resolution
+    #[arg(
+        long = "async-dns",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub async_dns: Option<bool>,
+
+    /// DNS server address for async resolver
+    #[arg(long = "async-dns-server")]
+    pub async_dns_server: Option<String>,
+
+    /// Enable IPv6 async DNS resolution (deprecated)
+    #[arg(
+        long = "enable-async-dns6",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_async_dns6: Option<bool>,
+
+    /// Event poll method (epoll/kqueue/port/poll/select)
+    #[arg(long = "event-poll")]
+    pub event_poll: Option<String>,
+
+    /// Server performance statistics input file
+    #[arg(long = "server-stat-if")]
+    pub server_stat_if: Option<PathBuf>,
+
+    /// Server performance statistics output file
+    #[arg(long = "server-stat-of")]
+    pub server_stat_of: Option<PathBuf>,
+
+    /// Server stat timeout in seconds (0=unlimited)
+    #[arg(long = "server-stat-timeout")]
+    pub server_stat_timeout: Option<u64>,
+
+    /// Path to the .netrc file for authentication
+    #[arg(long = "netrc-path")]
+    pub netrc_path: Option<PathBuf>,
+
+    /// Show file list for BitTorrent/Metalink
+    #[arg(
+        short = 'S',
+        long = "show-files",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub show_files: Option<bool>,
+
+    /// Path to a .torrent file
+    #[arg(short = 'T', long = "torrent-file")]
+    pub torrent_file: Option<PathBuf>,
+
+    /// Path to a Metalink file
+    #[arg(short = 'M', long = "metalink-file")]
+    pub metalink_file: Option<PathBuf>,
+
+    /// Checksum for verification (hashType=digest format)
+    #[arg(long = "checksum")]
+    pub checksum: Option<String>,
+
+    /// Enable mmap for file allocation
+    #[arg(
+        long = "enable-mmap",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_mmap: Option<bool>,
+
+    /// Max size limit for mmap (0=unlimited)
+    #[arg(long = "max-mmap-limit")]
+    pub max_mmap_limit: Option<String>,
+
+    /// Whether to use only one protocol per Metalink mirror host
+    #[arg(
+        long = "metalink-enable-unique-protocol",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub metalink_enable_unique_protocol: Option<bool>,
+
+    /// Base URI used to resolve relative Metalink URLs
+    #[arg(long = "metalink-base-uri")]
+    pub metalink_base_uri: Option<String>,
+
+    /// Pause downloads created from metadata
+    #[arg(
+        long = "pause-metadata",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub pause_metadata: Option<bool>,
+
+    /// Command on download start
+    #[arg(long = "on-download-start")]
+    pub on_download_start: Option<String>,
+
+    /// Command on download stop
+    #[arg(long = "on-download-stop")]
+    pub on_download_stop: Option<String>,
+
+    /// Command on download pause
+    #[arg(long = "on-download-pause")]
+    pub on_download_pause: Option<String>,
+
+    /// Command on download complete
+    #[arg(long = "on-download-complete")]
+    pub on_download_complete: Option<String>,
+
+    /// Command on download error
+    #[arg(long = "on-download-error")]
+    pub on_download_error: Option<String>,
+
+    /// Show the console readout
+    #[arg(
+        long = "show-console-readout",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub show_console_readout: Option<bool>,
+
+    /// Set soft resource limit for open files
+    #[arg(long = "rlimit-nofile")]
+    pub rlimit_nofile: Option<u64>,
 }
 
 // =========================================================================
@@ -530,6 +869,7 @@ pub struct GeneralArgs {
 
 /// HTTP/FTP options: proxies, headers, timeouts, connection management.
 #[derive(Args, Debug)]
+#[command(next_help_heading = "HTTP/FTP options")]
 pub struct HttpFtpArgs {
     /// Global proxy URL
     #[arg(long = "all-proxy")]
@@ -659,6 +999,18 @@ pub struct HttpFtpArgs {
     /// CA certificate file
     #[arg(long = "ca-certificate")]
     pub ca_certificate: Option<PathBuf>,
+
+    /// Client certificate file path (PEM format)
+    #[arg(long = "certificate")]
+    pub certificate: Option<PathBuf>,
+
+    /// Client private key file path (PEM format)
+    #[arg(long = "private-key")]
+    pub private_key: Option<PathBuf>,
+
+    /// Minimum TLS version (TLSv1.1/TLSv1.2/TLSv1.3)
+    #[arg(long = "min-tls-version")]
+    pub min_tls_version: Option<String>,
 
     /// Allow overwriting existing files
     #[arg(
@@ -833,6 +1185,10 @@ pub struct HttpFtpArgs {
     /// FTP transfer type (binary/ascii)
     #[arg(long = "ftp-type")]
     pub ftp_type: Option<String>,
+
+    /// SSH host key fingerprint (hashType=digest format)
+    #[arg(long = "ssh-host-key-md")]
+    pub ssh_host_key_md: Option<String>,
 }
 
 // =========================================================================
@@ -841,6 +1197,7 @@ pub struct HttpFtpArgs {
 
 /// BitTorrent options: seeding, DHT, PEX, peer management.
 #[derive(Args, Debug)]
+#[command(next_help_heading = "BitTorrent options")]
 pub struct BitTorrentArgs {
     /// Seeding time in minutes (0=infinite)
     #[arg(short = 'G', long = "seed-time")]
@@ -1132,6 +1489,14 @@ pub struct BitTorrentArgs {
     #[arg(long = "dht-listen-addr6")]
     pub dht_listen_addr6: Option<String>,
 
+    /// IPv6 DHT bootstrap node (hostname:port)
+    #[arg(long = "dht-entry-point6")]
+    pub dht_entry_point6: Option<String>,
+
+    /// Path to IPv6 DHT routing table file
+    #[arg(long = "dht-file-path6")]
+    pub dht_file_path6: Option<PathBuf>,
+
     /// Peer ID prefix for BitTorrent
     #[arg(long = "peer-id-prefix")]
     pub peer_id_prefix: Option<String>,
@@ -1155,6 +1520,7 @@ pub struct BitTorrentArgs {
 
 /// JSON-RPC/XML-RPC server options.
 #[derive(Args, Debug)]
+#[command(next_help_heading = "RPC options")]
 pub struct RpcArgs {
     /// Enable JSON-RPC/XML-RPC server
     #[arg(
@@ -1254,6 +1620,7 @@ pub struct RpcArgs {
 
 /// Advanced options: bandwidth limits, disk cache, file allocation.
 #[derive(Args, Debug)]
+#[command(next_help_heading = "Advanced options")]
 pub struct AdvancedArgs {
     /// File allocation method (none/prealloc/falloc/trunc/mmap)
     #[arg(short = 'a', long = "file-allocation")]
@@ -1322,6 +1689,28 @@ pub struct AdvancedArgs {
     /// Auto-save interval for server stats in seconds (0=disabled)
     #[arg(long = "save-server-stat-interval")]
     pub save_server_stat_interval: Option<u64>,
+
+    /// DSCP (DiffServ) IP packet marking value (0-63)
+    #[arg(long = "dscp")]
+    pub dscp: Option<u64>,
+
+    /// Socket receive buffer size (0=OS default)
+    #[arg(long = "socket-recv-buffer-size")]
+    pub socket_recv_buffer_size: Option<String>,
+
+    /// Max resume failure retries before a fresh download (0=unlimited)
+    #[arg(long = "max-resume-failure-tries")]
+    pub max_resume_failure_tries: Option<u64>,
+
+    /// Optimize concurrent download count based on network conditions
+    #[arg(
+        long = "optimize-concurrent-downloads",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub optimize_concurrent_downloads: Option<bool>,
 }
 
 // =========================================================================

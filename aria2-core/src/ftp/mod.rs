@@ -17,8 +17,9 @@ pub mod file_preparation;
 mod connection_tests;
 
 pub use connection::{
-    FtpClient, FtpDataProxyConfig, FtpFileInfo, FtpMode, FtpProxyConfig, FtpProxyGetRequest,
-    FtpProxyGetRequestBuilder, FtpResponse, FtpTransferType, ProxyMethod, resolve_proxy_method,
+    FtpClient, FtpDataProxyConfig, FtpDataStream, FtpFileInfo, FtpMode, FtpProxyConfig,
+    FtpProxyGetRequest, FtpProxyGetRequestBuilder, FtpResponse, FtpTransferType, ProxyMethod,
+    resolve_proxy_method,
 };
 pub use connection_pool::{
     ConnectionKey, FtpConnectionPool, PoolConfig, PoolStats, PooledConnection, create_custom_pool,

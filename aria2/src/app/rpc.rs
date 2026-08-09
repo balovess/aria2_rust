@@ -259,8 +259,8 @@ impl App {
             .with_global_opts(user_opts_json);
 
         // Pass the configured --save-session path through so the RPC
-        // `aria2.saveSession` method can persist without an explicit path
-        // argument (mirrors C++ reading PREF_SAVE_SESSION).
+        // `aria2.saveSession` method always uses PREF_SAVE_SESSION, matching
+        // C++ even when a request supplies an extra positional value.
         let rpc_engine = if let Some(save_path) = self
             .get_opt_str("save-session")
             .await
@@ -318,13 +318,21 @@ impl App {
                 .map_err(|e| format!("Failed to create RPC server: {}", e))?
         };
 
+        // Bind before registering process-wide hooks or spawning the server.
+        // A failed bind must fail CLI startup; otherwise RPC-only mode would
+        // keep the engine alive with no reachable endpoint.
+        let listener = server
+            .bind_listener()
+            .await
+            .map_err(|e| format!("Failed to bind RPC server on {}: {}", server.addr(), e))?;
+
         let rpc_url = server.rpc_url();
         info!("RPC server listening at {}", rpc_url);
         println!("  {} RPC server: {}", "📡".cyan(), rpc_url.yellow());
 
         // Spawn server in background
         let handle = tokio::spawn(async move {
-            if let Err(e) = server.serve().await {
+            if let Err(e) = server.serve_on_listener(listener).await {
                 error!("RPC server error: {}", e);
             }
         });
@@ -437,6 +445,37 @@ mod bridge_tests {
         let engine = Arc::new(RpcEngine::new());
         let bridge = CoreEventBridge::new(&engine);
         bridge.on_download_event(CoreDownloadEvent::Error, GID);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_occupied_rpc_port_before_startup() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let port = occupied
+            .local_addr()
+            .expect("test listener should expose an address")
+            .port();
+
+        let app = App::new();
+        {
+            let mut config = app.config.write().await;
+            config
+                .set_global_option("enable-rpc", OptionValue::Bool(true))
+                .await
+                .expect("enable-rpc should be valid");
+            config
+                .set_global_option("rpc-listen-port", OptionValue::Int(port as i64))
+                .await
+                .expect("rpc-listen-port should be valid");
+        }
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let error = app
+            .start_rpc_server(app.request_man.clone(), cmd_tx)
+            .await
+            .expect_err("occupied port must fail RPC startup");
+        assert!(error.contains("Failed to bind RPC server"));
     }
 
     /// Registering the bridge on the process-wide core bus must make the core

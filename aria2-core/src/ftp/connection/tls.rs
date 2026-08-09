@@ -471,6 +471,50 @@ impl AsyncWrite for super::types::FtpControlStream {
     }
 }
 
+impl AsyncRead for super::types::FtpDataStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            super::types::FtpDataStream::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            super::types::FtpDataStream::Tls(stream) => {
+                Pin::new(stream.as_mut()).poll_read(cx, buf)
+            }
+        }
+    }
+}
+
+impl AsyncWrite for super::types::FtpDataStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            super::types::FtpDataStream::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            super::types::FtpDataStream::Tls(stream) => {
+                Pin::new(stream.as_mut()).poll_write(cx, buf)
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            super::types::FtpDataStream::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            super::types::FtpDataStream::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            super::types::FtpDataStream::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            super::types::FtpDataStream::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
 // =============================================================================
 // Unit tests
 // =============================================================================

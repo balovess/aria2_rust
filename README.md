@@ -44,7 +44,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (37 listed methods, 6 notifications; compatibility coverage tracked separately)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (36 all-features methods, 6 notifications; compatibility coverage tracked separately)
 - **Configuration System**: ~95 core options with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -210,7 +210,7 @@ Verification snapshot (2026-08-08): the protocol, RPC, and CLI crates pass
 their all-feature package test suites; the core all-feature targets executed
 3,411 passing tests with 11 ignored and 0 failures before a Windows build
 timeout while the final target was starting. Node.js binding tests pass 123/123
-and Python binding tests pass 136/136 with a real `aria2c` binary. The single
+and Python binding tests pass 137/137 with a real `aria2c` binary. The single
 workspace aggregate command is still a build-time timeout on this host, so
 these results do not mean the migration is complete.
 
@@ -437,7 +437,7 @@ path can still be `PARTIAL` or `UNVERIFIED` there.
 | CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
-| JSON-RPC API | Implemented path | 37 methods returned by `system.listMethods`; interoperability remains open |
+| JSON-RPC API | Implemented path | 36 all-features methods returned by `system.listMethods`; interoperability remains open |
 | XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
 | WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
 | URI list file (`-i`) | Implemented path | Mirror + inline options |

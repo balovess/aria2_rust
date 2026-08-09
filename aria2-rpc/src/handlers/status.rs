@@ -3,11 +3,95 @@
 //! Handlers for querying download status and global statistics.
 
 use aria2_core::util::rwlock_ext::RwLockRecover;
+use std::collections::HashSet;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, GlobalStat, StatusInfo};
 use aria2_core::request::request_group::download_result::DownloadResult;
+
+pub(crate) fn status_keys_for_request(
+    req: &JsonRpcRequest,
+    index: usize,
+) -> Result<Vec<String>, JsonRpcError> {
+    Ok(req
+        .get_optional_param::<Vec<String>>(index)?
+        .unwrap_or_default())
+}
+
+fn pagination_params(req: &JsonRpcRequest) -> Result<(i64, usize, Vec<String>), JsonRpcError> {
+    let offset: i64 = req.get_param(0)?;
+    let num: i64 = req.get_param(1)?;
+    if num < 0 {
+        return Err(JsonRpcError::RpcExecution(
+            "num must be greater than or equal to 0".into(),
+        ));
+    }
+    let num = usize::try_from(num)
+        .map_err(|_| JsonRpcError::RpcExecution("num is out of range".into()))?;
+    Ok((offset, num, status_keys_for_request(req, 2)?))
+}
+
+/// Apply aria2's pagination rules, including negative offsets.
+fn paginate<T>(items: Vec<T>, offset: i64, num: usize) -> Vec<T> {
+    if num == 0 {
+        return Vec::new();
+    }
+
+    let size = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    let originally_negative = offset < 0;
+    let (start, count) = if originally_negative {
+        let tempoffset = offset.saturating_add(size);
+        if tempoffset < 0 {
+            return Vec::new();
+        }
+        let num = i64::try_from(num).unwrap_or(i64::MAX);
+        let mut start = tempoffset.saturating_sub(num.saturating_sub(1));
+        let count = if start < 0 {
+            start = 0;
+            tempoffset.saturating_add(1)
+        } else {
+            num
+        };
+        (start, count)
+    } else {
+        if offset >= size {
+            return Vec::new();
+        }
+        (offset, i64::try_from(num).unwrap_or(i64::MAX))
+    };
+
+    if start < 0 || start >= size {
+        return Vec::new();
+    }
+    let end = start.saturating_add(count).min(size).max(start);
+    let mut selected = items
+        .into_iter()
+        .skip(start as usize)
+        .take((end - start) as usize)
+        .collect::<Vec<_>>();
+    if originally_negative {
+        selected.reverse();
+    }
+    selected
+}
+
+pub(crate) fn status_to_json(
+    status: StatusInfo,
+    keys: &[String],
+) -> Result<serde_json::Value, JsonRpcError> {
+    let mut value = serde_json::to_value(status)
+        .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {e}")))?;
+    if keys.is_empty() {
+        return Ok(value);
+    }
+
+    let requested: HashSet<&str> = keys.iter().map(String::as_str).collect();
+    if let Some(fields) = value.as_object_mut() {
+        fields.retain(|key, _| requested.contains(key.as_str()));
+    }
+    Ok(value)
+}
 
 impl RpcEngine {
     pub(crate) fn build_status_from_result(result: &DownloadResult) -> StatusInfo {
@@ -34,6 +118,7 @@ impl RpcEngine {
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let keys = status_keys_for_request(req, 0)?;
         let active: Vec<StatusInfo> = if let Some(group_man) = self.group_man.as_ref() {
             let man = group_man.read().await;
             let mut result = Vec::new();
@@ -50,10 +135,13 @@ impl RpcEngine {
                 "RequestGroupMan is not wired".into(),
             ));
         };
+        let active = active
+            .into_iter()
+            .map(|status| status_to_json(status, &keys))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::to_value(active)
-                .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+            active,
         ))
     }
 
@@ -66,8 +154,7 @@ impl RpcEngine {
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let offset: usize = req.get_param_or_default(0);
-        let num: usize = req.get_param_or_default(1);
+        let (offset, num, keys) = pagination_params(req)?;
         let waiting: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
             let mut result = Vec::new();
@@ -83,16 +170,19 @@ impl RpcEngine {
                     _ => {}
                 }
             }
-            result.into_iter().skip(offset).take(num).collect()
+            paginate(result, offset, num)
         } else {
             return Err(JsonRpcError::InternalError(
                 "RequestGroupMan is not wired".into(),
             ));
         };
+        let waiting = waiting
+            .into_iter()
+            .map(|status| status_to_json(status, &keys))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::to_value(waiting)
-                .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+            waiting,
         ))
     }
 
@@ -103,23 +193,23 @@ impl RpcEngine {
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let offset: usize = req.get_param_or_default(0);
-        let num: usize = req.get_param_or_default(1);
+        let (offset, num, keys) = pagination_params(req)?;
         let stopped: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
             let man = group_man.read().await;
-            man.get_stopped_results(offset as i32, num)
-                .iter()
-                .map(Self::build_status_from_result)
-                .collect()
+            let results = paginate(man.get_stopped_results(0, usize::MAX), offset, num);
+            results.iter().map(Self::build_status_from_result).collect()
         } else {
             return Err(JsonRpcError::InternalError(
                 "RequestGroupMan is not wired".into(),
             ));
         };
+        let stopped = stopped
+            .into_iter()
+            .map(|status| status_to_json(status, &keys))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            serde_json::to_value(stopped)
-                .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {}", e)))?,
+            stopped,
         ))
     }
 

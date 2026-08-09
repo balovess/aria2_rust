@@ -210,7 +210,7 @@ async fn test_tell_status_has_real_progress_data() {
 
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://x.com/large.iso"]),
+        serde_json::json!([["http://x.com/large.iso"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -282,7 +282,7 @@ async fn test_tell_status_includes_upload_fields() {
 
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://torrent.example.com/file.torrent"]),
+        serde_json::json!([["http://torrent.example.com/file.torrent"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -346,7 +346,7 @@ async fn test_pause_all_pauses_active_tasks() {
     for i in 0..3 {
         let req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!([format!("http://x.com/{}", i)]),
+            serde_json::json!([[format!("http://x.com/{}", i)]]),
         )
         .with_id(i);
         engine.handle_request(&req).await;
@@ -368,7 +368,7 @@ async fn test_pause_all_pauses_active_tasks() {
 async fn test_unpause_all_resumes_paused_tasks() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -395,7 +395,7 @@ async fn test_change_uri_adds_uris() {
     let engine = RpcEngine::new();
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://x.com/original.iso"]),
+        serde_json::json!([["http://x.com/original.iso"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -445,7 +445,7 @@ async fn test_unpause_fires_download_start_event() {
 async fn test_change_option_ignores_unknown_key() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -465,7 +465,7 @@ async fn test_change_option_ignores_unknown_key() {
 async fn test_change_option_invalid_value_is_execution_error() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -519,7 +519,7 @@ async fn test_change_global_option_invalid_value_is_execution_error() {
 async fn test_change_option_rejects_invalid_registered_enum() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -565,7 +565,7 @@ async fn test_change_global_option_matches_original_changeability_policy() {
 async fn test_change_option_accepts_valid_keys() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -624,7 +624,7 @@ async fn test_change_option_accepts_valid_keys() {
 async fn test_change_option_ignores_startup_only_key() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -647,7 +647,7 @@ async fn test_change_option_ignores_startup_only_key() {
 async fn test_handle_get_set_option() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -670,7 +670,7 @@ async fn test_multiple_tasks() {
     for i in 0..5 {
         let req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!([format!("http://x.com/{}", i)]),
+            serde_json::json!([[format!("http://x.com/{}", i)]]),
         )
         .with_id(i);
         engine.handle_request(&req).await;
@@ -751,7 +751,7 @@ async fn test_multicall_preserves_order() {
     for i in 0..3 {
         let req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!([format!("http://order-test.com/{}", i)]),
+            serde_json::json!([[format!("http://order-test.com/{}", i)]]),
         )
         .with_id(i);
         engine.handle_request(&req).await;
@@ -890,7 +890,7 @@ async fn test_save_session_handler_basic() {
     for i in 0..3 {
         let req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!([format!("http://save-session.com/{}", i)]),
+            serde_json::json!([[format!("http://save-session.com/{}", i)]]),
         )
         .with_id(i);
         engine.handle_request(&req).await;
@@ -902,11 +902,8 @@ async fn test_save_session_handler_basic() {
         std::env::temp_dir().join(format!("test_save_session_rpc_{}.sess", std::process::id()));
     let _ = tokio::fs::remove_file(&path).await;
 
-    let req = JsonRpcRequest::new(
-        "aria2.saveSession",
-        serde_json::json!([path.to_str().unwrap()]),
-    )
-    .with_id(10);
+    let engine = engine.with_save_session_path(path.clone());
+    let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([])).with_id(10);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success(), "saveSession should succeed");
 
@@ -924,8 +921,8 @@ async fn test_save_session_handler_basic() {
     let _ = tokio::fs::remove_file(&path).await;
 }
 
-/// `aria2.saveSession` with no explicit path must fall back to the engine's
-/// configured `--save-session` path (mirrors C++ reading PREF_SAVE_SESSION).
+/// `aria2.saveSession` uses the engine's configured `--save-session` path
+/// because the original method does not accept a request-selected filename.
 #[tokio::test]
 async fn test_save_session_uses_configured_path() {
     let path =
@@ -946,14 +943,17 @@ async fn test_save_session_uses_configured_path() {
     let _ = tokio::fs::remove_file(&path).await;
 }
 
-/// `aria2.saveSession` with neither a path param nor a configured
-/// save-session path must fail (C++ throws "Filename is not given.").
+/// `aria2.saveSession` without a configured save-session path must fail
+/// (C++ throws "Filename is not given.").
 #[tokio::test]
 async fn test_save_session_without_path_errors() {
     let engine = RpcEngine::new();
     let req = JsonRpcRequest::new("aria2.saveSession", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_error(), "saveSession without any path should error");
+    assert!(
+        resp.is_error(),
+        "saveSession without a configured path should error"
+    );
 }
 
 /// `aria2.saveSession` wired to a RequestGroupMan persists the real group
@@ -1007,9 +1007,9 @@ async fn test_save_session_with_group_man() {
     let _ = tokio::fs::remove_file(&path).await;
 }
 
-/// `aria2.saveSession` with an explicit path overrides the configured path.
+/// `aria2.saveSession` always uses the configured path, matching C++.
 #[tokio::test]
-async fn test_save_session_explicit_path_overrides_config() {
+async fn test_save_session_ignores_explicit_path() {
     let cfg_path = std::env::temp_dir().join(format!(
         "test_save_session_cfg_over_{}.sess",
         std::process::id()
@@ -1030,10 +1030,10 @@ async fn test_save_session_explicit_path_overrides_config() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
 
-    assert!(explicit_path.exists(), "explicit path must be written to");
+    assert!(cfg_path.exists(), "configured path must be written to");
     assert!(
-        !cfg_path.exists(),
-        "configured path must NOT be written when explicit path given"
+        !explicit_path.exists(),
+        "request path must not redirect session output"
     );
 
     let _ = tokio::fs::remove_file(&explicit_path).await;
@@ -1045,7 +1045,7 @@ async fn test_change_position_move_uri() {
     let engine = RpcEngine::new();
 
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://uri1.com"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://uri1.com"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -1070,7 +1070,7 @@ async fn test_change_position_invalid_how() {
 
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://invalid-how.com/f"]),
+        serde_json::json!([["http://invalid-how.com/f"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -1096,7 +1096,7 @@ async fn test_force_remove_cancels_immediately() {
 
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://force-remove.com/large.iso"]),
+        serde_json::json!([["http://force-remove.com/large.iso"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -1138,7 +1138,7 @@ async fn test_batch_gids_force_remove() {
     for i in 0..4 {
         let req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!([format!("http://batch-remove.com/{}.iso", i)]),
+            serde_json::json!([[format!("http://batch-remove.com/{}.iso", i)]]),
         )
         .with_id(i);
         let resp = engine.handle_request(&req).await;
@@ -1202,8 +1202,11 @@ async fn test_get_uris_single_uri() {
 #[tokio::test]
 async fn test_get_uris_serialization_format() {
     let engine = RpcEngine::new();
-    let add_req = JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://test.com/a.bin"]))
-        .with_id(1);
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!([["http://test.com/a.bin"]]),
+    )
+    .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -1260,7 +1263,7 @@ async fn test_get_files_valid_gid_returns_file_list() {
     let engine = RpcEngine::new();
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/large.iso"]),
+        serde_json::json!([["http://example.com/large.iso"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -1304,8 +1307,11 @@ async fn test_get_files_unknown_gid_returns_error() {
 #[tokio::test]
 async fn test_get_files_zero_completed_length() {
     let engine = RpcEngine::new();
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/new.zip"])).with_id(1);
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!([["http://x.com/new.zip"]]),
+    )
+    .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -1335,7 +1341,7 @@ async fn test_get_files_zero_completed_length() {
 async fn test_get_files_selected_field() {
     let engine = RpcEngine::new();
     let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://sel.test/f"])).with_id(1);
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://sel.test/f"]])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -1410,7 +1416,7 @@ async fn test_get_servers_waiting_gid_returns_error() {
     let engine = RpcEngine::new();
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://zero-speed.com/f"]),
+        serde_json::json!([["http://zero-speed.com/f"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -1425,8 +1431,8 @@ async fn test_get_servers_waiting_gid_returns_error() {
 #[tokio::test]
 async fn test_get_servers_paused_gid_returns_error() {
     let engine = RpcEngine::new();
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://single.com/f"])).with_id(1);
+    let add_req = JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://single.com/f"]]))
+        .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -1525,7 +1531,7 @@ async fn test_get_version_json_rpc_response_format() {
 }
 
 #[tokio::test]
-async fn test_purge_download_result_specific_gid() {
+async fn test_purge_download_result_ignores_extra_parameter() {
     let engine = RpcEngine::new();
     let req = JsonRpcRequest::new(
         "aria2.purgeDownloadResult",
@@ -1533,11 +1539,11 @@ async fn test_purge_download_result_specific_gid() {
     )
     .with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_error(), "Unknown stopped GID should fail");
+    assert!(resp.is_success(), "Purge ignores request parameters");
 }
 
 #[tokio::test]
-async fn test_purge_download_result_gid_not_found() {
+async fn test_purge_download_result_does_not_lookup_gid() {
     let engine = RpcEngine::new();
     let req = JsonRpcRequest::new(
         "aria2.purgeDownloadResult",
@@ -1545,11 +1551,7 @@ async fn test_purge_download_result_gid_not_found() {
     )
     .with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(
-        resp.is_error(),
-        "purgeDownloadResult with unknown GID should fail"
-    );
-    assert_eq!(resp.error.unwrap().code, 1, "Should be RpcExecution error");
+    assert!(resp.is_success(), "Purge ignores request parameters");
 }
 
 #[tokio::test]
@@ -1561,12 +1563,12 @@ async fn test_purge_download_result_no_param_clears_all() {
 }
 
 #[tokio::test]
-async fn test_purge_download_result_partial_purge() {
+async fn test_purge_download_result_ignores_gid_like_parameter() {
     let engine = RpcEngine::new();
     let req =
         JsonRpcRequest::new("aria2.purgeDownloadResult", serde_json::json!(["gid-b"])).with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_error(), "Unknown stopped GID should fail");
+    assert!(resp.is_success(), "Purge ignores request parameters");
 }
 
 #[tokio::test]

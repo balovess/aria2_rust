@@ -8,6 +8,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tracing::info;
 
 use crate::dns::dns_cache::DnsCache;
+use crate::ftp::connection::{FtpsConfig, TlsVersion};
 use crate::network::ConnectionContext;
 
 use crate::constants;
@@ -29,6 +30,10 @@ pub struct FtpDownloadCommand {
     pub(super) remote_path: String,
     pub(super) username: String,
     pub(super) password: String,
+    /// TLS configuration for an `ftps://` URI. Plain FTP keeps this unset.
+    pub(super) ftps_config: Option<FtpsConfig>,
+    /// Use implicit TLS for the conventional FTPS port 990.
+    pub(super) ftps_implicit: bool,
     /// Resume offset for partial downloads (0 if not resuming)
     pub(super) resume_offset: u64,
     /// Whether to use passive mode (true) or active mode (false)
@@ -96,6 +101,9 @@ impl FtpDownloadCommand {
         }
 
         let (host, port, username, password, remote_path) = Self::parse_uri(&uri)?;
+        let is_ftps = Self::is_ftps_uri(&uri);
+        let ftps_implicit = is_ftps && port == 990;
+        let ftps_config = is_ftps.then(|| Self::ftps_config(&options));
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -138,6 +146,8 @@ impl FtpDownloadCommand {
             remote_path,
             username,
             password,
+            ftps_config,
+            ftps_implicit,
             resume_offset,
             passive_mode: options.ftp_pasv,
             max_retries: constants::DEFAULT_MAX_RETRIES,
@@ -163,16 +173,48 @@ impl FtpDownloadCommand {
         self.dns_cache = Some(dns_cache);
     }
 
+    fn is_ftps_uri(uri: &str) -> bool {
+        uri.get(..7)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftps://"))
+    }
+
+    fn ftps_config(options: &DownloadOptions) -> FtpsConfig {
+        let min_tls_version = match options
+            .min_tls_version
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("tlsv1.3") | Some("tls1.3") => TlsVersion::Tls13,
+            _ => TlsVersion::Tls12,
+        };
+
+        FtpsConfig {
+            enabled: true,
+            check_certificate: options.check_certificate,
+            ca_certificate: options
+                .ca_certificate
+                .as_deref()
+                .map(std::path::PathBuf::from),
+            min_tls_version,
+        }
+    }
+
     pub(super) fn parse_uri(uri: &str) -> Result<(String, u16, String, String, String)> {
-        if !uri.starts_with("ftp://") && !uri.starts_with("ftps://") {
+        let scheme_len = if uri
+            .get(..6)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftp://"))
+        {
+            6
+        } else if Self::is_ftps_uri(uri) {
+            7
+        } else {
             return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {
                 protocol: "ftp".into(),
             }));
-        }
+        };
 
-        let without_scheme = uri
-            .trim_start_matches("ftp://")
-            .trim_start_matches("ftps://");
+        let without_scheme = &uri[scheme_len..];
 
         let (auth_host_port, path) = match without_scheme.find('/') {
             Some(idx) => (&without_scheme[..idx], &without_scheme[idx..]),

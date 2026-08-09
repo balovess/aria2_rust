@@ -70,19 +70,27 @@ class HttpTransport:
         payload = self._build_request(method, params)
         try:
             response = await self._client.post(self._url, json=payload)
-            response.raise_for_status()
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise ConnectionError(f"Connection error: {exc}") from exc
         except httpx.TimeoutException as exc:
             raise TimeoutError(f"Request timed out: {exc}") from exc
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (401, 403):
-                raise AuthError(f"Authentication failed: {exc}") from exc
-            raise ConnectionError(f"HTTP error {exc.response.status_code}: {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise ConnectionError(f"Connection error: {exc}") from exc
 
-        data = response.json()
+        # aria2 returns a JSON-RPC error body with HTTP 400 for execution
+        # failures. Decode the body before treating the HTTP status as a
+        # transport failure, just like the Node.js adapter.
+        try:
+            data = response.json()
+        except (TypeError, ValueError) as exc:
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as status_error:
+                if status_error.response.status_code in (401, 403):
+                    raise AuthError(f"Authentication failed: {status_error}") from status_error
+                raise ConnectionError(
+                    f"HTTP error {status_error.response.status_code}: {status_error}"
+                ) from status_error
+            raise ConnectionError("Invalid JSON response") from exc
+
         if "error" in data:
             err = data["error"]
             err_msg = err.get("message", "Unknown RPC error")
@@ -90,6 +98,15 @@ class HttpTransport:
             if _is_auth_rpc_error(err_code, err_msg):
                 raise AuthError(err_msg, err_code)
             raise RpcError(err_msg, err_code)
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                raise AuthError(f"Authentication failed: {exc}") from exc
+            raise ConnectionError(f"HTTP error {exc.response.status_code}: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise ConnectionError(f"Connection error: {exc}") from exc
 
         return data.get("result")
 

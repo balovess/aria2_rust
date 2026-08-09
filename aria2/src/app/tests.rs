@@ -6,7 +6,6 @@ use aria2_core::config::OptionValue;
 use aria2_core::request::request_group::DownloadOptions;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use aria2_core::util::rwlock_ext::RwLockRecover;
-use clap::Parser;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -74,6 +73,101 @@ async fn test_load_cli_args_rejects_invalid_file_allocation() {
     assert!(
         error.contains("--file-allocation"),
         "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_original_cli_options_reach_config_registry() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--async-dns=false",
+        "--event-poll=select",
+        "--certificate=client.pem",
+        "--private-key=client.key",
+        "--min-tls-version=TLSv1.2",
+        "--ssh-host-key-md=sha-1=deadbeef",
+        "--metalink-enable-unique-protocol=false",
+        "--pause-metadata",
+        "--show-console-readout=false",
+        "--dscp=46",
+        "--socket-recv-buffer-size=1M",
+        "--max-resume-failure-tries=3",
+        "--optimize-concurrent-downloads",
+    ])
+    .expect("new original CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("new original CLI options should use registry validation");
+
+    assert_eq!(app.get_opt_bool("async-dns").await, Some(false));
+    assert_eq!(
+        app.get_opt_str("event-poll").await.as_deref(),
+        Some("select")
+    );
+    assert_eq!(
+        app.get_opt_str("certificate").await.as_deref(),
+        Some("client.pem")
+    );
+    assert_eq!(
+        app.get_opt_str("ssh-host-key-md").await.as_deref(),
+        Some("sha-1=deadbeef")
+    );
+    assert_eq!(
+        app.get_opt_bool("metalink-enable-unique-protocol").await,
+        Some(false)
+    );
+    assert_eq!(app.get_opt_bool("pause-metadata").await, Some(true));
+    assert_eq!(app.get_opt_i64("dscp").await, Some(46));
+    assert_eq!(
+        app.get_opt_i64("socket-recv-buffer-size").await,
+        Some(1024 * 1024)
+    );
+    assert_eq!(app.get_opt_i64("max-resume-failure-tries").await, Some(3));
+    assert_eq!(
+        app.get_opt_bool("optimize-concurrent-downloads").await,
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn test_torrent_and_metalink_file_options_enter_input_detection() {
+    let temp_dir = TempDir::new().expect("temporary input directory");
+    let torrent_path = temp_dir.path().join("input.torrent");
+    let metalink_path = temp_dir.path().join("input.meta4");
+    tokio::fs::write(&torrent_path, b"d8:announce0:e")
+        .await
+        .expect("write torrent fixture");
+    tokio::fs::write(
+        &metalink_path,
+        br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"></metalink>"#,
+    )
+    .await
+    .expect("write metalink fixture");
+
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--torrent-file",
+        torrent_path.to_str().expect("torrent path is UTF-8"),
+        "--metalink-file",
+        metalink_path.to_str().expect("metalink path is UTF-8"),
+    ])
+    .expect("metadata file options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("metadata file options should be detected");
+
+    assert_eq!(app.detected_inputs.len(), 2);
+    assert_eq!(
+        app.detected_inputs[0].input_type,
+        aria2_core::validation::protocol_detector::InputType::TorrentFile
+    );
+    assert_eq!(
+        app.detected_inputs[1].input_type,
+        aria2_core::validation::protocol_detector::InputType::MetalinkFile
     );
 }
 

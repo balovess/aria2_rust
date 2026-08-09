@@ -177,9 +177,35 @@ impl FtpDownloadCommand {
         let control_address =
             self.resolved_addresses[self.current_retry as usize % self.resolved_addresses.len()];
         let context = ConnectionContext::new(&self.host, self.port, control_address);
+        let host = self.host.clone();
+        let port = self.port;
+        let ftps_config = self.ftps_config.clone();
+        let ftps_implicit = self.ftps_implicit;
         let connect_result = tokio::time::timeout(
             Duration::from_secs(constants::FTP_DEFAULT_COMMAND_TIMEOUT_SECS),
-            RawFtpControl::connect_at(&self.host, self.port, control_address),
+            async move {
+                if let Some(config) = ftps_config.as_ref() {
+                    if ftps_implicit {
+                        RawFtpControl::connect_ftps_implicit_at(
+                            &host,
+                            port,
+                            control_address,
+                            config,
+                        )
+                        .await
+                    } else {
+                        RawFtpControl::connect_ftps_explicit_at(
+                            &host,
+                            port,
+                            control_address,
+                            config,
+                        )
+                        .await
+                    }
+                } else {
+                    RawFtpControl::connect_at(&host, port, control_address).await
+                }
+            },
         )
         .await;
         let mut ctrl = match connect_result {
@@ -331,7 +357,7 @@ impl FtpDownloadCommand {
 
         // Step 8: Establish the data connection. In active mode the server
         // connects back after RETR; never attempt a client-side connect.
-        let mut data_stream = if let Some((data_host, data_port)) = passive_target {
+        let data_stream = if let Some((data_host, data_port)) = passive_target {
             let data_addr: std::net::SocketAddr = format!("{}:{}", data_host, data_port)
                 .parse()
                 .map_err(|_| {
@@ -382,7 +408,10 @@ impl FtpDownloadCommand {
             .0
         };
 
-        // Set TCP no-delay on data connection
+        // Upgrade the data channel after the server accepted RETR. For plain
+        // FTP this preserves the TCP stream; FTPS performs the PROT P TLS
+        // handshake before any payload bytes are read.
+        let mut data_stream = ctrl.secure_data_stream(data_stream).await?;
         let _ = data_stream.set_nodelay(true); // Ignore error if not supported
 
         // Step 9: Select a disk or memory writer, then apply optional rate
