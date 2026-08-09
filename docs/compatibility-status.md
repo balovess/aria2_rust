@@ -68,8 +68,9 @@ cargo test -p aria2-core --test test_e2e_download --all-features -- --test-threa
 cargo clippy --workspace --all-targets --all-features -- -D warnings PASS (prior checkpoint; not rerun in this incremental checkpoint)
 cargo test -p aria2-core --all-features c_api --lib   PASS
 cargo test -p aria2-protocol --all-features -j 1        872 passed, 4 ignored
-cargo test -p aria2-rpc --all-features --tests -- --test-threads=1 394 passed, 0 failed
-cargo test -p aria2 --all-features --tests -j 1 -- --test-threads=1 279 passed, 3 ignored, 0 failed
+cargo test -p aria2-rpc --all-features --tests -- --test-threads=1 395 passed, 0 failed
+cargo test -p aria2 --lib application_rpc_does_not_enable_cors_by_default --all-features -- --test-threads=1 1 passed, 0 failed
+cargo test -p aria2 --all-features --tests -j 1 -- --test-threads=1 280 passed, 3 ignored, 0 failed
 cargo build -p aria2 --all-features -j 1                PASS
 npm run typecheck                                        PASS
 npm run build                                            PASS
@@ -132,8 +133,11 @@ cargo clippy -p aria2-rpc --all-targets --all-features -- -D warnings
 
 The OPTIONS preflight response now carries the same `Access-Control-Max-Age:
 1728000` value as `aria2_original/src/HttpServerBodyCommand.cc`. This verifies
-the browser-facing header at the HTTP seam; it does not establish the complete
-original browser-extension or client interoperability matrix.
+the browser-facing header at the HTTP seam. The application startup seam also
+verifies that the default registry leaves `rpc-cors-domain` unset, so no
+`Access-Control-Allow-Origin` header is emitted unless CORS is explicitly
+configured. This does not establish the complete original browser-extension or
+client interoperability matrix.
 
 Focused HTTP resume regression evidence (2026-08-09):
 
@@ -210,7 +214,7 @@ arrays; ordinary options cannot be silently converted from arrays. The
 checkpoint includes 221 library tests, 18 integration tests, 55 all-method
 HTTP tests, 43 HTTP/WebSocket/XML-RPC route tests, 5 server-config tests, 3
 HTTPS tests, 31 mock-server tests, 8 header/progress tests, and 10 stress
-tests in the 394-test command above. The
+tests in the 395-test command above. The
 active/reserved task changeability policy is centralized with the global
 policy in `aria2-core/src/config/runtime.rs`; `request_group` only preserves
 the historical re-export path. This is a RPC-scope result only; it does not
@@ -264,8 +268,17 @@ The XML-RPC adapter now also has source-backed HTTP contract coverage against
 `aria2_original/src/HttpServerBodyCommand.cc`: parser or XML value conversion
 failures return HTTP 400 with an empty body and no `Content-Type`, while a
 successfully parsed method execution failure returns HTTP 200 with an XML
-fault whose `faultCode` is `1`. The all-features RPC suite is 394 passed and
+fault whose `faultCode` is `1`. The all-features RPC suite is 395 passed and
 0 failed after this regression was added.
+
+The XML-RPC value adapter was compared with
+`aria2_original/src/XmlRpcRequestParserStateImpl.cc` and
+`test/RpcHelperTest.cc`. Explicit XML strings now preserve leading and trailing
+whitespace, and `<double>` request values are forwarded as strings, matching
+the original parser's observable string-state behavior for `<double>`.
+The focused `xml_rpc` target reports 15 passed and 0 failed; the full HTTP
+target remains 43 passed and 0 failed. This is a parameter-coercion seam
+regression, not complete XML-RPC client interoperability evidence.
 
 The `getSessionInfo` value was compared with
 `aria2_original/src/DownloadEngine.cc` and

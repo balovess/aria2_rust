@@ -20,7 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use super::connection::{SshConnection, SshOptions};
@@ -44,6 +45,16 @@ pub struct SftpExtension {
     pub data: String,
 }
 
+/// Serialized I/O state for one SFTP subsystem channel.
+///
+/// `russh::Channel` already owns the receive half for its channel. Keeping
+/// that stream and the packet buffer together prevents a second forwarding
+/// queue, unnecessary packet copies, and response-order races.
+struct SftpIo {
+    stream: russh::ChannelStream<russh::client::Msg>,
+    recv_buffer: Vec<u8>,
+}
+
 impl std::fmt::Display for SftpExtension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}={}", self.name, self.data)
@@ -61,27 +72,22 @@ impl std::fmt::Display for SftpExtension {
 ///
 /// **No unsafe code** -- all memory management is handled by Rust's ownership system.
 pub struct SftpSession {
-    /// The underlying russh channel for SFTP subsystem communication.
-    /// Wrapped in Mutex for interior mutability across async operations.
-    channel: Arc<Mutex<russh::Channel<russh::client::Msg>>>,
-    /// Receiver for incoming channel data (routed by handler's data() callback)
-    response_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    /// Serialized SFTP channel I/O and packet reassembly state.
+    io: Arc<Mutex<SftpIo>>,
     /// The negotiated server SFTP protocol version
     server_version: u32,
     /// Connection options used for diagnostics
     options: Arc<SshOptions>,
     /// Monotonically increasing request ID counter
-    next_request_id: AtomicU32,
+    next_request_id: Arc<AtomicU32>,
     /// Server-advertised extensions from the VERSION response
     extensions: Vec<SftpExtension>,
     /// When this session was initialized
     created_at: std::time::Instant,
     /// Count of operations performed (for metrics/diagnostics)
-    operation_count: AtomicU32,
+    operation_count: Arc<AtomicU32>,
     /// Read timeout for individual operations
     read_timeout: Duration,
-    /// Buffered incomplete packet data (packets may arrive in fragments)
-    recv_buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for SftpSession {
@@ -95,21 +101,19 @@ impl std::fmt::Debug for SftpSession {
     }
 }
 
-/// Clone implementation for SftpSession -- all internal fields are Arc-wrapped,
-/// so cloning is cheap (just increments refcounts).
+/// Clone implementation for SftpSession -- all mutable state is shared, so
+/// request IDs and metrics remain correct across clones.
 impl Clone for SftpSession {
     fn clone(&self) -> Self {
         Self {
-            channel: Arc::clone(&self.channel),
-            response_rx: Arc::clone(&self.response_rx),
+            io: Arc::clone(&self.io),
             server_version: self.server_version,
             options: Arc::clone(&self.options),
-            next_request_id: AtomicU32::new(self.next_request_id.load(Ordering::Relaxed)),
+            next_request_id: Arc::clone(&self.next_request_id),
             extensions: self.extensions.clone(),
             created_at: self.created_at,
-            operation_count: AtomicU32::new(self.operation_count.load(Ordering::Relaxed)),
+            operation_count: Arc::clone(&self.operation_count),
             read_timeout: self.read_timeout,
-            recv_buffer: Arc::clone(&self.recv_buffer),
         }
     }
 }
@@ -133,7 +137,7 @@ impl SftpSession {
         debug!("[SFTP] Initializing SFTP session (pure Rust)...");
 
         // Step 1: Open SFTP subsystem channel on the connection
-        let (channel, data_rx) = conn
+        let channel = conn
             .open_sftp_channel()
             .await
             .map_err(|e| format!("Failed to open SFTP channel: {}", e))?;
@@ -141,10 +145,10 @@ impl SftpSession {
         let options = Arc::clone(conn.options());
         let read_timeout = options.read_timeout;
 
-        // Wrap channel and receiver in Arc<Mutex<>> for shared access
-        let channel = Arc::new(Mutex::new(channel));
-        let response_rx = Arc::new(Mutex::new(data_rx));
-        let recv_buffer = Arc::new(Mutex::new(Vec::new()));
+        let mut io = SftpIo {
+            stream: channel.into_stream(),
+            recv_buffer: Vec::new(),
+        };
 
         // Step 2: Send SSH_FXP_INIT(version=3) using packet.rs codec
         let init_pkt = SftpPacket::Init { version: 3 };
@@ -152,18 +156,12 @@ impl SftpSession {
             .encode()
             .map_err(|e| format!("Failed to encode SFTP INIT packet: {}", e))?;
 
-        {
-            let ch = channel.lock().await;
-            ch.data(encoded.as_slice())
-                .await
-                .map_err(|e| format!("Failed to send SFTP INIT packet: {}", e))?;
-        }
+        Self::write_packet(&mut io, &encoded, "SFTP INIT").await?;
 
         debug!("[SFTP] Sent SFTP INIT (version=3), awaiting VERSION...");
 
         // Step 3: Receive SSH_FXP_VERSION response with timeout
-        let version_response =
-            Self::recv_packet_from_channel(&response_rx, &recv_buffer, read_timeout).await?;
+        let version_response = Self::recv_packet_from_io(&mut io, read_timeout).await?;
 
         // Step 4: Parse the VERSION response
         let (server_version, extensions) = match version_response {
@@ -196,19 +194,17 @@ impl SftpSession {
         );
 
         Ok(Self {
-            channel,
-            response_rx,
+            io: Arc::new(Mutex::new(io)),
             server_version,
             options,
-            next_request_id: AtomicU32::new(1), // Start at 1, 0 reserved for INIT
+            next_request_id: Arc::new(AtomicU32::new(1)), // Start at 1, 0 reserved for INIT
             extensions: extensions
                 .into_iter()
                 .map(|(name, data)| SftpExtension { name, data })
                 .collect(),
             created_at: std::time::Instant::now(),
-            operation_count: AtomicU32::new(0),
+            operation_count: Arc::new(AtomicU32::new(0)),
             read_timeout,
-            recv_buffer,
         })
     }
 
@@ -217,10 +213,8 @@ impl SftpSession {
     /// Encodes the packet using packet.rs and writes it to the russh channel.
     pub async fn send_packet(&self, pkt: &SftpPacket) -> Result<(), String> {
         let encoded = pkt.encode().map_err(|e| format!("Encode error: {}", e))?;
-        let ch = self.channel.lock().await;
-        ch.data(encoded.as_slice())
-            .await
-            .map_err(|e| format!("Channel write error: {}", e))
+        let mut io = self.io.lock().await;
+        Self::write_packet(&mut io, &encoded, "SFTP packet").await
     }
 
     /// Core I/O: receive a single SFTP packet from the channel.
@@ -228,8 +222,19 @@ impl SftpSession {
     /// Reads data from the mpsc receiver (fed by handler's data() callback),
     /// buffers partial packets, and decodes complete packets using packet.rs.
     pub async fn recv_packet(&self) -> Result<SftpPacket, String> {
-        Self::recv_packet_from_channel(&self.response_rx, &self.recv_buffer, self.read_timeout)
+        let mut io = self.io.lock().await;
+        Self::recv_packet_from_io(&mut io, self.read_timeout).await
+    }
+
+    async fn write_packet(io: &mut SftpIo, encoded: &[u8], operation: &str) -> Result<(), String> {
+        io.stream
+            .write_all(encoded)
             .await
+            .map_err(|e| format!("Failed to send {operation}: {e}"))?;
+        io.stream
+            .flush()
+            .await
+            .map_err(|e| format!("Failed to flush {operation}: {e}"))
     }
 
     /// Internal implementation of packet reception with buffering.
@@ -237,48 +242,30 @@ impl SftpSession {
     /// SFTP packets may arrive fragmented across multiple channel data callbacks.
     /// This method buffers incoming data until a complete packet (with length prefix)
     /// can be decoded.
-    async fn recv_packet_from_channel(
-        response_rx: &Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
-        recv_buffer: &Arc<Mutex<Vec<u8>>>,
-        timeout: Duration,
-    ) -> Result<SftpPacket, String> {
+    async fn recv_packet_from_io(io: &mut SftpIo, timeout: Duration) -> Result<SftpPacket, String> {
         loop {
             // Try to decode a complete packet from the buffer first
-            {
-                let mut buf = recv_buffer.lock().await;
-                if !buf.is_empty() {
-                    match SftpPacket::decode(buf.as_slice()) {
-                        Ok((pkt, consumed)) => {
-                            // Remove consumed bytes from buffer
-                            let remaining = buf.split_off(consumed);
-                            *buf = remaining;
-                            return Ok(pkt);
-                        }
-                        Err(_) => {
-                            // Not enough data yet - wait for more
-                            // Buffer stays as-is, will be appended to below
-                        }
+            if !io.recv_buffer.is_empty() {
+                match SftpPacket::decode(io.recv_buffer.as_slice()) {
+                    Ok((pkt, consumed)) => {
+                        let remaining = io.recv_buffer.split_off(consumed);
+                        io.recv_buffer = remaining;
+                        return Ok(pkt);
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+                    Err(error) => return Err(format!("Invalid SFTP packet from server: {error}")),
                 }
             }
 
-            // Need more data - wait for channel data with timeout
-            let mut rx = response_rx.lock().await;
-
-            match tokio::time::timeout(timeout, rx.recv()).await {
-                Ok(Some(chunk)) => {
-                    drop(rx); // Release lock before acquiring buffer lock
-                    let mut buf = recv_buffer.lock().await;
-                    buf.extend_from_slice(&chunk);
-                    // Loop back to try decoding again
-                }
-                Ok(None) => {
-                    return Err("Channel closed by server".to_string());
-                }
-                Err(_) => {
-                    return Err(format!("Receive timed out after {}s", timeout.as_secs()));
-                }
+            let mut chunk = [0_u8; 32 * 1024];
+            let count = tokio::time::timeout(timeout, io.stream.read(&mut chunk))
+                .await
+                .map_err(|_| format!("Receive timed out after {}s", timeout.as_secs()))?
+                .map_err(|e| format!("SFTP channel read failed: {e}"))?;
+            if count == 0 {
+                return Err("Channel closed by server".to_string());
             }
+            io.recv_buffer.extend_from_slice(&chunk[..count]);
         }
     }
 
@@ -293,12 +280,13 @@ impl SftpSession {
         // Set the request ID in the packet
         Self::set_request_id_in_packet(&mut pkt, req_id);
 
-        // Send the packet
-        self.send_packet(&pkt).await?;
-
-        // Wait for response (with timeout)
-        let resp = self.recv_packet().await?;
-        Ok(resp)
+        // Keep one request/response exchange serialized. SFTP servers can
+        // reply out of order, while this client intentionally exposes a
+        // synchronous operation seam rather than a speculative pending map.
+        let encoded = pkt.encode().map_err(|e| format!("Encode error: {}", e))?;
+        let mut io = self.io.lock().await;
+        Self::write_packet(&mut io, &encoded, "SFTP request").await?;
+        Self::recv_packet_from_io(&mut io, self.read_timeout).await
     }
 
     /// Set the request ID field in any request-type SftpPacket.

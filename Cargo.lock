@@ -198,6 +198,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rusqlite",
+ "russh",
  "rustls",
  "rustls-pemfile",
  "serde",

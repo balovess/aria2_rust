@@ -500,7 +500,7 @@ tests, and the aria2 C++ performance baseline remain open in
   and real HTTP E2E checks for invalid `changeOption` and
   `changeGlobalOption` values.
 - `cargo test -p aria2-rpc --all-features --tests -- --test-threads=1`:
-  **394 passed / 0 failed**. This proves the RPC test scope only; the
+  **395 passed / 0 failed**. This proves the RPC test scope only; the
   workspace aggregate and complete original browser-client interoperability
   matrix remain open.
 
@@ -549,7 +549,7 @@ tests, and the aria2 C++ performance baseline remain open in
   engine-owned value, while the old `rpc_helpers::generate_session_id` path is
   retained as a forwarding export rather than a second generator.
 - Verification: `cargo test -p aria2-rpc --all-features --tests
-  -- --test-threads=1` passed **394 tests / 0 failed**; RPC Clippy and format
+  -- --test-threads=1` passed **395 tests / 0 failed**; RPC Clippy and format
   checks also passed. Browser-extension and complete original-client
   interoperability remain open acceptance items.
 
@@ -579,6 +579,22 @@ tests, and the aria2 C++ performance baseline remain open in
   execution failures return HTTP 200 with `faultCode=1`. The E2E regression is
   `e2e_xmlrpc_parse_errors_match_original_http_contract`.
 
+#### XML-RPC parameter coercion checkpoint (2026-08-09)
+
+- Compared `aria2_original/src/XmlRpcRequestParserStateImpl.cc` and
+  `test/RpcHelperTest.cc` with the Rust XML-RPC adapter. The original parser
+  preserves explicit string contents and represents `<double>` request values
+  as strings; Rust now keeps those semantics at the XML-to-RPC conversion
+  seam while retaining typed `Double` values for Rust-side response building.
+- Added regression coverage for leading/trailing string whitespace and nested
+  option-map double conversion. The focused target
+  `cargo test -p aria2-rpc --all-features --lib xml_rpc -- --test-threads=1`
+  reports **15 passed / 0 failed**.
+- Re-ran `cargo test -p aria2-rpc --test test_e2e_http_server --all-features
+  -- --test-threads=1` with **43 passed / 0 failed**, plus RPC Clippy with
+  `-D warnings`. The overall RPC status remains `PARTIAL` because complete
+  original-client and browser-extension interoperability is still unverified.
+
 #### CLI short-option compatibility checkpoint (2026-08-09)
 
 - `aria2_original/src/OptionHandlerFactory.cc` is the source of truth for the
@@ -601,3 +617,16 @@ tests, and the aria2 C++ performance baseline remain open in
   version/help text parity, and complete original-client interoperability
   remain open. The original parser does not dynamically generate arbitrary
   `--no-*` aliases; Rust's extra explicit aliases are documented extensions.
+
+#### Application RPC CORS default checkpoint (2026-08-09)
+
+- The application-level seam now keeps `rpc-cors-domain` unset by default,
+  matching `aria2_original`: starting RPC without an explicit CORS option does
+  not emit `Access-Control-Allow-Origin` for an OPTIONS request.
+- The regression uses `App::start_rpc_server` and a real HTTP request rather
+  than only testing `CorsConfig` in the RPC crate:
+  `cargo test -p aria2 --lib application_rpc_does_not_enable_cors_by_default
+  --all-features -- --test-threads=1` reports **1 passed / 0 failed**.
+- Explicit `rpc-allow-origin-all` and `rpc-cors-domain` remain additive opt-in
+  paths. The RPC status remains `PARTIAL` until original browser extensions and
+  the full external-client matrix are exercised.

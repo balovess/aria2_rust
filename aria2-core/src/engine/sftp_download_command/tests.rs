@@ -11,18 +11,97 @@ use crate::error::{Aria2Error, FatalError, RecoverableError};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 use super::types::SftpDownloadCommand;
-use super::uri::sftp_path_decode;
+use super::uri::sftp_percent_decode;
 
 #[test]
 fn test_sftp_path_decoding() {
-    assert_eq!(sftp_path_decode("/normal/path"), "/normal/path");
+    assert_eq!(sftp_percent_decode("/normal/path"), "/normal/path");
     assert_eq!(
-        sftp_path_decode("/path%20with%20spaces"),
+        sftp_percent_decode("/path%20with%20spaces"),
         "/path with spaces"
     );
     // UTF-8 encoded Chinese path: "%E6%96%87%E4%BB%B6" decodes to Chinese characters for "file"
-    assert_eq!(sftp_path_decode("/%E6%96%87%E4%BB%B6"), "/\u{6587}\u{4EF6}");
-    assert_eq!(sftp_path_decode("%2Froot%2Ftest"), "/root/test");
+    assert_eq!(
+        sftp_percent_decode("/%E6%96%87%E4%BB%B6"),
+        "/\u{6587}\u{4EF6}"
+    );
+    assert_eq!(sftp_percent_decode("%2Froot%2Ftest"), "/root/test");
+    assert_eq!(
+        sftp_percent_decode("/\u{6587}\u{4EF6}"),
+        "/\u{6587}\u{4EF6}"
+    );
+    assert_eq!(sftp_percent_decode("%5t%20"), "%5t ");
+    assert_eq!(sftp_percent_decode("%"), "%");
+    assert_eq!(sftp_percent_decode("%3"), "%3");
+}
+
+#[test]
+fn sftp_uri_parser_matches_original_userinfo_and_path_rules() {
+    let parsed = SftpDownloadCommand::parse_uri(
+        "sftp://user%40name:pass%3Aword@example.com:2222/a%20file?ignored=yes#fragment",
+    )
+    .expect("source-compatible SFTP URI should parse");
+
+    assert_eq!(parsed.host, "example.com");
+    assert_eq!(parsed.port, 2222);
+    assert_eq!(parsed.username.as_deref(), Some("user@name"));
+    assert_eq!(parsed.password.as_deref(), Some("pass:word"));
+    assert_eq!(parsed.remote_path, "/a file");
+}
+
+#[test]
+fn sftp_uri_parser_rejects_invalid_explicit_port() {
+    assert!(SftpDownloadCommand::parse_uri("sftp://host:not-a-port/file").is_err());
+    assert!(SftpDownloadCommand::parse_uri("sftp://[::1]suffix/file").is_err());
+}
+
+#[test]
+fn sftp_credentials_follow_original_ftp_resolution_precedence() {
+    let options = DownloadOptions {
+        ftp_user: Some("option-user".to_string()),
+        ftp_passwd: Some("option-password".to_string()),
+        no_netrc: true,
+        ..DownloadOptions::default()
+    };
+
+    let option_credentials = SftpDownloadCommand::new(
+        GroupId::new(34),
+        "sftp://example.com/file",
+        &options,
+        None,
+        None,
+    )
+    .expect("SFTP command should resolve option credentials");
+    assert_eq!(option_credentials.username, "option-user");
+    assert_eq!(
+        option_credentials.password.as_deref(),
+        Some("option-password")
+    );
+
+    let embedded_user = SftpDownloadCommand::new(
+        GroupId::new(35),
+        "sftp://uri-user@example.com/file",
+        &options,
+        None,
+        None,
+    )
+    .expect("SFTP command should resolve a URI user with option password");
+    assert_eq!(embedded_user.username, "uri-user");
+    assert_eq!(embedded_user.password.as_deref(), Some("option-password"));
+
+    let anonymous = SftpDownloadCommand::new(
+        GroupId::new(36),
+        "sftp://example.com/file",
+        &DownloadOptions {
+            no_netrc: true,
+            ..DownloadOptions::default()
+        },
+        None,
+        None,
+    )
+    .expect("SFTP command should resolve original anonymous fallback");
+    assert_eq!(anonymous.username, "anonymous");
+    assert_eq!(anonymous.password.as_deref(), Some("ARIA2USER@"));
 }
 
 #[test]

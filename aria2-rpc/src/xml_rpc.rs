@@ -246,9 +246,11 @@ impl XmlRpcValue {
             XmlRpcValueInner::String_(value) | XmlRpcValueInner::DateTime(value) => {
                 Ok(serde_json::Value::String(value.clone()))
             }
-            XmlRpcValueInner::Double(value) => serde_json::Number::from_f64(*value)
-                .map(serde_json::Value::Number)
-                .ok_or_else(|| XmlRpcError::InvalidParams("invalid non-finite double".into())),
+            // C++ aria2 parses XML-RPC <double> using its string state and
+            // forwards the textual value to the RPC method. Keep that wire
+            // contract even though the value type remains available for
+            // Rust-side XML-RPC response construction.
+            XmlRpcValueInner::Double(value) => Ok(serde_json::Value::String(value.to_string())),
             XmlRpcValueInner::Base64(data) => Ok(serde_json::Value::String(
                 base64::engine::general_purpose::STANDARD.encode(data),
             )),
@@ -421,30 +423,30 @@ fn read_scalar(
 ) -> Result<XmlRpcValue, XmlRpcError> {
     let text = reader
         .read_text(e.name())
-        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
-    let text = text.trim();
+        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+        .into_owned();
+    let numeric_text = text.trim();
     match tag {
-        "int" | "i4" | "i8" => text
+        "int" | "i4" | "i8" => numeric_text
             .parse()
             .map(XmlRpcValue::int)
             .map_err(|e| XmlRpcError::InvalidParams(format!("invalid integer: {e}"))),
-        "boolean" => match text {
+        "boolean" => match numeric_text {
             "1" | "true" => Ok(XmlRpcValue::bool_(true)),
             "0" | "false" => Ok(XmlRpcValue::bool_(false)),
             _ => Err(XmlRpcError::InvalidParams(format!(
-                "invalid boolean: {text}"
+                "invalid boolean: {numeric_text}"
             ))),
         },
-        "string" => Ok(XmlRpcValue::string(text)),
-        "double" => text
-            .parse()
-            .map(XmlRpcValue::double)
-            .map_err(|e| XmlRpcError::InvalidParams(format!("invalid double: {e}"))),
+        // aria2_original's XML-RPC parser keeps both explicit string values
+        // and double values as strings. The latter is observable for option
+        // maps such as {"seed-ratio": <double>0.99</double>}.
+        "string" | "double" => Ok(XmlRpcValue::string(text)),
         "dateTime.iso8601" => Ok(XmlRpcValue {
-            inner: XmlRpcValueInner::DateTime(text.to_owned()),
+            inner: XmlRpcValueInner::DateTime(text),
         }),
         "base64" => base64::engine::general_purpose::STANDARD
-            .decode(text)
+            .decode(text.trim())
             .map(|data| XmlRpcValue {
                 inner: XmlRpcValueInner::Base64(data),
             })
@@ -779,8 +781,23 @@ mod tests {
         let req = parse_request(xml.as_bytes()).unwrap();
         assert_eq!(req.params.len(), 3);
         assert_eq!(req.params[0].as_i64(), Some(100));
-        assert_eq!(req.params[1].as_double(), Some(0.5));
+        assert_eq!(req.params[1].as_str(), Some("0.5"));
         assert_eq!(req.params[2].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_xmlrpc_wire_conversion_preserves_strings_and_coerces_doubles() {
+        let xml = r#"<methodCall><methodName>aria2.changeOption</methodName><params>
+            <param><value><struct>
+                <member><name>dir</name><value><string>  /downloads  </string></value></member>
+                <member><name>seed-ratio</name><value><double>0.99</double></value></member>
+            </struct></value></param>
+        </params></methodCall>"#;
+        let req = parse_request(xml.as_bytes()).unwrap();
+        let value = req.params[0].to_json_value().unwrap();
+
+        assert_eq!(value["dir"], serde_json::json!("  /downloads  "));
+        assert_eq!(value["seed-ratio"], serde_json::json!("0.99"));
     }
 
     #[test]

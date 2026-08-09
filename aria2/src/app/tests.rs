@@ -8,6 +8,34 @@ use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::collections::HashMap;
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn read_http_response(port: u16, request: &str) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(stream) => break stream,
+            Err(_error) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("RPC server did not accept a connection: {error}"),
+        }
+    };
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write HTTP request");
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .expect("read HTTP response timed out")
+    .expect("read HTTP response");
+    String::from_utf8(response).expect("RPC response should be UTF-8")
+}
 
 #[tokio::test]
 async fn test_cli_metalink_options_reach_download_options() {
@@ -73,6 +101,53 @@ async fn test_load_cli_args_rejects_invalid_file_allocation() {
     assert!(
         error.contains("--file-allocation"),
         "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn application_rpc_does_not_enable_cors_by_default() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let port = probe
+        .local_addr()
+        .expect("test listener should expose an address")
+        .port();
+    drop(probe);
+
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option("enable-rpc", OptionValue::Bool(true))
+            .await
+            .expect("enable-rpc should be valid");
+        config
+            .set_global_option("rpc-listen-port", OptionValue::Int(port as i64))
+            .await
+            .expect("rpc-listen-port should be valid");
+    }
+
+    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = app
+        .start_rpc_server(app.request_man.clone(), cmd_tx)
+        .await
+        .expect("RPC server should start");
+
+    let response = read_http_response(
+        port,
+        &format!(
+            "OPTIONS /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: https://browser.example\r\nAccess-Control-Request-Method: POST\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+    server.abort();
+
+    assert!(
+        !response
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("access-control-allow-origin: *")),
+        "aria2_original only emits CORS headers after explicit opt-in, response was:\n{response}"
     );
 }
 

@@ -9,6 +9,8 @@ pub mod mock_dht_server;
 pub mod mock_ftp_server;
 #[cfg(feature = "bittorrent")]
 pub mod mock_lpd_peer;
+#[cfg(feature = "sftp")]
+pub mod mock_sftp_server;
 #[cfg(feature = "bittorrent")]
 pub mod mock_tracker;
 #[cfg(feature = "bittorrent")]

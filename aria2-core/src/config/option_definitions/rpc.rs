@@ -78,7 +78,10 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "rpc-cors-domain".into(),
             opt_type: OptionType::String,
-            default_value: OptionValue::Str("*".into()),
+            // aria2_original enables CORS only through an explicit RPC option.
+            // Keep this unset so the application does not turn on wildcard
+            // CORS merely by loading the built-in defaults.
+            default_value: OptionValue::None,
             description: "CORS allowed domains for RPC (comma-separated, * for all)".into(),
             category: OptionCategory::Rpc,
             ..Default::default()

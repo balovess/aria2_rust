@@ -1,28 +1,39 @@
-//! SFTP URI path decoding utilities.
+//! SFTP URI percent-decoding utilities.
 //!
-//! Provides percent-encoding decoding for SFTP paths, including correct
-//! handling of multi-byte UTF-8 sequences (e.g. CJK characters).
+//! This mirrors `aria2_original`'s `util::percentDecode`: valid `%XX`
+//! sequences become one byte, while malformed sequences remain unchanged.
+//! The same decoder is used for SFTP userinfo and paths so their URI semantics
+//! cannot drift.
 
-/// Decode a percent-encoded SFTP path, handling UTF-8 multi-byte sequences correctly.
-///
-/// For example, `"%E6%96%87%E4%BB%B6"` decodes to the Chinese characters for "file".
-pub fn sftp_path_decode(s: &str) -> String {
-    let mut bytes = Vec::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                bytes.push(byte);
-            } else {
-                // Invalid percent-encoding, push literal characters
-                bytes.extend_from_slice(c.to_string().as_bytes());
-                bytes.extend_from_slice(hex.as_bytes());
-            }
+/// Decode percent escapes without treating `+` specially.
+pub fn sftp_percent_decode(input: &str) -> String {
+    let input = input.as_bytes();
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < input.len() {
+        if input[index] == b'%'
+            && let (Some(high), Some(low)) = (
+                input.get(index + 1).copied().and_then(hex_value),
+                input.get(index + 2).copied().and_then(hex_value),
+            )
+        {
+            bytes.push((high << 4) | low);
+            index += 3;
         } else {
-            bytes.push(c as u8);
+            bytes.push(input[index]);
+            index += 1;
         }
     }
-    // Decode the full byte sequence as UTF-8, with lossy fallback for invalid sequences
+
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }

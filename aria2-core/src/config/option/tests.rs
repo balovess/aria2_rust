@@ -310,6 +310,16 @@ fn test_registry_by_category() {
 }
 
 #[test]
+fn test_rpc_cors_domain_is_unset_by_default() {
+    let reg = OptionRegistry::new();
+    let def = reg
+        .get("rpc-cors-domain")
+        .expect("rpc-cors-domain must be registered");
+
+    assert!(matches!(def.default_value(), OptionValue::None));
+}
+
+#[test]
 fn test_registry_defaults_are_valid() {
     let reg = OptionRegistry::new();
     for def in reg.all().values() {
