@@ -80,13 +80,13 @@ extension handshake use the same release source.
   WebSocket alias were removed; `/` and `/ws` return 404, while `/jsonrpc`
   remains the compatible JSONP/JSON-RPC and WebSocket route.
 
-This slice was checked with `cargo fmt --all -- --check`,
-`cargo test -p aria2-protocol --all-features --lib -j 1 -- --test-threads=1`
-(807 passed), the focused core identity regression, the prior complete
-all-features `aria2-rpc` test target (402 passed), the post-route-change
-HTTP/WebSocket target (46 passed), RPC Clippy, and the current CLI checks:
-`regression_v_triggers_version`, `regression_help_rendering_filters_options`,
-`cargo build -p aria2 --all-features -j 1`, and
+This slice was checked with `cargo fmt --all -- --check`, the focused
+`identity::tests::product_identity_uses_the_package_version`,
+`bittorrent::peer::id::tests::test_generate_peer_id`, and
+`handlers::handler_tests::test_get_version_uses_product_version` regressions,
+the complete `test_cli_options` target (105 passed),
+`cargo build -p aria2 --all-features -j 1` with an observed
+`aria2c --version` value of `aria2c 0.2.8`, and
 `cargo clippy -p aria2 --all-targets --all-features -- -D warnings`.
 It does not establish complete original-client or end-to-end download
 compatibility.

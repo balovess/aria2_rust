@@ -26,7 +26,10 @@ mod tests {
     #[test]
     fn product_identity_uses_the_package_version() {
         assert_eq!(PRODUCT_VERSION, env!("CARGO_PKG_VERSION"));
-        assert_eq!(DEFAULT_USER_AGENT, format!("{PRODUCT_NAME}/{PRODUCT_VERSION}"));
+        assert_eq!(
+            DEFAULT_USER_AGENT,
+            format!("{PRODUCT_NAME}/{PRODUCT_VERSION}")
+        );
         assert_eq!(DEFAULT_PEER_AGENT, DEFAULT_USER_AGENT);
         assert!(DEFAULT_PEER_ID_PREFIX.starts_with("A2-RUST-"));
     }
