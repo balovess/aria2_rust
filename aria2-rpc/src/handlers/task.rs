@@ -349,7 +349,7 @@ impl RpcEngine {
         ))
     }
 
-    /// Handle `aria2.unpause` / `aria2.forceUnpause` - Resume a paused task.
+    /// Handle `aria2.unpause` - Resume a paused task.
     pub async fn handle_unpause(
         &self,
         req: &JsonRpcRequest,

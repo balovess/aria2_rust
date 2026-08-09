@@ -6,7 +6,7 @@
 //!
 //! Test groups:
 //!   A — Task Management  (addUri, remove, forceRemove, pause, forcePause,
-//!                          unpause, forceUnpause, pauseAll, unpauseAll,
+//!                          unpause, pauseAll, unpauseAll,
 //!                          forcePauseAll, tellStatus, tellActive, tellWaiting,
 //!                          tellStopped, changePosition, changeUri, saveSession)
 //!   B — Option Management (getOption, changeOption, getGlobalOption, changeGlobalOption)
