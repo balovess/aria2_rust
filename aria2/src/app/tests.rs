@@ -45,6 +45,53 @@ async fn test_cli_metalink_options_reach_download_options() {
     assert_eq!(options.select_file.as_deref(), Some("2"));
 }
 
+#[tokio::test]
+async fn test_load_cli_args_rejects_invalid_split() {
+    let cli = CliArgs::try_parse_from(["aria2", "--split=0"])
+        .expect("clap should parse the integer before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the registry must reject split=0");
+
+    assert!(error.contains("--split"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn test_load_cli_args_rejects_invalid_file_allocation() {
+    let cli = CliArgs::try_parse_from(["aria2", "--file-allocation=invalid"])
+        .expect("clap should parse the string before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the registry must reject an unknown allocation mode");
+
+    assert!(
+        error.contains("--file-allocation"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_no_conf_skips_explicit_config_file() {
+    let temp_dir = TempDir::new().expect("temporary config directory");
+    let config_path = temp_dir.path().join("aria2.conf");
+    tokio::fs::write(&config_path, "split=8\n")
+        .await
+        .expect("write config file");
+
+    let mut app = App::new();
+    app.load_startup_config(true, config_path.to_str())
+        .await
+        .expect("--no-conf should not attempt to read the file");
+
+    assert_eq!(app.get_opt_i64("split").await, Some(5));
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_standard_session_restores_metalink_graph() {

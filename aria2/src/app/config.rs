@@ -39,63 +39,73 @@ impl App {
     pub async fn load_cli_args(&mut self, cli: CliArgs) -> std::result::Result<(), String> {
         let mut conf = self.config.write().await;
 
-        // Helper macros: set option only if value is present; ignore unknown
-        // options (they may be CLI-only flags like verbose/no-color not in registry)
+        // Helper macros: set option only if value is present and propagate the
+        // registry's validation error back to the CLI entry point.
         macro_rules! set_str {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf.set_global_option($name, OptionValue::Str(v)).await;
+                    conf.set_global_option($name, OptionValue::Str(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_path {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf
-                        .set_global_option(
-                            $name,
-                            OptionValue::Str(v.to_string_lossy().into_owned()),
-                        )
-                        .await;
+                    conf.set_global_option(
+                        $name,
+                        OptionValue::Str(v.to_string_lossy().into_owned()),
+                    )
+                    .await
+                    .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_u64 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf
-                        .set_global_option($name, OptionValue::Int(v as i64))
-                        .await;
+                    let v = i64::try_from(v)
+                        .map_err(|_| format!("--{}: value is out of range", $name))?;
+                    conf.set_global_option($name, OptionValue::Int(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_u16 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf
-                        .set_global_option($name, OptionValue::Int(v as i64))
-                        .await;
+                    conf.set_global_option($name, OptionValue::Int(i64::from(v)))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_f64 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf.set_global_option($name, OptionValue::Float(v)).await;
+                    conf.set_global_option($name, OptionValue::Float(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_bool_true {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf.set_global_option($name, OptionValue::Bool(v)).await;
+                    conf.set_global_option($name, OptionValue::Bool(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_bool_false {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf.set_global_option($name, OptionValue::Bool(!v)).await;
+                    conf.set_global_option($name, OptionValue::Bool(!v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
@@ -180,9 +190,9 @@ impl App {
         set_str!("user-agent", h.user_agent);
         set_str!("referer", h.referer);
         if !h.header.is_empty() {
-            let _ = conf
-                .set_global_option("header", OptionValue::List(h.header))
-                .await;
+            conf.set_global_option("header", OptionValue::List(h.header))
+                .await
+                .map_err(|e| format!("--header: {}", e))?;
         }
         set_path!("load-cookies", h.load_cookies);
         set_path!("save-cookies", h.save_cookies);
@@ -283,9 +293,9 @@ impl App {
         set_str!("peer-agent", b.peer_agent);
         set_str!("select-file", b.select_file);
         if !b.index_out.is_empty() {
-            let _ = conf
-                .set_global_option("index-out", OptionValue::Str(b.index_out.join("\n")))
-                .await;
+            conf.set_global_option("index-out", OptionValue::Str(b.index_out.join("\n")))
+                .await
+                .map_err(|e| format!("--index-out: {}", e))?;
         }
 
         // --- RPC options ---
@@ -374,6 +384,20 @@ impl App {
     pub async fn load_env(&mut self) {
         let mut conf = self.config.write().await;
         conf.load_env().await;
+    }
+
+    /// Load environment and file configuration according to CLI startup
+    /// precedence. `--no-conf` suppresses both the default and explicit file.
+    pub(super) async fn load_startup_config(
+        &mut self,
+        no_conf: bool,
+        path: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        self.load_env().await;
+        if no_conf {
+            return Ok(());
+        }
+        self.load_config_file(path).await
     }
 
     /// Load configuration from a file.

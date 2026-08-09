@@ -99,7 +99,8 @@ impl App {
         // - --no-conf: skip config file loading entirely
         // - --conf-path: use explicit path (error if not found)
         // - neither: use default ~/.aria2/aria2.conf
-        let conf_path = if cli.general.no_conf.unwrap_or(false) {
+        let no_conf = cli.general.no_conf.unwrap_or(false);
+        let conf_path = if no_conf {
             eprintln!("[*] --no-conf set, skipping config file loading");
             None
         } else {
@@ -110,9 +111,10 @@ impl App {
                 .map(|s| s.to_string())
         };
 
-        self.load_env().await;
-
-        if let Err(e) = self.load_config_file(conf_path.as_deref()).await {
+        if let Err(e) = self
+            .load_startup_config(no_conf, conf_path.as_deref())
+            .await
+        {
             tracing::error!("Failed to load config file: {}", e);
         }
 
