@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::HashType;
 use crate::constants;
-use crate::engine::active_output_registry::global_registry;
+use crate::engine::active_output_registry::{OutputPathPolicy, global_registry};
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::concurrent_download::{ConcurrentDownloadResult, ConcurrentDownloader};
 use crate::engine::download_cookie::CookieHelper;
@@ -19,42 +19,13 @@ use crate::error::{Aria2Error, Result};
 use crate::filesystem::file_allocation;
 use crate::filesystem::file_allocation_man;
 use crate::filesystem::resume_helper::ResumeHelper;
-use crate::request::request_group::GroupId;
+use crate::request::request_group::{DownloadResultCode, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;
 
-#[async_trait]
-impl Command for DownloadCommand {
-    async fn execute(&mut self) -> Result<()> {
-        // Check for early cancellation (task removed before execution started).
-        self.check_cancelled()?;
-
-        if !self.started {
-            self.group.recover_mut().start()?;
-            self.started = true;
-        }
-
-        let uri = {
-            let g = self.group.recover();
-            g.uris().first().cloned().unwrap_or_default()
-        };
-
-        if uri.is_empty() {
-            return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                "Download URI is empty".into(),
-            )));
-        }
-
-        // MemoryPreDownloadHandler semantics are represented explicitly on
-        // the group. Follow options also live on payload groups, so deriving
-        // this from DownloadOptions would incorrectly turn a normal payload
-        // into an in-memory source download.
-        let memory_download = self.group.recover().is_in_memory_download();
-        if memory_download {
-            return self.execute_in_memory(&uri).await;
-        }
-
+impl DownloadCommand {
+    async fn execute_attempt(&mut self, uri: &str) -> Result<()> {
         debug!(
             "Starting download: {} -> {}",
             uri,
@@ -77,16 +48,6 @@ impl Command for DownloadCommand {
             })?;
         }
 
-        let original_path = self.output_path.clone();
-        self.output_path = global_registry().resolve(&original_path).await;
-        if self.output_path != original_path {
-            info!(
-                "Filename collision resolved: '{}' -> '{}'",
-                original_path.display(),
-                self.output_path.display()
-            );
-        }
-
         let release_path = |path: &std::path::Path| {
             let path = path.to_path_buf();
             async move {
@@ -94,14 +55,14 @@ impl Command for DownloadCommand {
             }
         };
 
-        let url_for_head = reqwest::Url::parse(&uri).ok();
+        let url_for_head = reqwest::Url::parse(uri).ok();
         let cookie_hdr_head = if let Some(ref url) = url_for_head {
             CookieHelper::new(Arc::clone(&self.cookie_storage), self.cookie_file.clone())
                 .build_cookie_header_from_url(url)
         } else {
             String::new()
         };
-        let mut head_req = self.client.head(&uri);
+        let mut head_req = self.client.head(uri);
         if !cookie_hdr_head.is_empty() {
             head_req = head_req.header("Cookie", &cookie_hdr_head);
         }
@@ -139,13 +100,57 @@ impl Command for DownloadCommand {
                         })
                         .filter(|header| !header.is_empty()),
                 );
-            prober.probe_range_support(&uri, total_length).await
+            prober.probe_range_support(uri, total_length).await
         } else {
             false
         };
 
-        let resume_helper = ResumeHelper::new(&self.output_path, true);
-        let mut resume_state = resume_helper.detect(total_length).await?;
+        let options = self.group.recover().options_arc();
+        let original_path = self.output_path.clone();
+        if options.remove_control_file {
+            let control_path =
+                crate::filesystem::control_file::ControlFile::control_path_for(&original_path);
+            match tokio::fs::remove_file(&control_path).await {
+                Ok(()) => info!(path = %control_path.display(), "Removed requested control file"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Aria2Error::FileIo(format!(
+                        "Failed to remove control file {}: {}",
+                        control_path.display(),
+                        error
+                    )));
+                }
+            }
+        }
+        self.output_path = global_registry()
+            .resolve_with_policy(
+                &original_path,
+                OutputPathPolicy {
+                    allow_overwrite: options.allow_overwrite,
+                    auto_file_renaming: options.auto_file_renaming,
+                    continue_download: options.continue_download,
+                    check_integrity: self.check_integrity,
+                    total_length: (total_length > 0).then_some(total_length),
+                },
+            )
+            .await?;
+        if self.output_path != original_path {
+            info!(
+                "Filename collision resolved: '{}' -> '{}'",
+                original_path.display(),
+                self.output_path.display()
+            );
+        }
+
+        let continue_download = options.continue_download;
+        let resume_helper = ResumeHelper::new(&self.output_path, continue_download);
+        let mut resume_state = match resume_helper.detect(total_length).await {
+            Ok(state) => state,
+            Err(error) => {
+                release_path(&self.output_path).await;
+                return Err(error);
+            }
+        };
 
         // When resuming from a paused state, never short-circuit as "complete" --
         // the file on disk may be a preallocated sparse file that matches
@@ -188,8 +193,6 @@ impl Command for DownloadCommand {
             release_path(&self.output_path).await;
             return Err(e);
         }
-
-        self.spawn_progress_aggregator();
 
         // Initialize tail reclaim progress tracking before the download loop.
         // Mirrors C++ DownloadCommand constructor which initializes
@@ -316,7 +319,7 @@ impl Command for DownloadCommand {
                     self.global_limiter.clone(),
                 );
                 match concurrent_downloader.execute_with_retry(
-                    &uri,
+                    uri,
                     total_length,
                     &resume_state,
                     max_retries,
@@ -339,7 +342,7 @@ impl Command for DownloadCommand {
                             self.global_limiter.clone(),
                         );
                         return sequential_downloader.execute_with_gaps_with_retry(
-                            &uri,
+                            uri,
                             total_length,
                             &completed_ranges,
                             &retry_policy,
@@ -361,7 +364,7 @@ impl Command for DownloadCommand {
                 self.global_limiter.clone(),
             );
             sequential_downloader.execute_with_retry(
-                &uri,
+                uri,
                 &resume_state,
                 total_length,
                 &retry_policy,
@@ -374,8 +377,6 @@ impl Command for DownloadCommand {
         // here we update at the boundary since the Rust architecture uses
         // async downloaders that manage their own data loops internally.
         self.update_tail_reclaim_progress();
-
-        self.drain_progress_aggregator().await;
 
         if download_result.is_ok() {
             // Verify checksum if configured
@@ -439,6 +440,95 @@ impl Command for DownloadCommand {
         release_path(&self.output_path).await;
         download_result
     }
+}
+
+#[async_trait]
+impl Command for DownloadCommand {
+    async fn execute(&mut self) -> Result<()> {
+        // Check for early cancellation (task removed before execution started).
+        self.check_cancelled()?;
+
+        if !self.started {
+            self.group.recover_mut().start()?;
+            self.started = true;
+        }
+
+        let uris = self.candidate_uris();
+        let first_uri = uris.first().cloned().ok_or_else(|| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(
+                "Download URI is empty".into(),
+            ))
+        })?;
+
+        // MemoryPreDownloadHandler semantics are represented explicitly on
+        // the group. Follow options also live on payload groups, so deriving
+        // this from DownloadOptions would incorrectly turn a normal payload
+        // into an in-memory source download.
+        if self.group.recover().is_in_memory_download() {
+            return self.execute_in_memory(&first_uri).await;
+        }
+
+        // One aggregator belongs to the command generation, not to an
+        // individual mirror attempt. Keeping it alive lets progress continue
+        // monotonically while a failed resume moves to the next URI.
+        self.spawn_progress_aggregator();
+
+        let mut last_error = None;
+        let mut candidates = uris.into_iter().peekable();
+        while let Some(uri) = candidates.next() {
+            match self.execute_attempt(&uri).await {
+                Ok(()) => {
+                    self.drain_progress_aggregator().await;
+                    return Ok(());
+                }
+                Err(error)
+                    if matches!(
+                        &error,
+                        Aria2Error::Recoverable(crate::error::RecoverableError::CannotResume)
+                    ) =>
+                {
+                    let failure_count = self.group.recover().increase_resume_failure_count();
+                    self.group.recover().add_uri_result(
+                        uri.clone(),
+                        DownloadResultCode::CannotResume.as_code() as u16,
+                    );
+                    last_error = Some(error);
+
+                    let options = self.group.recover().options_arc();
+                    let limit_reached = options.max_resume_failure_tries > 0
+                        && failure_count >= options.max_resume_failure_tries;
+                    let no_mirror_left = candidates.peek().is_none();
+
+                    if !options.always_resume && (limit_reached || no_mirror_left) {
+                        if let Err(reset_error) = self.prepare_fresh_download().await {
+                            last_error = Some(reset_error);
+                            break;
+                        }
+
+                        match self.execute_attempt(&uri).await {
+                            Ok(()) => {
+                                self.drain_progress_aggregator().await;
+                                return Ok(());
+                            }
+                            Err(error) => last_error = Some(error),
+                        }
+                        break;
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    break;
+                }
+            }
+        }
+
+        self.drain_progress_aggregator().await;
+        Err(last_error.unwrap_or_else(|| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(
+                "No download URI is available".into(),
+            ))
+        }))
+    }
 
     fn status(&self) -> CommandStatus {
         if self.completed {
@@ -469,6 +559,74 @@ impl Command for DownloadCommand {
 }
 
 impl DownloadCommand {
+    fn candidate_uris(&self) -> Vec<String> {
+        let mut candidates = Vec::new();
+        if !self.initial_uri.is_empty() {
+            candidates.push(self.initial_uri.clone());
+        }
+
+        let group_uris = self.group.recover().uris().to_vec();
+        for uri in group_uris {
+            if !uri.is_empty() && !candidates.iter().any(|candidate| candidate == &uri) {
+                candidates.push(uri);
+            }
+        }
+        candidates
+    }
+
+    /// Reset the shared output for aria2's fresh-download fallback.
+    ///
+    /// This operation belongs to the command-generation seam: the protocol
+    /// downloader reports `CannotResume`, while the command decides whether
+    /// the failure means "try another mirror" or "start from byte zero".
+    async fn prepare_fresh_download(&mut self) -> Result<()> {
+        let control_path =
+            crate::filesystem::control_file::ControlFile::control_path_for(&self.output_path);
+        match tokio::fs::remove_file(&control_path).await {
+            Ok(()) => tracing::debug!(
+                path = %control_path.display(),
+                "Removed control file before fresh download"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Aria2Error::FileIo(format!(
+                    "Failed to reset control file {}: {}",
+                    control_path.display(),
+                    error
+                )));
+            }
+        }
+
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.output_path)
+            .await
+            .map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to truncate output file {}: {}",
+                    self.output_path.display(),
+                    error
+                ))
+            })?;
+        file.sync_data().await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "Failed to flush truncated output file {}: {}",
+                self.output_path.display(),
+                error
+            ))
+        })?;
+        drop(file);
+
+        self.completed_bytes = 0;
+        self.progress.set_completed_length(0);
+        let group = self.group.recover();
+        group.update_progress(0);
+        group.set_completed_length(0);
+        Ok(())
+    }
+
     /// Download a metadata source into a memory buffer.
     ///
     /// This is the Rust equivalent of aria2's memory pre-download handler:

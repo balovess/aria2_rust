@@ -246,7 +246,7 @@ impl App {
         } else {
             set_bool_true!("enable-dht", b.enable_dht);
         }
-        set_u64!("dht-listen-port", b.dht_listen_port);
+        set_str!("dht-listen-port", b.dht_listen_port);
         set_str!("dht-entry-point", b.dht_entry_point);
         set_path!("dht-file-path", b.dht_file_path);
         set_path!("dht-message-path", b.dht_message_path);
@@ -282,6 +282,11 @@ impl App {
         set_str!("peer-id-prefix", b.peer_id_prefix);
         set_str!("peer-agent", b.peer_agent);
         set_str!("select-file", b.select_file);
+        if !b.index_out.is_empty() {
+            let _ = conf
+                .set_global_option("index-out", OptionValue::Str(b.index_out.join("\n")))
+                .await;
+        }
 
         // --- RPC options ---
         set_bool_true!("enable-rpc", r.enable_rpc);

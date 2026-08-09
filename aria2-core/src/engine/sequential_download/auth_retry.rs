@@ -195,11 +195,21 @@ impl SequentialDownloader {
                     .extract_and_store_cookies(uri, &retry_response);
 
                 let retry_status = retry_response.status();
+                let mut effective_resume_state = resume_state.clone();
+                if retry_status.as_u16() == 200 && Self::resume_requested(&effective_resume_state) {
+                    effective_resume_state = match self
+                        .resume_state_after_failed_request(&effective_resume_state)
+                        .await
+                    {
+                        Ok(state) => state,
+                        Err(error) => return Some(Err(error)),
+                    };
+                }
                 if retry_status.is_success() || retry_status.as_u16() == 206 {
                     // Auth retry succeeded — proceed with the download using
                     // the retry response
                     return Some(
-                        self.download_response_body(retry_response, uri, resume_state)
+                        self.download_response_body(retry_response, uri, &effective_resume_state)
                             .await,
                     );
                 }

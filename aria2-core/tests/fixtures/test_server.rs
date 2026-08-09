@@ -149,6 +149,46 @@ impl TestServer {
                 let body = SMALL_CONTENT;
                 http_response(200, "application/octet-stream", body)
             }
+            "/files/no-range.bin" => {
+                // Deliberately ignores Range headers. This models a server
+                // which advertises a stable entity but cannot resume a
+                // partially downloaded file.
+                let body = b"resume-me";
+                http_response(200, "application/octet-stream", body)
+            }
+            "/files/resume-range.bin" => {
+                // Mirror used by resume failover tests. Unlike no-range.bin,
+                // this endpoint honors a byte range against the same entity.
+                let body = b"resume-me";
+                let range_header = request_str
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("range").then_some(value.trim())
+                    });
+                if let Some(range) = range_header
+                    && let Some(start) = range
+                        .strip_prefix("bytes=")
+                        .and_then(|value| value.split('-').next())
+                        .and_then(|value| value.parse::<usize>().ok())
+                    && start < body.len()
+                {
+                    let partial = &body[start..];
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes={}-{}/{}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                        start,
+                        body.len() - 1,
+                        body.len(),
+                        partial.len()
+                    )
+                    .into_bytes()
+                    .into_iter()
+                    .chain(partial.iter().copied())
+                    .collect()
+                } else {
+                    http_response(200, "application/octet-stream", body)
+                }
+            }
             "/files/medium.bin" => {
                 let body = vec![MEDIUM_PATTERN; 1024 * 1024];
                 http_response(200, "application/octet-stream", &body)

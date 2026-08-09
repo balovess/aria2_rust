@@ -50,11 +50,14 @@ pub fn generate_session_id() -> String {
 /// # Returns
 /// * JSON value containing version and enabled features
 pub fn build_version_info() -> serde_json::Value {
-    serde_json::json!({
-        "version": "1.37.0-Rust",
-        "enabledFeatures": ["http", "https", "ftp", "bittorrent", "metalink", "sftp"],
-        "session": "aria2-rpc"
-    })
+    let mut info = crate::types::VersionInfo::from_env().to_json_value();
+    if let Some(object) = info.as_object_mut() {
+        object.insert(
+            "session".to_string(),
+            serde_json::Value::String("aria2-rpc".to_string()),
+        );
+    }
+    info
 }
 
 /// Fields that original aria2 keeps as native JSON numbers (not strings).

@@ -22,17 +22,7 @@ impl RpcEngine {
             .with_error_message(result.message.clone())
             .with_dir(result.dir.clone());
         if !result.files.is_empty() {
-            info = info.with_files(
-                result
-                    .files
-                    .iter()
-                    .map(|file| {
-                        crate::types::FileInfo::new(file.path.clone(), file.length)
-                            .with_completed(file.completed_length)
-                            .with_index(file.index)
-                    })
-                    .collect(),
-            );
+            info = info.with_files(RpcEngine::build_file_infos_from_result(result));
         }
         info
     }

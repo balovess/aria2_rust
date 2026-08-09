@@ -44,6 +44,12 @@ pub enum Aria2Error {
     #[error("File I/O error: {0}")]
     FileIo(String),
 
+    #[error("File already exists: {0}")]
+    FileAlreadyExists(String),
+
+    #[error("File renaming failed: {0}")]
+    FileRenamingFailed(String),
+
     #[error("Directory create error: {0}")]
     DirCreate(String),
 

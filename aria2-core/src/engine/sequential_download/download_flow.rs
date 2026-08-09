@@ -26,6 +26,12 @@ impl SequentialDownloader {
         resume_state: &ResumeState,
         total_length: u64,
     ) -> Result<()> {
+        // Keep the caller's detection result immutable. A server can reject a
+        // resume request with HTTP 200, in which case aria2 either aborts with
+        // CANNOT_RESUME. DownloadCommand owns the higher-level decision to
+        // try another URI or restart from byte zero.
+        let mut effective_resume_state = resume_state.clone();
+
         #[cfg(not(target_os = "linux"))]
         let _ = total_length;
 
@@ -36,7 +42,7 @@ impl SequentialDownloader {
                 let opts = guard.options();
                 opts.http_proxy.is_none() && opts.all_proxy.is_none()
             };
-            if !resume_state.should_resume
+            if !effective_resume_state.should_resume
                 && total_length > 0
                 && no_proxy
                 && !uri.starts_with("https://")
@@ -67,13 +73,14 @@ impl SequentialDownloader {
 
         loop {
             let url_parsed = reqwest::Url::parse(&current_uri).ok();
-            let mut request =
-                if let Some(range_header) = ResumeHelper::build_range_header(resume_state) {
-                    tracing::debug!("Resume download: {}", range_header);
-                    self.client.get(&current_uri).header("Range", range_header)
-                } else {
-                    self.client.get(&current_uri)
-                };
+            let mut request = if let Some(range_header) =
+                ResumeHelper::build_range_header(&effective_resume_state)
+            {
+                tracing::debug!("Resume download: {}", range_header);
+                self.client.get(&current_uri).header("Range", range_header)
+            } else {
+                self.client.get(&current_uri)
+            };
 
             if let Some(ref url) = url_parsed {
                 let cookie_hdr = self.cookie_helper.build_cookie_header_from_url(url);
@@ -225,7 +232,7 @@ impl SequentialDownloader {
                         &url_parsed,
                         status_code,
                         false, // authentication_used = false (first attempt)
-                        resume_state,
+                        &effective_resume_state,
                     )
                     .await
                 {
@@ -271,11 +278,69 @@ impl SequentialDownloader {
                 ));
             }
 
+            // A server which ignores Range returns the complete entity with
+            // HTTP 200. C++ aria2 treats that as CANNOT_RESUME unless the
+            // caller explicitly opts into a fresh download. Do this before
+            // passing the body to the writer; otherwise progress and file
+            // offsets would describe a resumed transfer while bytes are
+            // actually being written from offset zero.
+            if status_code == 200 && Self::resume_requested(&effective_resume_state) {
+                effective_resume_state = self
+                    .resume_state_after_failed_request(&effective_resume_state)
+                    .await?;
+            }
+
             // Proceed with the response body download
             return self
-                .download_response_body(response, &current_uri, resume_state)
+                .download_response_body(response, &current_uri, &effective_resume_state)
                 .await;
         }
+    }
+
+    pub(in crate::engine::sequential_download) fn resume_requested(state: &ResumeState) -> bool {
+        state.should_resume && state.start_offset > 0
+    }
+
+    /// Apply aria2's response to an unsupported resume request.
+    pub(in crate::engine::sequential_download) async fn resume_state_after_failed_request(
+        &self,
+        state: &ResumeState,
+    ) -> Result<ResumeState> {
+        // File allocation may have extended a partial output to the remote
+        // length before the server rejected the Range request. Restore the
+        // meaningful resume boundary so the next mirror cannot mistake the
+        // preallocated tail for completed data.
+        let restore_length = state
+            .control_file
+            .as_ref()
+            .map(|control_file| control_file.completed_length())
+            .unwrap_or(state.existing_length);
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.output_path)
+            .await
+            .map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to restore resumable output {}: {}",
+                    self.output_path.display(),
+                    error
+                ))
+            })?;
+        file.set_len(restore_length).await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "Failed to restore output length for {}: {}",
+                self.output_path.display(),
+                error
+            ))
+        })?;
+        drop(file);
+
+        // The protocol layer must not choose between another URI and a fresh
+        // download. That policy is owned by DownloadCommand, which has the
+        // complete mirror list and the group-level retry options.
+        Err(Aria2Error::Recoverable(RecoverableError::CannotResume))
     }
 
     /// Download the response body to the output file.
@@ -319,7 +384,11 @@ impl SequentialDownloader {
 
         let rate_limit = { self.group.recover().options().max_download_limit };
 
-        let raw_writer = DefaultDiskWriter::new(&self.output_path);
+        let raw_writer = if start_offset > 0 {
+            DefaultDiskWriter::new_with_offset(&self.output_path, start_offset)
+        } else {
+            DefaultDiskWriter::new(&self.output_path)
+        };
 
         // Build per-download limiter (if max_download_limit is set).
         let per_limiter = match rate_limit {

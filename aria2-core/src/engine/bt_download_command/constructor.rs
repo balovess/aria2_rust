@@ -315,7 +315,7 @@ impl BtDownloadCommand {
             file_allocation: options
                 .file_allocation
                 .clone()
-                .unwrap_or_else(|| "none".to_string()),
+                .unwrap_or_else(|| crate::constants::DEFAULT_FILE_ALLOCATION.to_string()),
             secure_falloc: options.secure_falloc,
             check_integrity: options.check_integrity,
             hash_check_only: options.hash_check_only,

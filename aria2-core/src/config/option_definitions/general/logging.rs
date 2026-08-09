@@ -18,7 +18,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "log-level".into(),
             opt_type: OptionType::Enum,
-            short_name: Some('L'),
             default_value: OptionValue::Str("debug".into()),
             allowed_values: &["debug", "info", "notice", "warn", "error"],
             description: "Log level (debug/info/notice/warn/error)".into(),
@@ -48,10 +47,9 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "summary-interval".into(),
             opt_type: OptionType::Integer,
-            short_name: Some('S'),
             default_value: OptionValue::Int(60),
             min: Some(0),
-            max: Some(3600),
+            max: Some(i32::MAX as u64),
             description: "Progress summary interval in seconds".into(),
             category: OptionCategory::General,
             ..Default::default()

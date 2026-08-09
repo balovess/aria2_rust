@@ -363,6 +363,14 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_index_out_values_preserve_original_newline_wire_form() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&["--index-out=1=first.iso", "--index-out", "2=second.iso"]);
+        assert_eq!(p.get_str("index-out"), Some("1=first.iso\n2=second.iso"));
+        assert!(!p.has_errors());
+    }
+
+    #[test]
     fn test_set_raw_bool() {
         let mut p = ConfigParser::new();
         p.set_raw("check-certificate", "false");
@@ -440,7 +448,7 @@ mod tests {
     #[test]
     fn test_error_on_out_of_range() {
         let mut p = ConfigParser::new();
-        p.set_raw("split", "100");
+        p.set_raw("retry-wait", "601");
         assert!(p.has_errors());
     }
 

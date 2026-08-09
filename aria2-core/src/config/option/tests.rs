@@ -145,6 +145,58 @@ fn test_option_def_parse_integer() {
 }
 
 #[test]
+fn test_option_def_parse_integer_range_preserves_wire_value() {
+    let def = OptionDef {
+        name: "listen-port".into(),
+        opt_type: OptionType::IntegerRange,
+        min: Some(1024),
+        max: Some(65535),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        def.parse_value("6881-6999,7001").unwrap().as_str(),
+        Some("6881-6999,7001")
+    );
+    assert!(def.parse_value("1023").is_err());
+    assert!(def.parse_value("70000").is_err());
+    assert!(def.parse_value("6881-").is_err());
+    assert!(def.parse_value("6881-6999-7000").is_err());
+}
+
+#[test]
+fn test_option_def_parse_index_out_is_cumulative_wire_text() {
+    let def = OptionDef {
+        name: "index-out".into(),
+        opt_type: OptionType::IndexOut,
+        cumulative_delimiter: Some("\n"),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        def.parse_value("1=part.iso").unwrap().as_str(),
+        Some("1=part.iso")
+    );
+    assert!(def.parse_value("part.iso").is_err());
+    assert!(def.parse_value("1=").is_err());
+}
+
+#[test]
+fn test_size_bounds_are_applied_by_the_definition() {
+    let def = OptionDef {
+        name: "piece-length".into(),
+        opt_type: OptionType::Size,
+        min: Some(1024 * 1024),
+        max: Some(1024 * 1024 * 1024),
+        ..Default::default()
+    };
+
+    assert!(def.parse_value("1M").is_ok());
+    assert!(def.parse_value("512K").is_err());
+    assert!(def.parse_value("2G").is_err());
+}
+
+#[test]
 fn test_option_def_parse_boolean() {
     let def = OptionDef::new("verbose", OptionType::Boolean);
     assert!(def.parse_value("true").unwrap().as_bool().unwrap());
@@ -210,6 +262,26 @@ fn test_registry_creation() {
 }
 
 #[test]
+#[should_panic(expected = "duplicate configuration option 'duplicate'")]
+fn test_registry_rejects_duplicate_definitions() {
+    let mut reg = OptionRegistry::new();
+    reg.register(OptionDef::new("duplicate", OptionType::String));
+    reg.register(OptionDef::new("duplicate", OptionType::Boolean));
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn test_bt_tracker_definition_matches_original_overwrite_semantics() {
+    let reg = OptionRegistry::new();
+    let def = reg
+        .get("bt-tracker")
+        .expect("bt-tracker must be registered");
+
+    assert_eq!(def.opt_type(), OptionType::List);
+    assert_eq!(def.cumulative_delimiter, None);
+}
+
+#[test]
 fn test_registry_by_category() {
     let reg = OptionRegistry::new();
     let general = reg.by_category(OptionCategory::General);
@@ -237,6 +309,66 @@ fn test_registry_defaults_are_valid() {
             );
         }
     }
+}
+
+#[test]
+fn test_registry_parses_rpc_wire_values_through_one_typed_seam() {
+    let reg = OptionRegistry::new();
+
+    assert_eq!(
+        reg.parse_rpc_value("split", &serde_json::json!(4))
+            .unwrap()
+            .as_i64(),
+        Some(4)
+    );
+    assert_eq!(
+        reg.parse_rpc_value("max-retries", &serde_json::json!(7))
+            .unwrap()
+            .as_i64(),
+        Some(7)
+    );
+    assert_eq!(
+        reg.parse_rpc_value("allow-overwrite", &serde_json::json!(true))
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        reg.parse_rpc_value("uri-selector", &serde_json::json!("adaptive"))
+            .unwrap()
+            .as_str(),
+        Some("adaptive")
+    );
+    assert!(
+        reg.parse_rpc_value("uri-selector", &serde_json::json!("unsupported"))
+            .is_err()
+    );
+    assert!(
+        reg.parse_rpc_value("split", &serde_json::json!({"value": 4}))
+            .is_err()
+    );
+    assert!(
+        reg.parse_rpc_value("split", &serde_json::json!([4]))
+            .is_err()
+    );
+    assert!(
+        reg.parse_rpc_value("header", &serde_json::json!(["X-Test: 1"]))
+            .is_ok()
+    );
+    assert_eq!(
+        reg.parse_rpc_value("listen-port", &serde_json::json!("6881-6999"))
+            .unwrap()
+            .as_str(),
+        Some("6881-6999")
+    );
+    assert!(
+        reg.parse_rpc_value("select-file", &serde_json::json!("0"))
+            .is_err()
+    );
+    assert!(
+        reg.parse_rpc_value("index-out", &serde_json::json!("1=file.iso"))
+            .is_ok()
+    );
 }
 
 #[test]

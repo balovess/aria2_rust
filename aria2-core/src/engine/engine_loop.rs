@@ -26,7 +26,7 @@ use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::RateLimiter;
-use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId};
+use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId, HaltReason};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::session::auto_save_session::AutoSaveSession;
@@ -661,44 +661,41 @@ async fn process_task_completions(
                         &e,
                         Aria2Error::DownloadFailed(msg) if msg == "Download paused"
                     );
-                    let was_halt_requested = group_state.is_halt_requested();
+                    let halt_reason = group_state.get_halt_reason();
                     drop(group_state);
 
-                    if was_pause_requested {
-                        group.recover_mut().mark_paused();
-                    } else if was_halt_requested {
-                        // User removal is terminal and must become a REMOVED
-                        // result after the command counter reaches zero.
-                        match group.recover().get_halt_reason() {
-                            crate::request::request_group::HaltReason::UserRequest => {
-                                group.recover().mark_removed();
-                            }
-                            crate::request::request_group::HaltReason::Timeout => {
-                                group.recover().mark_timeout();
-                            }
-                            crate::request::request_group::HaltReason::ShutdownSignal
-                            | crate::request::request_group::HaltReason::None => {}
+                    match halt_reason {
+                        // A user removal is terminal even when a pause command
+                        // reached the group first. The halt reason is the
+                        // stronger lifecycle signal and must win over the
+                        // resumable Paused status.
+                        HaltReason::UserRequest => group.recover().mark_removed(),
+                        HaltReason::Timeout => group.recover().mark_timeout(),
+                        HaltReason::ShutdownSignal => {
+                            // A shutdown halt remains non-terminal so its
+                            // result maps to IN_PROGRESS after cleanup.
                         }
-                        // A shutdown halt remains non-terminal so its result
-                        // maps to IN_PROGRESS and is not re-queued after exit.
-                    } else if is_pause_error {
-                        // A pause was requested and then undone (`unpause`)
-                        // before the task fully exited. Leave the group
-                        // Waiting so the demotion layer re-queues it and
-                        // promotion re-spawns the download.
-                        let status = group.recover().status();
-                        if !matches!(
-                            status,
-                            DownloadStatus::Complete
-                                | DownloadStatus::Error(_)
-                                | DownloadStatus::Removed
-                        ) {
-                            group.recover().mark_waiting();
+                        HaltReason::None if was_pause_requested => {
+                            group.recover_mut().mark_paused();
                         }
-                    } else {
-                        group
+                        HaltReason::None if is_pause_error => {
+                            // A pause was requested and then undone (`unpause`)
+                            // before the task fully exited. Leave the group
+                            // Waiting so the demotion layer re-queues it and
+                            // promotion re-spawns the download.
+                            let status = group.recover().status();
+                            if !matches!(
+                                status,
+                                DownloadStatus::Complete
+                                    | DownloadStatus::Error(_)
+                                    | DownloadStatus::Removed
+                            ) {
+                                group.recover().mark_waiting();
+                            }
+                        }
+                        HaltReason::None => group
                             .recover()
-                            .mark_error_with_code(map_error_code(&e), e.to_string());
+                            .mark_error_with_code(map_error_code(&e), e.to_string()),
                     }
                     group
                         .recover()
@@ -715,24 +712,28 @@ async fn process_task_completions(
                     let halt_reason = group_state.get_halt_reason();
                     drop(group_state);
 
-                    if was_pause_requested {
+                    if matches!(halt_reason, HaltReason::UserRequest | HaltReason::Timeout) {
+                        // Removal/timeout is terminal even if the task was
+                        // paused when the force-halt arrived.
+                        if last_command {
+                            match halt_reason {
+                                HaltReason::UserRequest => group.recover().mark_removed(),
+                                HaltReason::Timeout => group.recover().mark_timeout(),
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            group
+                                .recover()
+                                .command_failure
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    } else if was_pause_requested {
                         group.recover_mut().mark_paused();
                     } else if !last_command {
                         group
                             .recover()
                             .command_failure
                             .store(true, std::sync::atomic::Ordering::Release);
-                    } else {
-                        match halt_reason {
-                            crate::request::request_group::HaltReason::UserRequest => {
-                                group.recover().mark_removed();
-                            }
-                            crate::request::request_group::HaltReason::Timeout => {
-                                group.recover().mark_timeout();
-                            }
-                            crate::request::request_group::HaltReason::ShutdownSignal
-                            | crate::request::request_group::HaltReason::None => {}
-                        }
                     }
                 }
             }
@@ -1188,6 +1189,52 @@ mod tests {
             DownloadStatus::Paused,
             "a pause-induced task failure must keep the group Paused (resumable), not Error"
         );
+    }
+
+    #[tokio::test]
+    async fn user_removal_wins_over_paused_status_on_cancelled_task() {
+        let ctx = test_ctx(false);
+        let gid = {
+            let man = ctx.group_man.read().await;
+            let gid = man
+                .add_group(
+                    vec!["http://example.com/file.bin".to_string()],
+                    DownloadOptions::default(),
+                )
+                .unwrap();
+            man.fill_from_reserver();
+            let group = man.find_group(gid).unwrap();
+            group.recover_mut().pause().unwrap();
+            group.recover().inc_commands();
+            // Force removal can arrive after a pause command has already
+            // published the Paused status. The user halt reason is terminal.
+            group.recover().request_force_halt(HaltReason::UserRequest);
+            gid
+        };
+
+        let (completion_tx, mut completion_rx) =
+            mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
+        completion_tx.send((gid, 1, TaskResult::Cancelled)).unwrap();
+
+        let mut running_downloads = Vec::new();
+        let mut completed_generations = HashSet::new();
+        process_task_completions(
+            &ctx,
+            &mut completion_rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
+
+        let status = ctx
+            .group_man
+            .read()
+            .await
+            .find_group(gid)
+            .unwrap()
+            .recover()
+            .status();
+        assert_eq!(status, DownloadStatus::Removed);
     }
 
     #[tokio::test]

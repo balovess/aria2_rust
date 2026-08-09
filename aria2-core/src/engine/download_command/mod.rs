@@ -32,6 +32,13 @@ pub struct DownloadCommand {
     /// Direct access to progress counters -- avoids RwLock on the hot path.
     pub(super) progress: Arc<AtomicProgress>,
     pub(super) client: Arc<reqwest::Client>,
+    /// URI selected when this command was created.
+    ///
+    /// A request group may contain mirror URIs. Keeping the command's
+    /// selected URI separate from the group's snapshot prevents a later
+    /// runtime URI update from silently changing the request that is already
+    /// being attempted.
+    pub(super) initial_uri: String,
     pub(super) output_path: std::path::PathBuf,
     pub(super) started: bool,
     pub(super) completed: bool,
@@ -264,6 +271,7 @@ impl DownloadCommand {
             group,
             progress,
             client,
+            initial_uri: uri.to_string(),
             output_path: path,
             started: false,
             completed: false,
@@ -392,6 +400,7 @@ impl DownloadCommand {
             group,
             progress,
             client,
+            initial_uri: uri.to_string(),
             output_path: path,
             started: false,
             completed: false,

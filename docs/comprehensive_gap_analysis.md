@@ -479,11 +479,11 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | DownloadCommand tail tracking | Complete | `engine/download_command/tail_reclaim.rs` |
 | Per-connection stall tracking | Complete | `http/tail_reclaim/tracker.rs` |
 
-#### Default Value Changes (P0)
+#### Default Value Audit (P0)
 
 | Option | Old Default | New Default | Status |
 |--------|-------------|-------------|--------|
-| `--file-allocation` | `prealloc` | `trunc` | Adopted |
+| `--file-allocation` | `prealloc` | `prealloc` | Original-compatible baseline restored on 2026-08-09 |
 | `--max-connection-per-server` max | 16 | 1024 | Adopted |
 
 #### Decimal Size Parsing (P1)
@@ -520,7 +520,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | 6 | Cookie | `to_netscape_line` domain dot inversion | FIXED |
 | 7 | LPD | BEP14 message format mismatch | FIXED |
 | 8 | WebSocket | `rpc-max-request-size` OOM | FIXED |
-| 9 | aria2-next | Default `--file-allocation: trunc` | Adopted |
+| 9 | aria2-next | Default `--file-allocation: trunc` | Superseded | The migration target is the aria2_original default `prealloc`; Rust now uses that value consistently across HTTP, FTP, BitTorrent, and Metalink constructors. |
 
 ---
 

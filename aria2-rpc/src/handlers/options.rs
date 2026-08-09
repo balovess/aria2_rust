@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 
 use aria2_core::config::{OptionRegistry, is_global_option_changeable};
-use aria2_core::request::request_group::{
-    ChangeableKind, RequestGroup, is_option_changeable, option_value_to_string,
-};
+use aria2_core::request::request_group::{RequestGroup, is_option_changeable};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 
 use crate::engine::RpcEngine;
@@ -96,13 +94,11 @@ fn validate_registered_option(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), JsonRpcError> {
-    let Some(definition) = registry.get(key) else {
+    if registry.get(key).is_none() {
         return Ok(());
-    };
-    let raw = option_value_to_string(value)
-        .ok_or_else(|| JsonRpcError::RpcExecution(format!("Option '{}' must be a string", key)))?;
-    definition
-        .parse_value(&raw)
+    }
+    registry
+        .parse_rpc_value(key, value)
         .map(|_| ())
         .map_err(|error| JsonRpcError::RpcExecution(format!("Option '{}': {}", key, error)))
 }
@@ -321,86 +317,31 @@ impl RpcEngine {
         let raw_changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
         let changes = normalize_rpc_options(&raw_changes);
 
-        let group = if let Some(group_man) = self.group_man.as_ref() {
-            let group_man = group_man.read().await;
-            group_man.group_by_hex(&gid)
+        if let Some(group_man) = self.group_man.as_ref() {
+            let manager = group_man.read().await;
+            manager
+                .change_group_options(&gid, changes)
+                .map_err(JsonRpcError::RpcExecution)?;
         } else {
-            None
-        };
-        if self.group_man.is_some() && group.is_none() {
-            return Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid)));
-        }
-        let is_active = group
-            .as_ref()
-            .is_some_and(|group| group.recover().status().is_active());
-
-        // Classify each option key and partition into immediate/pending.
-        let mut immediate = HashMap::new();
-        let mut pending = HashMap::new();
-        for (key, value) in &changes {
-            match is_option_changeable(key.as_str(), is_active) {
-                ChangeableKind::Immediate => {
-                    if RequestGroup::validate_option_update(key, value)
-                        .map_err(JsonRpcError::RpcExecution)?
-                    {
-                        immediate.insert(key.clone(), value.clone());
-                    }
-                }
-                ChangeableKind::Pending => {
-                    if RequestGroup::validate_option_update(key, value)
-                        .map_err(JsonRpcError::RpcExecution)?
-                    {
-                        pending.insert(key.clone(), value.clone());
-                    }
-                }
-                // C++ `gatherChangeableOption` ignores unknown and
-                // known-but-unacceptable options.
-                ChangeableKind::NotChangeable => continue,
-            }
-        }
-
-        // Apply immediate options to the running RequestGroup.
-        if !immediate.is_empty()
-            && let Some(ref group_man) = self.group_man
-        {
-            let gm = group_man.write().await;
-            if let Err(e) = gm.update_group_options(&gid, immediate.clone()) {
-                return Err(JsonRpcError::RpcExecution(e));
-            }
-        }
-
-        // Store pending options (to be applied on next pause/restart).
-        // In C++ aria2, these trigger a pause + restart cycle.
-        if !pending.is_empty() {
-            tracing::info!(
-                "GID {}: {} options stored as pending (applied on pause/restart): {:?}",
-                gid,
-                pending.len(),
-                pending.keys().collect::<Vec<_>>()
-            );
-            if let Some(group) = group.clone() {
+            // Keep the un-wired fixture path usable for legacy unit callers.
+            let mut immediate = HashMap::new();
+            for (key, value) in changes {
+                if matches!(
+                    is_option_changeable(&key, false),
+                    aria2_core::config::ChangeableKind::Immediate
+                ) && RequestGroup::validate_option_update(&key, &value)
+                    .map_err(JsonRpcError::RpcExecution)?
                 {
-                    let group_guard = group.recover();
-                    group_guard.set_pending_options(pending);
-                }
-                if is_active {
-                    let group_gid = group.recover().gid();
-                    let gm = self.group_man.as_ref().unwrap().read().await;
-                    gm.pause_group(group_gid)
-                        .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
-                    group.recover().request_restart();
+                    immediate.insert(key, value);
                 }
             }
-        }
-
-        // Keep only immediate changes in the legacy adapter-side cache. The
-        // RequestGroup runtime map is the source of truth once a group exists;
-        // pending values become visible there only after restart/application.
-        if !immediate.is_empty() {
-            let mut task_opts = self.task_opts.write().await;
-            let entry = task_opts.entry(gid).or_insert_with(HashMap::new);
-            for (k, v) in immediate {
-                entry.insert(k, v);
+            if !immediate.is_empty() {
+                self.task_opts
+                    .write()
+                    .await
+                    .entry(gid)
+                    .or_default()
+                    .extend(immediate);
             }
         }
 

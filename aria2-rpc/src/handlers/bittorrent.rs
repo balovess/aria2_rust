@@ -3,12 +3,10 @@
 //! Handlers for BT-specific operations, bulk operations, L3 query methods,
 //! and system/multicall support.
 
-use crate::engine::RpcEngine;
+use crate::engine::{RpcEngine, rpc_method_requires_auth};
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::rpc_helpers::split_auth_token;
-use crate::types::{
-    FileInfo, PeerInfo, ServerInfo, ServerInfoIndex, UriEntry, UriStatus, VersionInfo,
-};
+use crate::types::{DownloadStatus, PeerInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
@@ -211,19 +209,16 @@ impl RpcEngine {
         let group = man
             .group_by_hex(&gid)
             .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
-        let entries = group
-            .recover()
-            .uri_entries()
-            .into_iter()
-            .map(|entry| UriEntry {
-                uri: entry.uri,
-                status: if entry.status == "used" {
-                    UriStatus::Used
-                } else {
-                    UriStatus::Waiting
-                },
+        let guard = group.recover();
+        let entries = guard
+            .get_download_context()
+            .and_then(|context| {
+                context
+                    .get_file_entries()
+                    .first()
+                    .map(RpcEngine::build_uri_entries)
             })
-            .collect::<Vec<_>>();
+            .unwrap_or_else(|| guard.uris().iter().cloned().map(UriEntry::new).collect());
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::to_value(entries)
@@ -242,57 +237,18 @@ impl RpcEngine {
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
         let man = group_man.read().await;
-        let group = man
-            .group_by_hex(&gid)
-            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
-        let guard = group.recover();
-        let completed = guard.get_completed_length();
-        let files = guard
-            .get_download_context()
-            .map(|ctx| {
-                ctx.get_file_entries()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, file)| file.is_requested())
-                    .scan(0u64, |offset, (index, file)| {
-                        let start = *offset;
-                        *offset = offset.saturating_add(file.length());
-                        let file_completed = completed.saturating_sub(start).min(file.length());
-                        Some(
-                            FileInfo::new(file.path(), file.length())
-                                .with_index(index + 1)
-                                .with_completed(file_completed)
-                                .with_uris(
-                                    guard
-                                        .uri_entries()
-                                        .into_iter()
-                                        .filter(|uri| {
-                                            file.uris().iter().any(|value| value == &uri.uri)
-                                        })
-                                        .map(|uri| UriEntry {
-                                            uri: uri.uri,
-                                            status: if uri.status == "used" {
-                                                UriStatus::Used
-                                            } else {
-                                                UriStatus::Waiting
-                                            },
-                                        })
-                                        .collect(),
-                                ),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| {
-                vec![
-                    FileInfo::new(
-                        guard.uris().first().cloned().unwrap_or_default(),
-                        guard.get_total_length_atomic(),
-                    )
-                    .with_index(1)
-                    .with_completed(completed),
-                ]
-            });
+        let files = if let Some(group) = man.group_by_hex(&gid) {
+            let guard = group.recover();
+            let completed = guard.get_completed_length();
+            RpcEngine::build_file_infos(&guard, completed)
+        } else if let Some(result) = man.find_stopped_result(&gid) {
+            RpcEngine::build_file_infos_from_result(&result)
+        } else {
+            return Err(JsonRpcError::RpcExecution(format!(
+                "No file data is available for GID#{}",
+                gid
+            )));
+        };
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::to_value(files)
@@ -311,38 +267,41 @@ impl RpcEngine {
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
         let man = group_man.read().await;
-        let group = man
-            .group_by_hex(&gid)
-            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
+        let group = man.group_by_hex(&gid).ok_or_else(|| {
+            JsonRpcError::RpcExecution(format!("No active download for GID#{}", gid))
+        })?;
         let guard = group.recover();
-        let speed = guard.download_speed();
-        let uris = guard.uri_entries();
+        if !matches!(guard.status(), DownloadStatus::Active) {
+            return Err(JsonRpcError::RpcExecution(format!(
+                "No active download for GID#{}",
+                gid
+            )));
+        }
         let files = guard
             .get_download_context()
-            .map(|ctx| {
-                ctx.get_file_entries()
+            .map(|context| {
+                context
+                    .get_file_entries()
                     .iter()
                     .enumerate()
-                    .filter(|(_, file)| file.is_requested())
                     .map(|(index, file)| ServerInfoIndex {
                         index: index + 1,
                         servers: file
-                            .uris()
-                            .into_iter()
-                            .map(|uri| ServerInfo::new(uri).with_download_speed(speed))
+                            .in_flight_requests()
+                            .iter()
+                            .filter_map(|request| {
+                                let stats = request.peer_stat()?;
+                                Some(
+                                    ServerInfo::new(request.uri())
+                                        .with_current_uri(request.current_uri())
+                                        .with_download_speed(stats.download_speed),
+                                )
+                            })
                             .collect(),
                     })
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_else(|| {
-                vec![ServerInfoIndex {
-                    index: 1,
-                    servers: uris
-                        .into_iter()
-                        .map(|entry| ServerInfo::new(entry.uri).with_download_speed(speed))
-                        .collect(),
-                }]
-            });
+            .unwrap_or_default();
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             serde_json::to_value(files)
@@ -464,7 +423,7 @@ impl RpcEngine {
             };
             if method_name == "system.multicall" {
                 results.push(serde_json::json!({
-                    "code": -32600,
+                    "code": 1,
                     "message": "Recursive system.multicall forbidden."
                 }));
                 continue;
@@ -486,9 +445,13 @@ impl RpcEngine {
             let sub_request =
                 JsonRpcRequest::new(method_name, stripped_params.unwrap_or(call_params));
 
-            let sub_response = match self.auth_middleware.validate(effective_token) {
-                Ok(()) => self.dispatch_single(&sub_request).await,
-                Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
+            let sub_response = if rpc_method_requires_auth(method_name) {
+                match self.auth_middleware.validate(effective_token) {
+                    Ok(()) => self.dispatch_single(&sub_request).await,
+                    Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
+                }
+            } else {
+                self.dispatch_single(&sub_request).await
             };
 
             // Per C++ aria2 system.multicall spec: each successful result is

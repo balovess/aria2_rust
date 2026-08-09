@@ -452,6 +452,89 @@ tests, and the aria2 C++ performance baseline remain open in
   and real HTTP E2E checks for invalid `changeOption` and
   `changeGlobalOption` values.
 - `cargo test -p aria2-rpc --all-features --tests -- --test-threads=1`:
-  **372 passed / 0 failed**. This proves the RPC test scope only; the
+  **390 passed / 0 failed**. This proves the RPC test scope only; the
   workspace aggregate and complete original browser-client interoperability
   matrix remain open.
+
+#### HTTP resume and mirror failover checkpoint (2026-08-09)
+
+- `DownloadCommand` now owns the command-generation policy for multiple HTTP
+  URIs. A `CannotResume` response is recorded, the next mirror is tried in
+  order, and `max-resume-failure-tries` can trigger the original fresh-download
+  fallback before the mirror list is exhausted.
+- `SequentialDownloader` reports the typed `CannotResume` result and no longer
+  decides whether to delete control state or restart the task. Resume writes
+  begin at `start_offset`, and a rejected request restores the meaningful file
+  length after preallocation so a preallocated tail cannot be reported as
+  completed data.
+- Focused evidence: `cargo test -p aria2-core --test test_e2e_download
+  --all-features -- --test-threads=1` (26 passed, 0 failed, 2 ignored), with
+  four dedicated resume/failover tests passing.
+- This closes the sequential HTTP resume policy gap only. Concurrent range
+  control-file recovery, FTP/SFTP parity, and original-client interoperability
+  remain open and are not claimed as complete.
+
+#### RPC wire compatibility seam (2026-08-09)
+
+- `aria2_original/src/rpc_helper.cc` and
+  `aria2_original/src/HttpServerBodyCommand.cc` define the wire contract for
+  the HTTP and WebSocket JSON-RPC adapters. The Rust server keeps a separate
+  `parse_aria2_wire_document` seam so external envelope behavior is not mixed
+  with the typed internal `JsonRpcRequest` helper.
+- Covered original rules: ignore `jsonrpc`, default missing `params` to `[]`,
+  reject missing `id` or object params before method dispatch, materialize
+  object-level errors inside batches, skip non-object batch items, and preserve
+  empty batches as `[]`.
+- Verification: `cargo test -p aria2-rpc --all-features --tests
+  -- --test-threads=1` passed **390 tests / 0 failed**; RPC Clippy and format
+  checks also passed. Browser-extension and complete original-client
+  interoperability remain open acceptance items.
+
+- `aria2.getServers` now follows the source-backed active-only contract from
+  `aria2_original/src/RpcMethodImpl.cc`: waiting, paused, stopped, and unknown
+  GIDs return execution error code 1, while active results include only real
+  in-flight requests and never synthesize servers from configured mirrors.
+
+#### Request-group identity seam and XML-RPC HTTP contract (2026-08-09)
+
+- `RequestGroupMan` now keeps a canonical GID index for every non-terminal
+  group. `active` and `reserved` remain scheduling stores; moving a group
+  between them no longer creates a lookup gap for RPC/C API callers. The index
+  is removed only when the group is demoted, removed, or fails permanently.
+- Query snapshots preserve the externally observable active-first and reserved
+  FIFO order. A group seen only in the canonical index during a transfer is
+  appended as a de-duplicated complement, so the identity fix cannot reorder
+  `tellWaiting` or hide a task during the handoff.
+- The manager regression test exercises lookup during both halves of an
+  active/reserved transfer. `cargo test -p aria2-core --lib --tests
+  --all-features -- --test-threads=1` completed with exit code 0; its library
+  target reported 3,278 passed and 1 ignored, and all listed integration and
+  performance targets completed without failures.
+- XML-RPC was compared with
+  `aria2_original/src/HttpServerBodyCommand.cc`: parser/value failures return
+  HTTP 400 with an empty body and no `Content-Type`; successfully parsed method
+  execution failures return HTTP 200 with `faultCode=1`. The E2E regression is
+  `e2e_xmlrpc_parse_errors_match_original_http_contract`.
+
+#### CLI short-option compatibility checkpoint (2026-08-09)
+
+- `aria2_original/src/OptionHandlerFactory.cc` is the source of truth for the
+  short flags. The Rust registry and clap adapter now agree on the original
+  mappings, including `-a file-allocation`, `-p ftp-pasv`, `-P
+  parameterized-uri`, `-R remote-time`, `-u max-upload-limit`, and `-Z
+  force-sequential`; `-h` invokes help, `-v` invokes version, and `-V` enables
+  `check-integrity`.
+- `--verbose` remains available as a Rust extension without taking `-v`;
+  `-L` remains an additional non-conflicting alias for `listen-port`.
+- `check-integrity` carries `short_name = Some('V')` in the core
+  `OptionRegistry`, and `file-allocation` defaults to `prealloc` in both the
+  registry and the shared runtime constant. HTTP, FTP, BitTorrent, and
+  Metalink constructors read that same constant when no explicit allocation
+  option is supplied.
+- Focused verification: `cargo test -p aria2 --test test_cli_options
+  --all-features` passed 95 tests; the core allocation tests passed 44 tests;
+  `test_internalized_defaults` passed 12 tests plus 2 ignored tests.
+- Full default/changeability comparison, optional-argument/getopt edge cases,
+  version/help text parity, and complete original-client interoperability
+  remain open. The original parser does not dynamically generate arbitrary
+  `--no-*` aliases; Rust's extra explicit aliases are documented extensions.

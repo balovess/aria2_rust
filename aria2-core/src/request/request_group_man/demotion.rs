@@ -78,6 +78,7 @@ impl super::RequestGroupMan {
         result: crate::request::request_group::DownloadResult,
     ) -> bool {
         if let Some((_, group)) = self.active.remove(&gid) {
+            self.unregister_group(gid);
             // Release runtime resources (C++ `releaseRuntimeResource()`).
             // In Rust, this means clearing the download context and
             // releasing the rate limiter handle.

@@ -371,6 +371,62 @@ async fn test_change_option_propagates_to_running_group() {
 }
 
 #[tokio::test]
+async fn test_change_option_active_reserved_value_applies_after_restart() {
+    let (man, gid_hex) = setup_group_man_with_group().await;
+    {
+        let manager = man.read().await;
+        assert_eq!(manager.fill_from_reserver().len(), 1);
+    }
+
+    let engine = RpcEngine::new().with_group_man(man.clone());
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid_hex.clone(), {"dir": "restart-dir"}]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(
+        resp.is_success(),
+        "active reserved option should be accepted"
+    );
+
+    let gid = aria2_core::request::request_group::GroupId::from_hex_string(&gid_hex)
+        .expect("GID hex should parse");
+    {
+        let group = man
+            .read()
+            .await
+            .group_by_id(gid)
+            .expect("group should still exist");
+        let group = group.read().unwrap();
+        assert!(group.status().is_paused());
+        assert_eq!(
+            group.pending_options().get("dir"),
+            Some(&serde_json::json!("restart-dir"))
+        );
+        assert!(!group.runtime_options().contains_key("dir"));
+    }
+
+    {
+        let manager = man.read().await;
+        assert_eq!(manager.requeue_non_terminal_groups(None), 1);
+    }
+
+    let group = man
+        .read()
+        .await
+        .group_by_id(gid)
+        .expect("requeued group should still exist");
+    let group = group.read().unwrap();
+    assert_eq!(group.options().dir.as_deref(), Some("restart-dir"));
+    assert_eq!(
+        group.runtime_options().get("dir"),
+        Some(&serde_json::json!("restart-dir"))
+    );
+    assert!(group.pending_options().is_empty());
+}
+
+#[tokio::test]
 async fn test_change_option_ignores_startup_only_with_group_man() {
     let (man, gid_hex) = setup_group_man_with_group().await;
     let engine = RpcEngine::new().with_group_man(man);

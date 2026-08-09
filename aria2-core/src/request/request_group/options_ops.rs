@@ -56,17 +56,6 @@ fn rpc_option_u32(value: &serde_json::Value, key: &str) -> Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("Option '{}' is too large", key))
 }
 
-fn registry_option_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
-    match value {
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(|value| rpc_option_string(value, key))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|values| values.join(",")),
-        _ => rpc_option_string(value, key),
-    }
-}
-
 /// Validate a known aria2 option that has no dedicated `DownloadOptions`
 /// field yet. Keeping this fallback behind the core registry prevents RPC
 /// adapters from accepting arbitrary keys while preserving the wire value for
@@ -79,12 +68,11 @@ fn validate_unmapped_rpc_option(key: &str, value: &serde_json::Value) -> Result<
         return Ok(false);
     }
     let registry = crate::config::OptionRegistry::new();
-    let Some(definition) = registry.get(key) else {
+    if registry.get(key).is_none() {
         return Ok(false);
-    };
-    let raw = registry_option_string(value, key)?;
-    definition
-        .parse_value(&raw)
+    }
+    registry
+        .parse_rpc_value(key, value)
         .map(|_| true)
         .map_err(|error| format!("Option '{}': {}", key, error))
 }
@@ -244,7 +232,7 @@ fn apply_rpc_option(
             Ok(true)
         }
         "dht-listen-port" => {
-            opts.dht_listen_port = Some(rpc_option_u16(value, key)?);
+            opts.dht_listen_port = Some(rpc_option_string(value, key)?);
             Ok(true)
         }
         "dht-entry-point" => {
@@ -277,6 +265,127 @@ fn apply_rpc_option(
         }
         "utp-listen-port" => {
             opts.utp_listen_port = Some(rpc_option_u16(value, key)?);
+            Ok(true)
+        }
+        "check-integrity"
+        | "conditional-get"
+        | "dry-run"
+        | "ftp-pasv"
+        | "ftp-reuse-connection"
+        | "no-netrc"
+        | "realtime-chunk-checksum"
+        | "remote-time"
+        | "bt-enable-lpd"
+        | "http-auth-challenge" => {
+            let value = rpc_option_bool(value, key)?;
+            match key {
+                "check-integrity" => opts.check_integrity = value,
+                "conditional-get" => opts.conditional_get = value,
+                "dry-run" => opts.dry_run = value,
+                "ftp-pasv" => opts.ftp_pasv = value,
+                "ftp-reuse-connection" => opts.ftp_reuse_connection = value,
+                "no-netrc" => opts.no_netrc = value,
+                "realtime-chunk-checksum" => opts.realtime_chunk_checksum = value,
+                "remote-time" => opts.remote_time = value,
+                "bt-enable-lpd" => opts.bt_enable_lpd = value,
+                "http-auth-challenge" => opts.http_auth_challenge = value,
+                _ => unreachable!("boolean option handled above"),
+            }
+            Ok(true)
+        }
+        "hash-check-only" => {
+            let value = rpc_option_bool(value, key)?;
+            opts.hash_check_only = value;
+            if value {
+                opts.check_integrity = true;
+            }
+            Ok(true)
+        }
+        "timeout" | "connect-timeout" | "bt-stop-timeout" => {
+            let value = rpc_option_u64(value, key)?;
+            match key {
+                "timeout" => opts.timeout = Some(value),
+                "connect-timeout" => opts.connect_timeout = Some(value),
+                "bt-stop-timeout" => opts.bt_stop_timeout = Some(value),
+                _ => unreachable!("duration option handled above"),
+            }
+            Ok(true)
+        }
+        "lowest-speed-limit" | "piece-length" => {
+            let value = rpc_option_size(value, key)?;
+            match key {
+                "lowest-speed-limit" => opts.lowest_speed_limit = Some(value),
+                "piece-length" => opts.piece_length = Some(value),
+                _ => unreachable!("size option handled above"),
+            }
+            Ok(true)
+        }
+        "metalink-version"
+        | "metalink-language"
+        | "metalink-os"
+        | "metalink-location"
+        | "metalink-preferred-protocol"
+        | "select-file"
+        | "index-out"
+        | "listen-port"
+        | "bt-lpd-interface"
+        | "http-user"
+        | "http-passwd"
+        | "ftp-user"
+        | "ftp-passwd"
+        | "ssh-host-key-md" => {
+            let value = rpc_option_string(value, key)?;
+            match key {
+                "metalink-version" => opts.metalink_version = Some(value),
+                "metalink-language" => opts.metalink_language = Some(value),
+                "metalink-os" => opts.metalink_os = Some(value),
+                "metalink-location" => opts.metalink_location = Some(value),
+                "metalink-preferred-protocol" => opts.metalink_preferred_protocol = Some(value),
+                "select-file" => opts.select_file = Some(value),
+                "index-out" => opts.index_out = Some(value),
+                "listen-port" => opts.listen_port = Some(value),
+                "bt-lpd-interface" => opts.bt_lpd_interface = Some(value),
+                "http-user" => opts.http_user = Some(value),
+                "http-passwd" => opts.http_passwd = Some(value),
+                "ftp-user" => opts.ftp_user = Some(value),
+                "ftp-passwd" => opts.ftp_passwd = Some(value),
+                "ssh-host-key-md" => opts.ssh_host_key_md = Some(value),
+                _ => unreachable!("string option handled above"),
+            }
+            Ok(true)
+        }
+        "metalink-enable-unique-protocol" => {
+            opts.metalink_enable_unique_protocol = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "follow-torrent" | "follow-metalink" => {
+            let raw = rpc_option_string(value, key)?;
+            let mode = super::FollowMode::parse(&raw)
+                .ok_or_else(|| format!("Option '{}' must be true, false, or mem", key))?;
+            if key == "follow-torrent" {
+                opts.follow_torrent = Some(mode);
+            } else {
+                opts.follow_metalink = Some(mode);
+            }
+            Ok(true)
+        }
+        "bt-tracker" => {
+            let values = match value {
+                serde_json::Value::Array(values) => values
+                    .iter()
+                    .map(|value| rpc_option_string(value, key))
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => rpc_option_string(value, key)?
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            };
+            if values.is_empty() {
+                return Err(format!("Option '{}' must not be empty", key));
+            }
+            opts.bt_tracker = Some(values);
             Ok(true)
         }
         _ => Ok(false),
@@ -375,6 +484,47 @@ impl super::RequestGroup {
             .unwrap_or_default()
     }
 
+    /// Validate and partition a batch using the same policy for every
+    /// external adapter. Waiting and paused groups are reserved; only a
+    /// group in the `Active` state receives pending changes.
+    pub(crate) fn classify_runtime_options(
+        &self,
+        changes: HashMap<String, serde_json::Value>,
+    ) -> Result<RuntimeOptionChanges, String> {
+        let is_running = self.status().is_running();
+        let mut classified = RuntimeOptionChanges::default();
+        for (key, value) in changes {
+            match crate::config::is_option_changeable(&key, is_running) {
+                crate::config::ChangeableKind::Immediate => {
+                    if Self::validate_option_update(&key, &value)? {
+                        classified.immediate.insert(key, value);
+                    }
+                }
+                crate::config::ChangeableKind::Pending => {
+                    if Self::validate_option_update(&key, &value)? {
+                        classified.pending.insert(key, value);
+                    }
+                }
+                crate::config::ChangeableKind::NotChangeable => {}
+            }
+        }
+        Ok(classified)
+    }
+
+    /// Apply a previously classified immediate batch. Validation is repeated
+    /// at this seam so direct core callers cannot bypass the runtime contract.
+    pub(crate) fn apply_runtime_options(
+        &mut self,
+        changes: HashMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        for (key, value) in changes {
+            if !self.try_update_option(&key, value)? {
+                return Err(format!("Option '{}' cannot be changed at runtime", key));
+            }
+        }
+        Ok(())
+    }
+
     // ── Runtime Option Updates ──────────────────────────────────────────
 
     /// Update a single runtime-changeable option by key (using aria2's
@@ -388,6 +538,12 @@ impl super::RequestGroup {
     /// `RateLimiter` (if any) is also updated so the change takes effect
     /// immediately on the live download.
     pub fn validate_option_update(key: &str, value: &serde_json::Value) -> Result<bool, String> {
+        let registry = crate::config::OptionRegistry::new();
+        if registry.get(key).is_some() {
+            registry
+                .parse_rpc_value(key, value)
+                .map_err(|error| format!("Option '{}': {}", key, error))?;
+        }
         let mut options = super::DownloadOptions::default();
         if apply_rpc_option(&mut options, key, value)? {
             Ok(true)

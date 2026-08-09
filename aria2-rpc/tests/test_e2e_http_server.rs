@@ -122,16 +122,16 @@ async fn e2e_root_endpoint() {
 }
 
 #[tokio::test]
-async fn e2e_jsonrpc_get_info() {
+async fn e2e_jsonrpc_get_without_query_matches_original() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
     let resp = client.get(format!("{base}/jsonrpc")).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 500);
 
     let body: Value = resp.json().await.unwrap();
-    // GET on /jsonrpc returns server info for discovery
-    assert!(body.get("error").is_some() || body.get("name").is_some());
+    assert_error_code(&body, -32700);
+    assert_eq!(body["error"]["message"], "Parse error.");
 }
 
 #[tokio::test]
@@ -229,16 +229,21 @@ async fn e2e_jsonrpc_get_errors_use_compatible_status_codes() {
     let invalid_base64_body: Value = invalid_base64.json().await.unwrap();
     assert_error_code(&invalid_base64_body, -32700);
 
-    let invalid_callback = client
+    let raw_callback = client
         .get(format!(
-            "{base}/jsonrpc?method=aria2.getVersion&params=e30%3D&jsoncallback=bad%3Balert"
+            "{base}/jsonrpc?method=aria2.getVersion&params=e30%3D&jsoncallback=bad;alert"
         ))
         .send()
         .await
         .unwrap();
-    assert_eq!(invalid_callback.status(), 400);
-    let invalid_callback_body: Value = invalid_callback.json().await.unwrap();
-    assert_error_code(&invalid_callback_body, -32600);
+    assert_eq!(raw_callback.status(), 400);
+    assert_eq!(
+        raw_callback.headers()[reqwest::header::CONTENT_TYPE],
+        "text/javascript"
+    );
+    let raw_callback_body = raw_callback.text().await.unwrap();
+    assert!(raw_callback_body.starts_with("bad;alert({"));
+    assert!(raw_callback_body.contains("\"code\":-32600"));
 }
 
 #[tokio::test]
@@ -357,6 +362,47 @@ async fn e2e_xmlrpc_get_version() {
     let text = response.text().await.unwrap();
     assert!(text.contains("<methodResponse>"));
     assert!(text.contains("<name>version</name>"));
+}
+
+#[tokio::test]
+async fn e2e_xmlrpc_execution_errors_use_aria2_fault_code_one() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let body = r#"<?xml version="1.0"?><methodCall><methodName>aria2.addUri</methodName><params><param><value><int>7</int></value></param></params></methodCall>"#;
+
+    let response = client
+        .post(format!("{base}/rpc"))
+        .header("content-type", "text/xml")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("<name>faultCode</name>"));
+    assert!(text.contains("<int>1</int>"));
+}
+
+#[tokio::test]
+async fn e2e_xmlrpc_parse_errors_match_original_http_contract() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let malformed = r#"<?xml version="1.0"?><methodCall><methodName>aria2.getVersion</methodName><params></methodCall>"#;
+
+    let response = client
+        .post(format!("{base}/rpc"))
+        .header("content-type", "text/xml")
+        .body(malformed)
+        .send()
+        .await
+        .unwrap();
+
+    // aria2_original calls feedResponse(400) on XML parser failure: no XML
+    // fault document and no content type are emitted.
+    assert_eq!(response.status(), 400);
+    assert!(!response.headers().contains_key("content-type"));
+    assert!(response.bytes().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1018,6 +1064,59 @@ async fn e2e_batch_mixed() {
     assert_eq!(body.as_array().map(Vec::len), Some(2));
     assert_result(&body[0]);
     assert_error_code(&body[1], 1);
+}
+
+#[tokio::test]
+async fn e2e_jsonrpc_matches_original_wire_envelope_rules() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+
+    // aria2_original ignores the jsonrpc member and defaults omitted params
+    // to an empty positional list.
+    let compatible_object = client
+        .post(format!("{base}/jsonrpc"))
+        .json(&json!({
+            "jsonrpc": "1.0",
+            "id": "compat-1",
+            "method": "aria2.getVersion"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compatible_object.status(), 200);
+    let compatible_body: Value = compatible_object.json().await.unwrap();
+    assert_result(&compatible_body);
+    assert_eq!(compatible_body["id"], "compat-1");
+
+    // Object-level failures are returned as entries; non-object batch items
+    // are skipped exactly as in HttpServerBodyCommand.cc.
+    let mixed = client
+        .post(format!("{base}/jsonrpc"))
+        .json(&json!([
+            42,
+            {"id": 1, "method": "aria2.getVersion", "params": {}},
+            {"method": "aria2.getVersion"},
+            {"id": 2, "method": "aria2.getVersion", "params": []}
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mixed.status(), 200);
+    let mixed_body: Value = mixed.json().await.unwrap();
+    assert_eq!(mixed_body.as_array().map(Vec::len), Some(3));
+    assert_error_code(&mixed_body[0], -32602);
+    assert_error_code(&mixed_body[1], -32600);
+    assert_result(&mixed_body[2]);
+
+    let empty_batch = client
+        .post(format!("{base}/jsonrpc"))
+        .json(&json!([]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_batch.status(), 200);
+    let empty_body: Value = empty_batch.json().await.unwrap();
+    assert_eq!(empty_body, json!([]));
 }
 
 // =========================================================================

@@ -110,8 +110,11 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if !opts.enable_dht {
         map.insert("enable-dht".to_string(), "false".to_string());
     }
-    if let Some(v) = opts.dht_listen_port {
-        map.insert("dht-listen-port".to_string(), v.to_string());
+    if let Some(ref v) = opts.dht_listen_port {
+        map.insert("dht-listen-port".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.index_out {
+        map.insert("index-out".to_string(), v.clone());
     }
     if let Some(ref v) = opts.dht_entry_point {
         map.insert("dht-entry-point".to_string(), v.join(","));

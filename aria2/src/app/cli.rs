@@ -3,11 +3,11 @@
 //! This module defines the `CliArgs` struct that replaces the hand-rolled
 //! parser in `cli_options.rs`. All option names and short forms mirror the
 //! `OptionRegistry` in `aria2-core`, with conflict resolution:
-//! - `-h` → help only (clap default)
-//! - `-v` → verbose only
-//! - `-V` → version (clap default)
-//! - `-L` → listen-port (renamed from `-h`)
-//! - `--save-cookies` has no short form (was `-V`, now reserved for version)
+//! - `-h` → help (aria2_original)
+//! - `-v` → version (aria2_original)
+//! - `-V` → check-integrity (aria2_original)
+//! - `-L` → listen-port (additional non-conflicting alias)
+//! - `--save-cookies` has no short form (matching aria2_original)
 //!
 //! # Boolean option semantics (`--opt[=true|false]`)
 //!
@@ -62,7 +62,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use colored::Colorize;
 
 use super::App;
@@ -81,6 +81,8 @@ use super::App;
 #[command(
     name = "aria2",
     version,
+    disable_help_flag = true,
+    disable_version_flag = true,
     about = "aria2-rust - The ultra fast download utility",
     long_about = None
 )]
@@ -105,10 +107,17 @@ pub struct CliArgs {
     #[command(flatten)]
     pub advanced: AdvancedArgs,
 
+    /// Original aria2 version action (`-v`, `--version`).
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    pub version: Option<bool>,
+
+    /// Original aria2 help action (`-h`, `--help`).
+    #[arg(short = 'h', long = "help", action = ArgAction::Help)]
+    pub help: Option<bool>,
+
     /// Verbose output
     #[arg(
-        short = 'v',
-        long,
+        long = "verbose",
         num_args(0..=1),
         require_equals = true,
         default_missing_value = "true",
@@ -173,7 +182,7 @@ pub struct GeneralArgs {
     pub console_log_level: Option<String>,
 
     /// Progress summary interval in seconds
-    #[arg(short = 'S', long = "summary-interval")]
+    #[arg(long = "summary-interval")]
     pub summary_interval: Option<u64>,
 
     /// Configuration file path
@@ -229,7 +238,6 @@ pub struct GeneralArgs {
 
     /// Dry run (check only, no download)
     #[arg(
-        short = 'n',
         long = "dry-run",
         num_args(0..=1),
         require_equals = true,
@@ -275,6 +283,7 @@ pub struct GeneralArgs {
 
     /// Check file integrity by validating hash
     #[arg(
+        short = 'V',
         long = "check-integrity",
         num_args(0..=1),
         require_equals = true,
@@ -349,6 +358,7 @@ pub struct GeneralArgs {
 
     /// Enable parameterized URI support (e.g. {a,b})
     #[arg(
+        short = 'P',
         long = "parameterized-uri",
         num_args(0..=1),
         require_equals = true,
@@ -399,6 +409,7 @@ pub struct GeneralArgs {
 
     /// Force sequential download of files
     #[arg(
+        short = 'Z',
         long = "force-sequential",
         num_args(0..=1),
         require_equals = true,
@@ -409,6 +420,7 @@ pub struct GeneralArgs {
 
     /// Disable netrc file parsing for authentication
     #[arg(
+        short = 'n',
         long = "no-netrc",
         num_args(0..=1),
         require_equals = true,
@@ -520,19 +532,19 @@ pub struct GeneralArgs {
 #[derive(Args, Debug)]
 pub struct HttpFtpArgs {
     /// Global proxy URL
-    #[arg(short = 'p', long = "all-proxy")]
+    #[arg(long = "all-proxy")]
     pub all_proxy: Option<String>,
 
     /// HTTP proxy URL
-    #[arg(short = 'P', long = "http-proxy")]
+    #[arg(long = "http-proxy")]
     pub http_proxy: Option<String>,
 
     /// HTTPS proxy URL
-    #[arg(short = 'y', long = "https-proxy")]
+    #[arg(long = "https-proxy")]
     pub https_proxy: Option<String>,
 
     /// FTP proxy URL
-    #[arg(short = 'F', long = "ftp-proxy")]
+    #[arg(long = "ftp-proxy")]
     pub ftp_proxy: Option<String>,
 
     /// All proxy username
@@ -572,7 +584,7 @@ pub struct HttpFtpArgs {
     pub proxy_method: Option<String>,
 
     /// Proxy exclusion list (comma-separated domains)
-    #[arg(short = 'N', long = "no-proxy")]
+    #[arg(long = "no-proxy")]
     pub no_proxy: Option<String>,
 
     /// User-Agent header
@@ -580,15 +592,15 @@ pub struct HttpFtpArgs {
     pub user_agent: Option<String>,
 
     /// Referer header
-    #[arg(short = 'R', long)]
+    #[arg(long)]
     pub referer: Option<String>,
 
     /// Custom headers (Header:Value pairs, can be repeated)
-    #[arg(short = 'H', long)]
+    #[arg(long)]
     pub header: Vec<String>,
 
     /// Cookie file to load
-    #[arg(short = 'C', long = "load-cookies")]
+    #[arg(long = "load-cookies")]
     pub load_cookies: Option<PathBuf>,
 
     /// Cookie file to save
@@ -596,7 +608,7 @@ pub struct HttpFtpArgs {
     pub save_cookies: Option<PathBuf>,
 
     /// Connect timeout in seconds
-    #[arg(short = 'T', long = "connect-timeout")]
+    #[arg(long = "connect-timeout")]
     pub connect_timeout: Option<u64>,
 
     /// I/O timeout in seconds
@@ -608,7 +620,7 @@ pub struct HttpFtpArgs {
     pub max_tries: Option<u64>,
 
     /// Retry wait time in seconds
-    #[arg(short = 'w', long = "retry-wait")]
+    #[arg(long = "retry-wait")]
     pub retry_wait: Option<u64>,
 
     /// Connections per download
@@ -625,7 +637,6 @@ pub struct HttpFtpArgs {
 
     /// Verify SSL certificate
     #[arg(
-        short = 'b',
         long = "check-certificate",
         num_args(0..=1),
         require_equals = true,
@@ -646,12 +657,11 @@ pub struct HttpFtpArgs {
     pub no_check_certificate: Option<bool>,
 
     /// CA certificate file
-    #[arg(short = 'E', long = "ca-certificate")]
+    #[arg(long = "ca-certificate")]
     pub ca_certificate: Option<PathBuf>,
 
     /// Allow overwriting existing files
     #[arg(
-        short = 'O',
         long = "allow-overwrite",
         num_args(0..=1),
         require_equals = true,
@@ -694,6 +704,7 @@ pub struct HttpFtpArgs {
 
     /// Use remote file timestamp
     #[arg(
+        short = 'R',
         long = "remote-time",
         num_args(0..=1),
         require_equals = true,
@@ -800,6 +811,7 @@ pub struct HttpFtpArgs {
 
     /// Use FTP passive mode
     #[arg(
+        short = 'p',
         long = "ftp-pasv",
         num_args(0..=1),
         require_equals = true,
@@ -942,7 +954,7 @@ pub struct BitTorrentArgs {
 
     /// DHT listen port
     #[arg(long = "dht-listen-port")]
-    pub dht_listen_port: Option<u64>,
+    pub dht_listen_port: Option<String>,
 
     /// DHT bootstrap nodes (host:port format, comma-separated)
     #[arg(long = "dht-entry-point")]
@@ -967,7 +979,7 @@ pub struct BitTorrentArgs {
     pub enable_peer_exchange: Option<bool>,
 
     /// Auto-handle .torrent (true/false/mem)
-    #[arg(short = 'M', long = "follow-torrent")]
+    #[arg(long = "follow-torrent")]
     pub follow_torrent: Option<String>,
 
     /// Command on BT download complete
@@ -1131,6 +1143,10 @@ pub struct BitTorrentArgs {
     /// Comma-separated list of file indices to download (BT/Metalink, 1-indexed)
     #[arg(long = "select-file")]
     pub select_file: Option<String>,
+
+    /// Set output filename for a BitTorrent file index (INDEX=PATH, repeatable)
+    #[arg(short = 'O', long = "index-out")]
+    pub index_out: Vec<String>,
 }
 
 // =========================================================================
@@ -1240,7 +1256,7 @@ pub struct RpcArgs {
 #[derive(Args, Debug)]
 pub struct AdvancedArgs {
     /// File allocation method (none/prealloc/falloc/trunc/mmap)
-    #[arg(short = 'f', long = "file-allocation")]
+    #[arg(short = 'a', long = "file-allocation")]
     pub file_allocation: Option<String>,
 
     /// Zero-fill allocated space after fallocate (macOS/Windows)
@@ -1262,31 +1278,31 @@ pub struct AdvancedArgs {
     pub max_concurrent_downloads: Option<u64>,
 
     /// Overall download speed limit (0=unlimited)
-    #[arg(short = 'A', long = "max-overall-download-limit")]
+    #[arg(long = "max-overall-download-limit")]
     pub max_overall_download_limit: Option<String>,
 
     /// Per-task download limit (0=unlimited)
-    #[arg(short = 'Q', long = "max-download-limit")]
+    #[arg(long = "max-download-limit")]
     pub max_download_limit: Option<String>,
 
     /// Overall upload speed limit (0=unlimited)
-    #[arg(short = 'W', long = "max-overall-upload-limit")]
+    #[arg(long = "max-overall-upload-limit")]
     pub max_overall_upload_limit: Option<String>,
 
     /// Per-task upload limit (0=unlimited)
-    #[arg(short = 'K', long = "max-upload-limit")]
+    #[arg(short = 'u', long = "max-upload-limit")]
     pub max_upload_limit: Option<String>,
 
     /// BT piece length
-    #[arg(short = 'Y', long = "piece-length")]
+    #[arg(long = "piece-length")]
     pub piece_length: Option<String>,
 
     /// Disk cache size (0=disabled)
-    #[arg(short = 'Z', long = "disk-cache")]
+    #[arg(long = "disk-cache")]
     pub disk_cache: Option<String>,
 
     /// Stop after N seconds of completion (0=never)
-    #[arg(short = 'z', long = "stop")]
+    #[arg(long = "stop")]
     pub stop: Option<u64>,
 
     /// Force save state on every change

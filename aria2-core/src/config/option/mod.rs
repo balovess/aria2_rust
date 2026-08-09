@@ -17,7 +17,7 @@ mod tests;
 
 // Re-export all public API from sub-modules.
 pub use registry::OptionRegistry;
-pub use types::{OptionCategory, OptionDef, OptionType, OptionValue};
+pub use types::{OptionCategory, OptionDef, OptionType, OptionValue, parse_integer_segments};
 pub use validator::{
     ChoiceValidator, DependencyChecker, OptionDefinition, OptionError, OptionValidator,
     PathValidator, RangeValidator, RegexValidator, UrlValidator,

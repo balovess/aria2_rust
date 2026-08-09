@@ -98,4 +98,17 @@ impl super::RequestGroup {
         self.command_failure
             .store(false, std::sync::atomic::Ordering::Release);
     }
+
+    /// Return the number of resume failures recorded for this group.
+    pub fn resume_failure_count(&self) -> u32 {
+        self.resume_failure_count
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record one `CANNOT_RESUME` URI attempt and return the new count.
+    pub fn increase_resume_failure_count(&self) -> u32 {
+        self.resume_failure_count
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .saturating_add(1)
+    }
 }

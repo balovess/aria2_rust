@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::config::parse_integer_segments;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -174,11 +175,31 @@ impl Command for MagnetDownloadCommand {
         }
 
         let enable_dht = { self.group.recover().options().enable_dht };
-        let dht_port = { self.group.recover().options().dht_listen_port };
+        let dht_port = { self.group.recover().options().dht_listen_port.clone() };
 
         if enable_dht && self.dht_engine.is_none() {
+            let dht_ports = dht_port
+                .as_deref()
+                .map(|value| {
+                    parse_integer_segments(value, 1024, u16::MAX as i64).map(|ranges| {
+                        ranges
+                            .into_iter()
+                            .flat_map(|range| range.map(|port| port as u16))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .transpose()
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "invalid dht-listen-port: {error}"
+                    )))
+                })?;
             let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
-                port: dht_port.unwrap_or(0),
+                port: dht_ports
+                    .as_ref()
+                    .and_then(|ports| ports.first().copied())
+                    .unwrap_or(0),
+                port_range: dht_ports,
                 ..Default::default()
             };
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {

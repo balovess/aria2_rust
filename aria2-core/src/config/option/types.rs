@@ -13,10 +13,12 @@ use std::fmt;
 pub enum OptionType {
     String,
     Integer,
+    IntegerRange,
     Float,
     Boolean,
     List,
     Enum,
+    IndexOut,
     Path,
     Size,
 }
@@ -26,10 +28,12 @@ impl fmt::Display for OptionType {
         match self {
             Self::String => write!(f, "string"),
             Self::Integer => write!(f, "integer"),
+            Self::IntegerRange => write!(f, "integer-range"),
             Self::Float => write!(f, "float"),
             Self::Boolean => write!(f, "boolean"),
             Self::List => write!(f, "list"),
             Self::Enum => write!(f, "enum"),
+            Self::IndexOut => write!(f, "index-out"),
             Self::Path => write!(f, "path"),
             Self::Size => write!(f, "size"),
         }
@@ -193,6 +197,11 @@ impl OptionValue {
         } else {
             (s, 1u64)
         };
+        if suffix == 1
+            && let Ok(bytes) = num_part.parse::<u64>()
+        {
+            return Ok(bytes);
+        }
         let number = num_part
             .parse::<f64>()
             .map_err(|_| format!("invalid size '{}'", s))?;
@@ -313,6 +322,14 @@ impl OptionDef {
         }
         match self.opt_type {
             OptionType::String | OptionType::Path => Ok(OptionValue::Str(s.to_string())),
+            OptionType::IntegerRange => {
+                let max = self
+                    .max
+                    .map(|max| max.min(i64::MAX as u64) as i64)
+                    .unwrap_or(i64::MAX);
+                parse_integer_segments(s, self.min.unwrap_or(i64::MIN), max)
+                    .map(|_| OptionValue::Str(s.to_string()))
+            }
             OptionType::Enum => {
                 if !self.allowed_values.is_empty() && !self.allowed_values.contains(&s) {
                     return Err(format!(
@@ -339,21 +356,122 @@ impl OptionDef {
                     Ok(OptionValue::Int(n))
                 })
                 .map_err(|e| format!("invalid integer '{}': {}", s, e))?,
-            OptionType::Size => OptionValue::parse_size_str_checked(s)
-                .map(|value| OptionValue::Int(value as i64))
-                .map_err(|error| error.to_string()),
-            OptionType::Float => s
-                .parse::<f64>()
-                .map(OptionValue::Float)
-                .map_err(|e| format!("invalid float '{}': {}", s, e)),
+            OptionType::IndexOut => validate_index_out(s).map(|_| OptionValue::Str(s.to_string())),
+            OptionType::Size => {
+                let value = OptionValue::parse_size_str_checked(s)?;
+                if value > i64::MAX as u64 {
+                    return Err(format!("size '{}' is too large", s));
+                }
+                validate_unsigned_bounds(&self.name, value, self.min, self.max)?;
+                Ok(OptionValue::Int(value as i64))
+            }
+            OptionType::Float => {
+                let value = s
+                    .parse::<f64>()
+                    .map_err(|e| format!("invalid float '{}': {}", s, e))?;
+                if !value.is_finite() {
+                    return Err(format!("invalid float '{}'", s));
+                }
+                if let Some(min) = self.min
+                    && value < min as f64
+                {
+                    return Err(format!("value {} < minimum {}", value, min));
+                }
+                if let Some(max) = self.max
+                    && value > max as f64
+                {
+                    return Err(format!("value {} exceeds maximum {}", value, max));
+                }
+                Ok(OptionValue::Float(value))
+            }
             OptionType::Boolean => match s.to_lowercase().as_str() {
                 "true" | "yes" | "1" | "on" => Ok(OptionValue::Bool(true)),
                 "false" | "no" | "0" | "off" => Ok(OptionValue::Bool(false)),
                 _ => Err(format!("invalid boolean '{}'", s)),
             },
             OptionType::List => Ok(OptionValue::List(
-                s.split(',').map(|x| x.trim().to_string()).collect(),
+                s.split([',', '\n']).map(|x| x.trim().to_string()).collect(),
             )),
         }
     }
+}
+
+/// Parse aria2's comma-separated integer and inclusive-range syntax.
+pub fn parse_integer_segments(
+    value: &str,
+    min: i64,
+    max: i64,
+) -> Result<Vec<std::ops::RangeInclusive<i64>>, String> {
+    let mut ranges = Vec::new();
+    for raw_segment in value.split(',') {
+        let segment = raw_segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+
+        let mut endpoints = segment.split('-');
+        let start = endpoints
+            .next()
+            .and_then(|endpoint| endpoint.trim().parse::<i64>().ok())
+            .ok_or_else(|| format!("bad integer range '{}'", segment))?;
+        let end = match endpoints.next() {
+            Some(endpoint) if !endpoint.trim().is_empty() => endpoint
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| format!("bad integer range '{}'", segment))?,
+            Some(_) => return Err(format!("incomplete integer range '{}'", segment)),
+            None => start,
+        };
+        if endpoints.next().is_some() || start > end {
+            return Err(format!("bad integer range '{}'", segment));
+        }
+        if start < min || end > max {
+            return Err(format!(
+                "integer range '{}' must be between {} and {}",
+                segment, min, max
+            ));
+        }
+        ranges.push(start..=end);
+    }
+
+    if ranges.is_empty() {
+        return Err("integer range must not be empty".to_string());
+    }
+    Ok(ranges)
+}
+
+fn validate_index_out(value: &str) -> Result<(), String> {
+    for raw_line in value.split('\n') {
+        let line = raw_line.trim_end_matches('\r');
+        let (index, path) = line
+            .split_once('=')
+            .ok_or_else(|| format!("invalid index-out value '{}'", line))?;
+        index
+            .parse::<u32>()
+            .map_err(|_| format!("invalid index-out index '{}'", index))?;
+        if path.is_empty() {
+            return Err(format!("index-out path for {} must not be empty", index));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unsigned_bounds(
+    name: &str,
+    value: u64,
+    min: Option<i64>,
+    max: Option<u64>,
+) -> Result<(), String> {
+    if let Some(min) = min
+        && min >= 0
+        && value < min as u64
+    {
+        return Err(format!("{} value {} < minimum {}", name, value, min));
+    }
+    if let Some(max) = max
+        && value > max
+    {
+        return Err(format!("{} value {} exceeds maximum {}", name, value, max));
+    }
+    Ok(())
 }

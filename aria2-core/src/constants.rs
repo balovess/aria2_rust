@@ -86,7 +86,7 @@ pub const BT_COMPACT_LEN_IPV4: usize = 6;
 pub const BT_COMPACT_LEN_IPV6: usize = 18;
 
 // Segment/Download defaults
-pub const DEFAULT_FILE_ALLOCATION: &str = "trunc";
+pub const DEFAULT_FILE_ALLOCATION: &str = "prealloc";
 /// Default value for the `secure-falloc` option. When `false`, fallocate-based
 /// allocation on platforms that don't zero-fill allocated blocks (macOS
 /// `F_PREALLOCATE`, Windows `SetFileValidData`) leaves residual disk data

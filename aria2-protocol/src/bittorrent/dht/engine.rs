@@ -35,6 +35,11 @@ use super::tracker::TransactionTracker;
 pub struct DhtEngineConfig {
     /// Port to listen on for DHT communication.
     pub port: u16,
+    /// Ordered ports to try when the aria2 listen-port option is a range.
+    ///
+    /// The first available port is selected, matching the original DHT
+    /// setup command's range binding behavior.
+    pub port_range: Option<Vec<u16>>,
     /// Local node ID (20 bytes). All zeros → random on start.
     pub self_id: [u8; 20],
     /// Path to persist the routing table (dht.dat).
@@ -71,6 +76,7 @@ impl Default for DhtEngineConfig {
     fn default() -> Self {
         Self {
             port: 6881,
+            port_range: None,
             self_id: [0u8; 20],
             dht_file_path: None,
             refresh_check_interval: Duration::from_secs(300), // 5 min check
@@ -222,9 +228,29 @@ impl DhtEngine {
         );
 
         // Bind UDP socket
-        let socket = DhtSocket::bind(config.port)
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?;
+        let socket = if let Some(ports) = config.port_range.as_deref() {
+            let mut last_error = None;
+            let mut bound = None;
+            for port in ports {
+                match DhtSocket::bind(*port).await {
+                    Ok(socket) => {
+                        bound = Some(socket);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            bound.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    last_error.unwrap_or_else(|| "DHT port range is empty".to_string()),
+                )
+            })?
+        } else {
+            DhtSocket::bind(config.port)
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
+        };
         let actual_port = socket.local_addr().port();
         info!(port = actual_port, "DHT socket bound");
 

@@ -8,147 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Serialize a `u64` as a **string** matching original C++ aria2 wire format.
-/// All numeric fields in RPC responses are strings (e.g. `"totalLength": "104857600"`).
-fn serialize_u64_as_string<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&v.to_string())
-}
-
-/// Serialize an `Option<u64>` as a string or skip if None.
-fn serialize_opt_u64_as_string<S: Serializer>(v: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
-    match v {
-        Some(n) => s.serialize_str(&n.to_string()),
-        None => s.serialize_none(),
-    }
-}
-
-/// Serialize an `Option<u32>` as a string or skip if None.
-fn serialize_opt_u32_as_string<S: Serializer>(v: &Option<u32>, s: S) -> Result<S::Ok, S::Error> {
-    match v {
-        Some(n) => s.serialize_str(&n.to_string()),
-        None => s.serialize_none(),
-    }
-}
-
-/// Serialize an `Option<u16>` as a string or skip if None.
-fn serialize_opt_u16_as_string<S: Serializer>(v: &Option<u16>, s: S) -> Result<S::Ok, S::Error> {
-    match v {
-        Some(n) => s.serialize_str(&n.to_string()),
-        None => s.serialize_none(),
-    }
-}
-
-/// Serialize an optional status error code as a string. Method results such
-/// as `changePosition` remain numeric and therefore must not use a global
-/// number-to-string postprocessor.
-fn serialize_opt_i32_as_string<S: Serializer>(v: &Option<i32>, s: S) -> Result<S::Ok, S::Error> {
-    match v {
-        Some(n) => s.serialize_str(&n.to_string()),
-        None => s.serialize_none(),
-    }
-}
-
-fn deserialize_opt_i32_from_string_or_num<'de, D: Deserializer<'de>>(
-    d: D,
-) -> Result<Option<i32>, D::Error> {
-    use serde::de::Error;
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrNum {
-        Str(String),
-        Num(i32),
-        Null,
-    }
-    match StringOrNum::deserialize(d)? {
-        StringOrNum::Str(s) => s.parse::<i32>().map(Some).map_err(Error::custom),
-        StringOrNum::Num(n) => Ok(Some(n)),
-        StringOrNum::Null => Ok(None),
-    }
-}
-
-/// Serialize a `usize` as a string (for GlobalStat counts).
-fn serialize_usize_as_string<S: Serializer>(v: &usize, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&v.to_string())
-}
-
-/// Serialize a `u16` as a string (for PeerInfo.port, etc.).
-fn serialize_u16_as_string<S: Serializer>(v: &u16, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&v.to_string())
-}
-
-/// Deserialize a `u16` from a string or number.
-fn deserialize_u16_from_string_or_num<'de, D: Deserializer<'de>>(d: D) -> Result<u16, D::Error> {
-    use serde::de::Error;
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrNum {
-        Str(String),
-        Num(u16),
-    }
-    match StringOrNum::deserialize(d)? {
-        StringOrNum::Str(s) => s.parse::<u16>().map_err(Error::custom),
-        StringOrNum::Num(n) => Ok(n),
-    }
-}
-
-/// Serialize a `bool` as "true"/"false" string matching original aria2c
-/// wire format (e.g. `"selected": "true"`).
-fn serialize_bool_as_aria2_string<S: Serializer>(v: &bool, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(if *v { "true" } else { "false" })
-}
-
-/// Deserialize a "true"/"false" string or bool into a Rust bool.
-fn deserialize_bool_from_aria2_string<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
-    use serde::de::Error;
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum BoolOrString {
-        Bool(bool),
-        Str(String),
-    }
-    match BoolOrString::deserialize(d)? {
-        BoolOrString::Bool(b) => Ok(b),
-        BoolOrString::Str(s) => match s.as_str() {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(Error::custom(format!("invalid bool string: {}", s))),
-        },
-    }
-}
-
-/// Deserialize a string-encoded u64 (from aria2 wire format) or a raw number.
-fn deserialize_u64_from_string_or_num<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
-    use serde::de::Error;
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrNum {
-        Str(String),
-        Num(u64),
-    }
-    match StringOrNum::deserialize(d)? {
-        StringOrNum::Str(s) => s.parse::<u64>().map_err(Error::custom),
-        StringOrNum::Num(n) => Ok(n),
-    }
-}
-
-/// Deserialize an Option<String-encoded u64> or raw number.
-fn deserialize_opt_u64_from_string_or_num<'de, D: Deserializer<'de>>(
-    d: D,
-) -> Result<Option<u64>, D::Error> {
-    use serde::de::Error;
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrNum {
-        Str(String),
-        Num(u64),
-        Null,
-    }
-    match StringOrNum::deserialize(d)? {
-        StringOrNum::Str(s) => s.parse::<u64>().map(Some).map_err(Error::custom),
-        StringOrNum::Num(n) => Ok(Some(n)),
-        StringOrNum::Null => Ok(None),
-    }
-}
+use crate::wire;
 
 // Re-export DownloadStatus from aria2-core as the canonical definition
 pub use aria2_core::DownloadStatus;
@@ -216,49 +76,50 @@ pub struct StatusInfo {
     pub gid: String,
     #[serde(
         default,
-        serialize_with = "serialize_opt_u64_as_string",
-        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub total_length: Option<u64>,
     #[serde(
         default,
-        serialize_with = "serialize_opt_u64_as_string",
-        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub completed_length: Option<u64>,
     #[serde(
         default,
-        serialize_with = "serialize_opt_u64_as_string",
-        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub upload_length: Option<u64>,
     #[serde(
         default,
-        serialize_with = "serialize_opt_u64_as_string",
-        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub download_speed: Option<u64>,
     #[serde(
         default,
-        serialize_with = "serialize_opt_u64_as_string",
-        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub upload_speed: Option<u64>,
     #[serde(
         default,
-        serialize_with = "serialize_opt_u16_as_string",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub connections: Option<u16>,
     #[serde(
         default,
-        serialize_with = "serialize_opt_i32_as_string",
-        deserialize_with = "deserialize_opt_i32_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub error_code: Option<i32>,
@@ -284,15 +145,16 @@ pub struct StatusInfo {
     /// Piece length in bytes (BitTorrent only)
     #[serde(
         default,
-        serialize_with = "serialize_opt_u64_as_string",
-        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub piece_length: Option<u64>,
     /// Number of pieces (BitTorrent only)
     #[serde(
         default,
-        serialize_with = "serialize_opt_u32_as_string",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub num_pieces: Option<u32>,
@@ -308,15 +170,16 @@ pub struct StatusInfo {
     /// Number of seeders (BitTorrent only)
     #[serde(
         default,
-        serialize_with = "serialize_opt_u32_as_string",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub num_seeders: Option<u32>,
     /// Verified bytes length (when --check-integrity is active)
     #[serde(
         default,
-        serialize_with = "serialize_opt_u64_as_string",
-        deserialize_with = "deserialize_opt_u64_from_string_or_num",
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
     pub verified_length: Option<u64>,
@@ -477,24 +340,27 @@ impl StatusInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileInfo {
-    #[serde(serialize_with = "serialize_usize_as_string")]
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub index: usize,
     pub path: String,
     #[serde(
-        serialize_with = "serialize_u64_as_string",
-        deserialize_with = "deserialize_u64_from_string_or_num"
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub length: u64,
     #[serde(
-        serialize_with = "serialize_u64_as_string",
-        deserialize_with = "deserialize_u64_from_string_or_num"
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub completed_length: u64,
     /// Whether this file is selected for download.
     /// Original aria2c serializes as "true"/"false" string.
     #[serde(
-        serialize_with = "serialize_bool_as_aria2_string",
-        deserialize_with = "deserialize_bool_from_aria2_string"
+        serialize_with = "wire::serialize_bool_as_string",
+        deserialize_with = "wire::deserialize_bool_from_string_or_bool"
     )]
     pub selected: bool,
     pub uris: Vec<UriEntry>,
@@ -564,13 +430,48 @@ impl UriEntry {
 }
 
 /// URI status indicating whether a URI is currently being used or waiting.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UriStatus {
     Used,
     Spent,
     #[default]
     Waiting,
+}
+
+impl Serialize for UriStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Used | Self::Spent => "used",
+            Self::Waiting => "waiting",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for UriStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "used" => Ok(Self::Used),
+            "waiting" => Ok(Self::Waiting),
+            // Accepted for in-process snapshots; never emitted on the wire.
+            "spent" => Ok(Self::Spent),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["used", "waiting"],
+            )),
+        }
+    }
+}
+
+impl UriStatus {
+    /// Convert the core URI lifecycle snapshot to aria2's public vocabulary.
+    pub(crate) fn from_core_status(value: &str) -> Self {
+        match value {
+            "used" | "spent" => Self::Used,
+            "waiting" => Self::Waiting,
+            _ => Self::Waiting,
+        }
+    }
 }
 
 /// URI information returned by `aria2.getUris`.
@@ -590,7 +491,10 @@ pub type UriInfo = UriEntry;
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfoIndex {
     /// File index (1-based, serialized as string matching original aria2c)
-    #[serde(serialize_with = "serialize_usize_as_string")]
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub index: usize,
     /// List of active server connections for this file
     pub servers: Vec<ServerInfo>,
@@ -609,8 +513,8 @@ pub struct ServerInfo {
     pub current_uri: String,
     /// Current download speed from this server (bytes/sec, serialized as string)
     #[serde(
-        serialize_with = "serialize_u64_as_string",
-        deserialize_with = "deserialize_u64_from_string_or_num"
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub download_speed: u64,
 }
@@ -652,8 +556,8 @@ pub struct PeerInfo {
     pub ip: String,
     /// Peer port (serialized as string matching original util::uitos)
     #[serde(
-        serialize_with = "serialize_u16_as_string",
-        deserialize_with = "deserialize_u16_from_string_or_num"
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub port: u16,
     /// Bitfield hex string (matches original util::toHex)
@@ -661,26 +565,26 @@ pub struct PeerInfo {
     pub bitfield: Option<String>,
     /// Whether we are choking this peer (serialized as "true"/"false")
     #[serde(
-        serialize_with = "serialize_bool_as_aria2_string",
-        deserialize_with = "deserialize_bool_from_aria2_string"
+        serialize_with = "wire::serialize_bool_as_string",
+        deserialize_with = "wire::deserialize_bool_from_string_or_bool"
     )]
     pub am_choking: bool,
     /// Whether the peer is choking us (serialized as "true"/"false")
     #[serde(
-        serialize_with = "serialize_bool_as_aria2_string",
-        deserialize_with = "deserialize_bool_from_aria2_string"
+        serialize_with = "wire::serialize_bool_as_string",
+        deserialize_with = "wire::deserialize_bool_from_string_or_bool"
     )]
     pub peer_choking: bool,
     /// Download speed (serialized as string matching original util::itos)
     #[serde(
-        serialize_with = "serialize_u64_as_string",
-        deserialize_with = "deserialize_u64_from_string_or_num"
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub download_speed: u64,
     /// Upload speed (serialized as string matching original util::itos)
     #[serde(
-        serialize_with = "serialize_u64_as_string",
-        deserialize_with = "deserialize_u64_from_string_or_num"
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub upload_speed: u64,
     /// Seeder status as "true"/"false" string (matches original VLB_TRUE/VLB_FALSE)
@@ -696,13 +600,38 @@ pub struct PeerInfo {
 ///
 /// Returned by `aria2.getGlobalStat`. Contains aggregate numbers for
 /// active, waiting, and stopped downloads, plus total transfer speeds.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct GlobalStat {
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub download_speed: u64,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub upload_speed: u64,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub num_active: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub num_waiting: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub num_stopped: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
     pub num_stopped_total: usize,
 }
 
@@ -710,14 +639,7 @@ impl GlobalStat {
     /// Serialize as JSON matching original aria2 wire format where all
     /// numeric values are strings (e.g. `"downloadSpeed": "0"`, `"numActive": "1"`).
     pub fn to_json_value(&self) -> serde_json::Value {
-        serde_json::json!({
-            "downloadSpeed": self.download_speed.to_string(),
-            "uploadSpeed": self.upload_speed.to_string(),
-            "numActive": self.num_active.to_string(),
-            "numWaiting": self.num_waiting.to_string(),
-            "numStopped": self.num_stopped.to_string(),
-            "numStoppedTotal": self.num_stopped_total.to_string()
-        })
+        serde_json::to_value(self).expect("GlobalStat contains only serializable fields")
     }
 }
 
@@ -744,17 +666,16 @@ impl VersionInfo {
     /// protocol support available in the current build. The list reflects
     /// which protocols and capabilities aria2-core is compiled with.
     pub fn from_env() -> Self {
-        // Always-on protocol support via reqwest + aria2-protocol
-        let features: Vec<&str> = vec![
-            "http",
-            "https",
-            "ftp",
-            "bittorrent",
-            "metalink",
-            "sftp",
-            // Async DNS: available when the tokio-based resolver is compiled in
-            "Async DNS",
-        ];
+        // Keep the order and names used by C++ FeatureConfig::strSupportedFeature().
+        let mut features = vec!["Async DNS"];
+        #[cfg(feature = "bittorrent")]
+        features.push("BitTorrent");
+        features.extend(["Firefox3 Cookie", "GZip", "HTTPS", "Message Digest"]);
+        #[cfg(feature = "metalink")]
+        features.push("Metalink");
+        features.push("XML-RPC");
+        #[cfg(feature = "sftp")]
+        features.push("SFTP");
 
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1680,5 +1601,79 @@ mod tests {
         let roundtrip: StatusInfo = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(roundtrip.total_length, Some(104857600));
         assert_eq!(roundtrip.completed_length, Some(0));
+    }
+
+    #[test]
+    fn test_wire_codecs_accept_aria2_literals_and_native_values() {
+        let wire = serde_json::json!({
+            "gid": "wire-test",
+            "status": "active",
+            "totalLength": "104857600",
+            "completedLength": 52428800,
+            "connections": "4",
+            "pieceLength": 262144,
+            "numPieces": "400",
+            "numSeeders": 3,
+            "files": [{
+                "index": "1",
+                "path": "/downloads/file.bin",
+                "length": 104857600,
+                "completedLength": "52428800",
+                "selected": "true",
+                "uris": [{"uri": "http://example.test/file.bin", "status": "used"}]
+            }]
+        });
+
+        let info: StatusInfo = serde_json::from_value(wire).unwrap();
+        assert_eq!(info.total_length, Some(104857600));
+        assert_eq!(info.completed_length, Some(52428800));
+        assert_eq!(info.connections, Some(4));
+        assert_eq!(info.num_pieces, Some(400));
+        assert_eq!(info.num_seeders, Some(3));
+        assert_eq!(info.files.as_ref().unwrap()[0].index, 1);
+        assert_eq!(
+            info.files.as_ref().unwrap()[0].uris[0].status,
+            UriStatus::Used
+        );
+
+        let encoded = serde_json::to_value(info).unwrap();
+        assert_eq!(encoded["completedLength"], "52428800");
+        assert_eq!(encoded["connections"], "4");
+        assert_eq!(encoded["numPieces"], "400");
+        assert_eq!(encoded["numSeeders"], "3");
+        assert_eq!(encoded["files"][0]["index"], "1");
+        assert_eq!(encoded["files"][0]["selected"], "true");
+    }
+
+    #[test]
+    fn test_uri_status_hides_internal_spent_state_on_wire() {
+        assert_eq!(serde_json::to_value(UriStatus::Spent).unwrap(), "used");
+        assert_eq!(
+            serde_json::from_value::<UriStatus>(serde_json::json!("spent")).unwrap(),
+            UriStatus::Spent
+        );
+        assert_eq!(
+            serde_json::from_value::<UriStatus>(serde_json::json!("used")).unwrap(),
+            UriStatus::Used
+        );
+    }
+
+    #[test]
+    fn test_global_stat_roundtrip_uses_wire_strings() {
+        let stat: GlobalStat = serde_json::from_value(serde_json::json!({
+            "downloadSpeed": "100",
+            "uploadSpeed": 20,
+            "numActive": "1",
+            "numWaiting": 2,
+            "numStopped": "3",
+            "numStoppedTotal": 4
+        }))
+        .unwrap();
+        assert_eq!(stat.download_speed, 100);
+        assert_eq!(stat.upload_speed, 20);
+        assert_eq!(stat.num_stopped_total, 4);
+        let encoded = serde_json::to_value(stat).unwrap();
+        assert_eq!(encoded["downloadSpeed"], "100");
+        assert_eq!(encoded["numStoppedTotal"], "4");
     }
 }

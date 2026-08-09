@@ -195,7 +195,7 @@ impl App {
         let user = self.get_opt_str("rpc-user").await.unwrap_or_default();
         let pass = self.get_opt_str("rpc-passwd").await;
         let auth = if !secret.is_empty() {
-            AuthConfig::default().with_token(secret)
+            AuthConfig::default().with_token(&secret)
         } else if !user.is_empty() {
             AuthConfig {
                 username: Some(user),

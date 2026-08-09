@@ -28,6 +28,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "metalink-file".into(),
             opt_type: OptionType::Path,
+            short_name: Some('M'),
             description: "Path to Metalink file".into(),
             category: OptionCategory::General,
             ..Default::default()

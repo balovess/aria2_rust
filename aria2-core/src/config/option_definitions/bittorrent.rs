@@ -32,7 +32,6 @@ impl crate::config::OptionRegistry {
             short_name: Some('B'),
             default_value: OptionValue::Int(55),
             min: Some(0),
-            max: Some(512),
             description: "Max peers per torrent".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -49,21 +48,11 @@ impl crate::config::OptionRegistry {
             name: "bt-max-open-files".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(100),
-            min: Some(10),
-            max: Some(4096),
+            min: Some(1),
             description: "Max open files for BT".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
-        self.register(OptionDef {
-            name: "bt-tracker".into(),
-            opt_type: OptionType::List,
-            cumulative_delimiter: Some("\n"),
-            description: "BitTorrent tracker URLs (cumulative, multiple values append)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-
         // --- Torrent Behavior ---
         self.register(OptionDef {
             name: "bt-seed-unverified".into(),
@@ -76,7 +65,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-save-metadata".into(),
             opt_type: OptionType::Boolean,
-            short_name: Some('M'),
             default_value: OptionValue::Bool(false),
             description: "Save metadata as .torrent file".into(),
             category: OptionCategory::BitTorrent,
@@ -141,7 +129,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "enable-dht".into(),
             opt_type: OptionType::Boolean,
-            short_name: Some('D'),
             default_value: OptionValue::Bool(true),
             description: "Enable DHT".into(),
             category: OptionCategory::BitTorrent,
@@ -149,8 +136,8 @@ impl crate::config::OptionRegistry {
         });
         self.register(OptionDef {
             name: "dht-listen-port".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(6881),
+            opt_type: OptionType::IntegerRange,
+            default_value: OptionValue::Str("6881-6999".into()),
             min: Some(1024),
             max: Some(65535),
             description: "DHT listen port".into(),
@@ -191,7 +178,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "follow-torrent".into(),
             opt_type: OptionType::Enum,
-            short_name: Some('M'),
             default_value: OptionValue::Str("true".into()),
             allowed_values: &["true", "false", "mem"],
             description: "Auto-handle .torrent (true/false/mem)".into(),
@@ -218,9 +204,10 @@ impl crate::config::OptionRegistry {
         // --- Listening Port ---
         self.register(OptionDef {
             name: "listen-port".into(),
-            opt_type: OptionType::String,
-            short_name: Some('h'),
+            opt_type: OptionType::IntegerRange,
             default_value: OptionValue::Str("6881-6999".into()),
+            min: Some(1024),
+            max: Some(65535),
             description: "Listening port range".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -335,6 +322,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(60),
             min: Some(1),
+            max: Some(600),
             description: "Connect timeout for tracker in seconds".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -353,6 +341,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(60),
             min: Some(1),
+            max: Some(600),
             description: "Timeout for tracker in seconds".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -362,6 +351,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(10),
             min: Some(1),
+            max: Some(60),
             description: "DHT message timeout in seconds".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -399,7 +389,9 @@ impl crate::config::OptionRegistry {
         });
         self.register(OptionDef {
             name: "select-file".into(),
-            opt_type: OptionType::List,
+            opt_type: OptionType::IntegerRange,
+            min: Some(1),
+            max: Some(1_000_000),
             description:
                 "Comma-separated list of file indices to download (BT/Metalink, 1-indexed)".into(),
             category: OptionCategory::BitTorrent,
@@ -409,7 +401,9 @@ impl crate::config::OptionRegistry {
         // --- File Index Output Mapping ---
         self.register(OptionDef {
             name: "index-out".into(),
-            opt_type: OptionType::String,
+            opt_type: OptionType::IndexOut,
+            short_name: Some('O'),
+            cumulative_delimiter: Some("\n"),
             description: "Set output filename for BT file index (INDEX=PATH format)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()

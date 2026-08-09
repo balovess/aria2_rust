@@ -12,7 +12,7 @@ pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{
     ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition, OptionError,
     OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, RangeValidator,
-    RegexValidator, UrlValidator,
+    RegexValidator, UrlValidator, parse_integer_segments,
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use runtime::{

@@ -393,88 +393,115 @@ struct JsonGetRequest {
 
 /// Parse aria2's legacy JSON-RPC GET/JSONP query format.
 ///
-/// The original server accepts `method`, `id`, and a URL-encoded Base64
-/// `params` value. When both `method` and `id` are omitted, the decoded params
-/// are treated as a complete batch request. `jsoncallback` wraps the response
-/// in a JavaScript callback.
-fn parse_json_get_query(query: &str) -> Result<JsonGetRequest, crate::json_rpc::JsonRpcError> {
-    use base64::Engine;
-    use serde_json::{Map, Value};
-
+/// The C++ implementation intentionally has a small, legacy grammar here:
+/// it matches raw `key=value` prefixes, percent-decodes only `params`, and
+/// copies `method`, `id`, and `jsoncallback` into the generated request or
+/// response without form normalization. Keep those rules at this wire seam;
+/// the POST JSON parser must not inherit them.
+fn parse_json_get_query(query: &str) -> JsonGetRequest {
+    let query = query.strip_prefix('?').unwrap_or(query);
     let mut method = None;
     let mut id = None;
     let mut params = None;
     let mut callback = None;
-    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        match key.as_ref() {
-            "method" => method = Some(value.into_owned()),
-            "id" => id = Some(value.into_owned()),
-            "params" => params = Some(value.into_owned()),
-            "jsoncallback" => callback = Some(value.into_owned()),
-            _ => {}
+
+    for item in query.split('&') {
+        if let Some(value) = item.strip_prefix("method=") {
+            method = Some(value);
+        } else if let Some(value) = item.strip_prefix("id=") {
+            id = Some(value);
+        } else if let Some(value) = item.strip_prefix("params=") {
+            params = Some(value);
+        } else if let Some(value) = item.strip_prefix("jsoncallback=") {
+            callback = Some(value);
         }
     }
 
-    let decoded_params = params
-        .map(|encoded| {
-            // Form decoding turns an unescaped '+' into a space. Tolerate it
-            // for clients that omitted URL encoding around standard Base64.
-            let encoded = encoded.replace(' ', "+");
-            base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| {
-                    crate::json_rpc::JsonRpcError::ParseError(format!(
-                        "invalid GET params base64: {error}"
-                    ))
-                })
-        })
-        .transpose()?;
+    let decoded_params = params.map(|encoded| {
+        let decoded = aria2_core::util::uri::percent_decode(encoded);
+        decode_aria2_base64(&decoded)
+    });
 
     let body = match (method, id) {
-        (None, None) => decoded_params.ok_or_else(|| {
-            crate::json_rpc::JsonRpcError::ParseError("GET params are missing".into())
-        })?,
+        (None, None) => decoded_params.unwrap_or_default(),
         (method, id) => {
-            let mut request = Map::new();
+            let mut body = Vec::new();
+            body.extend_from_slice(b"{");
             if let Some(method) = method {
-                request.insert("method".into(), Value::String(method));
+                body.extend_from_slice(b"\"method\":\"");
+                body.extend_from_slice(method.as_bytes());
+                body.extend_from_slice(b"\"");
             }
             if let Some(id) = id {
-                request.insert("id".into(), Value::String(id));
+                // The leading comma when `method` is absent is an observable
+                // quirk of aria2_original's string builder.
+                body.extend_from_slice(b",\"id\":\"");
+                body.extend_from_slice(id.as_bytes());
+                body.extend_from_slice(b"\"");
             }
             if let Some(params) = decoded_params {
-                let params = serde_json::from_slice(&params).map_err(|error| {
-                    crate::json_rpc::JsonRpcError::ParseError(format!(
-                        "invalid GET params JSON: {error}"
-                    ))
-                })?;
-                request.insert("params".into(), params);
+                body.extend_from_slice(b",\"params\":");
+                body.extend_from_slice(&params);
             }
-            serde_json::to_vec(&Value::Object(request)).map_err(|error| {
-                crate::json_rpc::JsonRpcError::InternalError(format!(
-                    "failed to build GET request: {error}"
-                ))
-            })?
+            body.extend_from_slice(b"}");
+            body
         }
     };
 
-    if let Some(callback) = callback.as_deref()
-        && !is_valid_jsonp_callback(callback)
-    {
-        return Err(crate::json_rpc::JsonRpcError::InvalidRequest(
-            "invalid jsoncallback".into(),
-        ));
+    JsonGetRequest {
+        body,
+        // aria2_original emits this value verbatim as JavaScript. In
+        // particular, it does not percent-decode or validate the callback.
+        callback: callback.map(str::to_owned),
     }
-
-    Ok(JsonGetRequest { body, callback })
 }
 
-fn is_valid_jsonp_callback(callback: &str) -> bool {
-    callback.split('.').all(|segment| {
-        let mut chars = segment.chars();
-        matches!(chars.next(), Some('$' | '_' | 'a'..='z' | 'A'..='Z'))
-            && chars.all(|ch| matches!(ch, '$' | '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
-    }) && !callback.is_empty()
+/// Decode the permissive standard-Base64 stream used by aria2_original.
+/// Invalid alphabet bytes are skipped and malformed input becomes an empty
+/// or partial byte string; JSON parsing later produces the wire-level parse
+/// error. This is deliberately separate from strict RPC parameter decoding.
+fn decode_aria2_base64(input: &str) -> Vec<u8> {
+    use base64::Engine;
+
+    let filtered: Vec<u8> = input
+        .bytes()
+        .filter(|byte| {
+            matches!(
+                byte,
+                b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'+'
+                    | b'/'
+                    | b'='
+            )
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        return Vec::new();
+    }
+
+    let input = if let Some(eq_pos) = filtered.iter().position(|byte| *byte == b'=') {
+        let group_start = eq_pos / 4 * 4;
+        let group_end = group_start + 4;
+        if group_end > filtered.len()
+            || filtered[eq_pos..group_end].iter().any(|byte| *byte != b'=')
+        {
+            return Vec::new();
+        }
+        &filtered[..group_end]
+    } else if filtered.len() % 4 == 1 {
+        // A lone trailing alphabet byte is ignored by aria2_original after
+        // all complete quartets have been decoded.
+        &filtered[..filtered.len() - 1]
+    } else {
+        &filtered
+    };
+
+    base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .unwrap_or_default()
 }
 
 struct JsonRpcHttpResponse {
@@ -511,16 +538,28 @@ fn serialize_jsonrpc_response(response: crate::json_rpc::JsonRpcResponse) -> Jso
 }
 
 async fn dispatch_jsonrpc_body(engine: &RpcEngine, body: &[u8]) -> JsonRpcHttpResponse {
-    use crate::json_rpc::{JsonRpcBatchResponse, parse_request};
+    use crate::json_rpc::{JsonRpcBatchResponse, JsonRpcWireEntry, parse_aria2_wire_document};
 
-    match parse_request(body) {
-        Ok(requests) if requests.len() == 1 => {
-            serialize_jsonrpc_response(engine.handle_request(&requests[0]).await)
+    match parse_aria2_wire_document(body) {
+        Ok(document) if !document.is_batch => {
+            let entry = document
+                .entries
+                .into_iter()
+                .next()
+                .expect("single JSON-RPC document must contain one entry");
+            let response = match entry {
+                JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
+                JsonRpcWireEntry::Error(response) => response,
+            };
+            serialize_jsonrpc_response(response)
         }
-        Ok(requests) => {
-            let mut responses = Vec::with_capacity(requests.len());
-            for request in &requests {
-                responses.push(engine.handle_request(request).await);
+        Ok(document) => {
+            let mut responses = Vec::with_capacity(document.entries.len());
+            for entry in document.entries {
+                responses.push(match entry {
+                    JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
+                    JsonRpcWireEntry::Error(response) => response,
+                });
             }
             let body = JsonRpcBatchResponse(responses)
                 .to_string()
@@ -604,9 +643,8 @@ async fn handle_xmlrpc(
     use crate::json_rpc::JsonRpcRequest;
     use crate::xml_rpc::{XmlRpcResponse, XmlRpcValue, parse_request};
     use axum::http::{StatusCode, header};
-    use axum::response::IntoResponse;
 
-    let (status, response) = match parse_request(&body) {
+    let (status, content_type, response_body) = match parse_request(&body) {
         Ok(request) => {
             let params = request
                 .params
@@ -623,41 +661,45 @@ async fn handle_xmlrpc(
                         Some(result) => XmlRpcValue::from_json_value(result)
                             .map(XmlRpcResponse::single)
                             .unwrap_or_else(|error| {
-                                XmlRpcResponse::fault(-32603, &error.to_string())
+                                // Once XML-RPC parsing has succeeded, aria2
+                                // reports method-side failures as faultCode=1
+                                // regardless of the JSON-RPC adapter code.
+                                XmlRpcResponse::fault(1, &error.to_string())
                             }),
                         None => {
-                            let error = json_response
+                            let message = json_response
                                 .error
-                                .map(|error| (error.code, error.message))
-                                .unwrap_or((-32603, "Missing RPC response".into()));
-                            XmlRpcResponse::fault(error.0, &error.1)
+                                .map(|error| error.message)
+                                .unwrap_or_else(|| "Missing RPC response".into());
+                            XmlRpcResponse::fault(1, &message)
                         }
                     };
-                    (StatusCode::OK, response)
+                    (StatusCode::OK, Some("text/xml"), response.to_xml())
                 }
-                Err(error) => (
-                    StatusCode::BAD_REQUEST,
-                    XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
-                ),
+                // aria2_original treats XML value conversion failures as
+                // request parse failures: HTTP 400 with an empty body.
+                Err(_) => (StatusCode::BAD_REQUEST, None, String::new()),
             }
         }
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            XmlRpcResponse::fault(error.fault_code(), &error.fault_string()),
-        ),
+        // Keep the original HTTP/XML-RPC split. The C++ body command sends
+        // `feedResponse(400)` for parser errors, which has no XML fault body.
+        Err(_) => (StatusCode::BAD_REQUEST, None, String::new()),
     };
 
-    (
-        status,
-        [(header::CONTENT_TYPE, "text/xml")],
-        response.to_xml(),
-    )
-        .into_response()
+    let mut response = axum::response::Response::new(axum::body::Body::from(response_body));
+    *response.status_mut() = status;
+    if let Some(content_type) = content_type {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static(content_type),
+        );
+    }
+    response
 }
 
 /// Handle GET requests at `/jsonrpc`.
 ///
-/// Supports two modes:
+/// Supports WebSocket upgrades and aria2's legacy GET/JSONP transport.
 /// 1. **WebSocket upgrade** — If the request has `Upgrade: websocket` headers,
 ///    the connection is upgraded to WebSocket for real-time download events.
 /// 2. **Regular GET** — Returns an informational message.
@@ -670,10 +712,6 @@ async fn handle_jsonrpc_or_ws(
     ws: Option<axum::extract::ws::WebSocketUpgrade>,
     query: axum::extract::RawQuery,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::StatusCode;
-    use axum::response::Json;
-    use serde_json::json;
-
     use axum::response::IntoResponse;
 
     match ws {
@@ -687,41 +725,17 @@ async fn handle_jsonrpc_or_ws(
                 .on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
         }
         None => {
-            if let Some(query) = query.0.filter(|query| !query.is_empty()) {
-                let parsed = match parse_json_get_query(&query) {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        let response = serialize_jsonrpc_response(error.into_response(None));
-                        return (
-                            response.status,
-                            [(axum::http::header::CONTENT_TYPE, "application/json-rpc")],
-                            response.body,
-                        )
-                            .into_response();
-                    }
-                };
-                let response = dispatch_jsonrpc_body(&state.engine, &parsed.body).await;
-                let content_type = if parsed.callback.is_some() {
-                    "text/javascript"
-                } else {
-                    "application/json-rpc"
-                };
-                return (
-                    response.status,
-                    [(axum::http::header::CONTENT_TYPE, content_type)],
-                    wrap_jsonp(response.body, parsed.callback.as_deref()),
-                )
-                    .into_response();
-            }
-
-            // Keep a small discovery response for the Rust server's no-query
-            // health-check extension. Original aria2 uses query parameters
-            // for GET JSON-RPC and JSONP requests.
+            let parsed = parse_json_get_query(query.0.as_deref().unwrap_or_default());
+            let response = dispatch_jsonrpc_body(&state.engine, &parsed.body).await;
+            let content_type = if parsed.callback.is_some() {
+                "text/javascript"
+            } else {
+                "application/json-rpc"
+            };
             (
-                StatusCode::OK,
-                Json(json!({
-                    "error": "Use POST for JSON-RPC requests, or connect via WebSocket at /jsonrpc (ws://)"
-                })),
+                response.status,
+                [(axum::http::header::CONTENT_TYPE, content_type)],
+                wrap_jsonp(response.body, parsed.callback.as_deref()),
             )
                 .into_response()
         }
@@ -731,6 +745,40 @@ async fn handle_jsonrpc_or_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_json_get_query_matches_aria2_wire_grammar() {
+        use base64::Engine;
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode("[]");
+        let parsed = parse_json_get_query(&format!(
+            "method=aria2.getVersion&id=foo%20bar&params={encoded}&jsoncallback=cb%2Ename"
+        ));
+
+        assert_eq!(
+            parsed.body,
+            br#"{"method":"aria2.getVersion","id":"foo%20bar","params":[]}"#
+        );
+        assert_eq!(parsed.callback.as_deref(), Some("cb%2Ename"));
+    }
+
+    #[test]
+    fn test_json_get_query_keeps_original_malformed_cases_for_json_parser() {
+        let no_query = parse_json_get_query("");
+        assert!(no_query.body.is_empty());
+
+        let id_only = parse_json_get_query("id=only-id");
+        assert_eq!(id_only.body, br#"{,"id":"only-id"}"#);
+
+        let invalid_base64 = parse_json_get_query("method=aria2.getVersion&params=not-base64");
+        assert!(!invalid_base64.body.is_empty());
+    }
+
+    #[test]
+    fn test_json_get_callback_is_not_normalized() {
+        let parsed = parse_json_get_query("jsoncallback=bad;alert(1)//");
+        assert_eq!(parsed.callback.as_deref(), Some("bad;alert(1)//"));
+    }
 
     #[test]
     fn test_rpc_server_new_http() {

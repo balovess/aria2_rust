@@ -252,6 +252,105 @@ impl JsonRpcBatchResponse {
     }
 }
 
+/// One item in the original aria2 JSON-RPC wire envelope.
+///
+/// The C++ parser handles object-level failures while iterating a batch, so a
+/// batch can contain both executable requests and already-materialized error
+/// responses. Keeping that distinction at the wire seam prevents malformed
+/// entries from reaching the engine dispatcher.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonRpcWireEntry {
+    Request(JsonRpcRequest),
+    Error(JsonRpcResponse),
+}
+
+/// Parsed JSON-RPC document using aria2_original's envelope semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonRpcWireDocument {
+    /// Whether the input was a JSON array. A one-item batch is still encoded
+    /// as an array in the response.
+    pub is_batch: bool,
+    pub entries: Vec<JsonRpcWireEntry>,
+}
+
+fn parse_aria2_wire_object(object: serde_json::Map<String, serde_json::Value>) -> JsonRpcWireEntry {
+    let id = match object.get("id") {
+        Some(id) => id.clone(),
+        None => {
+            return JsonRpcWireEntry::Error(
+                JsonRpcError::InvalidRequest("Invalid Request.".to_string()).into_response(None),
+            );
+        }
+    };
+
+    let method = match object.get("method").and_then(serde_json::Value::as_str) {
+        Some(method) => method.to_string(),
+        None => {
+            return JsonRpcWireEntry::Error(
+                JsonRpcError::InvalidRequest("Invalid Request.".to_string())
+                    .into_response(Some(id)),
+            );
+        }
+    };
+
+    // aria2_original ignores the jsonrpc member and treats an omitted params
+    // member as an empty positional list. Named/object params are rejected by
+    // rpc_helper.cc before a method is executed.
+    let params = match object.get("params") {
+        None => serde_json::Value::Array(Vec::new()),
+        Some(serde_json::Value::Array(params)) => serde_json::Value::Array(params.clone()),
+        Some(_) => {
+            return JsonRpcWireEntry::Error(
+                JsonRpcError::InvalidParams("Invalid params.".to_string()).into_response(Some(id)),
+            );
+        }
+    };
+
+    JsonRpcWireEntry::Request(JsonRpcRequest {
+        version: object
+            .get("jsonrpc")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        method,
+        params,
+        id: Some(id),
+    })
+}
+
+/// Parse a JSON-RPC document with the externally observable aria2 semantics.
+///
+/// This adapter intentionally differs from the general-purpose
+/// [`parse_request`] helper used by typed Rust callers. `aria2_original`:
+///
+/// - does not validate the `jsonrpc` member;
+/// - defaults an omitted `params` member to an empty list;
+/// - requires an `id` before dispatching an object request;
+/// - returns object-level errors inside a batch;
+/// - ignores non-object elements in a batch; and
+/// - returns an empty array for an empty batch.
+pub fn parse_aria2_wire_document(data: &[u8]) -> Result<JsonRpcWireDocument, JsonRpcError> {
+    let parsed: serde_json::Value = serde_json::from_slice(data)
+        .map_err(|_| JsonRpcError::ParseError("Parse error.".to_string()))?;
+
+    match parsed {
+        serde_json::Value::Object(object) => Ok(JsonRpcWireDocument {
+            is_batch: false,
+            entries: vec![parse_aria2_wire_object(object)],
+        }),
+        serde_json::Value::Array(items) => Ok(JsonRpcWireDocument {
+            is_batch: true,
+            entries: items
+                .into_iter()
+                .filter_map(|item| match item {
+                    serde_json::Value::Object(object) => Some(parse_aria2_wire_object(object)),
+                    _ => None,
+                })
+                .collect(),
+        }),
+        _ => Err(JsonRpcError::InvalidRequest("Invalid Request.".to_string())),
+    }
+}
+
 pub fn parse_request(data: &[u8]) -> Result<Vec<JsonRpcRequest>, JsonRpcError> {
     let parsed: serde_json::Value =
         serde_json::from_slice(data).map_err(|e| JsonRpcError::ParseError(e.to_string()))?;
@@ -326,6 +425,50 @@ mod tests {
     fn test_batch_empty_rejects() {
         let raw = r#"[]"#;
         assert!(parse_request(raw.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn test_aria2_wire_parser_ignores_version_and_defaults_params() {
+        let raw = br#"{"jsonrpc":"1.0","id":1,"method":"aria2.getVersion"}"#;
+        let document = parse_aria2_wire_document(raw).unwrap();
+        assert!(!document.is_batch);
+
+        let JsonRpcWireEntry::Request(request) = &document.entries[0] else {
+            panic!("expected a request entry");
+        };
+        assert_eq!(request.version.as_deref(), Some("1.0"));
+        assert_eq!(request.params, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_aria2_wire_parser_materializes_object_errors() {
+        let raw = br#"[{"id":1,"method":"aria2.getVersion","params":{}},{"method":"aria2.getVersion"},42]"#;
+        let document = parse_aria2_wire_document(raw).unwrap();
+        assert!(document.is_batch);
+        assert_eq!(
+            document.entries.len(),
+            2,
+            "non-object batch items are ignored"
+        );
+
+        let JsonRpcWireEntry::Error(error) = &document.entries[0] else {
+            panic!("object params must be rejected before dispatch");
+        };
+        assert_eq!(error.error.as_ref().map(|error| error.code), Some(-32602));
+        assert_eq!(error.id, serde_json::json!(1));
+
+        let JsonRpcWireEntry::Error(error) = &document.entries[1] else {
+            panic!("missing id must be rejected before dispatch");
+        };
+        assert_eq!(error.error.as_ref().map(|error| error.code), Some(-32600));
+        assert!(error.id.is_null());
+    }
+
+    #[test]
+    fn test_aria2_wire_parser_preserves_empty_batch() {
+        let document = parse_aria2_wire_document(b"[]").unwrap();
+        assert!(document.is_batch);
+        assert!(document.entries.is_empty());
     }
 
     #[test]

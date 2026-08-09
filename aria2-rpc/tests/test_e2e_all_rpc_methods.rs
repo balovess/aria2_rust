@@ -659,6 +659,7 @@ async fn e2e_change_global_option_returns_ok() {
 // =========================================================================
 
 #[tokio::test]
+#[cfg(feature = "bittorrent")]
 async fn e2e_get_peers_returns_array() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
@@ -676,6 +677,7 @@ async fn e2e_get_peers_returns_array() {
 }
 
 #[tokio::test]
+#[cfg(feature = "bittorrent")]
 async fn e2e_get_peers_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
@@ -814,10 +816,13 @@ async fn e2e_system_list_methods_returns_array() {
     );
 
     let methods = resp["result"].as_array().unwrap();
-    assert!(
-        methods.len() >= 36,
-        "should list at least the 36 original methods, got {}",
-        methods.len()
+    let expected_method_count = 33
+        + usize::from(cfg!(feature = "bittorrent")) * 2
+        + usize::from(cfg!(feature = "metalink"));
+    assert_eq!(
+        methods.len(),
+        expected_method_count,
+        "method count must match aria2's feature-specific catalog"
     );
 
     // Verify core methods are present
@@ -855,21 +860,25 @@ async fn e2e_system_list_notifications_returns_array() {
     );
 
     let notifications = resp["result"].as_array().unwrap();
+    let expected_notification_count = 5 + usize::from(cfg!(feature = "bittorrent"));
     assert_eq!(
         notifications.len(),
-        6,
-        "should list exactly 6 notifications (matching C++ aria2)"
+        expected_notification_count,
+        "notification count must match aria2's feature-specific catalog"
     );
 
     let names: Vec<&str> = notifications.iter().filter_map(|v| v.as_str()).collect();
-    for expected in [
+    let mut expected = vec![
         "aria2.onDownloadStart",
         "aria2.onDownloadPause",
         "aria2.onDownloadStop",
         "aria2.onDownloadComplete",
         "aria2.onDownloadError",
-        "aria2.onBtDownloadComplete",
-    ] {
+    ];
+    if cfg!(feature = "bittorrent") {
+        expected.push("aria2.onBtDownloadComplete");
+    }
+    for expected in expected {
         assert!(
             names.contains(&expected),
             "listNotifications should contain '{expected}'"
@@ -1168,13 +1177,18 @@ async fn e2e_full_lifecycle_all_methods() {
     let files = rpc_call(&client, &base, "aria2.getFiles", json![[&gid]]).await;
     assert_success(&files);
 
-    // 9. getServers (while paused)
-    let servers = rpc_call(&client, &base, "aria2.getServers", json![[&gid]]).await;
-    assert_success(&servers);
+    // 9. getServers (while paused): aria2_original only accepts active groups.
+    let (servers_status, servers) =
+        rpc_call_with_status(&client, &base, "aria2.getServers", json![[&gid]]).await;
+    assert_eq!(servers_status, reqwest::StatusCode::BAD_REQUEST);
+    assert_error_code(&servers, 1);
 
     // 10. getPeers (while paused, non-BT → empty)
-    let peers = rpc_call(&client, &base, "aria2.getPeers", json![[&gid]]).await;
-    assert_success(&peers);
+    #[cfg(feature = "bittorrent")]
+    {
+        let peers = rpc_call(&client, &base, "aria2.getPeers", json![[&gid]]).await;
+        assert_success(&peers);
+    }
 
     // 11. unpause
     let unpause = rpc_call(&client, &base, "aria2.unpause", json![[&gid]]).await;

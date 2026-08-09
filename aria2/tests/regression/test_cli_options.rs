@@ -127,24 +127,66 @@ fn regression_short_option_user_agent() {
     assert_eq!(cli.http_ftp.user_agent.as_deref(), Some("aria2/1.0"));
 }
 
-/// Test: -H maps to "header" option (list, can be repeated).
+/// Test: --header maps to "header" option (list, can be repeated).
 #[test]
 fn regression_short_option_header() {
-    let cli = parse(&["-H", "Accept: application/json"]);
+    let cli = parse(&["--header", "Accept: application/json"]);
     assert_eq!(
         cli.http_ftp.header,
         vec!["Accept: application/json".to_string()]
     );
 }
 
-/// Test: -p maps to "all-proxy" option.
+/// Test: -p maps to the original "ftp-pasv" option.
 #[test]
-fn regression_short_option_all_proxy() {
-    let cli = parse(&["-p", "http://proxy.example.com:8080"]);
-    assert_eq!(
-        cli.http_ftp.all_proxy.as_deref(),
-        Some("http://proxy.example.com:8080")
-    );
+fn regression_short_option_ftp_pasv() {
+    let cli = parse(&["-p"]);
+    assert_eq!(cli.http_ftp.ftp_pasv, Some(true));
+}
+
+/// Test: -a maps to the original file-allocation option.
+#[test]
+fn regression_short_option_file_allocation() {
+    let cli = parse(&["-a", "prealloc"]);
+    assert_eq!(cli.advanced.file_allocation.as_deref(), Some("prealloc"));
+}
+
+/// Test: -P maps to parameterized-uri rather than http-proxy.
+#[test]
+fn regression_short_option_parameterized_uri() {
+    let cli = parse(&["-P"]);
+    assert_eq!(cli.general.parameterized_uri, Some(true));
+    assert_eq!(cli.http_ftp.http_proxy, None);
+}
+
+/// Test: -Z maps to force-sequential.
+#[test]
+fn regression_short_option_force_sequential() {
+    let cli = parse(&["-Z"]);
+    assert_eq!(cli.general.force_sequential, Some(true));
+}
+
+/// Test: -n maps to no-netrc rather than dry-run.
+#[test]
+fn regression_short_option_no_netrc() {
+    let cli = parse(&["-n"]);
+    assert_eq!(cli.general.no_netrc, Some(true));
+    assert_eq!(cli.general.dry_run, None);
+}
+
+/// Test: -R maps to remote-time rather than referer.
+#[test]
+fn regression_short_option_remote_time() {
+    let cli = parse(&["-R"]);
+    assert_eq!(cli.http_ftp.remote_time, Some(true));
+    assert_eq!(cli.http_ftp.referer, None);
+}
+
+/// Test: -u maps to the original per-torrent upload limit.
+#[test]
+fn regression_short_option_max_upload_limit() {
+    let cli = parse(&["-u", "2M"]);
+    assert_eq!(cli.advanced.max_upload_limit.as_deref(), Some("2M"));
 }
 
 /// Test: -g maps to "seed-ratio" option (float).
@@ -337,7 +379,7 @@ fn regression_long_option_listen_port() {
 #[test]
 fn regression_long_option_dht_listen_port() {
     let cli = parse(&["--dht-listen-port=6881"]);
-    assert_eq!(cli.bittorrent.dht_listen_port, Some(6881));
+    assert_eq!(cli.bittorrent.dht_listen_port.as_deref(), Some("6881"));
 }
 
 /// Test: --input-file with path value.
@@ -486,10 +528,9 @@ fn regression_long_option_auto_save_interval() {
 // New CLI Conflict Resolution Tests (clap-specific)
 // =========================================================================
 
-/// Test: -L maps to "listen-port" (renamed from -h).
-/// This is a key conflict resolution: -h no longer sets listen-port.
+/// Test: -L is an additional listen-port alias.
 #[test]
-fn regression_short_option_listen_port_renamed() {
+fn regression_short_option_listen_port_alias() {
     let cli = parse(&["-L", "6881"]);
     assert_eq!(cli.bittorrent.listen_port.as_deref(), Some("6881"));
 }
@@ -501,11 +542,11 @@ fn regression_short_option_listen_port_range() {
     assert_eq!(cli.bittorrent.listen_port.as_deref(), Some("6881-6999"));
 }
 
-/// Test: -h does NOT set listen-port (it triggers help in clap).
-/// Verify that -h with a value is rejected (clap treats -h as help, no arg).
+/// Test: -h does NOT set listen-port (it triggers the original help action).
+/// Verify that -h with a value is rejected because help takes no argument.
 #[test]
 fn regression_h_does_not_set_listen_port() {
-    // -h triggers help in clap; try_parse_from should return Err for -h with
+    // -h triggers help; try_parse_from should return Err for -h with
     // an extra positional value, OR succeed as help request.
     // The key assertion: -h never sets listen_port.
     let result = CliArgs::try_parse_from(["aria2c", "-h", "6881"]);
@@ -534,24 +575,29 @@ fn regression_no_color_default_false() {
     assert_eq!(cli.no_color, None);
 }
 
-/// Test: -v maps to verbose (not version).
+/// Test: -v is the original aria2 version flag.
 #[test]
-fn regression_v_maps_to_verbose() {
-    let cli = parse(&["-v"]);
-    assert_eq!(cli.verbose, Some(true));
+fn regression_v_triggers_version() {
+    let result = CliArgs::try_parse_from(["aria2c", "-v"]);
+    let error = result.expect_err("-v must trigger the original version action");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
 }
 
-/// Test: -V maps to version (clap exits with version, not listen-port).
-/// This verifies -V does NOT set save-cookies.
+/// Test: -O/--index-out is repeatable and preserves argument order.
 #[test]
-fn regression_v_does_not_set_save_cookies() {
-    // -V triggers version output in clap; try_parse_from returns Err
-    // with DisplayVersion kind.
-    let result = CliArgs::try_parse_from(["aria2c", "-V"]);
-    assert!(
-        result.is_err(),
-        "-V should trigger version output (clap error)"
+fn regression_index_out_is_repeatable() {
+    let cli = parse(&["-O", "1=first.iso", "--index-out=2=second.iso"]);
+    assert_eq!(
+        cli.bittorrent.index_out,
+        vec!["1=first.iso", "2=second.iso"]
     );
+}
+
+/// Test: -V is the original aria2 check-integrity short option.
+#[test]
+fn regression_v_uppercase_enables_check_integrity() {
+    let cli = parse(&["-V"]);
+    assert_eq!(cli.general.check_integrity, Some(true));
 }
 
 /// Test: completions subcommand is parsed correctly.
@@ -879,6 +925,10 @@ fn regression_registry_default_values() {
         registry.get("rpc-listen-port").unwrap().default_value(),
         &OptionValue::Int(6800)
     );
+    assert_eq!(
+        registry.get("file-allocation").unwrap().default_value(),
+        &OptionValue::Str("prealloc".to_string())
+    );
 }
 
 /// Test: OptionRegistry short name mappings.
@@ -887,6 +937,10 @@ fn regression_registry_short_names() {
     let registry = OptionRegistry::new();
 
     assert_eq!(registry.get("dir").unwrap().short_name(), Some('d'));
+    assert_eq!(
+        registry.get("check-integrity").unwrap().short_name(),
+        Some('V')
+    );
     assert_eq!(registry.get("out").unwrap().short_name(), Some('o'));
     assert_eq!(registry.get("split").unwrap().short_name(), Some('s'));
     assert_eq!(registry.get("timeout").unwrap().short_name(), Some('t'));
@@ -904,6 +958,96 @@ fn regression_registry_short_names() {
             .short_name(),
         Some('j')
     );
+}
+
+/// The short-option table is an external CLI contract. These values are
+/// copied from aria2_original/src/usage_text.h and must not be inferred from
+/// the Rust field layout or from a convenient unused character.
+#[test]
+fn regression_original_short_option_contract() {
+    let registry = OptionRegistry::new();
+    let expected = [
+        ("dir", Some('d')),
+        ("out", Some('o')),
+        ("log", Some('l')),
+        ("daemon", Some('D')),
+        ("split", Some('s')),
+        ("timeout", Some('t')),
+        ("max-tries", Some('m')),
+        ("ftp-pasv", Some('p')),
+        ("file-allocation", Some('a')),
+        ("force-sequential", Some('Z')),
+        ("parameterized-uri", Some('P')),
+        ("check-integrity", Some('V')),
+        ("continue", Some('c')),
+        ("user-agent", Some('U')),
+        ("no-netrc", Some('n')),
+        ("input-file", Some('i')),
+        ("max-concurrent-downloads", Some('j')),
+        ("show-files", Some('S')),
+        ("torrent-file", Some('T')),
+        ("metalink-file", Some('M')),
+        ("remote-time", Some('R')),
+        ("index-out", Some('O')),
+        ("max-upload-limit", Some('u')),
+        ("max-connection-per-server", Some('x')),
+        ("min-split-size", Some('k')),
+        ("quiet", Some('q')),
+        ("enable-rpc", Some('e')),
+        ("rpc-listen-port", Some('r')),
+        ("rpc-secret", Some('I')),
+        ("summary-interval", None),
+        ("log-level", None),
+        ("dry-run", None),
+        ("all-proxy", None),
+        ("http-proxy", None),
+        ("https-proxy", None),
+        ("ftp-proxy", None),
+        ("no-proxy", None),
+        ("referer", None),
+        ("header", None),
+        ("load-cookies", None),
+        ("save-cookies", None),
+        ("connect-timeout", None),
+        ("retry-wait", None),
+        ("check-certificate", None),
+        ("ca-certificate", None),
+        ("allow-overwrite", None),
+        ("disk-cache", None),
+        ("piece-length", None),
+        ("stop", None),
+        ("seed-time", Some('G')),
+        ("seed-ratio", Some('g')),
+        ("bt-max-peers", Some('B')),
+        ("bt-save-metadata", None),
+        ("bt-force-encryption", Some('X')),
+        ("enable-dht", None),
+        ("follow-torrent", None),
+        ("listen-port", None),
+    ];
+
+    for (name, short_name) in expected {
+        let actual = registry
+            .get(name)
+            .unwrap_or_else(|| panic!("registry is missing option {name}"))
+            .short_name();
+        assert_eq!(
+            actual, short_name,
+            "short option for {name} diverges from aria2_original"
+        );
+    }
+
+    let mut owners = std::collections::HashMap::new();
+    for definition in registry.all().values() {
+        if let Some(short_name) = definition.short_name() {
+            let previous = owners.insert(short_name, definition.name());
+            assert!(
+                previous.is_none(),
+                "short option -{short_name} is assigned to both {previous:?} and {}",
+                definition.name()
+            );
+        }
+    }
 }
 
 /// Test: OptionRegistry count.
@@ -961,7 +1105,7 @@ fn regression_invalid_integer_value() {
 #[test]
 fn regression_out_of_range_value() {
     let mut parser = ConfigParser::new();
-    parser.set_raw("split", "100");
+    parser.set_raw("retry-wait", "601");
     assert!(parser.has_errors());
 }
 

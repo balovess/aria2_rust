@@ -13,7 +13,7 @@ async fn test_list_methods_returns_all_methods() {
     assert!(resp.is_success());
 
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(methods.len(), 37);
+    assert_eq!(methods.len(), 33);
 }
 
 #[tokio::test]
@@ -26,8 +26,6 @@ async fn test_list_methods_contains_core_methods() {
 
     // Core task management methods
     assert!(methods.contains(&"aria2.addUri".to_string()));
-    assert!(methods.contains(&"aria2.addTorrent".to_string()));
-    assert!(methods.contains(&"aria2.addMetalink".to_string()));
     assert!(methods.contains(&"aria2.remove".to_string()));
     assert!(methods.contains(&"aria2.forceRemove".to_string()));
     assert!(methods.contains(&"aria2.pause".to_string()));
@@ -69,7 +67,7 @@ async fn test_list_notifications_returns_all_events() {
     assert!(resp.is_success());
 
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(notifications.len(), 6);
+    assert_eq!(notifications.len(), 5);
 }
 
 #[tokio::test]
@@ -86,18 +84,6 @@ async fn test_list_notifications_contains_core_events() {
     assert!(notifications.contains(&"aria2.onDownloadStop".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadComplete".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadError".to_string()));
-}
-
-#[tokio::test]
-async fn test_list_notifications_contains_bt_events() {
-    let engine = RpcEngine::new();
-    let req = JsonRpcRequest::new("system.listNotifications", serde_json::json!([])).with_id(1);
-    let resp = engine.handle_request(&req).await;
-
-    let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-
-    // BitTorrent-specific events (only onBtDownloadComplete in C++ aria2)
-    assert!(notifications.contains(&"aria2.onBtDownloadComplete".to_string()));
 }
 
 #[tokio::test]

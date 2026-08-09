@@ -65,6 +65,22 @@ pub struct DownloadOptions {
     /// File allocation strategy: "none", "prealloc", "falloc", "trunc", or "mmap".
     /// When "mmap", `MmapDiskWriter` is used for files above `mmap_threshold`.
     pub file_allocation: Option<String>,
+    /// Resume an existing output file when no control file is available.
+    /// This is the C++ `--continue` option and defaults to `false`.
+    pub continue_download: bool,
+    /// Allow replacing an existing output file. C++ default: `false`.
+    pub allow_overwrite: bool,
+    /// Rename an existing output file using the `.N` suffix policy.
+    /// C++ default: `true`.
+    pub auto_file_renaming: bool,
+    /// Require a resume attempt when the remote cannot satisfy a range.
+    /// C++ default: `true`.
+    pub always_resume: bool,
+    /// Number of failed resume attempts before a fresh download is allowed.
+    /// Zero means unlimited, matching C++.
+    pub max_resume_failure_tries: u32,
+    /// Remove the control file before starting the download.
+    pub remove_control_file: bool,
     /// File size threshold (bytes) above which mmap writes are used when
     /// `file_allocation = "mmap"`. Default: 256 MiB.
     pub mmap_threshold: Option<u64>,
@@ -93,7 +109,9 @@ pub struct DownloadOptions {
     pub bt_force_encrypt: bool,
     pub bt_require_crypto: bool,
     pub enable_dht: bool,
-    pub dht_listen_port: Option<u16>,
+    pub dht_listen_port: Option<String>,
+    /// Cumulative INDEX=PATH mappings for BitTorrent file outputs.
+    pub index_out: Option<String>,
     pub dht_entry_point: Option<Vec<String>>,
     /// User-specified tracker URLs that override the torrent's own
     /// announce list (C++ `--bt-tracker`). Multiple URLs are comma or
@@ -333,6 +351,12 @@ impl Default for DownloadOptions {
             dir: None,
             out: None,
             file_allocation: None,
+            continue_download: false,
+            allow_overwrite: false,
+            auto_file_renaming: true,
+            always_resume: true,
+            max_resume_failure_tries: 0,
+            remove_control_file: false,
             mmap_threshold: None,
             secure_falloc: false,
             check_integrity: false,
@@ -346,6 +370,7 @@ impl Default for DownloadOptions {
             bt_require_crypto: false,
             enable_dht: true,
             dht_listen_port: None,
+            index_out: None,
             dht_entry_point: None,
             bt_tracker: None,
             enable_public_trackers: true,
@@ -481,13 +506,34 @@ impl DownloadOptions {
     pub fn from_rpc_options(
         options: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Self {
-        let string_options = options
-            .iter()
-            .filter_map(|(key, value)| {
-                option_value_to_string(value).map(|value| (key.clone(), value))
-            })
-            .collect();
-        Self::from_option_strings(&string_options)
+        Self::try_from_rpc_options(options).unwrap_or_default()
+    }
+
+    /// Fallibly build per-download options from an RPC option map.
+    ///
+    /// The registry is the validation seam for task creation. Unknown option
+    /// names remain ignored, matching aria2's RPC option gatherer, while
+    /// known options must pass the same type, range, and enum checks as the
+    /// configuration path. The infallible [`Self::from_rpc_options`] helper is
+    /// retained for compatibility with older in-process callers; external
+    /// adapters must use this method so invalid values cannot become defaults.
+    pub fn try_from_rpc_options(
+        options: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<Self, String> {
+        let registry = crate::config::OptionRegistry::new();
+        let mut string_options = std::collections::HashMap::with_capacity(options.len());
+        for (key, value) in options {
+            if registry.get(key).is_none() {
+                continue;
+            }
+            registry
+                .parse_rpc_value(key, value)
+                .map_err(|error| format!("Option '{}': {}", key, error))?;
+            let value = option_value_to_string(value)
+                .ok_or_else(|| format!("Option '{}' must be a string", key))?;
+            string_options.insert(key.clone(), value);
+        }
+        Ok(Self::from_option_strings(&string_options))
     }
 
     /// Build per-download options from aria2's kebab-case option map.
@@ -525,6 +571,30 @@ impl DownloadOptions {
             dir: options.get("dir").cloned(),
             out: options.get("out").cloned(),
             file_allocation: options.get("file-allocation").cloned(),
+            continue_download: options
+                .get("continue")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            allow_overwrite: options
+                .get("allow-overwrite")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            auto_file_renaming: options
+                .get("auto-file-renaming")
+                .map(|v| v == "true")
+                .unwrap_or(true),
+            always_resume: options
+                .get("always-resume")
+                .map(|v| v == "true")
+                .unwrap_or(true),
+            max_resume_failure_tries: options
+                .get("max-resume-failure-tries")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0),
+            remove_control_file: options
+                .get("remove-control-file")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             mmap_threshold: positive_size_u64("mmap-threshold"),
             secure_falloc: options
                 .get("secure-falloc")
@@ -578,7 +648,8 @@ impl DownloadOptions {
                 .get("enable-dht")
                 .map(|v| v != "false")
                 .unwrap_or(true),
-            dht_listen_port: positive_u16("dht-listen-port"),
+            dht_listen_port: options.get("dht-listen-port").cloned(),
+            index_out: options.get("index-out").cloned(),
             dht_entry_point: options.get("dht-entry-point").and_then(|v| {
                 let entries = v
                     .split(',')
@@ -823,5 +894,27 @@ mod tests {
         assert_eq!(options.max_retries, 7);
         assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
         assert_eq!(options.header, vec!["X-One: 1", "X-Two: 2"]);
+    }
+
+    #[test]
+    fn rpc_option_map_rejects_invalid_registered_values() {
+        let mut values = HashMap::new();
+        values.insert(
+            "metalink-preferred-protocol".to_string(),
+            serde_json::json!("gopher"),
+        );
+
+        let error = DownloadOptions::try_from_rpc_options(&values)
+            .expect_err("invalid enum values must not fall back to defaults");
+        assert!(error.contains("metalink-preferred-protocol"));
+    }
+
+    #[test]
+    fn continue_option_defaults_to_false_and_accepts_explicit_true() {
+        assert!(!DownloadOptions::from_option_strings(&HashMap::new()).continue_download);
+
+        let mut values = HashMap::new();
+        values.insert("continue".to_string(), "true".to_string());
+        assert!(DownloadOptions::from_option_strings(&values).continue_download);
     }
 }

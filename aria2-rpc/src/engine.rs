@@ -10,6 +10,10 @@ use super::websocket::EventPublisher;
 use aria2_core::config::OptionRegistry;
 use aria2_core::request::request_group_man::RequestGroupMan;
 
+pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
+    !matches!(method, "system.listMethods" | "system.listNotifications")
+}
+
 /// Core RPC engine. Download state lives exclusively in `RequestGroupMan` and
 /// lifecycle changes are submitted to the core engine command channel.
 pub struct RpcEngine {
@@ -181,7 +185,8 @@ impl RpcEngine {
         // Supports both array-style ("token:xxx" as first param element)
         // and object-style ({"token": "xxx"}) params for backward compatibility.
         let (token, stripped_params) = split_auth_token(&req.params);
-        if (!is_multicall || token.is_some())
+        if rpc_method_requires_auth(&req.method)
+            && (!is_multicall || token.is_some())
             && let Err(auth_err) = self.auth_middleware.validate(token.as_deref())
         {
             return auth_err.into_response(req.id.clone());
@@ -237,10 +242,12 @@ impl RpcEngine {
                 .handle_add_uri(dispatch_req)
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            #[cfg(feature = "bittorrent")]
             "aria2.addTorrent" => self
                 .handle_add_torrent(dispatch_req)
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            #[cfg(feature = "metalink")]
             "aria2.addMetalink" => self
                 .handle_add_metalink(dispatch_req)
                 .await
@@ -311,6 +318,7 @@ impl RpcEngine {
                 .handle_change_option(dispatch_req)
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            #[cfg(feature = "bittorrent")]
             "aria2.getPeers" => self
                 .handle_get_peers(dispatch_req)
                 .await
@@ -355,11 +363,9 @@ impl RpcEngine {
             // Guard against recursion: a multicall may not contain a multicall.
             // Mirrors C++ SystemMulticallRpcMethod::execute()'s
             // "Recursive system.multicall forbidden." branch.
-            "system.multicall" => JsonRpcResponse::error(
-                id,
-                -32600,
-                "Nested system.multicall is not supported".to_string(),
-            ),
+            "system.multicall" => {
+                JsonRpcResponse::error(id, 1, "Recursive system.multicall forbidden.".to_string())
+            }
             _ => JsonRpcResponse::error(id, 1, format!("No such method: {}", dispatch_req.method)),
         }
     }
@@ -643,5 +649,34 @@ mod tests {
         .with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_success(), "Token from AuthConfig should work");
+    }
+
+    #[tokio::test]
+    async fn test_public_discovery_methods_skip_rpc_auth() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("secret"));
+
+        for method in ["system.listMethods", "system.listNotifications"] {
+            let req = JsonRpcRequest::new(method, serde_json::json!([])).with_id(1);
+            let resp = engine.handle_request(&req).await;
+            assert!(resp.is_success(), "{method} should not require a token");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multicall_public_discovery_methods_skip_rpc_auth() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("secret"));
+        let req = JsonRpcRequest::new(
+            "system.multicall",
+            serde_json::json!([[
+                {"methodName": "system.listMethods", "params": []},
+                {"methodName": "system.listNotifications", "params": []}
+            ]]),
+        )
+        .with_id(1);
+
+        let resp = engine.handle_request(&req).await;
+        let results = resp.result.expect("multicall should succeed");
+        assert!(!results[0][0].as_array().unwrap().is_empty());
+        assert!(!results[1][0].as_array().unwrap().is_empty());
     }
 }

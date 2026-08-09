@@ -26,6 +26,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "check-integrity".into(),
             opt_type: OptionType::Boolean,
+            short_name: Some('V'),
             default_value: OptionValue::Bool(false),
             description: "Check file integrity by validating hash".into(),
             category: OptionCategory::General,
@@ -66,6 +67,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "parameterized-uri".into(),
             opt_type: OptionType::Boolean,
+            short_name: Some('P'),
             default_value: OptionValue::Bool(false),
             description: "Enable parameterized URI support (e.g. {a,b})".into(),
             category: OptionCategory::General,
@@ -106,6 +108,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "force-sequential".into(),
             opt_type: OptionType::Boolean,
+            short_name: Some('Z'),
             default_value: OptionValue::Bool(false),
             description: "Force sequential download of files".into(),
             category: OptionCategory::General,
@@ -114,6 +117,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "no-netrc".into(),
             opt_type: OptionType::Boolean,
+            short_name: Some('n'),
             default_value: OptionValue::Bool(false),
             description: "Disable netrc file parsing for authentication".into(),
             category: OptionCategory::General,

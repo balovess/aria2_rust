@@ -33,6 +33,21 @@ impl ResumeHelper {
     }
 
     pub async fn detect(&self, total_length: u64) -> Result<ResumeState> {
+        let file_exists = self.output_path.exists();
+        // Match C++ `RequestGroup::removeDefunctControlFile`: a control file
+        // without its data file cannot be used for resume.
+        if !file_exists && self.control_path.exists() {
+            tokio::fs::remove_file(&self.control_path)
+                .await
+                .map_err(|error| {
+                    crate::error::Aria2Error::FileIo(format!(
+                        "Failed to remove defunct control file {}: {}",
+                        self.control_path.display(),
+                        error
+                    ))
+                })?;
+        }
+
         if !self.continue_opt || total_length == 0 {
             return Ok(ResumeState {
                 existing_length: 0,
@@ -43,7 +58,6 @@ impl ResumeHelper {
             });
         }
 
-        let file_exists = self.output_path.exists();
         let existing_length = if file_exists {
             tokio::fs::metadata(&self.output_path)
                 .await
@@ -169,6 +183,25 @@ mod tests {
         assert!(state.control_file.is_some());
         assert_eq!(state.start_offset, 300);
         assert!(!state.is_complete);
+    }
+
+    #[tokio::test]
+    async fn test_defunct_control_file_is_removed_when_output_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("missing.bin");
+        let ctrl_path = ControlFile::control_path_for(&out_path);
+        let cf = ControlFile::open_or_create(&ctrl_path, 1000, 10)
+            .await
+            .unwrap();
+        cf.save().await.unwrap();
+        assert!(ctrl_path.exists());
+
+        let helper = ResumeHelper::new(&out_path, true);
+        let state = helper.detect(1000).await.unwrap();
+
+        assert!(!state.should_resume);
+        assert_eq!(state.start_offset, 0);
+        assert!(!ctrl_path.exists());
     }
 
     #[tokio::test]

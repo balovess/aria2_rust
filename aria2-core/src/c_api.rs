@@ -25,7 +25,7 @@ use crate::engine::engine_command::EngineCommand;
 use crate::error::Result;
 use crate::rate_limiter::RateLimiterConfig;
 use crate::request::request_group::{
-    ChangeableKind, DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
+    DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
 };
 use crate::request::request_group_man::RequestGroupMan;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -393,60 +393,18 @@ impl Aria2RustSession {
     }
 
     fn change_options(&mut self, gid: u64, options: Vec<(String, String)>) -> i32 {
-        let Some(group) = self
-            .runtime
-            .block_on(self.request_man.read())
-            .find_group(GroupId::new(gid))
-        else {
-            return self.fail(format!("GID {gid} not found"), INVALID_ARGUMENT);
+        let changes = options
+            .into_iter()
+            .map(|(name, value)| (name, serde_json::Value::String(value)))
+            .collect();
+        let result = {
+            let manager = self.runtime.block_on(self.request_man.read());
+            manager.change_group_options(&GroupId::new(gid).to_hex_string(), changes)
         };
-        let is_active = group.recover().status().is_active();
-        let mut immediate = HashMap::new();
-        let mut pending = HashMap::new();
-        for (name, value) in options {
-            let Some(definition) = self.config.registry().get(&name) else {
-                continue;
-            };
-            let parsed = match definition.parse_value(&value) {
-                Ok(value) => value,
-                Err(error) => return self.fail(error, INVALID_ARGUMENT),
-            };
-            match crate::request::request_group::is_option_changeable(&name, is_active) {
-                ChangeableKind::Immediate => {
-                    immediate.insert(name, (&parsed).into());
-                }
-                ChangeableKind::Pending => {
-                    pending.insert(name, (&parsed).into());
-                }
-                ChangeableKind::NotChangeable => continue,
-            }
+        match result {
+            Ok(()) => 0,
+            Err(error) => self.fail(error, INVALID_ARGUMENT),
         }
-        if immediate.is_empty() && pending.is_empty() {
-            return 0;
-        }
-        if !immediate.is_empty() {
-            let update_result = {
-                let manager = self.runtime.block_on(self.request_man.read());
-                manager.update_group_options(&GroupId::new(gid).to_hex_string(), immediate)
-            };
-            if let Err(error) = update_result {
-                return self.fail(error, INVALID_ARGUMENT);
-            }
-        }
-        if !pending.is_empty() {
-            group.recover().set_pending_options(pending);
-            if is_active {
-                let pause_result = {
-                    let manager = self.runtime.block_on(self.request_man.read());
-                    manager.pause_group(GroupId::new(gid))
-                };
-                if let Err(error) = pause_result {
-                    return self.fail(error.to_string(), INVALID_ARGUMENT);
-                }
-                group.recover().request_restart();
-            }
-        }
-        0
     }
 
     fn get_info(&mut self, gid: u64) -> Option<Aria2RustDownloadInfo> {
@@ -1108,5 +1066,50 @@ mod tests {
         assert_eq!(unsafe { aria2_rust_hex_to_gid(hex.as_ptr()) }, gid);
         unsafe { aria2_rust_session_final(session) };
         aria2_rust_library_deinit();
+    }
+
+    #[test]
+    fn c_api_change_option_uses_reserved_group_semantics() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(aria2_rust_library_init(), 0);
+        let (pause_entry, pause_name, pause_value) = kv("pause", "true");
+        let session = unsafe { aria2_rust_session_new(&pause_entry, 1, ptr::null_mut()) };
+        let _keep_alive = [pause_name, pause_value];
+        assert!(!session.is_null());
+        let (dir_entry, dir_name, dir_value) = kv("dir", "reserved-dir");
+        let _keep_alive_option = [dir_name, dir_value];
+
+        let uri = CString::new("http://127.0.0.1:1/c-api-change-option").unwrap();
+        let uri_ptr = uri.as_ptr();
+        let mut gid = 0;
+        assert_eq!(
+            unsafe { aria2_rust_add_uri(session, &uri_ptr, 1, ptr::null(), 0, &mut gid) },
+            0
+        );
+
+        assert_eq!(
+            unsafe { aria2_rust_change_option(session, gid, &dir_entry, 1,) },
+            0
+        );
+
+        let group = unsafe {
+            (&*session)
+                .runtime
+                .block_on((&*session).request_man.read())
+                .find_group(GroupId::new(gid))
+        }
+        .expect("C API option change should keep the group");
+        let group = group.read().unwrap();
+        assert_eq!(group.options().dir.as_deref(), Some("reserved-dir"));
+        assert_eq!(
+            group.runtime_options().get("dir"),
+            Some(&serde_json::json!("reserved-dir"))
+        );
+        assert!(group.pending_options().is_empty());
+
+        assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
+        assert_eq!(aria2_rust_library_deinit(), 0);
     }
 }

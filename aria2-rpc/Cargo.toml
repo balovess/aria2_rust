@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Remote control server for aria2-rust: JSON-RPC 2.0, XML-RPC, and WebSocket download management with 34+ methods and 7 event types"
+description = "Remote control server for aria2-rust: aria2-compatible JSON-RPC 2.0, XML-RPC, and WebSocket download management"
 documentation = "https://docs.rs/aria2-rpc"
 homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
@@ -61,6 +61,7 @@ windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win
 default = []
 bittorrent = ["aria2-core/bittorrent", "aria2-protocol/bittorrent"]
 metalink = ["aria2-core/metalink", "aria2-protocol/metalink"]
+sftp = ["aria2-core/sftp", "aria2-protocol/sftp"]
 
 [[bench]]
 name = "rpc_bench"

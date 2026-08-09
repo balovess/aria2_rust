@@ -9,7 +9,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "all-proxy".into(),
             opt_type: OptionType::String,
-            short_name: Some('p'),
             description: "Global proxy URL".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -17,7 +16,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "http-proxy".into(),
             opt_type: OptionType::String,
-            short_name: Some('P'),
             description: "HTTP proxy URL".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -25,7 +23,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "https-proxy".into(),
             opt_type: OptionType::String,
-            short_name: Some('y'),
             description: "HTTPS proxy URL".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -33,7 +30,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "ftp-proxy".into(),
             opt_type: OptionType::String,
-            short_name: Some('F'),
             description: "FTP proxy URL".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -41,7 +37,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "no-proxy".into(),
             opt_type: OptionType::List,
-            short_name: Some('N'),
             description: "Proxy exclusion list (comma-separated domains)".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -117,7 +112,7 @@ impl crate::config::OptionRegistry {
             name: "user-agent".into(),
             opt_type: OptionType::String,
             short_name: Some('U'),
-            default_value: OptionValue::Str("aria2/1.37.0-Rust".into()),
+            default_value: OptionValue::Str("aria2/1.37.0".into()),
             description: "User-Agent header".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -125,7 +120,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "referer".into(),
             opt_type: OptionType::String,
-            short_name: Some('R'),
             description: "Referer header".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -133,7 +127,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "header".into(),
             opt_type: OptionType::List,
-            short_name: Some('H'),
             cumulative_delimiter: Some("\n"),
             description: "Custom headers (Header:Value pairs)".into(),
             category: OptionCategory::HttpFtp,
@@ -144,7 +137,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "load-cookies".into(),
             opt_type: OptionType::Path,
-            short_name: Some('C'),
             description: "Cookie file to load".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -152,7 +144,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "save-cookies".into(),
             opt_type: OptionType::Path,
-            short_name: Some('V'),
             description: "Cookie file to save".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -162,7 +153,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "connect-timeout".into(),
             opt_type: OptionType::Integer,
-            short_name: Some('T'),
             default_value: OptionValue::Int(60),
             min: Some(1),
             max: Some(600),
@@ -187,7 +177,6 @@ impl crate::config::OptionRegistry {
             short_name: Some('m'),
             default_value: OptionValue::Int(5),
             min: Some(0),
-            max: Some(100),
             description: "Max retry attempts".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -195,10 +184,9 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "retry-wait".into(),
             opt_type: OptionType::Integer,
-            short_name: Some('w'),
             default_value: OptionValue::Int(0),
             min: Some(0),
-            max: Some(3600),
+            max: Some(600),
             description: "Retry wait time in seconds".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -211,7 +199,6 @@ impl crate::config::OptionRegistry {
             short_name: Some('s'),
             default_value: OptionValue::Int(5),
             min: Some(1),
-            max: Some(16),
             description: "Connections per download".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -221,6 +208,8 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Size,
             short_name: Some('k'),
             default_value: OptionValue::Int((20 * 1024 * 1024) as i64),
+            min: Some(1024 * 1024),
+            max: Some(1024 * 1024 * 1024),
             description: "Min split size".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -241,7 +230,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "check-certificate".into(),
             opt_type: OptionType::Boolean,
-            short_name: Some('b'),
             default_value: OptionValue::Bool(true),
             description: "Verify SSL certificate".into(),
             category: OptionCategory::HttpFtp,
@@ -250,7 +238,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "ca-certificate".into(),
             opt_type: OptionType::Path,
-            short_name: Some('E'),
             description: "CA certificate file".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -260,7 +247,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "allow-overwrite".into(),
             opt_type: OptionType::Boolean,
-            short_name: Some('O'),
             default_value: OptionValue::Bool(false),
             description: "Allow overwriting existing files".into(),
             category: OptionCategory::HttpFtp,
@@ -286,6 +272,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "remote-time".into(),
             opt_type: OptionType::Boolean,
+            short_name: Some('R'),
             default_value: OptionValue::Bool(false),
             description: "Use remote file timestamp".into(),
             category: OptionCategory::HttpFtp,
@@ -430,6 +417,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "ftp-pasv".into(),
             opt_type: OptionType::Boolean,
+            short_name: Some('p'),
             default_value: OptionValue::Bool(true),
             description: "Use FTP passive mode".into(),
             category: OptionCategory::HttpFtp,

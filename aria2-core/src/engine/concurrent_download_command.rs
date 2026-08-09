@@ -88,7 +88,7 @@ impl ConcurrentDownloadCommand {
                 })?
         };
 
-        let alloc = "prealloc".to_string();
+        let alloc = crate::constants::DEFAULT_FILE_ALLOCATION.to_string();
         let secure = options.secure_falloc;
         let cache_mb: Option<usize> = None;
 

@@ -567,6 +567,82 @@ fn test_update_option_new_runtime_changeable() {
     assert!(!group.update_option("unknown-option", serde_json::json!(1)));
 }
 
+#[test]
+fn test_runtime_option_updates_populate_execution_fields() {
+    let mut group = RequestGroup::new(
+        GroupId::new(2),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert!(group.update_option("check-integrity", serde_json::json!("true")));
+    assert!(group.update_option("conditional-get", serde_json::json!("true")));
+    assert!(group.update_option("connect-timeout", serde_json::json!("12")));
+    assert!(group.update_option("lowest-speed-limit", serde_json::json!("4K")));
+    assert!(group.update_option("timeout", serde_json::json!("30")));
+    assert!(group.update_option("remote-time", serde_json::json!("true")));
+    assert!(group.update_option("ftp-pasv", serde_json::json!("false")));
+    assert!(group.update_option("ftp-user", serde_json::json!("alice")));
+    assert!(group.update_option("ftp-passwd", serde_json::json!("secret")));
+    assert!(group.update_option("http-auth-challenge", serde_json::json!("true")));
+    assert!(group.update_option("http-user", serde_json::json!("bob")));
+    assert!(group.update_option("http-passwd", serde_json::json!("password")));
+    assert!(group.update_option("metalink-location", serde_json::json!("JP")));
+    assert!(group.update_option("metalink-version", serde_json::json!("4.0")));
+    assert!(group.update_option("follow-metalink", serde_json::json!("mem")));
+    assert!(group.update_option(
+        "bt-tracker",
+        serde_json::json!("https://tracker.test/announce")
+    ));
+
+    let options = group.options();
+    assert!(options.check_integrity);
+    assert!(options.conditional_get);
+    assert_eq!(options.connect_timeout, Some(12));
+    assert_eq!(options.lowest_speed_limit, Some(4 * 1024));
+    assert_eq!(options.timeout, Some(30));
+    assert!(options.remote_time);
+    assert!(!options.ftp_pasv);
+    assert_eq!(options.ftp_user.as_deref(), Some("alice"));
+    assert_eq!(options.ftp_passwd.as_deref(), Some("secret"));
+    assert!(options.http_auth_challenge);
+    assert_eq!(options.http_user.as_deref(), Some("bob"));
+    assert_eq!(options.http_passwd.as_deref(), Some("password"));
+    assert_eq!(options.metalink_location.as_deref(), Some("JP"));
+    assert_eq!(options.metalink_version.as_deref(), Some("4.0"));
+    assert_eq!(options.follow_metalink, Some(super::FollowMode::Memory));
+    assert_eq!(
+        options
+            .bt_tracker
+            .as_ref()
+            .and_then(|values| values.first())
+            .map(String::as_str),
+        Some("https://tracker.test/announce")
+    );
+}
+
+#[test]
+fn test_runtime_option_enum_validation_is_shared_with_registry() {
+    assert!(
+        RequestGroup::validate_option_update(
+            "metalink-preferred-protocol",
+            &serde_json::json!("https")
+        )
+        .unwrap()
+    );
+    assert!(
+        RequestGroup::validate_option_update(
+            "metalink-preferred-protocol",
+            &serde_json::json!("gopher")
+        )
+        .is_err()
+    );
+    assert!(RequestGroup::validate_option_update("ftp-type", &serde_json::json!("ascii")).unwrap());
+    assert!(
+        RequestGroup::validate_option_update("ftp-type", &serde_json::json!("invalid")).is_err()
+    );
+}
+
 /// Verify that `is_removed()` correctly reflects the group's Removed
 /// status, and that it is non-blocking (does not deadlock when the
 /// status lock is contended).

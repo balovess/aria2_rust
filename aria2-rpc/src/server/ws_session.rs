@@ -123,11 +123,11 @@ async fn process_ws_jsonrpc(
     engine: &Arc<RpcEngine>,
     text: &str,
 ) {
-    use crate::json_rpc::{JsonRpcBatchResponse, parse_request};
+    use crate::json_rpc::{JsonRpcBatchResponse, JsonRpcWireEntry, parse_aria2_wire_document};
 
     // Step 1: Parse the incoming text as JSON-RPC request(s)
-    let requests = match parse_request(text.as_bytes()) {
-        Ok(reqs) => reqs,
+    let document = match parse_aria2_wire_document(text.as_bytes()) {
+        Ok(document) => document,
         Err(e) => {
             // Step 2: Parse error → send -32700 response
             tracing::warn!("WebSocket JSON-RPC parse error: {}", e);
@@ -138,16 +138,26 @@ async fn process_ws_jsonrpc(
     };
 
     // Step 3/4: Dispatch request(s) through the engine
-    if requests.len() == 1 {
+    if !document.is_batch {
         // Single request — send single response object (not wrapped in array)
-        let resp = engine.handle_request(&requests[0]).await;
+        let entry = document
+            .entries
+            .into_iter()
+            .next()
+            .expect("single JSON-RPC document must contain one entry");
+        let resp = match entry {
+            JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
+            JsonRpcWireEntry::Error(response) => response,
+        };
         send_ws_response(socket, &resp).await;
     } else {
         // Batch request — send array of response objects
-        let mut results = Vec::with_capacity(requests.len());
-        for req in &requests {
-            let resp = engine.handle_request(req).await;
-            results.push(resp);
+        let mut results = Vec::with_capacity(document.entries.len());
+        for entry in document.entries {
+            results.push(match entry {
+                JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
+                JsonRpcWireEntry::Error(response) => response,
+            });
         }
         let batch = JsonRpcBatchResponse(results);
         match batch.to_string() {

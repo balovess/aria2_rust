@@ -2,6 +2,7 @@
 //!
 //! Tests for RPC handler methods exercised through `RpcEngine::handle_request`.
 
+#[cfg(any(feature = "bittorrent", feature = "metalink"))]
 use base64::Engine;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,9 +11,14 @@ use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
 use crate::types::{SessionInfo, StatusInfo, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
+use aria2_core::download::download_context::DownloadContext;
+use aria2_core::download::file_entry::FileEntry;
+use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+#[cfg(any(feature = "bittorrent", feature = "metalink"))]
 use aria2_core::util::rwlock_ext::RwLockRecover;
 
 #[tokio::test]
+#[cfg(feature = "bittorrent")]
 async fn test_add_uri_preserves_memory_follow_mode_from_rpc_options() {
     let engine = RpcEngine::new();
     let request = JsonRpcRequest::new(
@@ -41,6 +47,27 @@ async fn test_add_uri_preserves_memory_follow_mode_from_rpc_options() {
 }
 
 #[tokio::test]
+async fn test_add_uri_rejects_invalid_registered_option() {
+    let engine = RpcEngine::new();
+    let request = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!([["https://example.test/file"], {
+            "metalink-preferred-protocol": "gopher"
+        }]),
+    )
+    .with_id(1);
+
+    let response = engine.handle_request(&request).await;
+    let error = response
+        .error
+        .expect("invalid option must fail task creation");
+    assert_eq!(error.code, 1);
+    assert!(error.message.contains("metalink-preferred-protocol"));
+    assert_eq!(engine.task_count().await, 0);
+}
+
+#[tokio::test]
+#[cfg(feature = "bittorrent")]
 async fn test_handle_add_torrent() {
     let engine = RpcEngine::new();
     let fake_torrent_bencode = "d8:announce40:http://tracker.example.com/announce4:info6:lengthi1000e12:piece lengthi32768e6:pieces20:00000000000000000000000ee";
@@ -57,6 +84,7 @@ async fn test_handle_add_torrent() {
 }
 
 #[tokio::test]
+#[cfg(feature = "bittorrent")]
 async fn test_handle_add_torrent_invalid_data() {
     let engine = RpcEngine::new();
     let not_torrent =
@@ -70,6 +98,7 @@ async fn test_handle_add_torrent_invalid_data() {
 }
 
 #[tokio::test]
+#[cfg(feature = "metalink")]
 async fn test_handle_add_metalink() {
     let engine = RpcEngine::new();
     let metalink_xml = r#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><files><file name="test.bin"><size>1024</size><url priority="1">http://example.com/test.bin</url></file></files></metalink>"#;
@@ -137,6 +166,7 @@ async fn test_add_metalink_direct_only_applies_filters_and_priority() {
 }
 
 #[tokio::test]
+#[cfg(feature = "metalink")]
 async fn test_add_metalink_position_inserts_the_whole_result() {
     let engine = RpcEngine::new();
     let first = JsonRpcRequest::new(
@@ -165,6 +195,7 @@ async fn test_add_metalink_position_inserts_the_whole_result() {
 }
 
 #[tokio::test]
+#[cfg(feature = "metalink")]
 async fn test_handle_add_metalink_invalid_data() {
     let engine = RpcEngine::new();
     let not_metalink = base64::engine::general_purpose::STANDARD.encode("this is not metalink xml");
@@ -290,6 +321,7 @@ async fn test_tell_status_includes_upload_fields() {
 }
 
 #[tokio::test]
+#[cfg(feature = "bittorrent")]
 async fn test_get_peers_returns_core_state_error() {
     let engine = RpcEngine::new();
     let req =
@@ -299,6 +331,7 @@ async fn test_get_peers_returns_core_state_error() {
 }
 
 #[tokio::test]
+#[cfg(feature = "bittorrent")]
 async fn test_get_peers_unknown_gid() {
     let engine = RpcEngine::new();
     let req =
@@ -481,6 +514,25 @@ async fn test_change_global_option_invalid_value_is_execution_error() {
     let error = resp.error.expect("invalid enum value must fail");
     assert_eq!(error.code, 1);
     assert!(error.message.contains("uri-selector"));
+}
+
+#[tokio::test]
+async fn test_change_option_rejects_invalid_registered_enum() {
+    let engine = RpcEngine::new();
+    let add_req =
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+    let add_resp = engine.handle_request(&add_req).await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid, {"metalink-preferred-protocol": "gopher"}]),
+    )
+    .with_id(2);
+    let resp = engine.handle_request(&req).await;
+    let error = resp.error.expect("invalid enum value must fail");
+    assert_eq!(error.code, 1);
+    assert!(error.message.contains("metalink-preferred-protocol"));
 }
 
 #[tokio::test]
@@ -763,7 +815,7 @@ async fn test_multicall_invalid_entries_match_cpp_errors_and_continue() {
             .unwrap()
             .contains("expected struct")
     );
-    assert_eq!(results[1]["code"], -32600);
+    assert_eq!(results[1]["code"], 1);
     assert!(
         results[1]["message"]
             .as_str()
@@ -1164,6 +1216,46 @@ async fn test_get_uris_serialization_format() {
     assert_eq!(uris[0]["uri"].as_str(), Some("http://test.com/a.bin"));
 }
 
+#[test]
+fn test_file_list_matches_aria2_file_entry_contract() {
+    let group = RequestGroup::new(GroupId::new(42), Vec::new(), DownloadOptions::default());
+    let mut context = DownloadContext::new_default();
+    context.set_file_entries(vec![
+        FileEntry::new(
+            "downloads/first.bin".into(),
+            10,
+            0,
+            vec!["https://example.test/first.bin".into()],
+        ),
+        FileEntry::new(
+            "downloads/second.bin".into(),
+            20,
+            10,
+            vec!["https://example.test/second.bin".into()],
+        ),
+    ]);
+    context.set_file_filter(vec![2]);
+    group.set_download_context(Arc::new(context));
+
+    let files = RpcEngine::build_file_infos(&group, 15);
+
+    assert_eq!(
+        files.len(),
+        2,
+        "unselected files remain visible to RPC clients"
+    );
+    assert_eq!(files[0].index, 1);
+    assert_eq!(files[0].path, "downloads/first.bin");
+    assert!(!files[0].selected);
+    assert_eq!(files[0].completed_length, 10);
+    assert_eq!(files[0].uris[0].uri, "https://example.test/first.bin");
+    assert_eq!(files[0].uris[0].status, crate::types::UriStatus::Waiting);
+    assert_eq!(files[1].index, 2);
+    assert_eq!(files[1].path, "downloads/second.bin");
+    assert!(files[1].selected);
+    assert_eq!(files[1].completed_length, 5);
+}
+
 #[tokio::test]
 async fn test_get_files_valid_gid_returns_file_list() {
     let engine = RpcEngine::new();
@@ -1259,7 +1351,7 @@ async fn test_get_files_selected_field() {
 }
 
 #[tokio::test]
-async fn test_get_servers_valid_gid_returns_server_list() {
+async fn test_get_servers_active_gid_returns_file_indexes_without_fake_servers() {
     let engine = RpcEngine::new();
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
@@ -1271,6 +1363,16 @@ async fn test_get_servers_valid_gid_returns_server_list() {
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    // `getServers` only accepts active groups. Promotion must not turn the
+    // configured mirror list into fake in-flight server entries.
+    let manager = engine.group_man.as_ref().unwrap().read().await;
+    assert_eq!(manager.fill_from_reserver().len(), 1);
+    let group = manager.group_by_hex(&gid).expect("promoted group");
+    group
+        .recover()
+        .set_download_context(Arc::new(DownloadContext::new(0, 0, "file.bin".to_string())));
+    drop(manager);
 
     let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;
@@ -1290,18 +1392,8 @@ async fn test_get_servers_valid_gid_returns_server_list() {
     );
     assert_eq!(
         arr[0]["servers"].as_array().map(|a| a.len()),
-        Some(2),
-        "Should have 2 server entries"
-    );
-    assert_eq!(
-        arr[0]["servers"][0]["uri"].as_str(),
-        Some("http://dl.example.com/file.bin"),
-        "First server URI should match"
-    );
-    assert_eq!(
-        arr[0]["servers"][0]["downloadSpeed"].as_str(),
-        Some("0"),
-        "A new task has no measured download speed"
+        Some(0),
+        "A promoted group without in-flight requests must have no server entries"
     );
 }
 
@@ -1315,7 +1407,7 @@ async fn test_get_servers_unknown_gid_returns_error() {
 }
 
 #[tokio::test]
-async fn test_get_servers_zero_download_speed() {
+async fn test_get_servers_waiting_gid_returns_error() {
     let engine = RpcEngine::new();
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
@@ -1327,38 +1419,25 @@ async fn test_get_servers_zero_download_speed() {
 
     let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success());
-    let servers = resp.result.unwrap();
-    assert_eq!(
-        servers[0]["servers"][0]["downloadSpeed"].as_str(),
-        Some("0"),
-        "No-progress task should have 0 speed (as string)"
-    );
-    assert_eq!(
-        servers[0]["servers"][0]["currentUri"].as_str(),
-        servers[0]["servers"][0]["uri"].as_str(),
-        "current_uri should equal uri when no redirect"
-    );
+    assert!(resp.is_error(), "waiting downloads must be rejected");
+    assert_eq!(resp.error.unwrap().code, 1);
 }
 
 #[tokio::test]
-async fn test_get_servers_empty_uri_list() {
+async fn test_get_servers_paused_gid_returns_error() {
     let engine = RpcEngine::new();
     let add_req =
         JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://single.com/f"])).with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
-    let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success());
+    let pause_req = JsonRpcRequest::new("aria2.pause", serde_json::json!([gid])).with_id(2);
+    assert!(engine.handle_request(&pause_req).await.is_success());
 
-    let servers = resp.result.unwrap();
-    assert_eq!(
-        servers[0]["servers"].as_array().map(|a| a.len()),
-        Some(1),
-        "Single URI should produce 1 server entry"
-    );
+    let servers_req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(3);
+    let resp = engine.handle_request(&servers_req).await;
+    assert!(resp.is_error(), "paused downloads must be rejected");
+    assert_eq!(resp.error.unwrap().code, 1);
 }
 
 #[tokio::test]
@@ -1387,11 +1466,12 @@ async fn test_get_version_returns_version_info() {
         !version_info.enabled_features.is_empty(),
         "Enabled features list should not be empty"
     );
-    assert!(
+    assert_eq!(
         version_info
             .enabled_features
-            .contains(&"bittorrent".to_string()),
-        "Should include bittorrent feature"
+            .contains(&"BitTorrent".to_string()),
+        cfg!(feature = "bittorrent"),
+        "BitTorrent feature visibility must match the build"
     );
 }
 

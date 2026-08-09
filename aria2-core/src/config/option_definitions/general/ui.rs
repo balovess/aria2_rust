@@ -26,7 +26,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "dry-run".into(),
             opt_type: OptionType::Boolean,
-            short_name: Some('n'),
             default_value: OptionValue::Bool(false),
             description: "Dry run (check only, no download)".into(),
             category: OptionCategory::General,

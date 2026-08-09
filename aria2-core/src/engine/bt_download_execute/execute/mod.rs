@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use super::types::PeerKey;
+use crate::config::parse_integer_segments;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
@@ -58,6 +59,26 @@ impl BtDownloadCommand {
             self.bt_runtime.set_connections(active_connections.len());
             info!("[BT] Admitted incoming peer {}", endpoint);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_listen_ports;
+
+    #[test]
+    fn listen_port_parser_expands_original_segment_syntax() {
+        assert_eq!(
+            parse_listen_ports("6881-6883,6999").unwrap(),
+            vec![6881, 6882, 6883, 6999]
+        );
+    }
+
+    #[test]
+    fn listen_port_parser_rejects_values_outside_original_bounds() {
+        assert!(parse_listen_ports("1023").is_err());
+        assert!(parse_listen_ports("70000").is_err());
+        assert!(parse_listen_ports("6881-").is_err());
     }
 }
 
@@ -287,7 +308,7 @@ impl Command for BtDownloadCommand {
                     .map(parse_listen_ports)
                     .transpose()
                     .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?
-                    .unwrap_or(0..=0);
+                    .unwrap_or_else(|| vec![0]);
                 (
                     ports,
                     group.options().bt_max_peers,
@@ -549,26 +570,12 @@ impl Command for BtDownloadCommand {
     }
 }
 
-fn parse_listen_ports(value: &str) -> std::result::Result<std::ops::RangeInclusive<u16>, String> {
-    let value = value.trim();
-    let mut parts = value.split('-');
-    let start = parts
-        .next()
-        .filter(|port| !port.is_empty())
-        .ok_or_else(|| "listen-port must not be empty".to_owned())?
-        .parse::<u16>()
-        .map_err(|error| format!("invalid listen-port start: {error}"))?;
-    let end = match parts.next() {
-        Some(value) if !value.is_empty() => value
-            .parse::<u16>()
-            .map_err(|error| format!("invalid listen-port end: {error}"))?,
-        Some(_) => return Err(format!("invalid listen-port range: {value}")),
-        None => start,
-    };
-    if parts.next().is_some() || start > end {
-        return Err(format!("invalid listen-port range: {value}"));
-    }
-    Ok(start..=end)
+fn parse_listen_ports(value: &str) -> std::result::Result<Vec<u16>, String> {
+    let ports = parse_integer_segments(value, 1024, u16::MAX as i64)?
+        .into_iter()
+        .flat_map(|range| range.map(|port| port as u16))
+        .collect::<Vec<_>>();
+    Ok(ports)
 }
 
 impl BtDownloadCommand {

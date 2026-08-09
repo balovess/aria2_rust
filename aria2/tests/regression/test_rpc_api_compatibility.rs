@@ -100,6 +100,7 @@ async fn regression_add_torrent_rejects_invalid() {
 
 /// Test: aria2.addMetalink validates Metalink XML.
 #[tokio::test]
+#[cfg(feature = "metalink")]
 async fn regression_add_metalink_validates_xml() {
     let engine = RpcEngine::new();
     let metalink_xml = base64::Engine::encode(
@@ -442,13 +443,13 @@ async fn regression_change_option_validates_keys() {
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);
 
-    // Invalid option key
+    // Unknown option keys are ignored by aria2's gatherChangeableOption().
     let invalid_req = make_request(
         "aria2.changeOption",
         serde_json::json!([gid, {"invalid-option": "value"}]),
     );
     let invalid_resp = engine.handle_request(&invalid_req).await;
-    assert_error_code(&invalid_resp, -32602);
+    assert_success(&invalid_resp);
 }
 
 /// Test: aria2.changeOption accepts max-connection-per-server (runtime-changeable).
@@ -932,9 +933,9 @@ async fn regression_remove_download_result_returns_ok() {
 // System Discovery Methods (2 methods)
 // =========================================================================
 
-/// Test: system.listMethods returns all 36 methods.
+/// Test: system.listMethods matches aria2's feature-specific method order.
 #[tokio::test]
-async fn regression_list_methods_returns_36_methods() {
+async fn regression_list_methods_returns_feature_specific_methods() {
     let engine = RpcEngine::new();
 
     let req = make_request("system.listMethods", serde_json::json!([]));
@@ -942,16 +943,55 @@ async fn regression_list_methods_returns_36_methods() {
 
     assert_success(&resp);
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(
-        methods.len(),
-        36,
-        "Should return exactly the 36 original methods"
-    );
+    let mut expected = vec!["aria2.addUri"];
+    #[cfg(feature = "bittorrent")]
+    expected.extend(["aria2.addTorrent", "aria2.getPeers"]);
+    #[cfg(feature = "metalink")]
+    expected.push("aria2.addMetalink");
+    expected.extend([
+        "aria2.remove",
+        "aria2.pause",
+        "aria2.forcePause",
+        "aria2.pauseAll",
+        "aria2.forcePauseAll",
+        "aria2.unpause",
+        "aria2.unpauseAll",
+        "aria2.forceRemove",
+        "aria2.changePosition",
+        "aria2.tellStatus",
+        "aria2.getUris",
+        "aria2.getFiles",
+        "aria2.getServers",
+        "aria2.tellActive",
+        "aria2.tellWaiting",
+        "aria2.tellStopped",
+        "aria2.getOption",
+        "aria2.changeUri",
+        "aria2.changeOption",
+        "aria2.getGlobalOption",
+        "aria2.changeGlobalOption",
+        "aria2.purgeDownloadResult",
+        "aria2.removeDownloadResult",
+        "aria2.getVersion",
+        "aria2.getSessionInfo",
+        "aria2.shutdown",
+        "aria2.forceShutdown",
+        "aria2.getGlobalStat",
+        "aria2.saveSession",
+        "system.multicall",
+        "system.listMethods",
+        "system.listNotifications",
+    ]);
+    let actual: Vec<&str> = methods.iter().map(String::as_str).collect();
+    assert_eq!(actual, expected);
 
     // Verify key methods are present
     assert!(methods.contains(&"aria2.addUri".to_string()));
     assert!(methods.contains(&"aria2.addTorrent".to_string()));
-    assert!(methods.contains(&"aria2.addMetalink".to_string()));
+    assert_eq!(
+        methods.contains(&"aria2.addMetalink".to_string()),
+        cfg!(feature = "metalink")
+    );
     assert!(methods.contains(&"aria2.remove".to_string()));
     assert!(methods.contains(&"aria2.tellStatus".to_string()));
     assert!(methods.contains(&"aria2.getVersion".to_string()));
@@ -959,14 +999,14 @@ async fn regression_list_methods_returns_36_methods() {
     assert!(methods.contains(&"system.listNotifications".to_string()));
 }
 
-/// Test: system.listNotifications returns 6 notifications.
+/// Test: system.listNotifications matches aria2's feature-specific order.
 ///
 /// C++ aria2 and aria2-next both define exactly 6 notifications:
 /// onDownloadStart, onDownloadPause, onDownloadStop, onDownloadComplete,
 /// onDownloadError, onBtDownloadComplete. See RpcMethodFactory.cc and
 /// WebSocketSessionMan.cc in the original source.
 #[tokio::test]
-async fn regression_list_notifications_returns_6() {
+async fn regression_list_notifications_returns_feature_specific_events() {
     let engine = RpcEngine::new();
 
     let req = make_request("system.listNotifications", serde_json::json!([]));
@@ -974,11 +1014,18 @@ async fn regression_list_notifications_returns_6() {
 
     assert_success(&resp);
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(
-        notifications.len(),
-        6,
-        "Should return exactly 6 notifications (matching C++ aria2)"
-    );
+    let mut expected = vec![
+        "aria2.onDownloadStart",
+        "aria2.onDownloadPause",
+        "aria2.onDownloadStop",
+        "aria2.onDownloadComplete",
+        "aria2.onDownloadError",
+    ];
+    if cfg!(feature = "bittorrent") {
+        expected.push("aria2.onBtDownloadComplete");
+    }
+    let actual: Vec<&str> = notifications.iter().map(String::as_str).collect();
+    assert_eq!(actual, expected);
 
     // Verify notification names match C++ aria2 exactly
     assert!(notifications.contains(&"aria2.onDownloadStart".to_string()));
@@ -986,7 +1033,10 @@ async fn regression_list_notifications_returns_6() {
     assert!(notifications.contains(&"aria2.onDownloadStop".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadComplete".to_string()));
     assert!(notifications.contains(&"aria2.onDownloadError".to_string()));
-    assert!(notifications.contains(&"aria2.onBtDownloadComplete".to_string()));
+    assert_eq!(
+        notifications.contains(&"aria2.onBtDownloadComplete".to_string()),
+        cfg!(feature = "bittorrent")
+    );
 }
 
 // =========================================================================
@@ -1284,7 +1334,7 @@ async fn regression_multicall_covers_previously_missing_methods() {
     }
 }
 
-/// Test: a nested `system.multicall` is still rejected with -32600 without
+/// Test: a nested `system.multicall` is still rejected with code 1 without
 /// aborting the surrounding batch.
 #[tokio::test]
 async fn regression_multicall_nested_multicall_rejected() {
@@ -1304,7 +1354,7 @@ async fn regression_multicall_nested_multicall_rejected() {
     assert_success(&resp);
 
     assert_multicall_ok(&resp, 0, "aria2.getVersion");
-    assert_multicall_error_code(&resp, 1, -32600);
+    assert_multicall_error_code(&resp, 1, 1);
     assert_multicall_ok(&resp, 2, "aria2.getSessionInfo");
 }
 

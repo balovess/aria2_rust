@@ -9,8 +9,8 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "file-allocation".into(),
             opt_type: OptionType::Enum,
-            short_name: Some('f'),
-            default_value: OptionValue::Str("trunc".into()),
+            short_name: Some('a'),
+            default_value: OptionValue::Str("prealloc".into()),
             allowed_values: &["none", "prealloc", "falloc", "trunc", "mmap"],
             description: "File allocation method (none/prealloc/falloc/trunc/mmap)".into(),
             category: OptionCategory::Advanced,
@@ -53,7 +53,6 @@ impl crate::config::OptionRegistry {
             short_name: Some('j'),
             default_value: OptionValue::Int(5),
             min: Some(1),
-            max: Some(256),
             description: "Max concurrent downloads".into(),
             category: OptionCategory::Advanced,
             ..Default::default()
@@ -63,7 +62,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "max-overall-download-limit".into(),
             opt_type: OptionType::Size,
-            short_name: Some('A'),
             default_value: OptionValue::Int(0),
             description: "Overall download speed limit (0=unlimited)".into(),
             category: OptionCategory::Advanced,
@@ -72,7 +70,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "max-download-limit".into(),
             opt_type: OptionType::Size,
-            short_name: Some('Q'),
             default_value: OptionValue::Int(0),
             description: "Per-task download limit (0=unlimited)".into(),
             category: OptionCategory::Advanced,
@@ -81,7 +78,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "max-overall-upload-limit".into(),
             opt_type: OptionType::Size,
-            short_name: Some('W'),
             default_value: OptionValue::Int(0),
             description: "Overall upload speed limit (0=unlimited)".into(),
             category: OptionCategory::Advanced,
@@ -90,7 +86,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "max-upload-limit".into(),
             opt_type: OptionType::Size,
-            short_name: Some('K'),
+            short_name: Some('u'),
             default_value: OptionValue::Int(0),
             description: "Per-task upload limit (0=unlimited)".into(),
             category: OptionCategory::Advanced,
@@ -101,8 +97,9 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "piece-length".into(),
             opt_type: OptionType::Size,
-            short_name: Some('Y'),
             default_value: OptionValue::Int((1024 * 1024) as i64),
+            min: Some(1024 * 1024),
+            max: Some(1024 * 1024 * 1024),
             description: "BT piece length".into(),
             category: OptionCategory::Advanced,
             ..Default::default()
@@ -110,7 +107,6 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "disk-cache".into(),
             opt_type: OptionType::Size,
-            short_name: Some('Z'),
             default_value: OptionValue::Int((16 * 1024 * 1024) as i64),
             description: "Disk cache size (0=disabled)".into(),
             category: OptionCategory::Advanced,
@@ -121,10 +117,9 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "stop".into(),
             opt_type: OptionType::Integer,
-            short_name: Some('z'),
             default_value: OptionValue::Int(0),
             min: Some(0),
-            max: Some(86400),
+            max: Some(i32::MAX as u64),
             description: "Stop after N seconds of completion (0=never)".into(),
             category: OptionCategory::Advanced,
             ..Default::default()

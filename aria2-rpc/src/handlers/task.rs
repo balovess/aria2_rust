@@ -5,7 +5,7 @@
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::rpc_helpers::normalize_rpc_options;
-use crate::types::{DownloadStatus, FileInfo, StatusInfo, create_gid};
+use crate::types::{DownloadStatus, FileInfo, StatusInfo, UriEntry, UriStatus, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::checksum::checksum::Checksum;
 use aria2_core::constants as core_constants;
@@ -189,7 +189,7 @@ impl RpcEngine {
 
         #[cfg(feature = "metalink")]
         if let Some(group_man) = &self.group_man {
-            let options = rpc_options_to_download_options(&opts);
+            let options = rpc_options_to_download_options(&opts)?;
             let man = group_man.read().await;
             let converter =
                 aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
@@ -687,7 +687,7 @@ impl RpcEngine {
             }
             m
         };
-        let dl_options = rpc_options_to_download_options(&merged_options);
+        let dl_options = rpc_options_to_download_options(&merged_options)?;
 
         // Validate checksum format at task creation time, before any download starts.
         if let Some((ref algo, ref val)) = dl_options.checksum {
@@ -736,6 +736,125 @@ impl RpcEngine {
         Ok(gid_str)
     }
 
+    /// Build the file list exposed by `getFiles` and `tellStatus.files`.
+    ///
+    /// The original implementation returns every file entry, including
+    /// entries excluded by `select-file`; selection is represented by the
+    /// `selected` field. Keeping this conversion in one helper prevents the
+    /// two RPC methods from drifting apart.
+    pub(crate) fn build_file_infos(
+        g: &aria2_core::request::request_group::RequestGroup,
+        completed: u64,
+    ) -> Vec<FileInfo> {
+        let fallback_path = || {
+            let options = g.options();
+            let name = options
+                .out
+                .clone()
+                .or_else(|| {
+                    g.uris().first().and_then(|uri| {
+                        url::Url::parse(uri)
+                            .ok()
+                            .and_then(|parsed| {
+                                parsed.path_segments()?.next_back().map(str::to_owned)
+                            })
+                            .filter(|segment| !segment.is_empty())
+                    })
+                })
+                .unwrap_or_default();
+            if name.is_empty() {
+                return name;
+            }
+            match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
+                Some(dir) => std::path::PathBuf::from(dir)
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned(),
+                None => name,
+            }
+        };
+
+        if let Some(context) = g.get_download_context() {
+            return context
+                .get_file_entries()
+                .iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    let mut info = FileInfo::new(
+                        if file.path().is_empty() {
+                            fallback_path()
+                        } else {
+                            file.path().to_owned()
+                        },
+                        file.length(),
+                    )
+                    .with_index(index + 1)
+                    .with_completed(completed.saturating_sub(file.offset()).min(file.length()))
+                    .with_uris(Self::build_uri_entries(file));
+                    info.selected = file.is_requested();
+                    info
+                })
+                .collect();
+        }
+
+        let mut info = FileInfo::new(fallback_path(), g.get_total_length_atomic())
+            .with_index(1)
+            .with_completed(completed)
+            .with_uris(g.uris().iter().cloned().map(UriEntry::new).collect());
+        info.selected = true;
+        vec![info]
+    }
+
+    /// Convert the core URI lifecycle into aria2's public URI vocabulary.
+    ///
+    /// The core keeps `spent` as a useful lifecycle state. The C++ RPC
+    /// adapter exposes dispatched URIs as `used`, so that internal state must
+    /// never leak through the external seam.
+    pub(crate) fn build_uri_entries(
+        file: &aria2_core::download::file_entry::FileEntry,
+    ) -> Vec<UriEntry> {
+        let remaining = file.remaining_uris();
+        file.uris()
+            .into_iter()
+            .map(|uri| UriEntry {
+                status: if remaining.iter().any(|candidate| candidate == &uri) {
+                    UriStatus::Waiting
+                } else {
+                    UriStatus::Used
+                },
+                uri,
+            })
+            .collect()
+    }
+
+    /// Convert a stopped core snapshot without dropping file selection or URI
+    /// state. This is the same wire adapter used by `tellStatus.files` and
+    /// `getFiles` for completed, removed, and failed downloads.
+    pub(crate) fn build_file_infos_from_result(
+        result: &aria2_core::request::request_group::download_result::DownloadResult,
+    ) -> Vec<FileInfo> {
+        result
+            .files
+            .iter()
+            .map(|file| {
+                let mut info = FileInfo::new(file.path.clone(), file.length)
+                    .with_index(file.index)
+                    .with_completed(file.completed_length)
+                    .with_uris(
+                        file.uris
+                            .iter()
+                            .map(|uri| UriEntry {
+                                uri: uri.uri.clone(),
+                                status: UriStatus::from_core_status(&uri.status),
+                            })
+                            .collect(),
+                    );
+                info.selected = file.selected;
+                info
+            })
+            .collect()
+    }
+
     /// Build a complete StatusInfo from a RequestGroup read guard.
     ///
     /// Populates all available fields matching original aria2c's
@@ -753,18 +872,9 @@ impl RpcEngine {
         let uploaded = g.get_uploaded_length();
         let ul_speed = g.get_upload_speed_cached();
         let dir = g.options().dir.clone().unwrap_or_default();
-        let uris: Vec<String> = g.uris().to_vec();
-        let first_uri = uris.first().cloned().unwrap_or_default();
-
-        // Build file entries matching original createFileEntry:
-        // index (1-based), path, selected, length, completedLength, uris
-        let files = vec![
-            FileInfo::new(first_uri, total)
-                .with_completed(completed)
-                .with_index(1),
-        ];
 
         let connections = g.options().split.unwrap_or(core_constants::DEFAULT_SPLIT);
+        let files = Self::build_file_infos(g, completed);
 
         // BT-specific fields: bitfield, piece length, num pieces, info hash
         let bt_info_hash = g.get_bt_info_hash_hex();
@@ -879,6 +989,8 @@ impl RpcEngine {
 /// The public RPC wire format uses strings for options. The core adapter also
 /// accepts numeric/boolean JSON values for existing Rust callers and
 /// canonicalizes them before parsing.
-fn rpc_options_to_download_options(opts: &HashMap<String, serde_json::Value>) -> DownloadOptions {
-    DownloadOptions::from_rpc_options(opts)
+fn rpc_options_to_download_options(
+    opts: &HashMap<String, serde_json::Value>,
+) -> Result<DownloadOptions, JsonRpcError> {
+    DownloadOptions::try_from_rpc_options(opts).map_err(JsonRpcError::RpcExecution)
 }

@@ -150,7 +150,7 @@ impl DownloadEvent {
         self.method.clone()
     }
 
-    // -- C++ compatible notification constructors (6 events) --
+    // -- C++ compatible notification constructors (5 core + BT event) --
 
     pub fn download_start(gid: impl Into<String>) -> Self {
         Self::from_gid(EventType::DownloadStart, gid)

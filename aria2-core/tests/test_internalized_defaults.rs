@@ -4,8 +4,8 @@
 //! through the public `DownloadCommand` API against a live in-process test
 //! server:
 //!
-//! * SubTask 5.1 — default file-allocation is `falloc` (verified by asserting
-//!   `constants::DEFAULT_FILE_ALLOCATION == "falloc"` and completing a real
+//! * The default file-allocation is `prealloc` (verified by asserting
+//!   `constants::DEFAULT_FILE_ALLOCATION == "prealloc"` and completing a real
 //!   download that exercises the preallocation code path).
 //! * SubTask 5.2 — progress reporting flows through the auto-wired mpsc
 //!   channel + aggregator task into the `RequestGroup`'s atomic
@@ -29,19 +29,18 @@ fn tmp_dir() -> tempfile::TempDir {
 }
 
 /// SubTask 5.1: Download a 1 MiB file with `DownloadOptions::default()` and
-/// verify the default file-allocation strategy is `trunc` (aria2-next default).
+/// verify the default file-allocation strategy is `prealloc` (aria2 default).
 ///
 /// The assertion on `constants::DEFAULT_FILE_ALLOCATION` proves the default
 /// allocation strategy, and the successful completion of the download
-/// exercises the trunc allocation code path end-to-end.
+/// exercises the preallocation code path end-to-end.
 #[tokio::test]
-async fn test_default_download_uses_trunc_allocation() {
-    // Prove the default allocation strategy is trunc — this matches aria2-next
-    // which changed the default from prealloc/falloc to trunc.
+async fn test_default_download_uses_prealloc_allocation() {
+    // Prove the default allocation strategy is prealloc, matching aria2.
     assert_eq!(
         constants::DEFAULT_FILE_ALLOCATION,
-        "trunc",
-        "default file-allocation must be trunc (aria2-next default)"
+        "prealloc",
+        "default file-allocation must be prealloc (aria2 default)"
     );
 
     let server = start_server().await;

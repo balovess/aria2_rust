@@ -130,6 +130,10 @@ pub struct RequestGroup {
     /// Whether any command in the current command generation failed.
     pub command_failure: AtomicBool,
 
+    /// Number of URI attempts that failed because the remote did not support
+    /// resuming. Mirrors C++ `RequestGroup::resumeFailureCount_`.
+    pub resume_failure_count: AtomicU32,
+
     /// Whether saving the .aria2 control file is currently enabled.
     /// Disabled during hash checking to prevent corrupt state.
     pub save_control_file_enabled: std::sync::RwLock<std::sync::atomic::AtomicBool>,
@@ -234,6 +238,7 @@ impl RequestGroup {
             last_error_message: std::sync::RwLock::new(String::new()),
             connection_contexts: std::sync::RwLock::new(Vec::new()),
             command_failure: AtomicBool::new(false),
+            resume_failure_count: AtomicU32::new(0),
             save_control_file_enabled: std::sync::RwLock::new(std::sync::atomic::AtomicBool::new(
                 true,
             )),
