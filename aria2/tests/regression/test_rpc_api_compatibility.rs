@@ -3,10 +3,12 @@
 //! These tests verify that all 36 original RPC methods return values in the expected format
 //! and maintain compatibility with the original aria2 RPC specification.
 
+use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::json_rpc::JsonRpcResponse;
 use aria2_rpc::server::RpcAuthMiddleware;
+use std::sync::Arc;
 
 /// Helper to create a JSON-RPC request.
 fn make_request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
@@ -565,7 +567,9 @@ async fn regression_get_files_format() {
 /// Test: aria2.getServers returns array with server info.
 #[tokio::test]
 async fn regression_get_servers_format() {
-    let engine = RpcEngine::new();
+    let group_man = Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new()));
+    let (engine_cmd_tx, _engine_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let engine = RpcEngine::wired(group_man.clone(), engine_cmd_tx);
 
     let add_req = make_request(
         "aria2.addUri",
@@ -573,6 +577,10 @@ async fn regression_get_servers_format() {
     );
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let manager = group_man.read().await;
+    assert_eq!(manager.fill_from_reserver().len(), 1);
+    drop(manager);
 
     let req = make_request("aria2.getServers", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;

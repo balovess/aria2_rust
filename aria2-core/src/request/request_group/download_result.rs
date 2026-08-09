@@ -111,7 +111,6 @@ impl DownloadResult {
             DownloadResultCode::Finished => "OK".to_string(),
             DownloadResultCode::Removed => "Download removed by user".to_string(),
             DownloadResultCode::InProgress => "Download interrupted by shutdown".to_string(),
-            DownloadResultCode::Paused => "Download paused".to_string(),
             _ => format!("{}", code),
         };
 
@@ -196,7 +195,10 @@ impl DownloadResult {
         Self {
             gid: GroupId(0),
             status: DownloadStatus::Paused,
-            code: DownloadResultCode::Paused,
+            // C++ has no paused error code. A paused task is not normally
+            // stored as a stopped result; keep this constructor wire-safe for
+            // callers that need a snapshot before requeueing.
+            code: DownloadResultCode::UnknownError,
             message: String::from("Download paused"),
             ..Self::finished()
         }
@@ -261,14 +263,12 @@ mod tests {
     #[test]
     fn test_is_resumable() {
         assert!(DownloadResultCode::InProgress.is_resumable());
-        assert!(DownloadResultCode::Paused.is_resumable());
         assert!(!DownloadResultCode::TimeOut.is_resumable());
     }
 
     #[test]
     fn test_is_user_stopped() {
         assert!(DownloadResultCode::Removed.is_user_stopped());
-        assert!(DownloadResultCode::Paused.is_user_stopped());
         assert!(!DownloadResultCode::InProgress.is_user_stopped());
     }
 
@@ -290,6 +290,14 @@ mod tests {
     fn test_download_result_in_progress() {
         let r = DownloadResult::in_progress();
         assert_eq!(r.code, DownloadResultCode::InProgress);
+    }
+
+    #[test]
+    fn test_download_result_paused_has_no_rust_only_error_code() {
+        let r = DownloadResult::paused();
+        assert_eq!(r.status, DownloadStatus::Paused);
+        assert_eq!(r.code, DownloadResultCode::UnknownError);
+        assert_ne!(r.code.as_code(), 33);
     }
 
     #[test]

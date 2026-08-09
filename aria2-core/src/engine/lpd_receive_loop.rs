@@ -223,7 +223,7 @@ fn create_lpd_socket() -> Result<UdpSocket, String> {
     // where SocketCore sets SO_REUSEADDR during bind.
     #[cfg(unix)]
     {
-        use std::os::unix::io::{AsRawFd, FromRawFd};
+        use std::os::unix::io::FromRawFd;
 
         // Create an unbound UDP socket.
         // SAFETY: `libc::socket` is a standard POSIX syscall. AF_INET and
@@ -258,15 +258,54 @@ fn create_lpd_socket() -> Result<UdpSocket, String> {
             );
         }
 
-        // SAFETY: `fd` is a valid open socket descriptor returned by a
-        // successful `socket()` call above (fd >= 0). `from_raw_fd` takes
-        // ownership of the descriptor, and the socket will be closed when
-        // the `UdpSocket` is dropped. This is the only owner of this fd.
-        let socket = unsafe { UdpSocket::from_raw_fd(fd) };
         let bind_addr = SocketAddrV4::new(multicast_ip, port);
-        socket
-            .bind(bind_addr)
-            .map_err(|e| format!("Failed to bind LPD socket to {}: {}", bind_addr, e))?;
+
+        #[cfg(target_os = "macos")]
+        let raw_bind_addr = libc::sockaddr_in {
+            sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+            sin_family: libc::AF_INET as _,
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from_be_bytes(multicast_ip.octets()),
+            },
+            sin_zero: [0; 8],
+        };
+        #[cfg(not(target_os = "macos"))]
+        let raw_bind_addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as _,
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from_be_bytes(multicast_ip.octets()),
+            },
+            sin_zero: [0; 8],
+        };
+
+        // SAFETY: `fd` is a valid socket descriptor, and `raw_bind_addr`
+        // remains alive for the duration of the call. The descriptor is
+        // closed explicitly on failure and transferred to `UdpSocket` on
+        // success.
+        let bind_result = unsafe {
+            libc::bind(
+                fd,
+                (&raw_bind_addr as *const libc::sockaddr_in).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        if bind_result != 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(format!(
+                "Failed to bind LPD socket to {}: {}",
+                bind_addr, error
+            ));
+        }
+
+        // SAFETY: `fd` is a valid open socket descriptor returned by a
+        // successful `socket()` call above. `from_raw_fd` takes ownership
+        // of the descriptor, and the socket will be closed when dropped.
+        let socket = unsafe { UdpSocket::from_raw_fd(fd) };
 
         // Join multicast group on all interfaces.
         // C++: `socket_->joinMulticastGroup(multicastAddress_, multicastPort_, localAddr)`

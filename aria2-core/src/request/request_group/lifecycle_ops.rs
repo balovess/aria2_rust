@@ -244,8 +244,9 @@ impl super::RequestGroup {
     /// pause-requested groups return to the reserved queue.
     pub fn mark_paused(&self) {
         *self.status.recover_mut() = DownloadStatus::Paused;
-        *self.last_error_code.recover_mut() = super::result_code::DownloadResultCode::Paused;
-        *self.last_error_message.recover_mut() = "Download paused".to_string();
+        // C++ keeps pause as lifecycle state and leaves lastErrorCode and its
+        // message untouched. In particular, do not invent a pause error code
+        // or erase a code recorded by an earlier URI attempt.
         tracing::info!(gid = self.gid.value(), "Marked download as paused");
     }
 

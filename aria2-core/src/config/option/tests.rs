@@ -325,6 +325,7 @@ fn test_registry_defaults_are_valid() {
     }
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_registry_parses_rpc_wire_values_through_one_typed_seam() {
     let reg = OptionRegistry::new();

@@ -8,6 +8,8 @@ use super::group_id::GroupId;
 #[allow(unused_imports)]
 use super::options::DownloadOptions;
 #[allow(unused_imports)]
+use super::result_code::DownloadResultCode;
+#[allow(unused_imports)]
 use crate::download::DownloadContext;
 
 #[test]
@@ -77,6 +79,22 @@ fn test_child_relationship_fields_are_preserved() {
     group.set_belongs_to_gid(parent);
     assert_eq!(group.following_gid(), Some(parent));
     assert_eq!(group.belongs_to_gid(), Some(parent));
+}
+
+#[test]
+fn test_mark_paused_preserves_existing_error_details() {
+    let group = RequestGroup::new(
+        GroupId::new(3),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_last_error(DownloadResultCode::TimeOut, "previous timeout");
+
+    group.mark_paused();
+
+    assert!(group.status().is_paused());
+    assert_eq!(group.get_last_error_code(), DownloadResultCode::TimeOut);
+    assert_eq!(group.get_last_error_message(), "previous timeout");
 }
 
 #[test]

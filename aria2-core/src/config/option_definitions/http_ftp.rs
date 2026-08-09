@@ -199,6 +199,7 @@ impl crate::config::OptionRegistry {
             short_name: Some('s'),
             default_value: OptionValue::Int(5),
             min: Some(1),
+            max: Some(16),
             description: "Connections per download".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

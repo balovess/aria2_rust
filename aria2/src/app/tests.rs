@@ -4,6 +4,7 @@ use super::cli::CliArgs;
 use super::*;
 use aria2_core::config::OptionValue;
 use aria2_core::request::request_group::DownloadOptions;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use clap::Parser;
 use std::collections::HashMap;

@@ -32,7 +32,7 @@ units catalogued in docs/MIGRATION.md measure audit coverage only.
 | BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist. `index-out` now applies the original 1-based `INDEX=PATH` mapping to both `DownloadContext` and the actual single/multi-file writers; TCP listen-port ranges try ports in order and have occupied-port regression coverage. Incoming listener ownership, dependency graph, and full scheduler/seeding parity remain. |
 | DHT and trackers | aria2-protocol/src/bittorrent/dht/ | PARTIAL | Production paths and tests now use the protocol crate as the single canonical DHT implementation; the former `aria2-core/src/dht/` source tree is no longer exported. DHT port ranges now try the ordered list and fall back after an occupied first port; complete live-network evidence is still missing. |
 | Metalink | aria2-protocol/src/metalink/, aria2-core/src/engine/metalink_* | PARTIAL | V3/V4 parsing, filtering, resource downloads, manager-owned GID allocation, relative-URI base propagation, and metadata/payload graph terminal states have focused regression coverage. Same-metaurl multi-file grouping, full `follow-torrent=mem` semantics, session graph restoration, and live protocol interoperability remain open. |
-| Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Sequential resume detection, defunct-control-file cleanup, existing-file policy, preallocation-safe offset writes, `always-resume`, and `max-resume-failure-tries` multi-URI behavior have focused unit/HTTP E2E evidence. Concurrent control-file lifecycle, piece-level resume semantics, and integrity entry callbacks remain incomplete or unverified. |
+| Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Sequential resume detection, defunct-control-file cleanup, existing-file policy, preallocation-safe offset writes, `always-resume`, and `max-resume-failure-tries` multi-URI behavior have focused unit/HTTP E2E evidence. Session serialization preserves original option names and non-default values for resume policy, trackers, port ranges, piece sizing, FTP/auth/netrc settings, plus the original 16-hex-digit GID form; Rust-only fields remain extensions. The result-code seam now contains exactly the original wire values `0..32`; `paused` remains a separate task status and cannot leak a Rust-only error code. Concurrent control-file lifecycle, piece-level resume semantics, and integrity entry callbacks remain incomplete or unverified. |
 | RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces, token/Basic authentication, aria2-compatible error/status mapping, feature-specific method/notification discovery, feature-aware `getVersion`, and real HTTP E2E coverage exist. XML-RPC execution faults use HTTP 200 + `faultCode=1`; parser/value failures match the original HTTP 400 empty-body contract. `getServers` is active-only and reports only real in-flight requests; waiting, paused, stopped, or unknown GIDs return execution error code 1. `getSessionInfo` now generates one 20-byte random session key per engine and exposes the original 40-character lowercase hexadecimal representation. The catalog is 33 core methods plus 2 BitTorrent and 1 Metalink method when enabled; notifications are 5 core plus 1 BitTorrent event when enabled. Task-creation and runtime option values share core validation. Full original-client interoperability, including the browser-extension matrix and complete XML-RPC client coverage, remains unverified. |
 | CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | `OptionDef::parse_value` remains the shared typed seam for CLI/config/RPC validation, and `App::load_cli_args` now propagates validation failures instead of silently discarding them. Regression coverage proves invalid `--split=0` and unknown `--file-allocation` values are rejected before engine startup; startup coverage proves `--no-conf` skips an explicit config file as in the original. `IntegerRange` preserves ordered range wire values, and `IndexOut` uses one cumulative `INDEX=PATH` parser for validation and BT execution. The original short-option contract is covered for registry mappings, including `-a`/`-p`/`-P`/`-R`/`-u`/`-Z`, and `-h`/`-v`/`-V` help/version/check-integrity actions. Complete option inventory/default/changeability parity, optional-argument/getopt edge cases, version/help text parity, and generated comparison/E2E proof remain open. Rust's extra explicit negation aliases are documented extensions, not an original-parser gap. |
 | Public C API/ABI | aria2_original/src/aria2api.cc, src/includes/aria2/aria2.h | PARTIAL | `aria2-core/src/c_api.rs` and `bindings/c/` provide a tested opaque-handle `extern "C"`/cdylib migration interface. It is intentionally source-level and is not binary-compatible with the original C++ classes or STL ABI. |
@@ -136,16 +136,25 @@ asserts the exact length and alphabet as well as per-engine stability; the
 legacy `rpc_helpers::generate_session_id` path now forwards to the canonical
 `SessionInfo` implementation.
 
+The session option adapter was compared with
+`aria2_original/src/SessionSerializer.cc` and `OptionParser.cc`. It keeps
+aria2's `load-cookies` key while accepting Rust's `cookie-file` input alias,
+preserves ordered `listen-port`/`dht-listen-port` ranges, and restores the
+non-default option set through the typed `DownloadOptions` parser. The focused
+session-entry target reports 19 passed tests; this is session compatibility
+evidence, not proof that every session lifecycle or original client workflow
+is complete.
+
 The `aria2.getServers` adapter now follows the original active-only contract:
 it emits one file-index entry per active file and includes only requests that
 currently have peer statistics. Configured mirrors are not emitted as fake
 servers; waiting, paused, stopped, and unknown GIDs map to execution error
 code 1 with HTTP 400 for JSON-RPC.
 
-The core command `cargo test -p aria2-core --lib --tests --all-features --
+The core command `cargo test -p aria2-core --lib --all-features --
 --test-threads=1` completed with exit code 0. Its library target reported
-3,278 passed and 1 ignored; every integration and performance target in the
-same command also completed with 0 failures. The aggregate workspace command
+3,293 passed and 1 ignored. Integration and performance targets are covered by
+the separate commands listed above; the aggregate workspace command
 `cargo test --workspace --all-features -j 1` has not been used as a green gate,
 so this document does not claim one workspace aggregate run.
 

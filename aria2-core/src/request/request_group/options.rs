@@ -877,6 +877,7 @@ mod tests {
         assert!(options.uses_memory_download());
     }
 
+    #[cfg(feature = "bittorrent")]
     #[test]
     fn rpc_option_map_uses_aria2_wire_strings() {
         let mut values = HashMap::new();

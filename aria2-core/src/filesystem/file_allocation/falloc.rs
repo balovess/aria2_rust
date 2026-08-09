@@ -2,6 +2,9 @@ use crate::error::Result;
 use crate::filesystem::disk_adaptor::DiskAdaptor;
 
 #[cfg(unix)]
+use crate::error::Aria2Error;
+
+#[cfg(unix)]
 use super::strategies;
 
 /// Allocate file space using platform-native preallocation syscalls.

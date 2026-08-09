@@ -51,7 +51,17 @@ impl super::RequestGroup {
                 DownloadResultCode::Removed,
                 "Download removed by user".to_string(),
             ),
-            DownloadStatus::Paused => (DownloadResultCode::Paused, "Download paused".to_string()),
+            // Paused is a live task status, not a C++ error code. Paused
+            // groups are normally requeued before this path; keep the
+            // defensive result aligned with RequestGroup::downloadResult(),
+            // including any error recorded before the pause.
+            DownloadStatus::Paused => {
+                if last_code != DownloadResultCode::UnknownError {
+                    (last_code, last_msg)
+                } else {
+                    (DownloadResultCode::UnknownError, String::new())
+                }
+            }
             DownloadStatus::Error(_) => {
                 // Use structured error code if available
                 if last_code != DownloadResultCode::UnknownError {

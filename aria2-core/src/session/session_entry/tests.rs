@@ -420,24 +420,27 @@ fn test_download_options_to_map_all_fields() {
         seed_ratio: Some(2.0),
         // File allocation
         file_allocation: Some("trunc".to_string()),
-        continue_download: false,
-        allow_overwrite: false,
-        auto_file_renaming: true,
-        always_resume: true,
-        max_resume_failure_tries: 0,
-        remove_control_file: false,
+        continue_download: true,
+        allow_overwrite: true,
+        auto_file_renaming: false,
+        always_resume: false,
+        max_resume_failure_tries: 2,
+        remove_control_file: true,
         mmap_threshold: Some(128 * 1024 * 1024),
         secure_falloc: true,
         check_integrity: false,
         hash_check_only: false,
-        bt_tracker: None,
+        bt_tracker: Some(vec![
+            "https://tracker.example/announce".to_string(),
+            "udp://tracker.example:6969".to_string(),
+        ]),
         // Checksum
         checksum: Some(("sha256".to_string(), "abc123".to_string())),
         // Cookies
         cookie_file: Some("/tmp/cookies.txt".to_string()),
         cookies: Some("key=value".to_string()),
         // BT
-        bt_max_peers: 55,
+        bt_max_peers: 64,
         bt_force_encrypt: true,
         bt_require_crypto: true,
         enable_dht: false,
@@ -476,25 +479,25 @@ fn test_download_options_to_map_all_fields() {
         metalink_location: None,
         metalink_preferred_protocol: None,
         select_file: None,
-        piece_length: None,
-        metalink_enable_unique_protocol: true,
+        piece_length: Some(1024 * 1024),
+        metalink_enable_unique_protocol: false,
         // FTP
-        timeout: None,
-        connect_timeout: None,
-        startup_idle_time: None,
-        lowest_speed_limit: None,
-        ftp_pasv: true,
-        remote_time: false,
-        dry_run: false,
-        ftp_reuse_connection: true,
+        timeout: Some(90),
+        connect_timeout: Some(30),
+        startup_idle_time: Some(10),
+        lowest_speed_limit: Some(1024),
+        ftp_pasv: false,
+        remote_time: true,
+        dry_run: true,
+        ftp_reuse_connection: false,
         // Download
-        realtime_chunk_checksum: true,
-        bt_stop_timeout: None,
+        realtime_chunk_checksum: false,
+        bt_stop_timeout: Some(120),
         // BitTorrent extended
-        disable_ipv6: false,
-        listen_port: None,
-        bt_enable_lpd: false,
-        bt_lpd_interface: None,
+        disable_ipv6: true,
+        listen_port: Some("6881-6999".to_string()),
+        bt_enable_lpd: true,
+        bt_lpd_interface: Some("eth0".to_string()),
         enable_rpc: false,
         pause: false,
         // Follow options
@@ -508,16 +511,16 @@ fn test_download_options_to_map_all_fields() {
         on_download_stop: None,
         on_bt_download_complete: None,
         // HTTP authentication
-        http_auth_challenge: false,
-        http_user: None,
-        http_passwd: None,
-        ftp_user: None,
-        ftp_passwd: None,
+        http_auth_challenge: true,
+        http_user: Some("http-user".to_string()),
+        http_passwd: Some("http-pass".to_string()),
+        ftp_user: Some("ftp-user".to_string()),
+        ftp_passwd: Some("ftp-pass".to_string()),
         ssh_host_key_md: None,
-        no_netrc: false,
-        netrc_path: None,
+        no_netrc: true,
+        netrc_path: Some("/tmp/netrc".to_string()),
         // Conditional GET
-        conditional_get: false,
+        conditional_get: true,
     };
 
     let map = download_options_to_map(&opts);
@@ -526,22 +529,34 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("file-allocation").unwrap(), "trunc");
     assert_eq!(map.get("mmap-threshold").unwrap(), "134217728");
     assert_eq!(map.get("secure-falloc").unwrap(), "true");
+    assert_eq!(map.get("continue").unwrap(), "true");
+    assert_eq!(map.get("allow-overwrite").unwrap(), "true");
+    assert_eq!(map.get("auto-file-renaming").unwrap(), "false");
+    assert_eq!(map.get("always-resume").unwrap(), "false");
+    assert_eq!(map.get("max-resume-failure-tries").unwrap(), "2");
+    assert_eq!(map.get("remove-control-file").unwrap(), "true");
 
     // Checksum
     assert_eq!(map.get("checksum").unwrap(), "sha256=abc123");
 
     // Cookies
-    assert_eq!(map.get("cookie-file").unwrap(), "/tmp/cookies.txt");
+    assert_eq!(map.get("load-cookies").unwrap(), "/tmp/cookies.txt");
     assert_eq!(map.get("cookies").unwrap(), "key=value");
 
     // BT
     assert_eq!(map.get("bt-force-encrypt").unwrap(), "true");
     assert_eq!(map.get("bt-require-crypto").unwrap(), "true");
+    assert_eq!(map.get("bt-max-peers").unwrap(), "64");
     assert_eq!(map.get("enable-dht").unwrap(), "false");
-    assert_eq!(map.get("dht-listen-port").unwrap(), "6881");
+    assert_eq!(map.get("dht-listen-port").unwrap(), "6881-6999");
+    assert_eq!(map.get("listen-port").unwrap(), "6881-6999");
     assert_eq!(
         map.get("dht-entry-point").unwrap(),
         "router.bittorrent.com:6881"
+    );
+    assert_eq!(
+        map.get("bt-tracker").unwrap(),
+        "https://tracker.example/announce,udp://tracker.example:6969"
     );
     assert_eq!(map.get("enable-public-trackers").unwrap(), "false");
     assert_eq!(
@@ -555,6 +570,31 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("bt-prioritize-piece").unwrap(), "head");
     assert_eq!(map.get("enable-utp").unwrap(), "true");
     assert_eq!(map.get("utp-listen-port").unwrap(), "6882");
+
+    // Connection and authentication options
+    assert_eq!(map.get("piece-length").unwrap(), "1048576");
+    assert_eq!(map.get("metalink-enable-unique-protocol").unwrap(), "false");
+    assert_eq!(map.get("timeout").unwrap(), "90");
+    assert_eq!(map.get("connect-timeout").unwrap(), "30");
+    assert_eq!(map.get("startup-idle-time").unwrap(), "10");
+    assert_eq!(map.get("lowest-speed-limit").unwrap(), "1024");
+    assert_eq!(map.get("ftp-pasv").unwrap(), "false");
+    assert_eq!(map.get("remote-time").unwrap(), "true");
+    assert_eq!(map.get("dry-run").unwrap(), "true");
+    assert_eq!(map.get("ftp-reuse-connection").unwrap(), "false");
+    assert_eq!(map.get("realtime-chunk-checksum").unwrap(), "false");
+    assert_eq!(map.get("bt-stop-timeout").unwrap(), "120");
+    assert_eq!(map.get("disable-ipv6").unwrap(), "true");
+    assert_eq!(map.get("bt-enable-lpd").unwrap(), "true");
+    assert_eq!(map.get("bt-lpd-interface").unwrap(), "eth0");
+    assert_eq!(map.get("http-auth-challenge").unwrap(), "true");
+    assert_eq!(map.get("http-user").unwrap(), "http-user");
+    assert_eq!(map.get("http-passwd").unwrap(), "http-pass");
+    assert_eq!(map.get("ftp-user").unwrap(), "ftp-user");
+    assert_eq!(map.get("ftp-passwd").unwrap(), "ftp-pass");
+    assert_eq!(map.get("no-netrc").unwrap(), "true");
+    assert_eq!(map.get("netrc-path").unwrap(), "/tmp/netrc");
+    assert_eq!(map.get("conditional-get").unwrap(), "true");
 
     // Retry
     assert_eq!(map.get("max-retries").unwrap(), "5");
@@ -574,6 +614,29 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("header").unwrap(), "X-Custom: foo,X-Other: bar");
     assert_eq!(map.get("user-agent").unwrap(), "aria2-rust/1.0");
     assert_eq!(map.get("referer").unwrap(), "http://example.com");
+
+    // The same canonical string map is consumed by session restoration.
+    let restored = DownloadOptions::from_option_strings(&map);
+    assert!(restored.continue_download);
+    assert!(!restored.auto_file_renaming);
+    assert!(!restored.always_resume);
+    assert_eq!(restored.max_resume_failure_tries, 2);
+    assert_eq!(restored.cookie_file.as_deref(), Some("/tmp/cookies.txt"));
+    assert_eq!(restored.bt_max_peers, 64);
+    assert_eq!(
+        restored.bt_tracker,
+        Some(vec![
+            "https://tracker.example/announce".to_string(),
+            "udp://tracker.example:6969".to_string(),
+        ])
+    );
+    assert_eq!(restored.listen_port.as_deref(), Some("6881-6999"));
+    assert_eq!(restored.dht_listen_port.as_deref(), Some("6881-6999"));
+    assert!(!restored.metalink_enable_unique_protocol);
+    assert_eq!(restored.piece_length, Some(1024 * 1024));
+    assert!(!restored.ftp_pasv);
+    assert_eq!(restored.http_user.as_deref(), Some("http-user"));
+    assert!(restored.conditional_get);
 }
 
 #[test]
@@ -589,6 +652,9 @@ fn test_download_options_to_map_defaults_excluded() {
     assert!(!map.contains_key("secure-falloc"));
     // file_allocation defaults to None -> should NOT be in map
     assert!(!map.contains_key("file-allocation"));
+    assert!(!map.contains_key("seed-ratio"));
+    assert!(!map.contains_key("metalink-enable-unique-protocol"));
+    assert!(!map.contains_key("load-cookies"));
     // enable_dht and enable_public_trackers default to true -> NOT saved
     assert!(!map.contains_key("enable-dht"));
     assert!(!map.contains_key("enable-public-trackers"));

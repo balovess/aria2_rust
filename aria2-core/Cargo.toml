@@ -128,6 +128,7 @@ harness = false
 [[bench]]
 name = "engine_bench"
 harness = false
+required-features = ["bittorrent"]
 
 [[bench]]
 name = "filesystem_bench"
@@ -136,10 +137,12 @@ harness = false
 [[bench]]
 name = "p2_bench"
 harness = false
+required-features = ["bittorrent"]
 
 [[bench]]
 name = "serialization_bench"
 harness = false
+required-features = ["bittorrent"]
 
 # Linux-only io_uring benchmark. Compiles only when both the `io_uring`
 # feature is enabled and the target OS is Linux. The source file itself is

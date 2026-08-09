@@ -362,6 +362,7 @@ mod tests {
         assert_eq!(p.get_i64("split").unwrap(), 8);
     }
 
+    #[cfg(feature = "bittorrent")]
     #[test]
     fn test_repeated_index_out_values_preserve_original_newline_wire_form() {
         let mut p = ConfigParser::new();

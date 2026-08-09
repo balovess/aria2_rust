@@ -36,10 +36,33 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.out {
         map.insert("out".to_string(), v.clone());
     }
+    if opts.continue_download {
+        map.insert("continue".to_string(), "true".to_string());
+    }
+    if opts.allow_overwrite {
+        map.insert("allow-overwrite".to_string(), "true".to_string());
+    }
+    if !opts.auto_file_renaming {
+        map.insert("auto-file-renaming".to_string(), "false".to_string());
+    }
+    if !opts.always_resume {
+        map.insert("always-resume".to_string(), "false".to_string());
+    }
+    if opts.max_resume_failure_tries > 0 {
+        map.insert(
+            "max-resume-failure-tries".to_string(),
+            opts.max_resume_failure_tries.to_string(),
+        );
+    }
+    if opts.remove_control_file {
+        map.insert("remove-control-file".to_string(), "true".to_string());
+    }
     if let Some(v) = opts.seed_time {
         map.insert("seed-time".to_string(), v.to_string());
     }
-    if let Some(v) = opts.seed_ratio {
+    if let Some(v) = opts.seed_ratio
+        && (v - 1.0).abs() > f64::EPSILON
+    {
         map.insert("seed-ratio".to_string(), v.to_string());
     }
 
@@ -79,10 +102,10 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.select_file {
         map.insert("select-file".to_string(), v.clone());
     }
-    if opts.metalink_enable_unique_protocol {
+    if !opts.metalink_enable_unique_protocol {
         map.insert(
             "metalink-enable-unique-protocol".to_string(),
-            "true".to_string(),
+            "false".to_string(),
         );
     }
 
@@ -93,7 +116,7 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
 
     // --- Cookies ---
     if let Some(ref v) = opts.cookie_file {
-        map.insert("cookie-file".to_string(), v.clone());
+        map.insert("load-cookies".to_string(), v.clone());
     }
     if let Some(ref v) = opts.cookies {
         map.insert("cookies".to_string(), v.clone());
@@ -106,6 +129,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if opts.bt_require_crypto {
         map.insert("bt-require-crypto".to_string(), "true".to_string());
     }
+    if opts.bt_max_peers != 55 {
+        map.insert("bt-max-peers".to_string(), opts.bt_max_peers.to_string());
+    }
     // enable_dht defaults to true; only save if disabled
     if !opts.enable_dht {
         map.insert("enable-dht".to_string(), "false".to_string());
@@ -113,11 +139,17 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.dht_listen_port {
         map.insert("dht-listen-port".to_string(), v.clone());
     }
+    if let Some(ref v) = opts.listen_port {
+        map.insert("listen-port".to_string(), v.clone());
+    }
     if let Some(ref v) = opts.index_out {
         map.insert("index-out".to_string(), v.clone());
     }
     if let Some(ref v) = opts.dht_entry_point {
         map.insert("dht-entry-point".to_string(), v.join(","));
+    }
+    if let Some(ref v) = opts.bt_tracker {
+        map.insert("bt-tracker".to_string(), v.join(","));
     }
     // enable_public_trackers defaults to true; only save if disabled
     if !opts.enable_public_trackers {
@@ -204,6 +236,76 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     }
     if let Some(ref v) = opts.referer {
         map.insert("referer".to_string(), v.clone());
+    }
+
+    // --- Piece sizing and connection behaviour ---
+    if let Some(v) = opts.piece_length {
+        map.insert("piece-length".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.timeout {
+        map.insert("timeout".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.connect_timeout {
+        map.insert("connect-timeout".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.startup_idle_time {
+        map.insert("startup-idle-time".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.lowest_speed_limit {
+        map.insert("lowest-speed-limit".to_string(), v.to_string());
+    }
+    if !opts.ftp_pasv {
+        map.insert("ftp-pasv".to_string(), "false".to_string());
+    }
+    if opts.remote_time {
+        map.insert("remote-time".to_string(), "true".to_string());
+    }
+    if opts.dry_run {
+        map.insert("dry-run".to_string(), "true".to_string());
+    }
+    if !opts.ftp_reuse_connection {
+        map.insert("ftp-reuse-connection".to_string(), "false".to_string());
+    }
+    if !opts.realtime_chunk_checksum {
+        map.insert("realtime-chunk-checksum".to_string(), "false".to_string());
+    }
+    if let Some(v) = opts.bt_stop_timeout {
+        map.insert("bt-stop-timeout".to_string(), v.to_string());
+    }
+    if opts.disable_ipv6 {
+        map.insert("disable-ipv6".to_string(), "true".to_string());
+    }
+    if opts.bt_enable_lpd {
+        map.insert("bt-enable-lpd".to_string(), "true".to_string());
+    }
+    if let Some(ref v) = opts.bt_lpd_interface {
+        map.insert("bt-lpd-interface".to_string(), v.clone());
+    }
+
+    // --- Authentication and netrc ---
+    if opts.http_auth_challenge {
+        map.insert("http-auth-challenge".to_string(), "true".to_string());
+    }
+    if let Some(ref v) = opts.http_user {
+        map.insert("http-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.http_passwd {
+        map.insert("http-passwd".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.ftp_user {
+        map.insert("ftp-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.ftp_passwd {
+        map.insert("ftp-passwd".to_string(), v.clone());
+    }
+    if opts.no_netrc {
+        map.insert("no-netrc".to_string(), "true".to_string());
+    }
+    if let Some(ref v) = opts.netrc_path {
+        map.insert("netrc-path".to_string(), v.clone());
+    }
+    if opts.conditional_get {
+        map.insert("conditional-get".to_string(), "true".to_string());
     }
 
     // --- Metadata follow modes ---

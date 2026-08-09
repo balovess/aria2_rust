@@ -1,17 +1,20 @@
 //! Structured download result codes.
 //!
 //! Port of C++ `error_code.h` / `error_code.cc`. Provides a typed enum for
-//! download outcomes instead of free-form error strings, enabling RPC
-//! consumers (web UIs, scripts) to programmatically distinguish between
-//! timeout, network failure, user removal, etc.
+//! the original download result codes instead of free-form error strings,
+//! enabling RPC consumers (web UIs, scripts) to distinguish timeout, network
+//! failure, user removal, and other outcomes.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Structured result code for a completed download.
 ///
-/// Mirrors C++ `error_code::Value` with the most commonly used variants.
-/// The numeric values match the C++ wire format for RPC compatibility.
+/// Mirrors every wire-visible value in C++ `error_code::Value`.
+///
+/// Paused is deliberately not a variant: aria2 represents it as a task
+/// status, not as an error code. Keeping that distinction prevents a Rust-
+/// only value from leaking into `errorCode` in stopped-download responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 #[derive(Default)]
@@ -83,8 +86,6 @@ pub enum DownloadResultCode {
     Removed = 31,
     /// Checksum verification failed.
     ChecksumError = 32,
-    /// Download was paused and never completed. Rust-local status code.
-    Paused = 33,
 }
 
 impl DownloadResultCode {
@@ -96,12 +97,12 @@ impl DownloadResultCode {
     /// Return `true` if the download was interrupted but not failed
     /// (i.e. can be resumed on next startup).
     pub fn is_resumable(self) -> bool {
-        matches!(self, Self::InProgress | Self::Paused)
+        matches!(self, Self::InProgress)
     }
 
     /// Return `true` if the download was explicitly stopped by the user.
     pub fn is_user_stopped(self) -> bool {
-        matches!(self, Self::Removed | Self::Paused)
+        matches!(self, Self::Removed)
     }
 
     /// Convert from a numeric code (matching C++ wire format).
@@ -140,7 +141,6 @@ impl DownloadResultCode {
             30 => Some(Self::JsonParseError),
             31 => Some(Self::Removed),
             32 => Some(Self::ChecksumError),
-            33 => Some(Self::Paused),
             _ => None,
         }
     }
@@ -187,7 +187,6 @@ impl fmt::Display for DownloadResultCode {
             Self::JsonParseError => "json_parse_error",
             Self::ChecksumError => "checksum_error",
             Self::Removed => "removed",
-            Self::Paused => "paused",
         };
         write!(f, "{}", s)
     }
@@ -217,7 +216,7 @@ mod tests {
         assert_eq!(DownloadResultCode::JsonParseError.as_code(), 30);
         assert_eq!(DownloadResultCode::Removed.as_code(), 31);
         assert_eq!(DownloadResultCode::ChecksumError.as_code(), 32);
-        assert_eq!(DownloadResultCode::Paused.as_code(), 33);
+        assert_eq!(DownloadResultCode::from_code(33), None);
     }
 
     #[test]
@@ -229,14 +228,12 @@ mod tests {
     #[test]
     fn test_is_resumable() {
         assert!(DownloadResultCode::InProgress.is_resumable());
-        assert!(DownloadResultCode::Paused.is_resumable());
         assert!(!DownloadResultCode::TimeOut.is_resumable());
     }
 
     #[test]
     fn test_is_user_stopped() {
         assert!(DownloadResultCode::Removed.is_user_stopped());
-        assert!(DownloadResultCode::Paused.is_user_stopped());
         assert!(!DownloadResultCode::InProgress.is_user_stopped());
     }
 }
