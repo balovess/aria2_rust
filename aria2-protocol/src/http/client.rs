@@ -24,7 +24,7 @@ impl Default for HttpClientOptions {
             connect_timeout: Duration::from_secs(30),
             timeout: Duration::from_secs(300),
             max_redirects: 5,
-            user_agent: "aria2/1.37.0-Rust".to_string(),
+            user_agent: crate::identity::DEFAULT_USER_AGENT.to_string(),
             accept_gzip: true,
             verify_tls: true,
             ca_cert_path: None,

@@ -182,7 +182,10 @@ impl HttpProxyForward {
             req.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
         }
 
-        req.push_str("User-Agent: aria2-rust/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n");
+        req.push_str(&format!(
+            "User-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+            crate::constants::USER_AGENT
+        ));
 
         let _ = path; // Path is used by the caller for Digest auth URI computation
         req
@@ -234,16 +237,18 @@ pub async fn forward_get_with_auth(
     loop {
         let request = if let Some(ref auth) = current_auth {
             format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nProxy-Authorization: {}\r\nUser-Agent: aria2-rust/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+                "GET {} HTTP/1.1\r\nHost: {}\r\nProxy-Authorization: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
                 full_url,
                 config.target_host_port(),
-                auth
+                auth,
+                crate::constants::USER_AGENT
             )
         } else {
             format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: aria2-rust/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+                "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
                 full_url,
-                config.target_host_port()
+                config.target_host_port(),
+                crate::constants::USER_AGENT
             )
         };
 

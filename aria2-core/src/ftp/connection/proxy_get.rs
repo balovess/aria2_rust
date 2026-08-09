@@ -20,7 +20,7 @@
 //! ```text
 //! GET ftp://ftp.example.com/pub/file.tar.gz HTTP/1.1\r\n
 //! Host: ftp.example.com\r\n
-//! User-Agent: aria2-rust/1.0\r\n
+//! User-Agent: aria2/1.37.0\r\n
 //! Accept: */*\r\n
 //! Connection: Keep-Alive\r\n
 //! Proxy-Authorization: Basic <credentials>\r\n    (if proxy auth needed)
@@ -104,7 +104,7 @@ impl Default for FtpProxyConfig {
             proxy_password: String::new(),
             ftp_username: String::new(),
             connect_timeout: Duration::from_secs(30),
-            user_agent: "aria2-rust/1.0".to_string(),
+            user_agent: crate::constants::USER_AGENT.to_string(),
             explicit_proxy_method: None,
         }
     }

@@ -374,7 +374,9 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "peer-id-prefix".into(),
             opt_type: OptionType::String,
-            default_value: OptionValue::Str("A2".into()),
+            default_value: OptionValue::Str(
+                aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX.into(),
+            ),
             description: "Peer ID prefix for BitTorrent".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -382,7 +384,9 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "peer-agent".into(),
             opt_type: OptionType::String,
-            default_value: OptionValue::Str("aria2/1.37.0".into()),
+            default_value: OptionValue::Str(
+                aria2_protocol::identity::DEFAULT_PEER_AGENT.into(),
+            ),
             description: "Peer agent string for BitTorrent".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -428,6 +432,7 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::Bool(false),
             description: "Enable uTP (UDP Transport Protocol, BEP 29). Experimental feature not in original aria2. Default: false".into(),
             category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: false,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -438,6 +443,7 @@ impl crate::config::OptionRegistry {
             max: Some(65535),
             description: "UDP port for uTP connections. 0 = auto-assign. Experimental feature not in original aria2".into(),
             category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: false,
             ..Default::default()
         });
 

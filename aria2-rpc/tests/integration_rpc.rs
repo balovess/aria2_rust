@@ -337,7 +337,7 @@ async fn test_change_option_propagates_to_running_group() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success(), "changeOption should succeed");
 
-    // getOption should return the new value from task_opts.
+    // getOption should return the value from the live core group state.
     let get_req =
         JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid_hex.clone()])).with_id(2);
     let get_resp = engine.handle_request(&get_req).await;

@@ -660,7 +660,7 @@ pub struct VersionInfo {
 }
 
 impl VersionInfo {
-    /// Create VersionInfo from environment or defaults.
+    /// Create VersionInfo for the aria2-compatible public interface.
     ///
     /// Enabled features are dynamically generated based on compile-time
     /// protocol support available in the current build. The list reflects
@@ -678,7 +678,7 @@ impl VersionInfo {
         features.push("SFTP");
 
         Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: aria2_protocol::identity::ARIA2_VERSION.to_string(),
             enabled_features: features.into_iter().map(|s| s.to_string()).collect(),
         }
     }

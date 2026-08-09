@@ -98,16 +98,15 @@ impl FromStr for HelpRequest {
 // Top-level CLI struct
 // =========================================================================
 
-/// Command-line arguments for aria2-rust.
+/// Command-line arguments for the aria2-compatible binary.
 ///
-/// `name = "aria2"` matches the upstream `aria2c` binary's `--version` output
-/// format (`aria2 VERSION`). The binary itself is still `aria2c` via `[[bin]]`
-/// in `aria2/Cargo.toml`; only the clap display name is overridden so that
-/// `--version` prints `aria2 0.2.1` instead of `aria2c 0.2.1`.
+/// `name = "aria2"` and the explicit compatibility version preserve the
+/// upstream `aria2c --version` first-line contract. The binary itself remains
+/// `aria2c` via `[[bin]]` in `aria2/Cargo.toml`.
 #[derive(Parser, Debug)]
 #[command(
     name = "aria2",
-    version,
+    version = aria2_protocol::identity::ARIA2_VERSION,
     disable_help_flag = true,
     disable_version_flag = true,
     disable_help_subcommand = true,
@@ -1718,18 +1717,21 @@ pub struct AdvancedArgs {
 // =========================================================================
 
 impl App {
-    /// Print the application banner with version from CARGO_PKG_VERSION.
+    /// Print the application banner using the upstream-compatible identity.
     pub(super) fn print_banner(&self) {
         println!(
             "{}",
-            format!("aria2-rust v{}", env!("CARGO_PKG_VERSION"))
+            format!(
+                "aria2 version {}",
+                aria2_protocol::identity::ARIA2_VERSION
+            )
                 .green()
                 .bold()
         );
         println!(
             "{} {}",
             "Copyright:".blue(),
-            "(C) 2024-2026 aria2-rust contributors".white()
+            "(C) 2006, 2019 Tatsuhiro Tsujikawa".white()
         );
         println!();
     }

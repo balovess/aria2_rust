@@ -2,9 +2,10 @@
 
 mod support;
 
-use std::path::PathBuf;
 use std::net::TcpListener;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use support::RunningAria2;
@@ -85,6 +86,35 @@ fn force_shutdown(aria2: &mut RunningAria2) {
     assert!(aria2.wait_for_exit(PROCESS_EXIT_TIMEOUT).success());
 }
 
+fn wait_for_stopped_task(aria2: &RunningAria2, gid: &str) {
+    let deadline = Instant::now() + PROCESS_EXIT_TIMEOUT;
+    loop {
+        let stopped = call_jsonrpc(
+            aria2,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "aria2.tellStopped",
+                "params": [0, 1000],
+                "id": "stopped",
+            }),
+        );
+        let is_stopped = stopped["result"].as_array().is_some_and(|results| {
+            results
+                .iter()
+                .any(|result| result["gid"].as_str() == Some(gid))
+        });
+        if is_stopped {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "task {gid} did not reach stopped results within {PROCESS_EXIT_TIMEOUT:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// `--dir` is a global aria2 option. A task subsequently created through the
 /// public JSON-RPC adapter must inherit it, while the per-task `out` option
 /// remains the final filename.
@@ -123,6 +153,63 @@ fn e2e_change_global_option_dir_is_inherited_by_jsonrpc_add_uri_task() {
     force_shutdown(&mut aria2);
 }
 
+/// `getGlobalOption` is an original-client contract, not a dump of Rust's
+/// internal registry. Hidden original values stay observable when defined,
+/// while Rust-only option names cannot leak into browser-client responses.
+#[test]
+fn e2e_get_global_option_keeps_the_original_wire_surface() {
+    let mut aria2 = RunningAria2::start_rpc(&["--enable-utp=true".to_owned()]);
+
+    let response = call_jsonrpc(
+        &aria2,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.getGlobalOption",
+            "params": [],
+            "id": "global-options",
+        }),
+    );
+    let options = response["result"]
+        .as_object()
+        .expect("getGlobalOption must return an object");
+
+    assert_eq!(options.get("dns-timeout"), Some(&json!("30")));
+    assert!(
+        !options.contains_key("enable-async-dns6"),
+        "an original no-default option must not be synthesized"
+    );
+    assert!(!options.contains_key("enable-utp"));
+    assert!(!options.contains_key("utp-listen-port"));
+
+    let change = call_jsonrpc(
+        &aria2,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.changeGlobalOption",
+            "params": [{"enable-async-dns6": "true"}],
+            "id": "configure-no-default-option",
+        }),
+    );
+    assert_eq!(change["result"], "OK");
+
+    let configured = call_jsonrpc(
+        &aria2,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.getGlobalOption",
+            "params": [],
+            "id": "configured-global-options",
+        }),
+    );
+    assert_eq!(
+        configured["result"]["enable-async-dns6"].as_str(),
+        Some("true"),
+        "a C++ NO_DEFAULT_VALUE preference must be reported once explicitly defined"
+    );
+
+    force_shutdown(&mut aria2);
+}
+
 /// CLI inputs are created before the RPC listener starts. Their `getOption`
 /// response must keep the original task option snapshot when a later RPC call
 /// changes a global option, just as `aria2_original` serializes the group's
@@ -141,10 +228,8 @@ fn e2e_cli_task_get_option_preserves_initial_snapshot_after_global_change() {
             .local_addr()
             .expect("source listener must expose its address")
     );
-    let mut aria2 = RunningAria2::start_rpc(&[
-        format!("--dir={}", initial_dir.path().display()),
-        uri,
-    ]);
+    let mut aria2 =
+        RunningAria2::start_rpc(&[format!("--dir={}", initial_dir.path().display()), uri]);
 
     let active = call_jsonrpc(
         &aria2,
@@ -186,6 +271,84 @@ fn e2e_cli_task_get_option_preserves_initial_snapshot_after_global_change() {
         task_options["result"]["dir"].as_str(),
         Some(initial_dir.path().to_string_lossy().as_ref()),
         "getOption for a CLI-created task must not follow a later global mutation"
+    );
+
+    force_shutdown(&mut aria2);
+}
+
+/// Original aria2 preserves the group's `Option` inside `DownloadResult`.
+/// Once a CLI-created task is stopped, `getOption` must therefore keep both
+/// its creation state and any runtime change that already took effect.
+#[test]
+fn e2e_stopped_cli_task_get_option_preserves_snapshot_and_applied_changes() {
+    let source = TcpListener::bind("127.0.0.1:0").expect("failed to bind source listener");
+    let initial_dir = tempdir().expect("failed to create initial directory");
+    let uri = format!(
+        "http://{}/stopped-cli-task-snapshot.bin",
+        source
+            .local_addr()
+            .expect("source listener must expose its address")
+    );
+    let mut aria2 =
+        RunningAria2::start_rpc(&[format!("--dir={}", initial_dir.path().display()), uri]);
+
+    let active = call_jsonrpc(
+        &aria2,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.tellActive",
+            "params": [],
+            "id": "active",
+        }),
+    );
+    let gid = active["result"]
+        .as_array()
+        .and_then(|groups| groups.first())
+        .and_then(|group| group["gid"].as_str())
+        .expect("CLI task must remain active while the source listener stalls")
+        .to_owned();
+
+    let change = call_jsonrpc(
+        &aria2,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.changeOption",
+            "params": [gid, {"max-download-limit": "2048"}],
+            "id": "change-option",
+        }),
+    );
+    assert_eq!(change["result"], "OK");
+
+    let removed = call_jsonrpc(
+        &aria2,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.forceRemove",
+            "params": [gid],
+            "id": "force-remove",
+        }),
+    );
+    assert_eq!(removed["result"].as_str(), Some(gid.as_str()));
+    wait_for_stopped_task(&aria2, &gid);
+
+    let task_options = call_jsonrpc(
+        &aria2,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.getOption",
+            "params": [gid],
+            "id": "stopped-task-options",
+        }),
+    );
+    assert_eq!(
+        task_options["result"]["dir"].as_str(),
+        Some(initial_dir.path().to_string_lossy().as_ref()),
+        "stopped CLI task must retain its creation-time directory"
+    );
+    assert_eq!(
+        task_options["result"]["max-download-limit"].as_str(),
+        Some("2048"),
+        "stopped task must retain only runtime changes that already took effect"
     );
 
     force_shutdown(&mut aria2);

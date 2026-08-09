@@ -123,6 +123,16 @@ impl App {
                     let graphs = converter
                         .create_torrent_graphs_from_bytes(data, &options, &mut gid_iter)
                         .map_err(|e| format!("Metalink graph construction failed: {}", e))?;
+                    for graph in &graphs {
+                        graph
+                            .metadata
+                            .recover_mut()
+                            .set_option_snapshot(option_snapshot.clone());
+                        graph
+                            .payload
+                            .recover_mut()
+                            .set_option_snapshot(option_snapshot.clone());
+                    }
                     metalink_graphs.extend(graphs);
                 }
                 #[cfg(feature = "metalink")]
@@ -130,6 +140,11 @@ impl App {
                     let groups = converter
                         .create_resource_groups_from_bytes(data, &options, &mut gid_iter)
                         .map_err(|e| format!("Metalink resource construction failed: {}", e))?;
+                    for group in &groups {
+                        group
+                            .recover_mut()
+                            .set_option_snapshot(option_snapshot.clone());
+                    }
                     metalink_resource_groups.extend(groups);
                 }
             }
@@ -206,6 +221,9 @@ impl App {
                 vec![initial_uri],
                 options.clone(),
             )));
+            group
+                .recover_mut()
+                .set_option_snapshot(option_snapshot.clone());
             if options.uses_memory_download() {
                 group.recover().mark_in_memory_download();
             }

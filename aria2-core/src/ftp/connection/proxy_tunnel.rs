@@ -57,7 +57,7 @@ impl Default for FtpProxyTunnelConfig {
             proxy_password: String::new(),
             connect_timeout: Duration::from_secs(30),
             read_timeout: Duration::from_secs(60),
-            user_agent: "aria2/rust".to_string(),
+            user_agent: crate::constants::USER_AGENT.to_string(),
         }
     }
 }

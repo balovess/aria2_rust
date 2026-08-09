@@ -4,10 +4,10 @@
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use crate::rpc_helpers::normalize_rpc_options;
 use crate::types::{DownloadStatus, FileInfo, StatusInfo, UriEntry, UriStatus, create_gid};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::checksum::checksum::Checksum;
+use aria2_core::config::project_initial_options;
 use aria2_core::constants as core_constants;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::engine_command::EngineCommand;
@@ -657,8 +657,8 @@ impl RpcEngine {
         // options take precedence.
         let mut merged_options = self.global_opts.read().await.clone();
         merged_options.extend(options);
-        let option_snapshot = normalize_rpc_options(&merged_options);
         let dl_options = rpc_options_to_download_options(&merged_options)?;
+        let option_snapshot = project_initial_options(merged_options);
 
         // Validate checksum format at task creation time, before any download starts.
         if let Some((ref algo, ref val)) = dl_options.checksum {
@@ -684,9 +684,9 @@ impl RpcEngine {
             let man = group_man.write().await;
             man.add_group_with_gid(gid, uris, dl_options)
                 .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
-            let group = man
-                .group_by_id(gid)
-                .ok_or_else(|| JsonRpcError::InternalError("Group not found after insert".into()))?;
+            let group = man.group_by_id(gid).ok_or_else(|| {
+                JsonRpcError::InternalError("Group not found after insert".into())
+            })?;
             group
                 .recover_mut()
                 .set_option_snapshot(option_snapshot.clone());
@@ -702,8 +702,6 @@ impl RpcEngine {
             )));
         }
 
-        let mut task_opts = self.task_opts.write().await;
-        task_opts.insert(gid_str.clone(), option_snapshot);
         // C++ aria2 notification only includes gid (no files field)
         let _ = self.event_publisher.publish(
             EventType::DownloadStart,

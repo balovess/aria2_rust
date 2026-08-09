@@ -56,7 +56,7 @@ async fn test_cli_metalink_options_reach_download_options() {
     app.load_cli_args(cli)
         .await
         .expect("CLI options should load into ConfigManager");
-    let options = app.download_options().await;
+    let (options, _) = app.download_options_with_snapshot().await;
 
     assert_eq!(
         options.follow_metalink,
@@ -336,6 +336,21 @@ async fn test_standard_session_restores_metalink_graph() {
         Some("payload.bin")
     );
     assert!(!payload.recover().is_dependency_resolved());
+    let payload_options = payload
+        .recover()
+        .effective_option_snapshot()
+        .expect("restored payload should retain a request option snapshot");
+    let expected_dir = temp_dir.path().to_string_lossy().into_owned();
+    assert_eq!(
+        payload_options
+            .get("dir")
+            .and_then(serde_json::Value::as_str),
+        Some(expected_dir.as_str())
+    );
+    assert!(
+        !payload_options.contains_key("aria2-rust-metadata-uri"),
+        "session metadata must not be observable through task options"
+    );
 }
 
 /// Test 1: Load entries from session file

@@ -126,6 +126,10 @@ mod tests {
             .map(str::to_owned)
             .collect();
         assert_eq!(methods, expected);
+        assert!(
+            !methods.iter().any(|method| method == "aria2.forceUnpause"),
+            "Rust-only methods must not alter the original discovery catalog"
+        );
     }
 
     #[tokio::test]

@@ -338,7 +338,7 @@ impl HttpRequestBuilder {
     /// Automatically adds standard headers following C++ aria2's
     /// `HttpRequest::createRequest()` logic:
     /// - Host: extracted from URL (omits default ports 80/443)
-    /// - User-Agent: aria2-rust/1.0
+    /// - User-Agent: aria2/1.37.0
     /// - Accept: \*/\*
     /// - Accept-Encoding: when `accept_gzip` is enabled
     /// - Pragma/Cache-Control: when `no_cache` is enabled
@@ -378,7 +378,7 @@ impl HttpRequestBuilder {
 
         // User-Agent header
         if !final_headers.contains_key("User-Agent") {
-            final_headers.insert("User-Agent".to_string(), "aria2-rust/1.0".to_string());
+            final_headers.insert("User-Agent".to_string(), crate::constants::USER_AGENT.to_string());
         }
 
         // Accept header

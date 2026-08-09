@@ -562,6 +562,38 @@ async fn test_change_global_option_matches_original_changeability_policy() {
 }
 
 #[tokio::test]
+async fn test_get_global_option_uses_original_wire_visibility_not_help_visibility() {
+    let engine = RpcEngine::new().with_global_opts(HashMap::from([
+        ("rpc-secret".to_string(), serde_json::json!("do-not-return")),
+        (
+            "not-a-registered-option".to_string(),
+            serde_json::json!("private"),
+        ),
+        ("enable-async-dns6".to_string(), serde_json::json!(true)),
+        ("enable-utp".to_string(), serde_json::json!(true)),
+        ("utp-listen-port".to_string(), serde_json::json!(6882)),
+    ]));
+    let request = JsonRpcRequest::new("aria2.getGlobalOption", serde_json::json!([])).with_id(1);
+
+    let response = engine.handle_request(&request).await;
+    let response_options = response.result.expect("global options response");
+    let options = response_options
+        .as_object()
+        .expect("global options must be an object");
+
+    assert_eq!(options.get("dns-timeout"), Some(&serde_json::json!("30")));
+    assert_eq!(
+        options.get("enable-async-dns6"),
+        Some(&serde_json::json!("true")),
+        "an original NO_DEFAULT_VALUE option must appear once explicitly configured"
+    );
+    assert!(!options.contains_key("rpc-secret"));
+    assert!(!options.contains_key("not-a-registered-option"));
+    assert!(!options.contains_key("enable-utp"));
+    assert!(!options.contains_key("utp-listen-port"));
+}
+
+#[tokio::test]
 async fn test_change_option_accepts_valid_keys() {
     let engine = RpcEngine::new();
     let add_req =

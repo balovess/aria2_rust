@@ -129,7 +129,8 @@ impl TrackerClient {
         };
 
         let client = HttpClient::default_client()?;
-        let request = HttpRequest::get(&full_url).with_header("User-Agent", "aria2/1.37.0-Rust");
+        let request = HttpRequest::get(&full_url)
+            .with_header("User-Agent", crate::identity::DEFAULT_USER_AGENT);
 
         let response = client.execute(request).await?;
 

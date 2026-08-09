@@ -1,5 +1,5 @@
 // Protocol defaults
-pub const USER_AGENT: &str = "aria2-rust/1.0";
+pub const USER_AGENT: &str = aria2_protocol::identity::DEFAULT_USER_AGENT;
 pub const FTP_DEFAULT_PORT: u16 = 21;
 pub const FTP_DEFAULT_USER: &str = "anonymous";
 pub const FTP_DEFAULT_PASSWORD: &str = "aria2@";

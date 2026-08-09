@@ -70,6 +70,31 @@ impl OptionRegistry {
         &self.options
     }
 
+    /// Return the currently defined global options that may appear in
+    /// `aria2.getGlobalOption`.
+    ///
+    /// C++ iterates its option table and emits values only when an
+    /// `OptionHandler` exists and the preference is defined, with
+    /// `rpc-secret` as the explicit exception. The registry owns the
+    /// equivalent metadata here so RPC adapters do not grow their own
+    /// string-based allowlists. Hidden and deprecated original options remain
+    /// visible when defined; Rust-only extensions are excluded.
+    pub fn project_defined_global_options_for_rpc(
+        &self,
+        options: &HashMap<String, serde_json::Value>,
+    ) -> HashMap<String, serde_json::Value> {
+        self.options
+            .iter()
+            .filter(|(_, definition)| definition.is_exposed_in_aria2_rpc())
+            .filter_map(|(name, _)| {
+                options
+                    .get(name)
+                    .cloned()
+                    .map(|value| (name.clone(), value))
+            })
+            .collect()
+    }
+
     pub fn count(&self) -> usize {
         self.options.len()
     }
@@ -115,5 +140,41 @@ fn rpc_value_to_string(value: &serde_json::Value) -> Result<String, String> {
             .map(|values| values.join("\n")),
         serde_json::Value::Null => Err("option value must not be null".to_string()),
         serde_json::Value::Object(_) => Err("option value must be scalar or array".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::OptionRegistry;
+
+    #[test]
+    fn global_rpc_projection_keeps_hidden_original_options_outside_help_and_extensions() {
+        let registry = OptionRegistry::new();
+        let mut options = HashMap::from([
+            ("dns-timeout".to_string(), serde_json::json!(30)),
+            ("rpc-secret".to_string(), serde_json::json!("do-not-return")),
+            (
+                "not-a-registered-option".to_string(),
+                serde_json::json!("private"),
+            ),
+        ]);
+        #[cfg(feature = "bittorrent")]
+        {
+            options.insert("enable-utp".to_string(), serde_json::json!(true));
+            options.insert("utp-listen-port".to_string(), serde_json::json!(6882));
+        }
+
+        let projected = registry.project_defined_global_options_for_rpc(&options);
+
+        assert_eq!(projected.get("dns-timeout"), Some(&serde_json::json!(30)));
+        assert!(!projected.contains_key("rpc-secret"));
+        assert!(!projected.contains_key("not-a-registered-option"));
+        #[cfg(feature = "bittorrent")]
+        {
+            assert!(!projected.contains_key("enable-utp"));
+            assert!(!projected.contains_key("utp-listen-port"));
+        }
     }
 }

@@ -8,7 +8,7 @@
 
 use super::App;
 use super::cli::CliArgs;
-use aria2_core::config::{OptionValue, UriListFile};
+use aria2_core::config::{OptionValue, UriListFile, project_initial_options};
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
@@ -19,15 +19,9 @@ impl App {
         config.get_all_global_options().await
     }
 
-    /// Convert the complete, validated global configuration into the core
-    /// download options used by CLI, RPC and session-restored downloads.
-    pub(super) async fn download_options(&self) -> DownloadOptions {
-        let values = self.global_option_values().await;
-        DownloadOptions::from_option_values(&values)
-    }
-
     /// Return the typed execution options together with the canonical raw
-    /// values that must remain attached to each CLI-created RequestGroup.
+    /// request values that must remain attached to each CLI-created
+    /// `RequestGroup`.
     pub(super) async fn download_options_with_snapshot(
         &self,
     ) -> (
@@ -35,12 +29,14 @@ impl App {
         std::collections::HashMap<String, serde_json::Value>,
     ) {
         let values = self.global_option_values().await;
-        let snapshot = values
-            .iter()
-            .filter(|(_, value)| !value.is_none())
-            .map(|(name, value)| (name.clone(), serde_json::Value::from(value)))
-            .collect();
-        (DownloadOptions::from_option_values(&values), snapshot)
+        let options = DownloadOptions::from_option_values(&values);
+        let snapshot = project_initial_options(
+            values
+                .into_iter()
+                .filter(|(_, value)| !value.is_none())
+                .map(|(name, value)| (name, serde_json::Value::from(&value))),
+        );
+        (options, snapshot)
     }
 
     /// Load parsed CLI arguments (from clap `CliArgs`) into the configuration.

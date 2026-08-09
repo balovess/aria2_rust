@@ -138,9 +138,10 @@ pub async fn try_splice_download(
          Host: {host_header}\r\n\
          Range: {range_value}\r\n\
          Connection: close\r\n\
-         User-Agent: aria2-rust/1.0\r\n\
+         User-Agent: {}\r\n\
          Accept: */*\r\n\
          \r\n",
+        crate::constants::USER_AGENT,
     );
     stream.write_all(request.as_bytes()).await?;
     debug!(range = %range_value, "splice_download: request sent");

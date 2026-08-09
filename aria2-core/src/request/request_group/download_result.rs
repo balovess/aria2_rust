@@ -56,6 +56,13 @@ pub struct DownloadResult {
     pub code: DownloadResultCode,
     /// Human-readable error / status message.
     pub message: String,
+    /// The request-option snapshot owned by this terminal result.
+    ///
+    /// C++ aria2 retains the group's `Option` so `aria2.getOption` continues
+    /// to work after the request group has moved into stopped storage. This
+    /// is adapter-facing state, not part of the serialized result payload.
+    #[serde(skip)]
+    option_snapshot: Option<std::collections::HashMap<String, serde_json::Value>>,
 
     // ── Progress ────────────────────────────────────────────────────────
     /// Total length of the download in bytes.
@@ -119,6 +126,7 @@ impl DownloadResult {
             status,
             code,
             message,
+            option_snapshot: None,
             total_length: 0,
             completed_length: 0,
             upload_length: 0,
@@ -140,6 +148,18 @@ impl DownloadResult {
         }
     }
 
+    pub(crate) fn set_option_snapshot(
+        &mut self,
+        options: Option<std::collections::HashMap<String, serde_json::Value>>,
+    ) {
+        self.option_snapshot = options;
+    }
+
+    /// Return the option state captured when the request became terminal.
+    pub fn option_snapshot(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.option_snapshot.as_ref()
+    }
+
     /// Create a successful result (convenience for tests).
     pub fn finished() -> Self {
         Self {
@@ -147,6 +167,7 @@ impl DownloadResult {
             status: DownloadStatus::Complete,
             code: DownloadResultCode::Finished,
             message: String::from("OK"),
+            option_snapshot: None,
             total_length: 0,
             completed_length: 0,
             upload_length: 0,

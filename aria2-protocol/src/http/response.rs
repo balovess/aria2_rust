@@ -226,14 +226,14 @@ mod tests {
     fn test_request_builder() {
         let req = HttpRequest::get("https://example.com/file.bin")
             .with_range(500, Some(999))
-            .with_user_agent("aria2/1.37.0-Rust");
+            .with_user_agent(crate::identity::DEFAULT_USER_AGENT);
 
         assert_eq!(req.method, "GET");
         assert!(req.has_range());
         assert_eq!(req.get_header("Range"), Some(&"bytes=500-999".to_string()));
         assert_eq!(
             req.get_header("User-Agent"),
-            Some(&"aria2/1.37.0-Rust".to_string())
+            Some(&crate::identity::DEFAULT_USER_AGENT.to_string())
         );
     }
 }

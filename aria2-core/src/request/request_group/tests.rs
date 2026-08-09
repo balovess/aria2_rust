@@ -615,6 +615,35 @@ fn test_effective_option_snapshot_overlays_only_applied_runtime_changes() {
 }
 
 #[test]
+fn test_download_result_preserves_effective_option_snapshot() {
+    let mut group = RequestGroup::new(
+        GroupId::new(43),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_option_snapshot(std::collections::HashMap::from([
+        ("dir".to_string(), serde_json::json!("/initial")),
+        ("max-download-limit".to_string(), serde_json::json!("1024")),
+    ]));
+    group
+        .apply_runtime_options(std::collections::HashMap::from([(
+            "max-download-limit".to_string(),
+            serde_json::json!("2048"),
+        )]))
+        .expect("runtime option update should apply");
+
+    let result = group.create_download_result();
+    let options = result
+        .option_snapshot()
+        .expect("stopped result must retain the group's effective option state");
+    assert_eq!(options.get("dir"), Some(&serde_json::json!("/initial")));
+    assert_eq!(
+        options.get("max-download-limit"),
+        Some(&serde_json::json!("2048"))
+    );
+}
+
+#[test]
 fn test_runtime_option_updates_populate_execution_fields() {
     let mut group = RequestGroup::new(
         GroupId::new(2),

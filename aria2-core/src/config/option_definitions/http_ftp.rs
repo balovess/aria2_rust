@@ -112,7 +112,9 @@ impl crate::config::OptionRegistry {
             name: "user-agent".into(),
             opt_type: OptionType::String,
             short_name: Some('U'),
-            default_value: OptionValue::Str("aria2/1.37.0".into()),
+            default_value: OptionValue::Str(
+                aria2_protocol::identity::DEFAULT_USER_AGENT.into(),
+            ),
             description: "User-Agent header".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

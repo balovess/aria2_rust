@@ -445,17 +445,15 @@ impl super::RequestGroup {
     /// intentionally separate from runtime overrides so a later global option
     /// change cannot alter the observable task state.
     pub fn set_option_snapshot(&mut self, options: HashMap<String, serde_json::Value>) {
-        self.option_snapshot = Some(options);
+        self.option_snapshot = Some(crate::config::project_initial_options(options));
     }
 
     /// Return the creation snapshot with only already-applied runtime changes
     /// overlaid. Pending changes remain absent until a restart applies them.
-    pub fn effective_option_snapshot(
-        &self,
-    ) -> Option<HashMap<String, serde_json::Value>> {
+    pub fn effective_option_snapshot(&self) -> Option<HashMap<String, serde_json::Value>> {
         let mut options = self.option_snapshot.clone()?;
         options.extend(self.runtime_options());
-        Some(options)
+        Some(crate::config::project_initial_options(options))
     }
 
     // ── Rate Limiter ────────────────────────────────────────────────────

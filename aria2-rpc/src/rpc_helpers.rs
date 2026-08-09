@@ -33,21 +33,12 @@ pub fn normalize_rpc_options(
 // in the SessionInfo domain type, which is the owner of its wire contract.
 pub use crate::types::generate_session_id;
 
-/// Build version info response
+/// Build the same version response used by `aria2.getVersion`.
 ///
-/// Returns standardized version information object.
-///
-/// # Returns
-/// * JSON value containing version and enabled features
+/// This forwarding helper preserves the public Rust utility without creating
+/// a second wire shape beside [`crate::types::VersionInfo`].
 pub fn build_version_info() -> serde_json::Value {
-    let mut info = crate::types::VersionInfo::from_env().to_json_value();
-    if let Some(object) = info.as_object_mut() {
-        object.insert(
-            "session".to_string(),
-            serde_json::Value::String("aria2-rpc".to_string()),
-        );
-    }
-    info
+    crate::types::VersionInfo::from_env().to_json_value()
 }
 
 /// Fields that original aria2 keeps as native JSON numbers (not strings).
@@ -175,9 +166,10 @@ mod tests {
     #[test]
     fn test_build_version_info_structure() {
         let info = build_version_info();
+        assert_eq!(info, crate::types::VersionInfo::from_env().to_json_value());
         assert!(info.get("version").is_some());
         assert!(info.get("enabledFeatures").is_some());
-        assert!(info.get("session").is_some());
+        assert!(info.get("session").is_none());
     }
 
     #[test]

@@ -991,7 +991,7 @@ mod tests {
     fn make_v4_metalink() -> Vec<u8> {
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <metalink xmlns="urn:ietf:params:xml:ns:metalink">
-  <generator>aria2/1.37.0-Rust</generator>
+  <generator>aria2/1.37.0</generator>
   <origin>Dynamic</origin>
   <published>2024-01-01T00:00:00Z</published>
   <file name="example.bin">
@@ -1031,7 +1031,10 @@ mod tests {
         let data = make_v4_metalink();
         let doc = MetalinkDocument::parse(&data, None).unwrap();
         assert_eq!(doc.version, MetalinkVersion::V4);
-        assert_eq!(doc.generator.as_deref(), Some("aria2/1.37.0-Rust"));
+        assert_eq!(
+            doc.generator.as_deref(),
+            Some(crate::identity::DEFAULT_USER_AGENT)
+        );
         assert_eq!(doc.origin.as_deref(), Some("Dynamic"));
         assert_eq!(doc.published.as_deref(), Some("2024-01-01T00:00:00Z"));
         assert_eq!(doc.files[0].name, "example.bin");

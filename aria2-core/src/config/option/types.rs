@@ -252,6 +252,14 @@ pub struct OptionDef {
     pub allowed_values: &'static [&'static str],
     pub deprecated: bool,
     pub hidden: bool,
+    /// Whether this option belongs in `aria2.getGlobalOption`'s original
+    /// wire contract when it is defined.
+    ///
+    /// This is intentionally independent from help visibility: C++ aria2
+    /// reports hidden and deprecated `OptionHandler` values, but must not
+    /// expose secrets or Rust-only extensions through its standard RPC
+    /// response.
+    pub expose_in_aria2_rpc: bool,
     /// If set, multiple calls to `set_raw` for this option will append values
     /// separated by this delimiter rather than overwrite. Used for cumulative
     /// options like `header` (delimiter: `"\n"`) and `bt-tracker`.
@@ -272,6 +280,7 @@ impl Default for OptionDef {
             allowed_values: &[],
             deprecated: false,
             hidden: false,
+            expose_in_aria2_rpc: true,
             cumulative_delimiter: None,
         }
     }
@@ -306,6 +315,10 @@ impl OptionDef {
     }
     pub fn is_hidden(&self) -> bool {
         self.hidden
+    }
+
+    pub fn is_exposed_in_aria2_rpc(&self) -> bool {
+        self.expose_in_aria2_rpc
     }
 
     pub fn description(&self) -> &str {

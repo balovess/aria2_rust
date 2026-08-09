@@ -51,7 +51,9 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "enable-async-dns6".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            // `OptionHandlerFactory.cc` uses `NO_DEFAULT_VALUE`, so the
+            // option is absent from `getGlobalOption` until explicitly set.
+            default_value: OptionValue::None,
             description: "Enable IPv6 async DNS resolution (deprecated)".into(),
             category: OptionCategory::General,
             deprecated: true,

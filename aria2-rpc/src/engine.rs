@@ -5,7 +5,7 @@ use tokio::sync::{RwLock, mpsc};
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use super::rpc_helpers::split_auth_token;
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
-use super::types::{GlobalOptions, SessionInfo, TaskOptions};
+use super::types::{GlobalOptions, SessionInfo};
 use super::websocket::EventPublisher;
 use aria2_core::config::OptionRegistry;
 use aria2_core::request::request_group_man::RequestGroupMan;
@@ -18,7 +18,6 @@ pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
 /// lifecycle changes are submitted to the core engine command channel.
 pub struct RpcEngine {
     pub(crate) global_opts: GlobalOptions,
-    pub(crate) task_opts: TaskOptions,
     pub event_publisher: Arc<EventPublisher>,
     pub(crate) auth_middleware: RpcAuthMiddleware,
     pub(crate) group_man: Option<Arc<RwLock<RequestGroupMan>>>,
@@ -45,11 +44,10 @@ impl RpcEngine {
         let registry = OptionRegistry::new();
         let mut defaults = HashMap::new();
         for (name, def) in registry.all() {
-            // Skip deprecated and hidden options so RPC clients don't see
-            // internal/legacy options via aria2.getGlobalOption.
-            if def.deprecated || def.hidden {
-                continue;
-            }
+            // `GetGlobalOptionRpcMethod` reports every defined original
+            // OptionHandler value, including hidden and deprecated options.
+            // RPC visibility is projected later from registry metadata so
+            // secrets and Rust-only extensions remain private.
             let json_val: serde_json::Value = serde_json::Value::from(def.default_value());
             // Skip None/Null defaults to keep the map compact
             if !json_val.is_null() {
@@ -59,7 +57,6 @@ impl RpcEngine {
 
         Self {
             global_opts: Arc::new(RwLock::new(defaults)),
-            task_opts: Arc::new(RwLock::new(HashMap::new())),
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),
             group_man: Some(group_man),
@@ -261,7 +258,7 @@ impl RpcEngine {
                 .handle_force_pause(dispatch_req)
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
-            "aria2.unpause" | "aria2.forceUnpause" => self
+            "aria2.unpause" => self
                 .handle_unpause(dispatch_req)
                 .await
                 .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
@@ -405,6 +402,10 @@ mod tests {
         let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_success());
+        assert_eq!(
+            resp.result.expect("getVersion result"),
+            crate::types::VersionInfo::from_env().to_json_value()
+        );
     }
 
     #[tokio::test]

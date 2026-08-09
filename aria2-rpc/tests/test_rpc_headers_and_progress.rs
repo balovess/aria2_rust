@@ -388,6 +388,10 @@ async fn test_get_option_preserves_task_snapshot_after_global_change() {
         opts_map["dir"], ".",
         "getOption should not reflect a later changeGlobalOption call"
     );
+    assert!(
+        !opts_map.contains_key("enable-rpc"),
+        "getOption must not expose process-wide RPC listener settings"
+    );
 }
 
 // =========================================================================
@@ -435,7 +439,7 @@ async fn test_get_option_merges_task_snapshot_with_applied_runtime_change() {
 
 // =========================================================================
 // Test 9: aria2.getOption returns RpcExecution error for a GID that exists
-// neither in task_opts nor in RequestGroupMan.
+// neither in RequestGroupMan nor in its stopped results.
 // =========================================================================
 
 #[tokio::test]

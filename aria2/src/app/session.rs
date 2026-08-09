@@ -6,6 +6,7 @@
 //! - Mapping session entries to download options
 
 use super::App;
+use aria2_core::config::project_initial_options;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use aria2_core::request::request_group::{BtDependency, BtFileMapping, MetadataInfo, RequestGroup};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
@@ -86,13 +87,20 @@ impl App {
                 continue;
             }
 
-            // Map SessionEntry options to DownloadOptions
+            // Keep the persisted request options separate from Rust-only
+            // session metadata before reconstructing execution settings.
+            let option_snapshot = Self::session_option_snapshot(&entry.options);
             let opts = Self::map_entry_to_download_options(&entry.options);
 
             #[cfg(all(feature = "metalink", feature = "bittorrent"))]
             if let Some(payload_gid) = standard_graph_payload_gid(entry) {
                 match self
-                    .restore_standard_metalink_graph(entry, payload_gid, opts.clone())
+                    .restore_standard_metalink_graph(
+                        entry,
+                        payload_gid,
+                        opts.clone(),
+                        option_snapshot.clone(),
+                    )
                     .await
                 {
                     Ok(count) => {
@@ -125,7 +133,8 @@ impl App {
 
                         // Store BT bitfield if present
                         if let Some(group_lock) = man.get_group(gid) {
-                            let group = group_lock.recover_mut();
+                            let mut group = group_lock.recover_mut();
+                            group.set_option_snapshot(option_snapshot.clone());
                             if entry.bitfield.is_some() {
                                 *group.bt_bitfield.recover_mut() = entry.bitfield.clone();
                                 debug!(
@@ -159,6 +168,7 @@ impl App {
         entry: &SessionEntry,
         payload_gid: GroupId,
         payload_options: DownloadOptions,
+        option_snapshot: std::collections::HashMap<String, serde_json::Value>,
     ) -> std::result::Result<usize, String> {
         let metadata_gid = GroupId::new(entry.gid);
         if metadata_gid == payload_gid {
@@ -221,6 +231,9 @@ impl App {
             vec![metadata_uri.clone()],
             metadata_options,
         )));
+        metadata
+            .recover_mut()
+            .set_option_snapshot(option_snapshot.clone());
         if memory_source {
             metadata.recover().mark_in_memory_download();
         }
@@ -231,6 +244,7 @@ impl App {
             vec![format!("bt://{}", metadata_gid.to_hex_string())],
             payload_options,
         )));
+        payload.recover_mut().set_option_snapshot(option_snapshot);
         payload.recover().set_output_name(output_name);
         payload.recover().set_metadata_info(metadata_info.clone());
         let dependency = if memory_source {
@@ -336,6 +350,16 @@ impl App {
         options: &std::collections::HashMap<String, String>,
     ) -> DownloadOptions {
         DownloadOptions::from_option_strings(options)
+    }
+
+    fn session_option_snapshot(
+        options: &std::collections::HashMap<String, String>,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        project_initial_options(
+            options
+                .iter()
+                .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone()))),
+        )
     }
 }
 
