@@ -18,7 +18,6 @@ pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
 /// lifecycle changes are submitted to the core engine command channel.
 pub struct RpcEngine {
     pub(crate) global_opts: GlobalOptions,
-    pub(crate) user_global_opts: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     pub(crate) task_opts: TaskOptions,
     pub event_publisher: Arc<EventPublisher>,
     pub(crate) auth_middleware: RpcAuthMiddleware,
@@ -60,8 +59,6 @@ impl RpcEngine {
 
         Self {
             global_opts: Arc::new(RwLock::new(defaults)),
-            // Keep user-provided global options separate from registry defaults.
-            user_global_opts: Arc::new(RwLock::new(HashMap::new())),
             task_opts: Arc::new(RwLock::new(HashMap::new())),
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),

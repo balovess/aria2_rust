@@ -12,8 +12,11 @@ pub struct ServerConfig {
     pub cors: CorsConfig,
     /// TLS configuration for HTTPS RPC
     pub tls: Option<TlsConfig>,
-    /// Maximum allowed size for a single RPC request / WebSocket message in bytes.
-    /// Prevents OOM from oversized payloads. Default: 2 MiB.
+    /// Maximum JSON-RPC/XML-RPC parser input size in bytes.
+    ///
+    /// HTTP rejects larger request bodies before dispatch. WebSocket keeps the
+    /// connection open and maps an oversized document to aria2's JSON-RPC
+    /// parse error. Default: 2 MiB.
     pub max_request_size: usize,
 }
 
@@ -51,10 +54,7 @@ impl ServerConfig {
         self.tls = Some(tls);
         self
     }
-    /// Set the maximum RPC request / WebSocket message size in bytes.
-    ///
-    /// Both `max_frame_size` and `max_message_size` on the WebSocket upgrade
-    /// will be set to this value, preventing OOM from oversized payloads.
+    /// Set the maximum RPC parser input size in bytes.
     pub fn with_max_request_size(mut self, size: usize) -> Self {
         self.max_request_size = size;
         self

@@ -62,6 +62,13 @@ pub struct RequestGroup {
     pub(super) output_name: std::sync::RwLock<Option<String>>,
     /// Download options — shared via `Arc` for cheap cloning.
     pub(super) options: Arc<DownloadOptions>,
+    /// Canonical option values captured when this task was created.
+    ///
+    /// The task owns this immutable snapshot so external adapters can report
+    /// the same per-group options after later global configuration changes.
+    /// Runtime changes stay separate in `runtime_options` and are overlaid
+    /// only when they have actually taken effect.
+    pub(super) option_snapshot: Option<HashMap<String, serde_json::Value>>,
     /// Successfully applied task-level runtime overrides.
     ///
     /// The typed fields in [`DownloadOptions`] remain the execution source for
@@ -217,6 +224,7 @@ impl RequestGroup {
             uris,
             output_name: std::sync::RwLock::new(None),
             options: Arc::new(options),
+            option_snapshot: None,
             runtime_options: std::sync::RwLock::new(HashMap::new()),
             pending_options: std::sync::RwLock::new(HashMap::new()),
             status: std::sync::RwLock::new(super::status::DownloadStatus::Waiting),

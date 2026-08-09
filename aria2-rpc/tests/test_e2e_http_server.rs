@@ -9,7 +9,7 @@
 //!   C — CORS                 (3 tests)
 //!   D — WebSocket            (5 tests)
 //!   E — Batch requests       (2 tests)
-//!   F — Full lifecycle       (2 tests)
+//!   F — Full lifecycle       (3 tests)
 
 mod common;
 
@@ -688,6 +688,31 @@ async fn e2e_cors_allowed_origin() {
     assert!(resp.headers().get("access-control-allow-origin").is_some());
 }
 
+/// With `--rpc-allow-origin-all=true`, aria2_original writes the wildcard CORS
+/// header on every RPC response, including requests that do not send Origin.
+#[tokio::test]
+async fn e2e_cors_wildcard_is_emitted_without_request_origin_like_original() {
+    let config = ServerConfig::default().with_cors(CorsConfig::allow_all_origins());
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/jsonrpc"))
+        .json(&rpc_body("aria2.getVersion", json!([])))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*"),
+        "aria2_original emits its configured wildcard header independently of request Origin"
+    );
+}
+
 #[tokio::test]
 async fn e2e_cors_wildcard() {
     let config = ServerConfig::default().with_cors(CorsConfig::allow_all_origins());
@@ -954,6 +979,49 @@ async fn e2e_ws_jsonrpc_get_version() {
     assert!(
         resp["result"]["version"].is_string(),
         "version should be a string"
+    );
+}
+
+/// C++ aria2 hands every non-control WebSocket frame to its JSON parser. A
+/// binary frame containing a valid JSON-RPC request must therefore receive the
+/// same text JSON-RPC response as the equivalent text frame.
+#[tokio::test]
+async fn e2e_ws_binary_jsonrpc_request_matches_original_non_control_frame_behavior() {
+    let (base, _guard) = start_test_server(None).await;
+    let ws_url = base.replace("http://", "ws://");
+
+    let (ws, _) = connect_async(format!("{ws_url}/jsonrpc"))
+        .await
+        .expect("WS upgrade failed");
+    let (mut tx, mut rx) = ws.split();
+
+    use tokio_tungstenite::tungstenite::Message;
+    let request = json!({
+        "jsonrpc": "2.0",
+        "method": "aria2.getVersion",
+        "params": [],
+        "id": "binary-frame",
+    });
+    tx.send(Message::Binary(request.to_string().into_bytes()))
+        .await
+        .expect("send binary JSON-RPC request failed");
+
+    let message = tokio::time::timeout(Duration::from_secs(5), rx.next())
+        .await
+        .expect("timeout waiting for binary-frame JSON-RPC response")
+        .expect("WS stream ended")
+        .expect("WS message error");
+    let response: Value = serde_json::from_str(
+        &message
+            .into_text()
+            .expect("original-compatible response must be a text frame"),
+    )
+    .expect("response should be valid JSON");
+
+    assert_eq!(response["id"], "binary-frame");
+    assert!(
+        response["result"]["version"].is_string(),
+        "expected getVersion response, got: {response}"
     );
 }
 
@@ -1309,5 +1377,41 @@ async fn e2e_global_option_change() {
         Some("5"),
         "expected max-concurrent-downloads=5, got: {}",
         after["result"]["max-concurrent-downloads"]
+    );
+}
+
+/// `aria2.getOption` serializes the task's own option state. A later global
+/// change must affect future tasks only, not rewrite an existing task's
+/// response over the public HTTP JSON-RPC adapter.
+#[tokio::test]
+async fn e2e_get_option_preserves_task_snapshot_after_global_change() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+
+    let add = rpc_call(
+        &client,
+        &base,
+        "aria2.addUri",
+        json!([["http://127.0.0.1:1/task-snapshot.bin"]]),
+    )
+    .await;
+    let gid = parse_gid(&add);
+
+    let change = rpc_call(
+        &client,
+        &base,
+        "aria2.changeGlobalOption",
+        json!([{"dir": "/tmp/http-task-snapshot"}]),
+    )
+    .await;
+    assert_eq!(change["result"], "OK");
+
+    let global = rpc_call(&client, &base, "aria2.getGlobalOption", json!([])).await;
+    assert_eq!(global["result"]["dir"], "/tmp/http-task-snapshot");
+
+    let task = rpc_call(&client, &base, "aria2.getOption", json!([gid])).await;
+    assert_eq!(
+        task["result"]["dir"], ".",
+        "the original task snapshot must not follow a later global mutation"
     );
 }

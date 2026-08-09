@@ -329,16 +329,14 @@ async fn test_progress_changes_reflected_in_tell_status() {
 }
 
 // =========================================================================
-// Test 7: aria2.getOption falls back to global options for tasks that exist
-// in RequestGroupMan but have no per-task overrides stored via changeOption.
+// Test 7: aria2.getOption returns the option snapshot captured for the task.
 // =========================================================================
 
 #[tokio::test]
-async fn test_get_option_falls_back_to_global_for_group_man_task() {
+async fn test_get_option_preserves_task_snapshot_after_global_change() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
-    // Add a download — this registers the GID in RequestGroupMan but does
-    // NOT create a task_opts entry (changeOption is never called).
+    // addUri captures the current global option set for this RequestGroup.
     let add_req = JsonRpcRequest::new("aria2.addUri", json!([["http://example.com/fallback.bin"]]))
         .with_id(1);
     let resp = engine.handle_request(&add_req).await;
@@ -351,8 +349,8 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
         "task should be registered in RequestGroupMan"
     );
 
-    // Set a known global option value so we can verify the fallback returns
-    // the live global options (not a stale snapshot or an error).
+    // Changing a global option updates future tasks, but must not rewrite the
+    // option snapshot held by this existing group.
     let change_global = JsonRpcRequest::new(
         "aria2.changeGlobalOption",
         json!([{"dir": "/tmp/fallback-test"}]),
@@ -361,13 +359,21 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
     let cg_resp = engine.handle_request(&change_global).await;
     assert!(cg_resp.is_success(), "changeGlobalOption should succeed");
 
-    // getOption on the task (no per-task overrides) should succeed and
-    // return the global options, including the value we just set.
-    let get_req = JsonRpcRequest::new("aria2.getOption", json!([gid.clone()])).with_id(3);
+    let get_global = JsonRpcRequest::new("aria2.getGlobalOption", json!([])).with_id(3);
+    let global_resp = engine.handle_request(&get_global).await;
+    assert_eq!(
+        global_resp.result.unwrap()["dir"],
+        "/tmp/fallback-test",
+        "the global option should have changed"
+    );
+
+    // C++ GetOptionRpcMethod serializes group->getOption(), so this task
+    // keeps its creation-time directory even though the global value changed.
+    let get_req = JsonRpcRequest::new("aria2.getOption", json!([gid.clone()])).with_id(4);
     let get_resp = engine.handle_request(&get_req).await;
     assert!(
         get_resp.is_success(),
-        "getOption should fall back to global options, not error"
+        "getOption should return the task option snapshot"
     );
 
     let opts = get_resp.result.unwrap();
@@ -376,16 +382,59 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
         .expect("getOption result should be a JSON object");
     assert!(
         opts_map.contains_key("dir"),
-        "fallback result should contain global 'dir' option"
+        "task option snapshot should contain 'dir'"
     );
     assert_eq!(
-        opts_map["dir"], "/tmp/fallback-test",
-        "fallback should reflect the current global option value"
+        opts_map["dir"], ".",
+        "getOption should not reflect a later changeGlobalOption call"
     );
 }
 
 // =========================================================================
-// Test 8: aria2.getOption returns RpcExecution error for a GID that exists
+// Test 8: aria2.getOption combines a task snapshot with applied changes.
+// =========================================================================
+
+#[tokio::test]
+async fn test_get_option_merges_task_snapshot_with_applied_runtime_change() {
+    let (engine, _group_man, _cmd_rx) = create_engine_with_shared_state();
+
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        json!([
+            ["http://example.com/runtime-change.bin"],
+            {"dir": "/tmp/task-snapshot", "max-download-limit": "1024"}
+        ]),
+    )
+    .with_id(1);
+    let add_resp = engine.handle_request(&add_req).await;
+    assert!(add_resp.is_success());
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let change_req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        json!([gid.clone(), {"max-download-limit": "2048"}]),
+    )
+    .with_id(2);
+    let change_resp = engine.handle_request(&change_req).await;
+    assert!(change_resp.is_success(), "changeOption should succeed");
+
+    let get_req = JsonRpcRequest::new("aria2.getOption", json!([gid])).with_id(3);
+    let get_resp = engine.handle_request(&get_req).await;
+    assert!(get_resp.is_success());
+    let opts = get_resp.result.unwrap();
+
+    assert_eq!(
+        opts["dir"], "/tmp/task-snapshot",
+        "getOption must retain unchanged fields from the task snapshot"
+    );
+    assert_eq!(
+        opts["max-download-limit"], "2048",
+        "getOption must expose the value applied by changeOption"
+    );
+}
+
+// =========================================================================
+// Test 9: aria2.getOption returns RpcExecution error for a GID that exists
 // neither in task_opts nor in RequestGroupMan.
 // =========================================================================
 

@@ -209,7 +209,7 @@ impl SftpDownloadCommand {
         // `uri_split` keeps query and fragment out of `Request::getDir()` /
         // `getFile()`. SFTP must therefore open only the path component.
         let authority_end = without_scheme
-            .find(|character| matches!(character, '/' | '?' | '#'))
+            .find(['/', '?', '#'])
             .unwrap_or(without_scheme.len());
         let authority = &without_scheme[..authority_end];
         if authority.is_empty() {
@@ -217,7 +217,7 @@ impl SftpDownloadCommand {
         }
         let path_and_suffix = &without_scheme[authority_end..];
         let path_end = path_and_suffix
-            .find(|character| matches!(character, '?' | '#'))
+            .find(['?', '#'])
             .unwrap_or(path_and_suffix.len());
         let path = if path_and_suffix.starts_with('/') {
             &path_and_suffix[..path_end]

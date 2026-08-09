@@ -14,14 +14,33 @@ use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
 
 impl App {
+    async fn global_option_values(&self) -> std::collections::HashMap<String, OptionValue> {
+        let config = self.config.read().await;
+        config.get_all_global_options().await
+    }
+
     /// Convert the complete, validated global configuration into the core
     /// download options used by CLI, RPC and session-restored downloads.
     pub(super) async fn download_options(&self) -> DownloadOptions {
-        let values = {
-            let config = self.config.read().await;
-            config.get_all_global_options().await
-        };
+        let values = self.global_option_values().await;
         DownloadOptions::from_option_values(&values)
+    }
+
+    /// Return the typed execution options together with the canonical raw
+    /// values that must remain attached to each CLI-created RequestGroup.
+    pub(super) async fn download_options_with_snapshot(
+        &self,
+    ) -> (
+        DownloadOptions,
+        std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        let values = self.global_option_values().await;
+        let snapshot = values
+            .iter()
+            .filter(|(_, value)| !value.is_none())
+            .map(|(name, value)| (name.clone(), serde_json::Value::from(value)))
+            .collect();
+        (DownloadOptions::from_option_values(&values), snapshot)
     }
 
     /// Load parsed CLI arguments (from clap `CliArgs`) into the configuration.

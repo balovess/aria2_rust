@@ -57,7 +57,7 @@ impl App {
             return Err("No download inputs provided".to_string());
         }
 
-        let options = self.download_options().await;
+        let (options, option_snapshot) = self.download_options_with_snapshot().await;
         let global_dl = self
             .get_opt_i64("max-overall-download-limit")
             .await

@@ -154,6 +154,13 @@ pub fn is_process_alive(pid: u32) -> bool {
 
     #[cfg(unix)]
     {
+        // `pid_t` is signed. Casting a larger u32 (notably u32::MAX) to it
+        // produces a negative PID; `kill(-1, 0)` checks a process group and
+        // can incorrectly report a stale PID as alive.
+        if pid == 0 || pid > libc::pid_t::MAX as u32 {
+            return false;
+        }
+
         // SAFETY: `kill` with signal 0 performs the permission/existence check
         // without delivering a signal.
         let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
@@ -187,6 +194,7 @@ mod tests {
         // PID 0 is the idle/swapper pseudo-process on both platforms and can
         // never be opened as a normal process, and u32::MAX is far above every
         // real PID range.
+        assert!(!is_process_alive(0));
         assert!(!is_process_alive(u32::MAX));
     }
 

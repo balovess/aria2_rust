@@ -177,14 +177,6 @@ impl RpcEngine {
             opts.insert(k.clone(), v.clone());
         }
         drop(opts);
-        // Track user-set options separately so addUri/addTorrent can apply
-        // them to subsequent downloads (registry defaults must not leak in).
-        {
-            let mut user = self.user_global_opts.write().await;
-            for (k, v) in &new_opts {
-                user.insert(k.clone(), v.clone());
-            }
-        }
         // Apply engine-level options live.
         // max-concurrent-downloads drives the engine's slot limit; the
         // engine loop reduces excess active downloads immediately.
@@ -232,47 +224,52 @@ impl RpcEngine {
     /// Handle `aria2.getOption` - Get per-task options.
     ///
     /// Resolution order:
-    /// 1. Per-task options stored via `aria2.changeOption` (returned as-is).
-    /// 2. If no per-task overrides exist but the task is registered in the
-    ///    shared `RequestGroupMan`, fall back to the current global options.
-    /// 3. Otherwise return `MethodNotFound`.
+    /// 1. The task snapshot captured when `aria2.add*` created the group,
+    ///    overlaid with options already applied through `aria2.changeOption`.
+    /// 2. Legacy group-only adapters without a task snapshot use their applied
+    ///    options, then the current global options as their historical fallback.
+    /// 3. Otherwise return an execution error.
     pub async fn handle_get_option(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Read options that have actually been applied to the live group.
         // Pending changes are intentionally absent until the group restarts;
         // this matches C++ getOption rather than exposing a queued value.
-        let group_exists = if let Some(group_man) = self.group_man.as_ref() {
+        let group_option_state = if let Some(group_man) = self.group_man.as_ref() {
             let group_man = group_man.read().await;
-            if let Some(group) = group_man.group_by_hex(&gid) {
-                let runtime_options = group.recover().runtime_options();
-                if !runtime_options.is_empty() {
-                    let wire_opts = normalize_rpc_options(&runtime_options);
-                    return Ok(JsonRpcResponse::success(
-                        req.id.clone().unwrap_or_default(),
-                        serde_json::to_value(wire_opts).map_err(|e| {
-                            JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                        })?,
-                    ));
-                }
-                true
-            } else {
-                false
-            }
+            group_man
+                .group_by_hex(&gid)
+                .map(|group| {
+                    let group = group.recover();
+                    (
+                        group.effective_option_snapshot(),
+                        group.runtime_options(),
+                    )
+                })
         } else {
-            false
+            None
         };
+        let group_exists = group_option_state.is_some();
 
-        // Legacy task-local storage is retained for adapters that do not own
-        // a RequestGroupMan (and for pre-existing callers).
+        // Live groups own their option snapshot in core. This makes CLI,
+        // session-restored, and RPC-created tasks follow the same rule.
+        if let Some((Some(options), _)) = group_option_state.as_ref() {
+            let wire_opts = normalize_rpc_options(options);
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                serde_json::to_value(wire_opts).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                })?,
+            ));
+        }
+
+        // Stopped-result and legacy adapter fallback. A live RequestGroup is
+        // always preferred above because C++ reads group->getOption().
         let task_opts = self.task_opts.read().await;
-        if let Some(opts) = task_opts.get(&gid)
-            && !opts.is_empty()
-        {
-            let wire_opts = normalize_rpc_options(opts);
+        if let Some(snapshot) = task_opts.get(&gid) {
+            let wire_opts = normalize_rpc_options(snapshot);
             return Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
                 serde_json::to_value(wire_opts).map_err(|e| {
@@ -282,8 +279,20 @@ impl RpcEngine {
         }
         drop(task_opts);
 
-        // Fall back to global options if the task is known to the shared
-        // RequestGroupMan.
+        // Preserve the legacy group-only adapter behavior for callers that
+        // registered a RequestGroup without the RPC task snapshot.
+        if let Some((_, runtime_options)) = group_option_state
+            && !runtime_options.is_empty()
+        {
+            let wire_opts = normalize_rpc_options(&runtime_options);
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                serde_json::to_value(wire_opts).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
+                })?,
+            ));
+        }
+
         if group_exists {
             let global_opts = self.global_opts.read().await;
             let wire_opts = normalize_rpc_options(&global_opts);

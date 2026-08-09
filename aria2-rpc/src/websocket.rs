@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 
 /// Configuration for WebSocket connection keepalive behavior.
 ///
@@ -177,12 +177,41 @@ impl DownloadEvent {
     }
 }
 
-#[derive(Clone)]
 struct Subscriber {
     #[allow(dead_code)] // Subscriber ID for debugging and connection management
     id: String,
     #[allow(dead_code)] // Event filter; stored for per-subscriber event filtering
     filter: Option<Vec<EventType>>,
+}
+
+/// Receiver registration that removes its bookkeeping entry when dropped.
+///
+/// The broadcast receiver itself already releases its channel slot on drop;
+/// this companion guard keeps `EventPublisher::subscriber_count` aligned with
+/// the active WebSocket session lifecycle as well.
+pub(crate) struct ScopedSubscription {
+    id: String,
+    receiver: broadcast::Receiver<(EventType, DownloadEvent)>,
+    subscribers: Arc<RwLock<HashMap<String, Subscriber>>>,
+}
+
+impl ScopedSubscription {
+    pub(crate) async fn recv(
+        &mut self,
+    ) -> Result<(EventType, DownloadEvent), broadcast::error::RecvError> {
+        self.receiver.recv().await
+    }
+}
+
+impl Drop for ScopedSubscription {
+    fn drop(&mut self) {
+        // Never panic while tearing down a WebSocket task. A poisoned lock can
+        // only result from an earlier internal panic, and must not prevent the
+        // receiver itself from being released.
+        if let Ok(mut subscribers) = self.subscribers.write() {
+            subscribers.remove(&self.id);
+        }
+    }
 }
 
 pub struct EventPublisher {
@@ -199,30 +228,55 @@ impl EventPublisher {
         }
     }
 
+    fn register(&self, id: String, filter: Option<Vec<EventType>>) {
+        let mut subscribers = self
+            .subscribers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        subscribers.insert(id.clone(), Subscriber { id, filter });
+    }
+
     pub async fn subscribe(
         &self,
         sub_id: impl Into<String>,
         filter: Option<Vec<EventType>>,
     ) -> broadcast::Receiver<(EventType, DownloadEvent)> {
-        let mut subs = self.subscribers.write().await;
         let id = sub_id.into();
-        subs.insert(
-            id.clone(),
-            Subscriber {
-                id: id.clone(),
-                filter,
-            },
-        );
+        self.register(id, filter);
         self.tx.subscribe()
     }
 
+    /// Subscribe a connection whose bookkeeping must end with its receiver.
+    ///
+    /// This is intentionally crate-private: public callers retain the
+    /// established explicit `subscribe` / `unsubscribe` lifecycle.
+    pub(crate) fn subscribe_scoped(
+        &self,
+        sub_id: impl Into<String>,
+        filter: Option<Vec<EventType>>,
+    ) -> ScopedSubscription {
+        let id = sub_id.into();
+        self.register(id.clone(), filter);
+        ScopedSubscription {
+            id,
+            receiver: self.tx.subscribe(),
+            subscribers: Arc::clone(&self.subscribers),
+        }
+    }
+
     pub async fn unsubscribe(&self, sub_id: &str) {
-        let mut subs = self.subscribers.write().await;
-        subs.remove(sub_id);
+        let mut subscribers = self
+            .subscribers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        subscribers.remove(sub_id);
     }
 
     pub async fn subscriber_count(&self) -> usize {
-        self.subscribers.read().await.len()
+        self.subscribers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     pub fn publish(&self, event_type: EventType, event: DownloadEvent) -> Result<usize, String> {
@@ -684,6 +738,26 @@ mod tests {
         assert_eq!(publisher.subscriber_count().await, 1);
 
         publisher.unsubscribe("client-1").await;
+        assert_eq!(publisher.subscriber_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_subscription_releases_bookkeeping_on_drop() {
+        let publisher = EventPublisher::new(16);
+        let mut subscription = publisher.subscribe_scoped("ws-conn-1", None);
+        assert_eq!(publisher.subscriber_count().await, 1);
+
+        publisher
+            .publish(
+                EventType::DownloadStart,
+                DownloadEvent::download_start("gid-1"),
+            )
+            .expect("scoped subscription must receive broadcast events");
+        let (event_type, event) = subscription.recv().await.unwrap();
+        assert_eq!(event_type, EventType::DownloadStart);
+        assert_eq!(event.gid(), "gid-1");
+
+        drop(subscription);
         assert_eq!(publisher.subscriber_count().await, 0);
     }
 

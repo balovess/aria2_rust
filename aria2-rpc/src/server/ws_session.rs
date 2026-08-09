@@ -2,9 +2,12 @@
 //! JSON-RPC dispatch, and outbound event forwarding.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::http_routes::RpcState;
 use crate::engine::RpcEngine;
+
+static NEXT_WS_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Handle WebSocket upgrade requests.
 ///
@@ -14,11 +17,13 @@ pub async fn ws_handler(
     axum::extract::State(state): axum::extract::State<RpcState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl axum::response::IntoResponse {
-    // Enforce max frame/message size to prevent OOM from oversized payloads.
-    let max_size = state.max_request_size;
-    ws.max_frame_size(max_size)
-        .max_message_size(max_size)
-        .on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
+    // `rpc-max-request-size` is a JSON parser limit in aria2_original, not a
+    // WebSocket transport limit. Setting it on the upgrade would make Axum
+    // close an oversized client frame before we can return aria2's parse
+    // error and keep the connection usable. The WebSocket implementation's
+    // default finite transport limits remain the outer DoS safeguard.
+    let max_request_size = state.max_request_size;
+    ws.on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone(), max_request_size))
 }
 
 /// Handle an upgraded WebSocket connection.
@@ -26,9 +31,10 @@ pub async fn ws_handler(
 /// Serves dual purpose (matching C++ aria2's `WebSocketSession::onMsgRecvCallback`):
 /// - **OUTBOUND**: Subscribes to the engine's event publisher and forwards
 ///   download event notifications to the connected WebSocket client.
-/// - **INBOUND**: Processes incoming `Text` messages as JSON-RPC requests
-///   (single or batch), dispatches them through `RpcEngine::handle_request`,
-///   and sends the response(s) back over the WebSocket.
+/// - **INBOUND**: Processes incoming non-control WebSocket message payloads
+///   as JSON-RPC requests (single or batch), dispatches them through
+///   `RpcEngine::handle_request`, and sends the response(s) back over the
+///   WebSocket. This accepts both text and binary frames like aria2_original.
 ///
 /// The `tokio::select!` loop interleaves both directions so that event
 /// notifications continue flowing even while request/response traffic is
@@ -36,16 +42,22 @@ pub async fn ws_handler(
 pub async fn handle_ws_socket(
     mut socket: axum::extract::ws::WebSocket,
     engine: std::sync::Arc<crate::engine::RpcEngine>,
+    max_request_size: usize,
 ) {
     use tokio::sync::broadcast;
 
-    // Subscribe to the engine's event publisher
-    let mut rx = engine.event_publisher.subscribe("ws-conn", None).await;
+    // C++ owns one WebSocketSession entry per connection and removes it on
+    // disconnect. Keep the same lifecycle with a unique RAII subscription.
+    let subscriber_id = format!(
+        "ws-conn-{}",
+        NEXT_WS_SUBSCRIBER_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut subscription = engine.event_publisher.subscribe_scoped(subscriber_id, None);
 
     loop {
         tokio::select! {
             // Wait for events from the engine (outbound notifications)
-            result = rx.recv() => {
+            result = subscription.recv() => {
                 match result {
                     Ok((_event_type, event)) => {
                         if let Ok(json_str) = event.to_json()
@@ -72,7 +84,12 @@ pub async fn handle_ws_socket(
                 match msg {
                     Some(Ok(axum::extract::ws::Message::Text(text))) => {
                         // Process incoming text as a JSON-RPC request
-                        process_ws_jsonrpc(&mut socket, &engine, &text).await;
+                        process_ws_jsonrpc(&mut socket, &engine, text.as_bytes(), max_request_size).await;
+                    }
+                    Some(Ok(axum::extract::ws::Message::Binary(data))) => {
+                        // aria2_original sends every non-control frame through
+                        // its JSON parser, including binary frames.
+                        process_ws_jsonrpc(&mut socket, &engine, data.as_ref(), max_request_size).await;
                     }
                     Some(Ok(axum::extract::ws::Message::Close(frame))) => {
                         tracing::debug!(?frame, "WebSocket close frame received");
@@ -96,7 +113,7 @@ pub async fn handle_ws_socket(
                         break;
                     }
                     _ => {
-                        // Ignore other message types (pong, binary, etc.)
+                        // Ignore Pong and any future message variants.
                         continue;
                     }
                 }
@@ -107,7 +124,7 @@ pub async fn handle_ws_socket(
     tracing::debug!("WebSocket client disconnected");
 }
 
-/// Process an incoming WebSocket text message as a JSON-RPC request.
+/// Process an incoming WebSocket message payload as a JSON-RPC request.
 ///
 /// Mirrors C++ aria2's `WebSocketSession::onMsgRecvCallback`:
 /// 1. Parse the text as JSON (single object or batch array).
@@ -121,12 +138,27 @@ pub async fn handle_ws_socket(
 async fn process_ws_jsonrpc(
     socket: &mut axum::extract::ws::WebSocket,
     engine: &Arc<RpcEngine>,
-    text: &str,
+    body: &[u8],
+    max_request_size: usize,
 ) {
     use crate::json_rpc::{JsonRpcBatchResponse, JsonRpcWireEntry, parse_aria2_wire_document};
 
+    // aria2_original stops feeding bytes into its incremental JSON parser
+    // once the configured cap is exceeded. Finalization then produces the
+    // normal JSON-RPC parse error without closing the WebSocket session.
+    let body = if body.len() > max_request_size {
+        tracing::info!(
+            request_size = body.len(),
+            max_request_size,
+            "WebSocket JSON-RPC request exceeds parser limit"
+        );
+        &[]
+    } else {
+        body
+    };
+
     // Step 1: Parse the incoming text as JSON-RPC request(s)
-    let document = match parse_aria2_wire_document(text.as_bytes()) {
+    let document = match parse_aria2_wire_document(body) {
         Ok(document) => document,
         Err(e) => {
             // Step 2: Parse error → send -32700 response

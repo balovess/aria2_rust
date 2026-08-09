@@ -201,7 +201,6 @@ impl RpcServer {
             Router, middleware,
             routing::{get, post},
         };
-        use std::net::SocketAddr;
 
         // Create shared state with the persistent RPC engine
         let state = RpcState {
@@ -238,15 +237,61 @@ impl RpcServer {
             tracing::info!("TLS enabled, serving HTTPS");
             self.serve_tls(listener, tls_acceptor.clone(), app).await?;
         } else {
-            // HTTP mode
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await?;
+            self.serve_http(listener, app).await?;
         }
 
         Ok(())
+    }
+
+    /// Serve cleartext HTTP with the same response-discard path as HTTPS.
+    ///
+    /// aria2_original closes a connection without writing an HTTP response
+    /// when an authenticated non-WebSocket request advertises an oversized
+    /// Content-Length. Axum's high-level server requires an infallible
+    /// service, so it cannot represent that transport result directly.
+    async fn serve_http(
+        &self,
+        listener: tokio::net::TcpListener,
+        app: axum::Router,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use axum::extract::Request;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use std::net::SocketAddr;
+        use tower_service::Service;
+
+        loop {
+            let (connection, remote_addr) = listener.accept().await?;
+            let mut make_service = app
+                .clone()
+                .into_make_service_with_connect_info::<SocketAddr>();
+
+            tokio::spawn(async move {
+                let router = make_service.call(remote_addr).await.unwrap();
+                let io = TokioIo::new(connection);
+                let hyper_service =
+                    hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+                        let mut router = router.clone();
+                        async move {
+                            let response = router.call(request).await.unwrap();
+                            if response.extensions().get::<DropHttpConnection>().is_some() {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionAborted,
+                                    "oversized aria2 RPC request",
+                                ));
+                            }
+                            Ok::<_, std::io::Error>(response)
+                        }
+                    });
+
+                if let Err(error) =
+                    hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection_with_upgrades(io, hyper_service)
+                        .await
+                {
+                    tracing::debug!(%remote_addr, %error, "HTTP connection ended");
+                }
+            });
+        }
     }
 
     /// Serve HTTPS by accepting TCP connections, wrapping each with TLS,
@@ -291,10 +336,22 @@ impl RpcServer {
                 // Bridge tokio AsyncRead/AsyncWrite → hyper's IO traits
                 let io = TokioIo::new(tls_stream);
 
-                // Build a hyper Service that delegates to the Router
+                // Build a hyper Service that delegates to the Router. The
+                // response marker tells the connection layer to close without
+                // writing bytes for aria2's oversized-request path.
                 let hyper_service =
                     hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
-                        router.clone().call(request)
+                        let mut router = router.clone();
+                        async move {
+                            let response = router.call(request).await.unwrap();
+                            if response.extensions().get::<DropHttpConnection>().is_some() {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionAborted,
+                                    "oversized aria2 RPC request",
+                                ));
+                            }
+                            Ok::<_, std::io::Error>(response)
+                        }
                     });
 
                 let result = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
@@ -316,9 +373,16 @@ pub struct RpcState {
     /// HTTP Basic Auth configuration. Token auth remains in `RpcEngine` and
     /// is carried in the JSON/XML-RPC parameter contract.
     pub(crate) auth: AuthConfig,
-    /// Maximum allowed size for a single WebSocket frame/message in bytes.
+    /// Maximum JSON/XML-RPC parser input size in bytes.
     pub(crate) max_request_size: usize,
 }
+
+/// Marks a response that must become a connection close without wire bytes.
+///
+/// The marker is consumed by the low-level HTTP/TLS connection services after
+/// the regular Router middleware has preserved original authentication order.
+#[derive(Clone, Debug)]
+struct DropHttpConnection;
 
 /// Convert the public CORS configuration into tower-http's request-aware
 /// layer. `AllowOrigin::list` mirrors an allowed origin back to the browser,
@@ -402,6 +466,11 @@ async fn http_auth_middleware(
         );
 
     if authorized {
+        if request_content_length_exceeds_limit(&request, state.max_request_size) {
+            let mut response = axum::response::Response::new(axum::body::Body::empty());
+            response.extensions_mut().insert(DropHttpConnection);
+            return response;
+        }
         next.run(request).await
     } else {
         (
@@ -411,6 +480,40 @@ async fn http_auth_middleware(
         )
             .into_response()
     }
+}
+
+/// Match `HttpServerCommand`: only non-WebSocket requests with a declared
+/// Content-Length greater than the configured cap are dropped at header time.
+fn request_content_length_exceeds_limit(
+    request: &axum::extract::Request,
+    max_request_size: usize,
+) -> bool {
+    use axum::http::header;
+
+    let is_websocket_upgrade = request
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        && request
+            .headers()
+            .get(header::CONNECTION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+            });
+    if is_websocket_upgrade {
+        return false;
+    }
+
+    request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|content_length| content_length > max_request_size as u64)
 }
 
 struct JsonGetRequest {
@@ -768,12 +871,13 @@ async fn handle_jsonrpc_or_ws(
     match ws {
         Some(upgrade) => {
             // WebSocket upgrade request from Aria2 Explorer or other clients.
-            // Enforce max frame/message size to prevent OOM from oversized payloads.
-            let max_size = state.max_request_size;
-            upgrade
-                .max_frame_size(max_size)
-                .max_message_size(max_size)
-                .on_upgrade(move |socket| handle_ws_socket(socket, state.engine.clone()))
+            // Preserve the same parser-limit behavior as the /ws route: an
+            // oversized RPC document receives a JSON-RPC parse error rather
+            // than a transport-level disconnect.
+            let max_request_size = state.max_request_size;
+            upgrade.on_upgrade(move |socket| {
+                handle_ws_socket(socket, state.engine.clone(), max_request_size)
+            })
         }
         None => {
             let parsed = parse_json_get_query(query.0.as_deref().unwrap_or_default());

@@ -152,6 +152,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "colored 2.2.0",
+ "futures",
  "libc",
  "mimalloc",
  "serde_json",
@@ -159,6 +160,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite 0.21.0",
  "tracing",
 ]
 

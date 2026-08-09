@@ -454,31 +454,29 @@ pub type SharedFileAllocationMan = Arc<RwLock<FileAllocationMan>>;
 ///
 /// The engine and every download command enqueue through this single
 /// instance, mirroring C++ where `FileAllocationMan` is owned by the
-/// `DownloadEngine` singleton. The background worker is spawned lazily on
-/// first use (must be called from a tokio runtime context).
+/// `DownloadEngine` singleton. Its worker owns a dedicated Tokio runtime, so
+/// callers may use it from independently created runtimes.
 pub fn shared() -> SharedFileAllocationMan {
     static SHARED: OnceLock<SharedFileAllocationMan> = OnceLock::new();
-    static WORKER: OnceLock<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
-        OnceLock::new();
+    static WORKER: OnceLock<()> = OnceLock::new();
 
     let man = SHARED
         .get_or_init(|| Arc::new(RwLock::new(FileAllocationMan::new())))
         .clone();
 
-    // A worker task belongs to the Tokio runtime that spawned it. Tests and
-    // embedders may create multiple runtimes, so a completed worker must be
-    // replaced rather than treated as a process-wide permanent singleton.
-    let worker = WORKER.get_or_init(|| std::sync::Mutex::new(None));
-    let mut guard = match worker.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if guard
-        .as_ref()
-        .is_none_or(tokio::task::JoinHandle::is_finished)
-    {
-        *guard = Some(tokio::spawn(worker_loop(man.clone())));
-    }
+    let worker_man = Arc::clone(&man);
+    WORKER.get_or_init(move || {
+        std::thread::Builder::new()
+            .name("aria2-file-allocation".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("file allocation worker runtime must initialize");
+                runtime.block_on(worker_loop(worker_man));
+            })
+            .expect("file allocation worker thread must start");
+    });
 
     man
 }

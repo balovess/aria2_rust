@@ -439,6 +439,25 @@ impl super::RequestGroup {
         Arc::clone(&self.options)
     }
 
+    /// Record the canonical option values that created this task.
+    ///
+    /// Callers set this while the group is constructed or restored. It is
+    /// intentionally separate from runtime overrides so a later global option
+    /// change cannot alter the observable task state.
+    pub fn set_option_snapshot(&mut self, options: HashMap<String, serde_json::Value>) {
+        self.option_snapshot = Some(options);
+    }
+
+    /// Return the creation snapshot with only already-applied runtime changes
+    /// overlaid. Pending changes remain absent until a restart applies them.
+    pub fn effective_option_snapshot(
+        &self,
+    ) -> Option<HashMap<String, serde_json::Value>> {
+        let mut options = self.option_snapshot.clone()?;
+        options.extend(self.runtime_options());
+        Some(options)
+    }
+
     // ── Rate Limiter ────────────────────────────────────────────────────
 
     /// Store a handle to the download's `RateLimiter` so that runtime option

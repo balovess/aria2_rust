@@ -652,17 +652,12 @@ impl RpcEngine {
         let gid = GroupId::from_hex_string(&gid_str)
             .ok_or_else(|| JsonRpcError::InternalError("Invalid GID generated".into()))?;
 
-        // Merge user-set global options (aria2.changeGlobalOption) so they
-        // apply to this download; task-level options win. Registry-default
-        // values are NOT merged (they live in global_opts, kept separate).
-        let merged_options = {
-            let user = self.user_global_opts.read().await;
-            let mut m: HashMap<String, serde_json::Value> = user.clone();
-            for (k, v) in &options {
-                m.insert(k.clone(), v.clone());
-            }
-            m
-        };
+        // A new request group inherits the canonical global option snapshot,
+        // including startup CLI/config and runtime global changes. Per-task
+        // options take precedence.
+        let mut merged_options = self.global_opts.read().await.clone();
+        merged_options.extend(options);
+        let option_snapshot = normalize_rpc_options(&merged_options);
         let dl_options = rpc_options_to_download_options(&merged_options)?;
 
         // Validate checksum format at task creation time, before any download starts.
@@ -689,8 +684,13 @@ impl RpcEngine {
             let man = group_man.write().await;
             man.add_group_with_gid(gid, uris, dl_options)
                 .map_err(|e| JsonRpcError::InternalError(format!("Failed to add group: {}", e)))?;
-            man.group_by_id(gid)
-                .ok_or_else(|| JsonRpcError::InternalError("Group not found after insert".into()))?
+            let group = man
+                .group_by_id(gid)
+                .ok_or_else(|| JsonRpcError::InternalError("Group not found after insert".into()))?;
+            group
+                .recover_mut()
+                .set_option_snapshot(option_snapshot.clone());
+            group
         };
 
         if let Err(error) = engine_cmd_tx.send(EngineCommand::AddDownload { group }) {
@@ -703,7 +703,7 @@ impl RpcEngine {
         }
 
         let mut task_opts = self.task_opts.write().await;
-        task_opts.insert(gid_str.clone(), normalize_rpc_options(&merged_options));
+        task_opts.insert(gid_str.clone(), option_snapshot);
         // C++ aria2 notification only includes gid (no files field)
         let _ = self.event_publisher.publish(
             EventType::DownloadStart,
