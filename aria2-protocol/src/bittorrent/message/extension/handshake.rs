@@ -31,12 +31,12 @@ use crate::bittorrent::bencode::codec::BencodeValue;
 /// ```
 ///
 /// Default values match the C++ `DefaultExtensionMessageFactory`:
-/// `ut_metadata = 1`, `ut_pex = 2`, `reqq = 500`, `v = "aria2-rust/0.2"`.
+/// `ut_metadata = 1`, `ut_pex = 2`, `reqq = 500`, `v = "aria2/1.37.0"`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionHandshake {
     /// The `m` sub-dictionary mapping extension names to their negotiated ext_id.
     m_dict: BTreeMap<Vec<u8>, BencodeValue>,
-    /// Client version string (BEP 10 `v` key). Defaults to "aria2-rust/0.2".
+    /// Client version string (BEP 10 `v` key). Defaults to "aria2/1.37.0".
     v: Option<String>,
     /// Total metadata size in bytes for magnet links (BEP 9 `metadata_size` key).
     /// Only set when the sender has metadata to share.
@@ -54,13 +54,13 @@ const DEFAULT_UT_PEX_ID: u8 = 2;
 /// Default maximum outstanding metadata requests (reqq).
 const DEFAULT_REQQ: u32 = 500;
 /// Default client version string sent in the `v` key.
-const DEFAULT_CLIENT_VERSION: &str = "aria2-rust/0.2";
+const DEFAULT_CLIENT_VERSION: &str = crate::identity::DEFAULT_PEER_AGENT;
 /// Maximum metadata size accepted from peers (8 MiB), matching C++ aria2.
 const MAX_METADATA_SIZE: u32 = 8 * 1024 * 1024;
 
 impl ExtensionHandshake {
     /// Create a new handshake with default values:
-    /// ut_metadata=1, ut_pex=2, reqq=500, v="aria2-rust/0.2".
+    /// ut_metadata=1, ut_pex=2, reqq=500, v="aria2/1.37.0".
     pub fn new() -> Self {
         let mut m_dict = BTreeMap::new();
         m_dict.insert(
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(hs.ut_metadata_id(), Some(1));
         assert_eq!(hs.ut_pex_id(), Some(2));
         assert_eq!(hs.reqq(), 500);
-        assert_eq!(hs.v(), Some("aria2-rust/0.2"));
+        assert_eq!(hs.v(), Some(DEFAULT_CLIENT_VERSION));
         assert_eq!(hs.metadata_size(), None);
         assert_eq!(hs.port(), None);
     }
@@ -300,7 +300,7 @@ mod tests {
         let hs = ExtensionHandshake::default();
         assert_eq!(hs.ut_metadata_id(), Some(1));
         assert_eq!(hs.ut_pex_id(), Some(2));
-        assert_eq!(hs.v(), Some("aria2-rust/0.2"));
+        assert_eq!(hs.v(), Some(DEFAULT_CLIENT_VERSION));
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
         let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.ut_metadata_id(), Some(1));
         assert_eq!(parsed.ut_pex_id(), Some(2));
-        assert_eq!(parsed.v(), Some("aria2-rust/0.2"));
+        assert_eq!(parsed.v(), Some(DEFAULT_CLIENT_VERSION));
         assert_eq!(parsed.metadata_size(), None);
         assert_eq!(parsed.port(), None);
     }
@@ -405,7 +405,7 @@ mod tests {
         assert!(s.contains("ut_pex"));
         assert!(s.contains("reqq"));
         // Default handshake includes client version string
-        assert!(s.contains("aria2-rust/0.2"));
+        assert!(s.contains(DEFAULT_CLIENT_VERSION));
         // No metadata_size or port in default handshake
         assert!(!s.contains("metadata_size"));
     }
@@ -448,10 +448,10 @@ mod tests {
     #[test]
     fn test_handshake_version_default() {
         let hs = ExtensionHandshake::new();
-        assert_eq!(hs.v(), Some("aria2-rust/0.2"));
+        assert_eq!(hs.v(), Some(DEFAULT_CLIENT_VERSION));
         let bytes = hs.to_bytes();
         let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.v(), Some("aria2-rust/0.2"));
+        assert_eq!(parsed.v(), Some(DEFAULT_CLIENT_VERSION));
     }
 
     #[test]

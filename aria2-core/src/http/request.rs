@@ -378,7 +378,10 @@ impl HttpRequestBuilder {
 
         // User-Agent header
         if !final_headers.contains_key("User-Agent") {
-            final_headers.insert("User-Agent".to_string(), crate::constants::USER_AGENT.to_string());
+            final_headers.insert(
+                "User-Agent".to_string(),
+                crate::constants::USER_AGENT.to_string(),
+            );
         }
 
         // Accept header

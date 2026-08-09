@@ -77,7 +77,7 @@ impl ConcurrentDownloadCommand {
             reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(300))
-                .user_agent("aria2-rust/0.1.0")
+                .user_agent(crate::constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::limited(5))
                 .build()
                 .map_err(|e| {

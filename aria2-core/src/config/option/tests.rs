@@ -335,6 +335,35 @@ fn test_registry_defaults_are_valid() {
     }
 }
 
+#[test]
+fn test_registry_identity_defaults_match_original_aria2() {
+    let registry = OptionRegistry::new();
+    assert_eq!(
+        registry
+            .get("user-agent")
+            .unwrap()
+            .default_value()
+            .to_string(),
+        aria2_protocol::identity::DEFAULT_USER_AGENT
+    );
+    assert_eq!(
+        registry
+            .get("peer-agent")
+            .unwrap()
+            .default_value()
+            .to_string(),
+        aria2_protocol::identity::DEFAULT_PEER_AGENT
+    );
+    assert_eq!(
+        registry
+            .get("peer-id-prefix")
+            .unwrap()
+            .default_value()
+            .to_string(),
+        aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX
+    );
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn test_registry_parses_rpc_wire_values_through_one_typed_seam() {

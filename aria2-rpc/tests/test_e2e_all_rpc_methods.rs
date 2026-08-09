@@ -269,16 +269,25 @@ async fn e2e_unpause_returns_gid() {
 }
 
 #[tokio::test]
-async fn e2e_force_unpause_returns_gid() {
+async fn e2e_force_unpause_is_rejected_as_an_unknown_original_method() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let gid = add_uri(&client, &base, "http://127.0.0.1:1/test-force-unpause").await;
-    let _ = rpc_call(&client, &base, "aria2.forcePause", json![[&gid]]).await;
-    let resp = rpc_call(&client, &base, "aria2.forceUnpause", json![[&gid]]).await;
+    let resp = rpc_error_call(
+        &client,
+        &base,
+        "aria2.forceUnpause",
+        json!([]),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
 
     assert_jsonrpc_format(&resp, "aria2-forceUnpause");
-    assert_success(&resp);
+    assert_error_code(&resp, 1);
+    assert_eq!(
+        resp["error"]["message"],
+        "No such method: aria2.forceUnpause"
+    );
 }
 
 #[tokio::test]

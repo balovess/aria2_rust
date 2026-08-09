@@ -219,7 +219,6 @@ impl RpcServer {
             .route("/jsonrpc", get(handle_jsonrpc_or_ws)) // GET + WebSocket upgrade
             .route("/rpc", post(handle_xmlrpc))
             .route("/ws", get(ws_handler)) // WebSocket upgrade (backward compat)
-            .route("/", get(root_handler))
             .layer(axum::extract::DefaultBodyLimit::max(
                 self.config.max_request_size,
             ))
@@ -760,26 +759,6 @@ impl std::fmt::Debug for RpcServer {
             .field("config", &self.config)
             .finish()
     }
-}
-
-/// Root handler - returns server info
-async fn root_handler() -> impl axum::response::IntoResponse {
-    use axum::http::StatusCode;
-    use axum::response::Json;
-    use serde_json::json;
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "name": crate::constants::RPC_SERVER_NAME,
-            "version": env!("CARGO_PKG_VERSION"),
-            "endpoints": {
-                "jsonrpc": crate::constants::RPC_ENDPOINT_PATH,
-                "rpc": "/rpc",
-                "ws": "/ws"
-            }
-        })),
-    )
 }
 
 /// Handle JSON-RPC POST requests

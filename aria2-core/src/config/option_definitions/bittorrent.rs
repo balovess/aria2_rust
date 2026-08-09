@@ -384,9 +384,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "peer-agent".into(),
             opt_type: OptionType::String,
-            default_value: OptionValue::Str(
-                aria2_protocol::identity::DEFAULT_PEER_AGENT.into(),
-            ),
+            default_value: OptionValue::Str(aria2_protocol::identity::DEFAULT_PEER_AGENT.into()),
             description: "Peer agent string for BitTorrent".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()

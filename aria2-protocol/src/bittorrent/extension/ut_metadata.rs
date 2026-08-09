@@ -33,7 +33,7 @@ impl ExtensionHandshake {
         Self {
             m,
             metadata_size: Some(metadata_size),
-            v: Some("aria2-rust/0.1.0".to_string()),
+            v: Some(crate::identity::DEFAULT_PEER_AGENT.to_string()),
         }
     }
 

@@ -1513,16 +1513,17 @@ async fn test_get_version_returns_version_info() {
 }
 
 #[tokio::test]
-async fn test_get_version_uses_cargo_pkg_version() {
+async fn test_get_version_uses_original_compatibility_version() {
     let engine = RpcEngine::new();
     let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
     let result = resp.result.unwrap();
     let version_info: VersionInfo = serde_json::from_value(result).unwrap();
 
-    assert!(
-        !version_info.version.is_empty(),
-        "CARGO_PKG_VERSION should be set"
+    assert_eq!(
+        version_info.version,
+        aria2_protocol::identity::ARIA2_VERSION,
+        "aria2.getVersion must expose the upstream compatibility version"
     );
 }
 

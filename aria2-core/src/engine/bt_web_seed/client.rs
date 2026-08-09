@@ -157,7 +157,7 @@ impl WebSeedClient {
             .client
             .get(&self.base_url)
             .header("Range", &range_header)
-            .header("User-Agent", "aria2-rust/1.0")
+            .header("User-Agent", crate::constants::USER_AGENT)
             .send()
             .await
             .map_err(|e| format!("HTTP request failed: {}", e))?;

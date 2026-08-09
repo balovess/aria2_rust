@@ -103,22 +103,12 @@ fn parse_gid(resp: &Value) -> String {
 // =========================================================================
 
 #[tokio::test]
-async fn e2e_root_endpoint() {
+async fn e2e_root_endpoint_matches_original_not_found_contract() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
     let resp = client.get(&base).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let body: Value = resp.json().await.unwrap();
-    assert!(body["name"].is_string());
-    assert!(body["version"].is_string());
-    // endpoints is an object (e.g. {"jsonrpc": "/jsonrpc", "rpc": "/rpc", "ws": "/ws"})
-    assert!(
-        body["endpoints"].is_object(),
-        "expected endpoints to be an object, got: {:?}",
-        body["endpoints"]
-    );
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

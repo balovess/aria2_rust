@@ -145,13 +145,11 @@ async fn wait_for_server_ready(base_url: &str) {
     let mut last_err = String::new();
 
     while tokio::time::Instant::now() < deadline {
-        match client.get(base_url).send().await {
-            Ok(resp)
-                if resp.status().is_success()
-                    || resp.status() == reqwest::StatusCode::UNAUTHORIZED =>
-            {
-                return;
-            }
+        match client.get(format!("{base_url}/jsonrpc")).send().await {
+            // The original JSONP endpoint reports a parse error for a GET
+            // without query parameters. Any non-404 HTTP response proves the
+            // compatible route is accepting connections.
+            Ok(resp) if resp.status() != reqwest::StatusCode::NOT_FOUND => return,
             Ok(resp) => {
                 last_err = format!("status={}", resp.status());
             }

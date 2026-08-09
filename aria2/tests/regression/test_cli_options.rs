@@ -661,6 +661,10 @@ fn regression_v_triggers_version() {
     let result = CliArgs::try_parse_from(["aria2c", "-v"]);
     let error = result.expect_err("-v must trigger the original version action");
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(
+        error.to_string().starts_with("aria2 1.37.0"),
+        "--version must start with the upstream aria2 identity"
+    );
 }
 
 /// Test: -O/--index-out is repeatable and preserves argument order.
