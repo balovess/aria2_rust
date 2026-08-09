@@ -328,6 +328,12 @@ fn build_cors_layer(config: &CorsConfig) -> tower_http::cors::CorsLayer {
     use std::time::Duration;
     use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, Any, CorsLayer};
 
+    // An empty origin list is the aria2_original default: do not emit any
+    // CORS response or preflight headers until the user opts in.
+    if config.allowed_origins().is_empty() {
+        return CorsLayer::new();
+    }
+
     let methods = if config.allow_methods.trim() == "*" {
         AllowMethods::any()
     } else {

@@ -90,8 +90,8 @@ impl<'a> RetryExecutor<'a> {
                         self.stats.record_retry(&error);
                         return Err(error);
                     }
-                    attempt += 1;
                     let wait = self.policy.wait_duration(attempt);
+                    attempt = attempt.saturating_add(1);
                     warn!(
                         "Retry #{}, waiting {:?} before next attempt (reason: {})",
                         attempt, wait, error

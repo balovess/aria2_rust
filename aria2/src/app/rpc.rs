@@ -212,7 +212,7 @@ impl App {
             .await
             .unwrap_or(false)
         {
-            CorsConfig::default()
+            CorsConfig::allow_all_origins()
         } else if let Some(allow_origin) = self
             .get_opt_str("rpc-allow-origin")
             .await

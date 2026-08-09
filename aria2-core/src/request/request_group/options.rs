@@ -382,7 +382,7 @@ impl Default for DownloadOptions {
             enable_public_trackers: true,
             bt_piece_selection_strategy: String::new(),
             bt_endgame_threshold: 0,
-            max_retries: 0,
+            max_retries: crate::constants::DEFAULT_MAX_RETRIES,
             retry_wait: 0,
             http_proxy: None,
             all_proxy: None,

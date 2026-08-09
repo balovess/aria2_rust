@@ -1,6 +1,6 @@
 # aria2_rust Comprehensive Gap Analysis
 # Deep-comparison audit against C++ aria2_original and aria2-next
-# Updated: 2026-08-09 (external-contract policy and FTPS status reconciliation)
+# Updated: 2026-08-09 (external-contract policy, FTPS status, retry, and CORS reconciliation)
 
 > This file is a historical deep-comparison audit, not the current completion
 > gate. The current external-compatibility status is maintained in
@@ -38,6 +38,8 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 **Key changes since previous audit (2026-08-01 deep-comparison refresh):**
 
 - **HTTP range/fallback safety:** Range responses now validate start/end/entity length; buffered and streaming segment downloads reject short or oversized bodies and invalid 200/206/416 combinations. Segment completion requires exact declared length and is idempotent. Fallback preserves only complete segments, so partial writes from failed requests are re-covered by full sequential gaps.
+- **Retry contract:** `aria2_original`'s default `max-tries=5`, total-attempt counting, and `max-tries=0` unlimited behavior are now centralized in Rust `RetryPolicy` and exercised across sequential HTTP, concurrent segments, and FTP. The focused retry evidence does not establish whole-workspace or original-client compatibility.
+- **Browser-facing CORS contract:** the RPC HTTP server now emits no CORS headers by default, enables them only through explicit origin configuration or `rpc-allow-origin-all=true`, and returns the original `Access-Control-Max-Age: 1728000` value for opted-in preflight responses. Live OPTIONS E2E coverage protects both default-off and wildcard-on behavior; the complete browser-extension matrix remains open.
 
 **Key changes since previous audit (2026-07-30 deep-comparison refresh):**
 
@@ -115,6 +117,9 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | 34 | **Engine** | **Request pause/unpause/remove scheduling broken** | `process_task_completions` in `engine_loop.rs` did not distinguish pause from error/completion, causing paused tasks to be demoted as if they had finished. `requeue_non_terminal_groups` in `request_group_man/demotion.rs` now re-queues groups in non-terminal states (Paused) back to active instead of dropping them. `mark_session_dirty` hooked into engine loop for session auto-save on state changes |
 | 35 | **Content-Disposition** | **Trailing `;` rejected (C++ bug #1118)** | C++ aria2's terminal state switch rejects `CD_BEFORE_DISPOSITION_PARM_NAME`, causing it to reject headers ending in `;` — a known bug (GitHub issue #1118, open 5+ years) that breaks downloads from S3/CloudFront/nginx which routinely emit trailing `;`. Rust parser now accepts `ParseState::BeforeParmName` as a valid terminal state, matching RFC 6266's `*( ";" disposition-parm )` grammar (zero or more trailing empty parameters). Empty parameters in the *middle* (`attachment; ;filename=foo`) are still rejected by the `BeforeParmName` state handler. 7 trailing-`;` tests, 110 total tests |
 | 36 | **SFTP** | **`FileOpError` type missing — sftp feature broken** | `types.rs` imported `FileOpError` from `aria2_protocol::sftp::file_ops`, but that module never defined it — all methods returned `Result<_, String>`. This made `cargo build --features sftp` fail (E0432). Fixed: `FileOpError` enum added to `file_ops.rs` with `NotFound`/`PermissionDenied`/`Network`/`Other` variants + `From<String>` impl that parses SFTP status codes (SSH_FX_NO_SUCH_FILE=2, SSH_FX_PERMISSION_DENIED=3, SSH_FX_NO_CONNECTION=6, SSH_FX_CONNECTION_LOST=7) + `Display` impl. 3 call sites in `execution.rs` convert `String` → `FileOpError` before passing to `map_file_op_error` |
+| 37 | **Retry** | **`max-tries` semantics diverged across download paths** | `aria2_original` defaults to 5 total attempts and treats `0` as unlimited. Rust previously mixed retry-count and attempt-count interpretations and used a lower default. Fixed by making `RetryPolicy` the shared typed seam for sequential HTTP, concurrent segments, and FTP; added policy, executor, HTTP E2E, and FTP E2E coverage. |
+| 38 | **RPC/HTTP** | **CORS preflight cache lifetime differed from aria2_original** | The Rust server returned `Access-Control-Max-Age: 86400`; `aria2_original/src/HttpServerBodyCommand.cc` returns `1728000`. Fixed the shared `CORS_MAX_AGE` wire constant and added a live OPTIONS E2E assertion. |
+| 39 | **RPC/HTTP** | **CORS was enabled by default in Rust** | `aria2_original` only sets `Access-Control-Allow-Origin` when `rpc-allow-origin-all=true`; Rust `CorsConfig::default()` previously meant wildcard access. Fixed by making the default empty/disabled, adding an explicit `allow_all_origins()` constructor, and covering both branches at the live HTTP seam. |
 
 ---
 
@@ -214,7 +219,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 | Sub-module | Status | Key Gaps |
 |------------|--------|----------|
-| FtpConnection | Complete | Commands, connector, FEAT, parser, transfer; passive data channels now pin to the control peer and strictly validate PASV byte fields |
+| FtpConnection | Complete | Commands, connector, FEAT, parser, transfer; production passive data channels now pin to the control peer as in `aria2_original`, while PASV byte fields remain strictly validated |
 | FtpNegotiation | Complete | MDTM, PWD/CWD, FEAT, SIZE, REST supported; parsed SIZE values are validated and existing RequestGroup lengths reject mismatches |
 | FTPS/TLS | Extension / unverified | Rust implements AUTH TLS, PBSZ 0, PROT P with `tokio_rustls`; plaintext downgrade rejection is covered, but positive TLS-server interoperability remains unverified |
 | FTP-over-HTTP-proxy | Complete | CONNECT method tunneling with 407 proxy auth |

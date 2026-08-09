@@ -386,7 +386,7 @@ fn test_auth_middleware_missing_token() {
 
 #[test]
 fn test_cors_wildcard_allows_all() {
-    let cors = CorsConfig::default(); // Default is "*"
+    let cors = CorsConfig::allow_all_origins();
 
     assert!(cors.allows_origin(Some("http://localhost:3000")));
     assert!(cors.allows_origin(Some("https://example.com")));

@@ -6,7 +6,7 @@ use std::time::Duration;
 #[test]
 fn test_retry_policy_default() {
     let policy = RetryPolicy::default();
-    assert_eq!(policy.max_tries(), 3);
+    assert_eq!(policy.max_tries(), 5);
 }
 
 #[test]
@@ -143,6 +143,36 @@ async fn test_executor_max_tries_exhausted() {
     assert!(result.is_err());
     assert_eq!(stats.total(), 3);
     assert_eq!(stats.server_errors(), 3);
+}
+
+#[tokio::test]
+async fn test_executor_zero_max_tries_is_unlimited() {
+    let policy = RetryPolicy::new(0, 0);
+    let stats = RetryStats::default();
+    let executor = RetryExecutor::new(&policy, &stats);
+    let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    let attempts_for_operation = Arc::clone(&attempts);
+    let result = executor
+        .execute(move |attempt| {
+            let attempts = Arc::clone(&attempts_for_operation);
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if attempt < 2 {
+                    Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: "retry me".into(),
+                        },
+                    ))
+                } else {
+                    Ok::<_, Aria2Error>("success")
+                }
+            }
+        })
+        .await;
+
+    assert_eq!(result.unwrap(), "success");
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
 }
 
 #[tokio::test]

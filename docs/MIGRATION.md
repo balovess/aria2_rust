@@ -31,6 +31,25 @@
 `output_path`。TCP `listen-port` 与 DHT `dht-listen-port` 的端口区间按原版
 顺序尝试，首端口被占用时回退到后续端口，并由真实 socket 回归测试覆盖。
 
+本轮还修复了生产 FTP 被动数据连接的兼容差异：`aria2_original` 在
+`FtpNegotiationCommand::preparePasvConnect()` 中使用控制连接的 peer 地址，
+不使用 PASV 响应中的广告 host；Rust engine 现在保持同一语义。新增本地
+E2E fixture 广告错误地址仍能下载的回归，避免把 NAT/错误广告地址误当作
+真实数据连接目标。
+
+本轮进一步统一了原版 `--max-tries` 的外部语义：
+`aria2_original/src/OptionHandlerFactory.cc` 的默认值为 5，
+`AbstractCommand.cc` 将它解释为总尝试次数，`0` 表示无限尝试。Rust 的
+`RetryPolicy` 现在作为顺序 HTTP、并发 segment 和 FTP 的共享 seam，统一
+使用默认 5 次、`max-tries=0` 无限、退避等待和可重试错误分类；内部保留的
+`max_retries` 字段名不改变外部 wire/config 名称或行为。
+
+面向浏览器客户端的 RPC HTTP seam 也修复了一个可观察差异：
+`aria2_original/src/HttpServerBodyCommand.cc` 对 OPTIONS preflight 返回
+`Access-Control-Max-Age: 1728000`，Rust 现在通过共享 `CORS_MAX_AGE` 常量
+返回相同值，并由真实 HTTP E2E 覆盖。这个 header 修复改善原版插件的预检
+兼容性，但不等于完整 Chrome/Firefox 插件互操作已经完成。
+
 本轮验证通过：
 
 - `cargo fmt --all -- --check`
@@ -41,6 +60,11 @@
 - BT command tests：34 passed / 0 failed
 - TCP listener tests：4 passed / 0 failed
 - DHT engine tests：6 passed / 0 failed
+- retry executor tests：15 passed / 0 failed
+- HTTP `max-tries` E2E：1 passed / 0 failed
+- FTP E2E：25 passed / 0 failed / 2 ignored
+- FTP-related core unit tests：200 passed / 0 failed / 1 ignored
+- RPC HTTP E2E：43 passed / 0 failed
 
 这些是增量证据，不代表 530 个 C++ 对照单元都已达到行为兼容，也不代表
 workspace、原版浏览器插件和完整端到端矩阵已经全部通过。
@@ -476,7 +500,7 @@ tests, and the aria2 C++ performance baseline remain open in
   and real HTTP E2E checks for invalid `changeOption` and
   `changeGlobalOption` values.
 - `cargo test -p aria2-rpc --all-features --tests -- --test-threads=1`:
-  **393 passed / 0 failed**. This proves the RPC test scope only; the
+  **394 passed / 0 failed**. This proves the RPC test scope only; the
   workspace aggregate and complete original browser-client interoperability
   matrix remain open.
 
@@ -513,6 +537,10 @@ tests, and the aria2 C++ performance baseline remain open in
   omission rule. Basic Auth treats an empty `rpc-passwd` as unset, so any
   password is accepted after the configured username, matching the original
   `HttpServer::setUsernamePassword` behavior.
+- CORS follows the original opt-in rule: the default configuration emits no
+  CORS headers, while `rpc-allow-origin-all=true` uses an explicit wildcard
+  configuration. The preflight cache value remains `1728000` as in
+  `aria2_original/src/HttpServerBodyCommand.cc`.
 - `getSessionInfo` was compared with
   `aria2_original/src/DownloadEngine.cc` and
   `aria2_original/src/RpcMethodImpl.cc`: Rust now generates one 20-byte random
@@ -521,7 +549,7 @@ tests, and the aria2 C++ performance baseline remain open in
   engine-owned value, while the old `rpc_helpers::generate_session_id` path is
   retained as a forwarding export rather than a second generator.
 - Verification: `cargo test -p aria2-rpc --all-features --tests
-  -- --test-threads=1` passed **393 tests / 0 failed**; RPC Clippy and format
+  -- --test-threads=1` passed **394 tests / 0 failed**; RPC Clippy and format
   checks also passed. Browser-extension and complete original-client
   interoperability remain open acceptance items.
 

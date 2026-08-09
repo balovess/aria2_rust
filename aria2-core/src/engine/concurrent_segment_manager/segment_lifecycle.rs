@@ -47,7 +47,7 @@ impl ConcurrentSegmentManager {
             }
         }
 
-        if new_retry >= self.max_retries_per_segment {
+        if self.max_retries_per_segment != 0 && new_retry >= self.max_retries_per_segment {
             if let Some(seg) = self.segments.get_mut(index as usize) {
                 seg.status = SegmentStatus::Failed;
                 seg.retry_count = new_retry;

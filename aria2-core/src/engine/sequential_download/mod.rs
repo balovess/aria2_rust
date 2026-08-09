@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::error::{Aria2Error, Result};
 use crate::network::ConnectionContext;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
@@ -169,12 +169,12 @@ impl SequentialDownloader {
         completed_ranges: &[(u64, u64)],
         retry_policy: &RetryPolicy,
     ) -> Result<()> {
-        let mut last_err = None;
         let mut accumulated_completed: Vec<(u64, u64)> = completed_ranges.to_vec();
 
-        for attempt in 0..=retry_policy.max_retries {
+        let mut attempt = 0u32;
+        loop {
             if attempt > 0
-                && let Some(wait) = retry_policy.compute_wait(attempt - 1)
+                && let Some(wait) = retry_policy.compute_wait(attempt)
             {
                 tracing::info!(
                     "Sequential download with gaps retry #{} (waiting {:?}), {} ranges already completed...",
@@ -205,23 +205,17 @@ impl SequentialDownloader {
 
             tracing::warn!(
                 "Sequential download with gaps attempt #{} failed: {}",
-                attempt + 1,
+                attempt.saturating_add(1),
                 result.error.as_ref().unwrap()
             );
-            last_err = result.error;
+            let error = result.error.expect("error was checked above");
 
-            if retry_policy.is_exhausted(attempt)
-                || !retry_policy.should_retry_error(&format!("{:?}", last_err.as_ref().unwrap()))
-            {
-                break;
+            if !retry_policy.should_retry(attempt, &error) {
+                return Err(error);
             }
+            debug_assert!(!retry_policy.is_exhausted(attempt.saturating_add(1)));
+            attempt = attempt.saturating_add(1);
         }
-
-        Err(last_err.unwrap_or_else(|| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: "All retries failed".into(),
-            })
-        }))
     }
 
     pub async fn execute_with_retry(
@@ -231,11 +225,10 @@ impl SequentialDownloader {
         total_length: u64,
         retry_policy: &RetryPolicy,
     ) -> Result<()> {
-        let mut last_err = None;
-
-        for attempt in 0..=retry_policy.max_retries {
+        let mut attempt = 0u32;
+        loop {
             if attempt > 0
-                && let Some(wait) = retry_policy.compute_wait(attempt - 1)
+                && let Some(wait) = retry_policy.compute_wait(attempt)
             {
                 tracing::info!(
                     "Sequential download retry #{} (waiting {:?})...",
@@ -248,23 +241,20 @@ impl SequentialDownloader {
             match self.execute(uri, resume_state, total_length).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    tracing::warn!("Sequential download attempt #{} failed: {}", attempt + 1, e);
-                    last_err = Some(e);
-                    if retry_policy.is_exhausted(attempt)
-                        || !retry_policy
-                            .should_retry_error(&format!("{:?}", last_err.as_ref().unwrap()))
-                    {
-                        break;
+                    tracing::warn!(
+                        "Sequential download attempt #{} failed: {}",
+                        attempt.saturating_add(1),
+                        e
+                    );
+                    let should_retry = retry_policy.should_retry(attempt, &e);
+                    if !should_retry {
+                        return Err(e);
                     }
+                    debug_assert!(!retry_policy.is_exhausted(attempt.saturating_add(1)));
+                    attempt = attempt.saturating_add(1);
                 }
             }
         }
-
-        Err(last_err.unwrap_or_else(|| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: "All retries failed".into(),
-            })
-        }))
     }
 }
 

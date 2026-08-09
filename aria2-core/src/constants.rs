@@ -32,10 +32,13 @@ pub const HTTP_CONFIG_DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 // CORS defaults
 pub const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 pub const CORS_ALLOW_HEADERS: &str = "Content-Type, Authorization";
-pub const CORS_MAX_AGE: &str = "86400";
+/// aria2_original's HttpServerBodyCommand uses 1728000 seconds for CORS
+/// preflight caching. Keep this wire/header value stable for browser clients.
+pub const CORS_MAX_AGE: &str = "1728000";
 
 // Retry defaults
-pub const DEFAULT_MAX_RETRIES: u32 = 3;
+/// Default value of aria2's `--max-tries`: total attempts, not retries.
+pub const DEFAULT_MAX_RETRIES: u32 = 5;
 pub const DEFAULT_RETRY_WAIT_SECS: u64 = 1;
 pub const RETRYABLE_HTTP_CODES: [u16; 6] = [408, 429, 500, 502, 503, 504];
 

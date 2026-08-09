@@ -8,6 +8,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tracing::info;
 
 use crate::dns::dns_cache::DnsCache;
+use crate::engine::retry_policy::RetryPolicy;
 use crate::ftp::connection::{FtpsConfig, TlsVersion};
 use crate::network::ConnectionContext;
 
@@ -38,10 +39,9 @@ pub struct FtpDownloadCommand {
     pub(super) resume_offset: u64,
     /// Whether to use passive mode (true) or active mode (false)
     pub(super) passive_mode: bool,
-    /// Maximum number of retry attempts for transient errors
-    pub(super) max_retries: u32,
-    /// Current retry attempt count
-    pub(super) current_retry: u32,
+    /// Unified retry contract for the download. `max_retries` in the policy
+    /// means total attempts and `0` means unlimited.
+    pub(super) retry_policy: RetryPolicy,
     pub(super) last_connection_context: Option<ConnectionContext>,
     pub(super) resolved_addresses: Vec<SocketAddr>,
     pub(super) dns_cache: Option<Arc<tokio::sync::Mutex<DnsCache>>>,
@@ -150,8 +150,10 @@ impl FtpDownloadCommand {
             ftps_implicit,
             resume_offset,
             passive_mode: options.ftp_pasv,
-            max_retries: constants::DEFAULT_MAX_RETRIES,
-            current_retry: 0,
+            retry_policy: RetryPolicy::new(
+                options.max_retries,
+                options.retry_wait.saturating_mul(1000),
+            ),
             last_connection_context: None,
             resolved_addresses: Vec::new(),
             dns_cache: None,

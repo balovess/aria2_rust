@@ -2,6 +2,7 @@
 
 use super::control::{RawFtpControl, parse_epsv_response, parse_pasv_response, urlencoding_decode};
 use super::types::FtpDownloadCommand;
+use crate::request::request_group::{DownloadOptions, GroupId};
 
 #[test]
 fn test_parse_uri_simple() {
@@ -12,6 +13,26 @@ fn test_parse_uri_simple() {
     assert_eq!(result.2, "anonymous");
     assert_eq!(result.3, "aria2@");
     assert_eq!(result.4, "/file.txt");
+}
+
+#[test]
+fn test_retry_policy_comes_from_download_options() {
+    let options = DownloadOptions {
+        max_retries: 7,
+        retry_wait: 3,
+        ..DownloadOptions::default()
+    };
+    let command = FtpDownloadCommand::new(
+        GroupId::new(101),
+        "ftp://example.com/file.txt",
+        &options,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(command.retry_policy.max_tries(), 7);
+    assert_eq!(command.retry_policy.base_wait_ms, 3000);
 }
 
 #[test]

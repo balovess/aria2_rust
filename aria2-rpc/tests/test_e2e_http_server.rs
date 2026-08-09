@@ -628,7 +628,8 @@ async fn e2e_auth_no_auth_required() {
 
 #[tokio::test]
 async fn e2e_cors_preflight() {
-    let (base, _guard) = start_test_server(None).await;
+    let config = ServerConfig::default().with_cors(CorsConfig::allow_all_origins());
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
     let client = Client::new();
 
     let resp = client
@@ -640,11 +641,40 @@ async fn e2e_cors_preflight() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert!(resp.headers().get("access-control-allow-origin").is_some());
+    assert_eq!(
+        resp.headers()
+            .get("access-control-max-age")
+            .and_then(|value| value.to_str().ok()),
+        Some("1728000"),
+        "CORS preflight cache lifetime must match aria2_original"
+    );
+}
+
+#[tokio::test]
+async fn e2e_cors_is_disabled_by_default_like_aria2_original() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+
+    let resp = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/jsonrpc"))
+        .header("Origin", "https://example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers().get("access-control-allow-origin").is_none(),
+        "aria2_original only emits CORS headers when rpc-allow-origin-all is enabled"
+    );
+    assert!(resp.headers().get("access-control-max-age").is_none());
 }
 
 #[tokio::test]
 async fn e2e_cors_allowed_origin() {
-    let (base, _guard) = start_test_server(None).await;
+    let config = ServerConfig::default().with_cors(CorsConfig::allow_all_origins());
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
     let client = Client::new();
 
     let resp = client
@@ -660,7 +690,8 @@ async fn e2e_cors_allowed_origin() {
 
 #[tokio::test]
 async fn e2e_cors_wildcard() {
-    let (base, _guard) = start_test_server(None).await;
+    let config = ServerConfig::default().with_cors(CorsConfig::allow_all_origins());
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
     let client = Client::new();
 
     let resp = client

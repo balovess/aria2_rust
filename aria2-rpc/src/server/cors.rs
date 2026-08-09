@@ -12,11 +12,18 @@ pub struct CorsConfig {
 
 impl Default for CorsConfig {
     fn default() -> Self {
-        Self::with_allowed_origins(vec![crate::constants::CORS_DEFAULT_ORIGIN.to_string()])
+        // aria2_original leaves `allowOrigin_` empty unless
+        // `rpc-allow-origin-all` is explicitly enabled.
+        Self::with_allowed_origins(Vec::new())
     }
 }
 
 impl CorsConfig {
+    /// Enable the original `rpc-allow-origin-all=true` behavior.
+    pub fn allow_all_origins() -> Self {
+        Self::with_allowed_origins(vec![crate::constants::CORS_DEFAULT_ORIGIN.to_string()])
+    }
+
     /// Create a new CorsConfig from a comma-separated list of allowed origins
     ///
     /// Special value "*" allows all origins (wildcard mode).
@@ -45,8 +52,11 @@ impl CorsConfig {
     /// Create CorsConfig from an option value string (comma-separated origins)
     pub fn from_option_value(value: &str) -> Self {
         let trimmed = value.trim();
-        if trimmed.is_empty() || trimmed == crate::constants::CORS_DEFAULT_ORIGIN {
+        if trimmed.is_empty() {
             return Self::default();
+        }
+        if trimmed == crate::constants::CORS_DEFAULT_ORIGIN {
+            return Self::allow_all_origins();
         }
 
         let origins = trimmed
@@ -154,6 +164,10 @@ impl CorsConfig {
 
     /// Get headers as static str pairs (for non-origin-specific responses)
     pub fn to_headers(&self) -> Vec<(&str, &str)> {
+        if self.allowed_origins.is_empty() {
+            return Vec::new();
+        }
+
         vec![
             ("Access-Control-Allow-Origin", &self.allow_origin),
             ("Access-Control-Allow-Methods", &self.allow_methods),
@@ -179,16 +193,13 @@ mod tests {
     fn test_cors_config_default() {
         let cors = CorsConfig::default();
         let headers = cors.to_headers();
-        assert!(
-            headers
-                .iter()
-                .any(|(k, _)| k == &"Access-Control-Allow-Origin")
-        );
+        assert!(headers.is_empty());
+        assert!(!cors.allows_origin(Some("http://localhost:8080")));
     }
 
     #[test]
     fn test_cors_wildcard_allows_any_origin() {
-        let cors = CorsConfig::default(); // Default is wildcard "*"
+        let cors = CorsConfig::allow_all_origins();
 
         // Wildcard should allow any origin
         assert!(cors.allows_origin(Some("http://localhost:8080")));
@@ -253,9 +264,10 @@ mod tests {
         assert!(cors_wildcard.allows_origin(Some("anything")));
         assert_eq!(cors_wildcard.allow_origin, "*");
 
-        // Test empty string defaults to wildcard
+        // Empty option leaves CORS disabled, matching aria2_original's
+        // default when rpc-allow-origin-all is false.
         let cors_empty = CorsConfig::from_option_value("");
-        assert!(cors_empty.allows_origin(Some("anything")));
+        assert!(!cors_empty.allows_origin(Some("anything")));
 
         // Test multiple origins
         let cors_multi =

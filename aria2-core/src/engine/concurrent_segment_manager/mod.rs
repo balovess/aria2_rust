@@ -356,7 +356,9 @@ impl ConcurrentSegmentManager {
 
     pub fn has_permanently_failed_segments(&self) -> bool {
         self.segments.iter().any(|s| {
-            s.status == SegmentStatus::Failed && s.retry_count >= self.max_retries_per_segment
+            s.status == SegmentStatus::Failed
+                && self.max_retries_per_segment != 0
+                && s.retry_count >= self.max_retries_per_segment
         })
     }
 

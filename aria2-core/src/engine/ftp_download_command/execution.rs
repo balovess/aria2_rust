@@ -73,9 +73,12 @@ impl Command for FtpDownloadCommand {
             })?;
         }
 
-        // Retry loop for transient errors
+        // Retry loop for transient errors. The policy counts total attempts,
+        // matching aria2's `--max-tries` contract.
+        let mut attempts = 0u32;
         loop {
-            match self.execute_single_attempt().await {
+            let attempt_index = attempts;
+            match self.execute_single_attempt(attempt_index).await {
                 Ok(_) => {
                     info!(
                         "FTP download completed successfully: {} ({} bytes)",
@@ -107,21 +110,27 @@ impl Command for FtpDownloadCommand {
                         );
                     }
                     // Check if this is a retry-worthy error
-                    let should_retry = matches!(
-                        e,
+                    let is_retryable_error = matches!(
+                        &e,
                         Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
                             | Aria2Error::Recoverable(RecoverableError::Timeout)
-                    ) && self.current_retry < self.max_retries;
+                    );
+                    let should_retry = is_retryable_error
+                        && self
+                            .retry_policy
+                            .can_retry_after(attempts.saturating_add(1));
 
                     if should_retry {
-                        self.current_retry += 1;
-                        let wait_ms =
-                            constants::FTP_BASE_RETRY_WAIT_MS * (1 << (self.current_retry - 1));
+                        attempts = attempts.saturating_add(1);
+                        let wait = self.retry_policy.compute_wait(attempts).unwrap_or_default();
                         warn!(
-                            "FTP download failed (attempt {}/{}), retrying in {}ms: {}",
-                            self.current_retry, self.max_retries, wait_ms, e
+                            "FTP download failed (attempt {}/{}), retrying in {:?}: {}",
+                            attempts,
+                            self.retry_policy.max_tries(),
+                            wait,
+                            e
                         );
-                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                        tokio::time::sleep(wait).await;
 
                         // Reset state for retry
                         self.completed_bytes = 0;
@@ -131,7 +140,7 @@ impl Command for FtpDownloadCommand {
                     // Non-retryable error or max retries exceeded
                     error!(
                         "FTP download failed permanently after {} attempts: {}",
-                        self.current_retry + 1,
+                        attempts.saturating_add(1),
                         e
                     );
                     return Err(e);
@@ -168,14 +177,17 @@ impl Command for FtpDownloadCommand {
 
 impl FtpDownloadCommand {
     /// Execute a single download attempt
-    async fn execute_single_attempt(&mut self) -> std::result::Result<(), FtpAttemptError> {
+    async fn execute_single_attempt(
+        &mut self,
+        attempt_index: u32,
+    ) -> std::result::Result<(), FtpAttemptError> {
         let in_memory_download = self.group.recover().is_in_memory_download();
 
         if self.resolved_addresses.is_empty() {
             self.refresh_control_addresses().await?;
         }
         let control_address =
-            self.resolved_addresses[self.current_retry as usize % self.resolved_addresses.len()];
+            self.resolved_addresses[attempt_index as usize % self.resolved_addresses.len()];
         let context = ConnectionContext::new(&self.host, self.port, control_address);
         let host = self.host.clone();
         let port = self.port;
